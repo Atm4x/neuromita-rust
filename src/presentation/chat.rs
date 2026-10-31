@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use thiserror::Error;
 use tokio::{
@@ -8,7 +8,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    api::ChatApi,
+    api::ChatApiState,
     character::CharacterId,
     generation::GenerationPreset,
     request::{
@@ -16,7 +16,7 @@ use crate::{
         RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestSnapshot,
         RequestSource, SubmitError, UserInput,
     },
-    settings::{SettingsApi, SettingsError, VoiceSettings},
+    settings::{SettingsError, SettingsOwner, VoiceSettings},
     timeline::{ContextPosition, EventId},
     voice::{VoiceOptions, VoicePlan},
 };
@@ -30,6 +30,7 @@ pub struct RequestView {
 
 #[derive(Debug, Clone)]
 pub struct ChatModel {
+    pub closed: bool,
     pub revision: u64,
     pub requests: Vec<RequestView>,
     pub discovery_error: Option<Arc<str>>,
@@ -49,6 +50,8 @@ pub enum PresenterError {
 
 #[derive(Clone)]
 pub struct ChatPresenter {
+    api: Arc<ChatApiState>,
+    settings: Arc<SettingsOwner>,
     preset: GenerationPreset,
     model: watch::Receiver<Arc<ChatModel>>,
 }
@@ -66,10 +69,10 @@ impl ChatPresenter {
             input,
             RequestSource::Presenter,
         );
-        Ok(ChatApi::reply(request.with_voice(self.voice_plan()?))?)
+        Ok(self.api.send(request.with_voice(self.voice_plan()?))?)
     }
     fn voice_plan(&self) -> Result<VoicePlan, SettingsError> {
-        let voice = SettingsApi::snapshot::<VoiceSettings>()?.value;
+        let voice = self.settings.snapshot::<VoiceSettings>()?.value;
         Ok(if voice.in_launcher {
             VoicePlan::Synthesize(VoiceOptions {
                 voice: voice.voice,
@@ -94,7 +97,7 @@ impl ChatPresenter {
             RequestSource::Presenter,
         )
         .with_voice(self.voice_plan()?);
-        Ok(ChatApi::react(request)?)
+        Ok(self.api.send(request)?)
     }
     pub fn initiate(
         &self,
@@ -109,7 +112,7 @@ impl ChatPresenter {
             RequestSource::Presenter,
         )
         .with_voice(self.voice_plan()?);
-        Ok(ChatApi::initiate(request)?)
+        Ok(self.api.send(request)?)
     }
     pub fn reply_at(
         &self,
@@ -125,11 +128,14 @@ impl ChatPresenter {
         )
         .at(at)
         .with_voice(self.voice_plan()?);
-        Ok(ChatApi::reply(request)?)
+        Ok(self.api.send(request)?)
     }
 
     pub fn cancel(&self, id: RequestId) -> Result<CancelResult, PresenterError> {
-        let handle = ChatApi::active_request(id)?.ok_or(PresenterError::NotActive)?;
+        let handle = self
+            .api
+            .active_request(id)?
+            .ok_or(PresenterError::NotActive)?;
         Ok(handle.cancel())
     }
 
@@ -147,10 +153,11 @@ enum Update {
 }
 
 pub(crate) struct PresenterRunner {
+    api: Arc<ChatApiState>,
     model: ChatModel,
     publish: watch::Sender<Arc<ChatModel>>,
     observers: JoinSet<()>,
-    observing: HashSet<RequestId>,
+    observing: HashMap<RequestId, RequestHandle>,
     updates: mpsc::Sender<Update>,
     receive: mpsc::Receiver<Update>,
     discovery: RequestDiscovery,
@@ -159,12 +166,15 @@ pub(crate) struct PresenterRunner {
 
 impl PresenterRunner {
     pub(crate) fn new(
+        api: Arc<ChatApiState>,
+        settings: Arc<SettingsOwner>,
         preset: GenerationPreset,
         discovery: RequestDiscovery,
         capacity: usize,
         retained_finished: usize,
     ) -> (ChatPresenter, Self) {
         let model = ChatModel {
+            closed: false,
             revision: 0,
             requests: Vec::new(),
             discovery_error: None,
@@ -172,14 +182,17 @@ impl PresenterRunner {
         let (publish, receive_model) = watch::channel(Arc::new(model.clone()));
         let (updates, receive) = mpsc::channel(capacity);
         let presenter = ChatPresenter {
+            api: Arc::clone(&api),
+            settings,
             preset,
             model: receive_model,
         };
         let runner = Self {
+            api,
             model,
             publish,
             observers: JoinSet::new(),
-            observing: HashSet::new(),
+            observing: HashMap::new(),
             updates,
             receive,
             discovery,
@@ -202,11 +215,11 @@ impl PresenterRunner {
                 request = self.discovery.next() => {
                     match request {
                         Ok(handle) => self.attach(handle),
+                        Err(DiscoveryError::Closed) => break,
                         Err(error) => {
                             self.model.discovery_error = Some(Arc::from(error.to_string()));
                             self.publish();
-                            if matches!(error, DiscoveryError::Closed) { break; }
-                            match ChatApi::observe_requests() {
+                            match self.api.observe_requests() {
                                 Ok(mut discovery) => {
                                     for handle in std::mem::take(&mut discovery.active) { self.attach(handle); }
                                     self.discovery = discovery;
@@ -224,15 +237,29 @@ impl PresenterRunner {
                 }
             }
         }
+        while let Some(request) = self.discovery.try_next() {
+            match request {
+                Ok(handle) => self.attach(handle),
+                Err(error) => self.model.discovery_error = Some(Arc::from(error.to_string())),
+            }
+        }
         self.observers.abort_all();
         while self.observers.join_next().await.is_some() {}
+        for row in &mut self.model.requests {
+            if let Some(handle) = self.observing.get(&row.metadata.id) {
+                row.snapshot = handle.snapshot();
+            }
+        }
+        self.model.closed = true;
+        self.publish();
     }
 
     fn attach(&mut self, handle: RequestHandle) {
         let id = handle.id();
-        if !self.observing.insert(id) {
+        if self.observing.contains_key(&id) {
             return;
         }
+        self.observing.insert(id, handle.clone());
         let snapshot = handle.snapshot();
         self.model.requests.push(RequestView {
             metadata: snapshot.metadata.clone(),

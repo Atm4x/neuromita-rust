@@ -643,13 +643,7 @@ async fn complete_minimal_contracts() {
         Err(SettingsError::Stopped)
     ));
     assert!(matches!(volume.next().await, Err(SettingsError::Stopped)));
-    assert!(
-        CharacterApi::get(CharacterId::Mita)
-            .unwrap()
-            .state()
-            .await
-            .is_err()
-    );
+    assert!(CharacterApi::get(CharacterId::Mita).is_err());
     assert_eq!(storage.load().unwrap().settings.voice.volume.get(), 56);
     drop(write);
 }

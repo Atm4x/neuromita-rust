@@ -14,7 +14,7 @@ pub(crate) struct RequestRegistry {
 
 pub(crate) struct RegistryInner {
     records: Mutex<HashMap<RequestId, Arc<RequestRecord>>>,
-    accepted: broadcast::Sender<RequestHandle>,
+    accepted: Mutex<Option<broadcast::Sender<RequestHandle>>>,
     traces: Mutex<VecDeque<Arc<RequestTrace>>>,
     trace_capacity: usize,
 }
@@ -49,6 +49,16 @@ pub enum DiscoveryError {
 }
 
 impl RequestDiscovery {
+    pub(crate) fn try_next(&mut self) -> Option<Result<RequestHandle, DiscoveryError>> {
+        match self.accepted.try_recv() {
+            Ok(handle) => Some(Ok(handle)),
+            Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                Some(Err(DiscoveryError::Lagged(count)))
+            }
+            Err(_) => None,
+        }
+    }
+
     pub async fn next(&mut self) -> Result<RequestHandle, DiscoveryError> {
         self.accepted.recv().await.map_err(|error| match error {
             broadcast::error::RecvError::Lagged(count) => DiscoveryError::Lagged(count),
@@ -63,7 +73,7 @@ impl RequestRegistry {
         Self {
             inner: Arc::new(RegistryInner {
                 records: Mutex::new(HashMap::new()),
-                accepted,
+                accepted: Mutex::new(Some(accepted)),
                 traces: Mutex::new(VecDeque::new()),
                 trace_capacity: discovery_capacity,
             }),
@@ -75,7 +85,14 @@ impl RequestRegistry {
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");
         records.insert(handle.id(), record);
-        let _ = self.inner.accepted.send(handle.clone());
+        if let Some(accepted) = &*self
+            .inner
+            .accepted
+            .lock()
+            .expect("discovery mutex poisoned")
+        {
+            let _ = accepted.send(handle.clone());
+        }
         handle
     }
 
@@ -103,7 +120,14 @@ impl RequestRegistry {
     }
     pub(crate) fn observe(&self) -> RequestDiscovery {
         let records = self.inner.records.lock().expect("registry mutex poisoned");
-        let accepted = self.inner.accepted.subscribe();
+        let accepted = self
+            .inner
+            .accepted
+            .lock()
+            .expect("discovery mutex poisoned")
+            .as_ref()
+            .expect("request registry is open")
+            .subscribe();
         let active = records
             .values()
             .filter(|record| !record.snapshot().state.is_terminal())
@@ -124,6 +148,14 @@ impl RequestRegistry {
         for handle in handles {
             handle.cancel();
         }
+    }
+
+    pub(crate) fn close(&self) {
+        self.inner
+            .accepted
+            .lock()
+            .expect("discovery mutex poisoned")
+            .take();
     }
 
     pub(crate) fn active_count(&self) -> usize {

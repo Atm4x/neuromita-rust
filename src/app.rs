@@ -4,34 +4,28 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-static STARTING: AtomicBool = AtomicBool::new(false);
-struct StartupGuard {
-    committed: bool,
-}
-impl Drop for StartupGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            STARTING.store(false, Ordering::Release);
-        }
-    }
-}
+pub use crate::runtime::ApplicationStatus;
 
 use crate::{
-    api::{CharacterApi, ChatApi, ChatApiState},
+    api::ChatApiState,
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
     request::{MessageHandler, RequestRegistry},
+    runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
         AppSettings, MemorySettingsRepository, SettingsConfig, SettingsError, SettingsLifecycle,
-        SettingsOwner, SettingsSource,
+        SettingsSource,
     },
     timeline::{SessionTimeline, TimelineEvent},
     voice::{UnavailableVoiceProvider, VoiceProvider},
@@ -77,8 +71,8 @@ impl ApplicationConfig {
 
 #[derive(Debug, Error)]
 pub enum ApplicationError {
-    #[error("ChatApi has already been initialized in this process")]
-    AlreadyInitialized,
+    #[error("application is starting, running or stopping")]
+    Busy,
     #[error("application task failed: {0}")]
     Task(String),
     #[error(transparent)]
@@ -88,34 +82,34 @@ pub enum ApplicationError {
 }
 
 pub struct ApplicationLifecycle {
-    api: Arc<ChatApiState>,
-    characters: CharacterRegistry,
+    bindings: Arc<ApiBindings>,
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
+    server: ServerHandle,
+    id: Uuid,
+    stop: CancellationToken,
+    completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
+}
+
+struct ApplicationOwner {
+    bindings: Arc<ApiBindings>,
     workers_stop: CancellationToken,
     owners_stop: CancellationToken,
     presenter_stop: CancellationToken,
     workers: Vec<JoinHandle<()>>,
     owners: Vec<JoinHandle<()>>,
     presenter_task: Option<JoinHandle<()>>,
-    settings_owner: Arc<SettingsOwner>,
     settings_stop: CancellationToken,
     settings_task: Option<JoinHandle<Result<(), SettingsError>>>,
-    server: ServerHandle,
     server_stop: CancellationToken,
     server_task: Option<JoinHandle<std::io::Result<()>>>,
+    lease: RuntimeLease,
 }
 
 impl ApplicationLifecycle {
     pub async fn start(config: ApplicationConfig) -> Result<Self, ApplicationError> {
-        if ChatApi::is_initialized()
-            || STARTING
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return Err(ApplicationError::AlreadyInitialized);
-        }
-        let mut startup = StartupGuard { committed: false };
+        let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
+        let id = lease.id();
         let ApplicationConfig {
             preset,
             generator,
@@ -154,56 +148,63 @@ impl ApplicationLifecycle {
         }
         let api = Arc::new(ChatApiState::new(registry, handlers));
         let discovery = api.registry.observe();
-        settings.install()?;
-        CharacterApi::install(characters.clone())
-            .map_err(|_| ApplicationError::AlreadyInitialized)?;
-        if ChatApi::install(Arc::clone(&api)).is_err() {
-            api.close();
-            workers_stop.cancel();
-            for worker in workers {
-                let _ = worker.await;
-            }
-            owners_stop.cancel();
-            for owner in owners {
-                let _ = owner.await;
-            }
-            return Err(ApplicationError::AlreadyInitialized);
-        }
+        let settings_owner = settings.owner();
         let (chat, runner) = PresenterRunner::new(
+            Arc::clone(&api),
+            Arc::clone(&settings_owner),
             preset,
             discovery,
             limits.presenter_updates.get(),
             limits.retained_finished.get(),
         );
         let presenter_task = Some(tokio::spawn(runner.run(presenter_stop.clone())));
-        let settings_presenter = SettingsPresenter::new()?;
-        let settings_owner = settings.owner();
+        let settings_presenter = SettingsPresenter::new(Arc::clone(&settings_owner));
         let settings_stop = CancellationToken::new();
         let settings_task = Some(tokio::spawn(settings.run(settings_stop.clone())));
         let server_stop = CancellationToken::new();
-        let server_task = Some(tokio::spawn(server_lifecycle.run(server_stop.clone())));
-        startup.committed = true;
-        Ok(Self {
-            api,
+        let bindings = Arc::new(ApiBindings {
+            chat: api,
             characters,
-            timeline,
-            presenter: GuiPresenter {
-                chat,
-                settings: settings_presenter,
-                characters: CharactersPresenter,
-            },
+            settings: settings_owner,
+        });
+        let server_task = Some(tokio::spawn(
+            server_lifecycle.run_with_api(server_stop.clone(), Arc::clone(&bindings)),
+        ));
+        let owner = ApplicationOwner {
+            bindings: Arc::clone(&bindings),
             workers_stop,
             owners_stop,
             presenter_stop,
             workers,
             owners,
             presenter_task,
-            settings_owner,
             settings_stop,
             settings_task,
-            server,
             server_stop,
             server_task,
+            lease,
+        };
+        owner.lease.publish(Arc::clone(&bindings));
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let (completed, completion) = oneshot::channel();
+        tokio::spawn(async move {
+            stopped.cancelled().await;
+            let result = owner.shutdown().await;
+            let _ = completed.send(result);
+        });
+        Ok(Self {
+            presenter: GuiPresenter {
+                chat,
+                settings: settings_presenter,
+                characters: CharactersPresenter::new(bindings.characters.clone()),
+            },
+            bindings,
+            timeline,
+            server,
+            id,
+            stop,
+            completion: Some(completion),
         })
     }
 
@@ -229,7 +230,7 @@ impl ApplicationLifecycle {
             .at_event(event)
     }
     pub fn character(&self, id: CharacterId) -> Option<CharacterHandle> {
-        self.characters.get(id)
+        self.bindings.characters.get(id)
     }
     pub fn timeline(&self) -> Vec<TimelineEvent> {
         self.timeline
@@ -238,10 +239,43 @@ impl ApplicationLifecycle {
             .events()
     }
     pub fn active_requests(&self) -> usize {
-        self.api.registry.active_count()
+        self.bindings.chat.registry.active_count()
+    }
+
+    pub fn status() -> ApplicationStatus {
+        runtime::status()
+    }
+
+    pub async fn wait_stopped() {
+        runtime::wait_stopped().await;
+    }
+
+    pub async fn restart(self, config: ApplicationConfig) -> Result<Self, ApplicationError> {
+        self.shutdown().await?;
+        Self::start(config).await
     }
 
     pub async fn shutdown(mut self) -> Result<(), ApplicationError> {
+        self.request_stop();
+        self.completion
+            .take()
+            .expect("application owns its completion")
+            .await
+            .map_err(|error| ApplicationError::Task(error.to_string()))?
+    }
+
+    fn request_stop(&self) {
+        if !self.stop.is_cancelled() {
+            runtime::begin_stopping(self.id);
+            self.bindings.chat.close();
+            self.bindings.settings.close();
+            self.stop.cancel();
+        }
+    }
+}
+
+impl ApplicationOwner {
+    async fn shutdown(mut self) -> Result<(), ApplicationError> {
         let mut failure = None;
         self.server_stop.cancel();
         if let Some(task) = self.server_task.take() {
@@ -251,13 +285,13 @@ impl ApplicationLifecycle {
                 Err(error) => failure = Some(ApplicationError::Task(error.to_string())),
             }
         }
-        self.api.close();
         self.workers_stop.cancel();
         for worker in self.workers.drain(..) {
             if let Err(error) = worker.await {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
         }
+        self.bindings.chat.registry.close();
         self.owners_stop.cancel();
         for owner in self.owners.drain(..) {
             if let Err(error) = owner.await {
@@ -270,7 +304,6 @@ impl ApplicationLifecycle {
         {
             failure = Some(ApplicationError::Task(error.to_string()));
         }
-        self.settings_owner.close();
         self.settings_stop.cancel();
         if let Some(task) = self.settings_task.take() {
             match task.await {
@@ -288,13 +321,34 @@ impl ApplicationLifecycle {
 
 impl Drop for ApplicationLifecycle {
     fn drop(&mut self) {
-        self.api.close();
+        self.request_stop();
+    }
+}
+
+impl Drop for ApplicationOwner {
+    fn drop(&mut self) {
+        self.bindings.chat.close();
+        self.bindings.chat.registry.close();
         self.workers_stop.cancel();
         self.presenter_stop.cancel();
         self.server_stop.cancel();
-        self.settings_owner.close();
+        self.bindings.settings.close();
         self.settings_stop.cancel();
         self.owners_stop.cancel();
+        for task in self
+            .workers
+            .iter()
+            .chain(self.owners.iter())
+            .chain(self.presenter_task.iter())
+        {
+            task.abort();
+        }
+        if let Some(task) = &self.server_task {
+            task.abort();
+        }
+        if let Some(task) = &self.settings_task {
+            task.abort();
+        }
     }
 }
 

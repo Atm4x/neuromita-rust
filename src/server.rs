@@ -18,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    api::ChatApi,
     character::CharacterId,
     generation::GenerationPreset,
     lifecycle::Lifecycle,
@@ -26,7 +25,8 @@ use crate::{
         ProcessingStage, ReplyRequest, RequestHandle, RequestId, RequestOutcome, RequestSnapshot,
         RequestSource, RequestState, UserInput,
     },
-    settings::{SettingsApi, VoiceSettings, Volume},
+    runtime::{self, ApiBindings},
+    settings::{VoiceSettings, Volume},
     voice::{VoiceOptions, VoicePlan},
 };
 
@@ -129,6 +129,18 @@ impl ServerLifecycle {
 impl Lifecycle for ServerLifecycle {
     type Error = io::Error;
     async fn run(self, stop: CancellationToken) -> io::Result<()> {
+        let api =
+            runtime::current().map_err(|_| io::Error::other("application API unavailable"))?;
+        self.run_with_api(stop, api).await
+    }
+}
+
+impl ServerLifecycle {
+    pub(crate) async fn run_with_api(
+        self,
+        stop: CancellationToken,
+        api: Arc<ApiBindings>,
+    ) -> io::Result<()> {
         let clients_stop = CancellationToken::new();
         let mut clients = JoinSet::new();
         self.state.change(|state| state.running = true);
@@ -145,9 +157,10 @@ impl Lifecycle for ServerLifecycle {
                             let state = Arc::clone(&self.state);
                             let config = Arc::clone(&self.config);
                             let stop = clients_stop.clone();
+                            let api = Arc::clone(&api);
                             clients.spawn(async move {
                                 let _connected = Connected(state);
-                                client(stream, config, stop).await
+                                client(stream, config, stop, api).await
                             });
                         }
                         Err(error) => { failure = Some(error); break; }
@@ -261,6 +274,7 @@ async fn client(
     stream: TcpStream,
     config: Arc<ServerConfig>,
     parent_stop: CancellationToken,
+    api: Arc<ApiBindings>,
 ) -> io::Result<()> {
     let stop = parent_stop.child_token();
     let client_id = Uuid::new_v4();
@@ -282,7 +296,7 @@ async fn client(
     let mut receipts: VecDeque<Receipt> = VecDeque::new();
     let result = async {
         send(&outbound, json!({"type":"connected","client_id":client_id}), &stop).await?;
-        let mut settings = SettingsApi::observe().map_err(io::Error::other)?;
+        let mut settings = api.settings.observe().map_err(io::Error::other)?;
         let settings_send = outbound.clone();
         let settings_stop = stop.clone();
         observers.spawn(async move {
@@ -328,10 +342,10 @@ async fn client(
                         Command::Reply { character, text } => (character, text),
                         _ => unreachable!(),
                     };
-                    let voice = SettingsApi::snapshot::<VoiceSettings>().map_err(io::Error::other)?.value;
+                    let voice = api.settings.snapshot::<VoiceSettings>().map_err(io::Error::other)?.value;
                     let voice = if voice.in_game { VoicePlan::Synthesize(VoiceOptions { voice: voice.voice, volume: voice.volume }) } else { VoicePlan::Disabled };
                     let request = UserInput::new(text).map(|input| ReplyRequest::new(character, config.preset.clone(), input, RequestSource::Client(client_id)).with_voice(voice));
-                    let handle = match request.map_err(|error| error.to_string()).and_then(|request| ChatApi::reply(request).map_err(|error| error.to_string())) {
+                    let handle = match request.map_err(|error| error.to_string()).and_then(|request| api.chat.send(request).map_err(|error| error.to_string())) {
                         Ok(handle) => handle,
                         Err(error) => { send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error}), &stop).await?; continue; }
                     };
@@ -355,11 +369,11 @@ async fn client(
                     send(&outbound, response, &stop).await?;
                 }
                 Command::Settings => {
-                    let snapshot = SettingsApi::snapshot_all().map_err(io::Error::other)?;
+                    let snapshot = api.settings.snapshot_all().map_err(io::Error::other)?;
                     send(&outbound, json!({"type":"settings","revision":snapshot.revision,"settings":snapshot.values}), &stop).await?;
                 }
                 Command::SetVolume { value } => {
-                    let result = SettingsApi::edit::<VoiceSettings>(|voice| voice.volume = value);
+                    let result = api.settings.edit::<VoiceSettings>(|voice| voice.volume = value);
                     let response = match result { Ok(snapshot) => json!({"type":"settings_applied","revision":snapshot.revision}), Err(error) => json!({"type":"error","error":error.to_string()}) };
                     send(&outbound, response, &stop).await?;
                 }

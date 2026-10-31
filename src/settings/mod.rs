@@ -4,13 +4,16 @@ mod storage;
 pub use model::*;
 pub use storage::*;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::lifecycle::Lifecycle;
+use crate::{
+    lifecycle::Lifecycle,
+    runtime::{self, ApiUnavailable},
+};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SettingsError {
@@ -62,41 +65,84 @@ pub(crate) struct SettingsOwner {
     save: Notify,
 }
 
-static SETTINGS: OnceLock<Arc<SettingsOwner>> = OnceLock::new();
 pub struct SettingsApi;
 
 impl SettingsApi {
-    fn owner() -> Result<&'static Arc<SettingsOwner>, SettingsError> {
-        SETTINGS.get().ok_or(SettingsError::Uninitialized)
+    fn owner() -> Result<Arc<SettingsOwner>, SettingsError> {
+        Ok(Arc::clone(
+            &runtime::current().map_err(SettingsError::from)?.settings,
+        ))
     }
     pub fn snapshot<T: SettingsSection>() -> Result<SectionSnapshot<T>, SettingsError> {
-        let snapshot = Self::snapshot_all()?;
-        Ok(SectionSnapshot {
-            revision: snapshot.revision,
-            value: T::read(&snapshot.values),
-        })
+        Self::owner()?.snapshot()
     }
     pub fn snapshot_all() -> Result<Arc<SettingsSnapshot>, SettingsError> {
-        let owner = Self::owner()?;
-        let state = owner.state.lock().expect("settings mutex poisoned");
-        if state.closed {
-            return Err(SettingsError::Stopped);
-        }
-        Ok(Arc::clone(&state.snapshot))
+        Self::owner()?.snapshot_all()
     }
     pub fn observe() -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
-        let owner = Self::owner()?;
-        let state = owner.state.lock().expect("settings mutex poisoned");
-        if state.closed {
-            return Err(SettingsError::Stopped);
-        }
-        Ok(owner.updates.subscribe())
+        Self::owner()?.observe()
     }
     pub fn replace<T: SettingsSection>(
         expected_revision: u64,
         value: T,
     ) -> Result<SectionSnapshot<T>, SettingsError> {
-        let snapshot = Self::owner()?.change(Some(expected_revision), move |settings| {
+        Self::owner()?.replace(expected_revision, value)
+    }
+    /// The edit must be short and must not block or re-enter SettingsApi.
+    pub fn edit<T: SettingsSection>(
+        edit: impl FnOnce(&mut T),
+    ) -> Result<SectionSnapshot<T>, SettingsError> {
+        Self::owner()?.edit(edit)
+    }
+    pub async fn flush() -> Result<(), SettingsError> {
+        Self::owner()?.flush().await
+    }
+    pub fn retry_save() -> Result<(), SettingsError> {
+        Self::owner()?.request_save()
+    }
+}
+
+impl From<ApiUnavailable> for SettingsError {
+    fn from(error: ApiUnavailable) -> Self {
+        match error {
+            ApiUnavailable::Uninitialized => Self::Uninitialized,
+            ApiUnavailable::Stopped => Self::Stopped,
+        }
+    }
+}
+
+impl SettingsOwner {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<SettingsSnapshot>> {
+        self.updates.subscribe()
+    }
+
+    pub(crate) fn snapshot<T: SettingsSection>(&self) -> Result<SectionSnapshot<T>, SettingsError> {
+        let snapshot = self.snapshot_all()?;
+        Ok(SectionSnapshot {
+            revision: snapshot.revision,
+            value: T::read(&snapshot.values),
+        })
+    }
+    pub(crate) fn snapshot_all(&self) -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        let state = self.state.lock().expect("settings mutex poisoned");
+        if state.closed {
+            return Err(SettingsError::Stopped);
+        }
+        Ok(Arc::clone(&state.snapshot))
+    }
+    pub(crate) fn observe(&self) -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
+        let state = self.state.lock().expect("settings mutex poisoned");
+        if state.closed {
+            return Err(SettingsError::Stopped);
+        }
+        Ok(self.updates.subscribe())
+    }
+    pub(crate) fn replace<T: SettingsSection>(
+        &self,
+        expected_revision: u64,
+        value: T,
+    ) -> Result<SectionSnapshot<T>, SettingsError> {
+        let snapshot = self.change(Some(expected_revision), move |settings| {
             value.replace(settings)
         })?;
         Ok(SectionSnapshot {
@@ -105,10 +151,11 @@ impl SettingsApi {
         })
     }
     /// The edit must be short and must not block or re-enter SettingsApi.
-    pub fn edit<T: SettingsSection>(
+    pub(crate) fn edit<T: SettingsSection>(
+        &self,
         edit: impl FnOnce(&mut T),
     ) -> Result<SectionSnapshot<T>, SettingsError> {
-        let snapshot = Self::owner()?.change(None, move |settings| {
+        let snapshot = self.change(None, move |settings| {
             let mut value = T::read(settings);
             edit(&mut value);
             value.replace(settings);
@@ -118,10 +165,10 @@ impl SettingsApi {
             value: T::read(&snapshot.values),
         })
     }
-    pub async fn flush() -> Result<(), SettingsError> {
-        let mut updates = Self::observe()?;
+    async fn flush(&self) -> Result<(), SettingsError> {
+        let mut updates = self.observe()?;
         let target = updates.borrow().revision;
-        Self::owner()?.save.notify_one();
+        self.save.notify_one();
         loop {
             let snapshot = Arc::clone(&updates.borrow_and_update());
             if snapshot
@@ -135,14 +182,14 @@ impl SettingsApi {
             {
                 return Err(error.clone());
             }
+            if snapshot.closed {
+                return Err(SettingsError::Stopped);
+            }
             updates
                 .changed()
                 .await
                 .map_err(|_| SettingsError::Stopped)?;
         }
-    }
-    pub fn retry_save() -> Result<(), SettingsError> {
-        Self::owner()?.request_save()
     }
 }
 
@@ -264,11 +311,6 @@ impl SettingsLifecycle {
             }),
             repository: config.repository,
         })
-    }
-    pub(crate) fn install(&self) -> Result<(), SettingsError> {
-        SETTINGS
-            .set(Arc::clone(&self.owner))
-            .map_err(|_| SettingsError::Validation("SettingsApi already initialized".into()))
     }
     pub(crate) fn owner(&self) -> Arc<SettingsOwner> {
         Arc::clone(&self.owner)
