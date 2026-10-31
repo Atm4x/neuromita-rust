@@ -35,6 +35,10 @@ YOUR_GEMINI_MODEL — доступный вам model ID. Стартовый с�
 
 Консольные команды: /character mita, /character kind-mita, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
 
+## Перезапуск Core в одном процессе
+
+Статические `ChatApi`, `SettingsApi` и `CharacterApi` используют общий синхронизированный runtime slot вместо необратимого `OnceLock`. Одновременно допускается только одно ядро. `ApplicationLifecycle::start()` резервирует слот, а `shutdown()`/`Drop` закрывают приём новых обращений и доводят исполнителей до завершения. `ApplicationLifecycle::wait_stopped()` ожидает полного освобождения слота; после него можно запустить новый экземпляр. Старые presenter/handle не перепривязываются к новому ядру. `tests/restart.rs` проверяет последовательные запуски, отменённый старт, сбой IO и старые handles.
+
 ## Генерация и результаты
 
 GenerationPreset содержит типизированный ProviderTemplate. Текущий адаптер — GeminiProvider с GeminiTemplate. URL, авторизация, wire format и обработка ответа находятся в generation/gemini. Общий GenerationProvider не предполагает HTTP или Gemini.

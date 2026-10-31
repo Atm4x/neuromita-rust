@@ -256,6 +256,26 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
         Err(SettingsError::Stopped)
     ));
     assert!(CharacterApi::get(CharacterId::Mita).is_err());
+    let concurrent_rejections = tokio::task::spawn_blocking(|| {
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    for _ in 0..64 {
+                        assert!(matches!(
+                            reply("first", "must reject during stopping"),
+                            Err(SubmitError::Stopped)
+                        ));
+                        assert!(matches!(
+                            SettingsApi::snapshot::<VoiceSettings>(),
+                            Err(SettingsError::Stopped)
+                        ));
+                        assert!(CharacterApi::get(CharacterId::Mita).is_err());
+                    }
+                });
+            }
+        });
+    });
+    concurrent_rejections.await.unwrap();
     assert!(matches!(
         ApplicationLifecycle::start(config("unused", &sent, &storage, initial(), address)).await,
         Err(ApplicationError::Busy)

@@ -6,7 +6,7 @@
 
 | Контракт | Реализация |
 |---|---|
-| Статические входы | ChatApi::reply/react/initiate/send, CharacterApi, SettingsApi |
+| Статические входы | ChatApi::reply/react/initiate/send, CharacterApi, SettingsApi; повторная установка после полного shutdown через общий runtime slot |
 | Типизированные сообщения | ReplyRequest, ReactRequest, InitiateRequest; Message; обязательный пресет, input/source, явные intent/at/voice |
 | Приём и очередь | Ограниченный mpsc на персонажа, короткий admission lock, немедленный RequestHandle или явный отказ |
 | Конкурентность | Разные персонажи генерируются параллельно; один персонаж принимает предыдущий результат перед следующей работой |

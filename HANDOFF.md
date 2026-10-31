@@ -19,7 +19,7 @@ Tokio has full features. All locked crates, including platform-specific sources 
 
 Read [minimal-contracts](future/minimal-contracts.md) and [checklist](future/implementation-checklist.md). These supersede limitations of the historical first-slice.md.
 
-- Static ChatApi/SettingsApi/CharacterApi, explicitly initialized once per process. No service locator and no silent fallback presets.
+- Static ChatApi/SettingsApi/CharacterApi backed by a replaceable runtime slot: one running Core at a time, with a fully completed shutdown required before the next start. Old presenters and handles remain bound to their original Core. No service locator and no silent fallback presets.
 - One owned Character per CharacterHandler mailbox; immutable definition and mutable state. CharacterRegistry exposes handles.
 - MessageHandler owns sequential execution per character; different characters run concurrently. No LLM await under global locks.
 - GenerationPreset contains typed ProviderTemplate. Gemini wire/URL/auth are inside generation/gemini, not in common application/presenter code.
@@ -45,7 +45,7 @@ Read [minimal-contracts](future/minimal-contracts.md) and [checklist](future/imp
 | Console | src/main.rs, src/terminal.rs |
 | Contract scenarios | tests/contracts.rs, tests/vertical_slice.rs |
 
-Tests initialize static Api once per test process; do not add many parallel integration test functions that each start a different application in the same process. Local tests do not need credentials or external network access.
+Concurrent application starts are rejected; sequential restarts are supported once the preceding lifecycle finishes. Tests that use the static API in the same process must still coordinate concurrent starts. Local tests do not need credentials or external network access.
 
 ## Live provider status
 

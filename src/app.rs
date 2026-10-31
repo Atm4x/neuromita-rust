@@ -167,10 +167,7 @@ impl ApplicationLifecycle {
             characters,
             settings: settings_owner,
         });
-        let server_task = Some(tokio::spawn(
-            server_lifecycle.run_with_api(server_stop.clone(), Arc::clone(&bindings)),
-        ));
-        let owner = ApplicationOwner {
+        let mut owner = ApplicationOwner {
             bindings: Arc::clone(&bindings),
             workers_stop,
             owners_stop,
@@ -181,10 +178,13 @@ impl ApplicationLifecycle {
             settings_stop,
             settings_task,
             server_stop,
-            server_task,
+            server_task: None,
             lease,
         };
         owner.lease.publish(Arc::clone(&bindings));
+        owner.server_task = Some(tokio::spawn(
+            server_lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
+        ));
         let stop = CancellationToken::new();
         let stopped = stop.clone();
         let (completed, completion) = oneshot::channel();
@@ -266,9 +266,9 @@ impl ApplicationLifecycle {
 
     fn request_stop(&self) {
         if !self.stop.is_cancelled() {
-            runtime::begin_stopping(self.id);
             self.bindings.chat.close();
             self.bindings.settings.close();
+            runtime::begin_stopping(self.id);
             self.stop.cancel();
         }
     }
