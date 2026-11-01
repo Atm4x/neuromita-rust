@@ -1,4 +1,6 @@
 mod index;
+#[cfg(feature = "sqlite-system")]
+pub(crate) use index::WorldLookup;
 mod messages;
 mod model;
 mod projection;

@@ -489,3 +489,115 @@ fn branch_scoped_append_cache_keeps_sibling_worlds_and_receipts_independent() {
         Ok(root_result)
     );
 }
+
+#[test]
+fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure() {
+    let db = DatabaseFile::new();
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut sql = db.open();
+    let mut memory = TimelineStore::new();
+    for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
+        repo.create_session(session, root).unwrap();
+    }
+    let mut secret = mk(EventKind::PlayerMessage, &[CharacterId::Mita]);
+    secret.actor = Some("Player".into());
+    secret.external_message_id = Some("secret-from-unity".into());
+    let secret_id = secret.id;
+    let mut checkpoint = mk(EventKind::Checkpoint, &[]);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    let child = BranchId::new();
+    let sibling = BranchId::new();
+    for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
+        repo.append(root, 0, "secret", json!({}), vec![secret.clone()])
+            .unwrap();
+        repo.append(root, 1, "checkpoint", json!({}), vec![checkpoint.clone()])
+            .unwrap();
+        repo.fork(root, checkpoint_id, child).unwrap();
+        repo.fork(root, checkpoint_id, sibling).unwrap();
+    }
+    let mut disclosure = mk(EventKind::EventObserved, &[CharacterId::KindMita]);
+    disclosure.links.push(CausalLink {
+        relation: CausalRelation::Observes,
+        event_id: secret_id,
+    });
+    let mut reset = mk(EventKind::CharacterContextReset, &[CharacterId::KindMita]);
+    reset.external_message_id = Some("context-reset".into());
+    for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
+        let head = repo.branch(child).unwrap().head_sequence;
+        repo.append(child, head, "disclose", json!({}), vec![disclosure.clone()])
+            .unwrap();
+        let head = repo.branch(child).unwrap().head_sequence;
+        repo.append(child, head, "reset", json!({}), vec![reset.clone()])
+            .unwrap();
+    }
+    drop(sql);
+    let mut sql = db.open();
+    assert_eq!(
+        sql.knows(child, CharacterId::KindMita, secret_id, None),
+        Ok(false)
+    );
+    assert_eq!(
+        sql.knows(sibling, CharacterId::KindMita, secret_id, None),
+        Ok(false)
+    );
+    let head = sql.branch(child).unwrap().head_sequence;
+    let mut reply = mk(EventKind::CharacterMessage, &[CharacterId::KindMita]);
+    reply.actor = Some(CharacterId::KindMita.to_string());
+    reply.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: secret_id,
+    });
+    let mut reply_other = reply.clone();
+    reply_other.id = neuromita::timeline::EventId::new();
+    assert!(matches!(
+        sql.append(child, head, "unknown-reply", json!({}), vec![reply.clone()]),
+        Err(TimelineError::Invalid(_))
+    ));
+    assert!(matches!(
+        sql.append(
+            sibling,
+            sql.branch(sibling).unwrap().head_sequence,
+            "unknown-reply",
+            json!({}),
+            vec![reply_other]
+        ),
+        Err(TimelineError::Invalid(_))
+    ));
+    let mut relearn = disclosure;
+    relearn.id = neuromita::timeline::EventId::new();
+    let mut renewed_reply = reply;
+    renewed_reply.id = neuromita::timeline::EventId::new();
+    let commands = vec![relearn, renewed_reply];
+    let expected = memory.append(
+        child,
+        head,
+        "relearn-and-reply",
+        json!({}),
+        commands.clone(),
+    );
+    let actual = sql.append(child, head, "relearn-and-reply", json!({}), commands);
+    assert_eq!(actual, expected);
+    assert_eq!(
+        sql.knows(child, CharacterId::KindMita, secret_id, None),
+        Ok(true)
+    );
+    assert_eq!(
+        sql.knows(sibling, CharacterId::KindMita, secret_id, None),
+        Ok(false)
+    );
+    let duplicated = mk(EventKind::UnityEvent, &[]);
+    let mut duplicated = duplicated;
+    duplicated.external_message_id = Some("secret-from-unity".into());
+    assert_eq!(
+        sql.append(
+            child,
+            sql.branch(child).unwrap().head_sequence,
+            "duplicate-external",
+            json!({}),
+            vec![duplicated]
+        ),
+        Err(TimelineError::Conflict)
+    );
+}

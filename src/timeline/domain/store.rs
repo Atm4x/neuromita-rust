@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use crate::identity::{CharacterId, EventId};
 
 use super::{
-    index::{AppendIndex, WorldIndex},
+    index::{AppendIndex, WorldIndex, WorldLookup},
     model::{
         BranchId, BranchInfo, CausalRelation, EventDraft, EventKind, KnownEvent, SessionId,
         TimelineError, TimelineFact,
@@ -34,14 +34,34 @@ pub struct TimelineStore {
     indexes: HashMap<BranchId, WorldIndex>,
 }
 
-impl TimelineStore {
-    pub fn new() -> Self {
-        Self::default()
+impl Receipt {
+    pub(crate) fn new(command: Value, drafts: Vec<EventDraft>, result: Vec<TimelineFact>) -> Self {
+        Self {
+            command,
+            drafts,
+            result,
+        }
+    }
+
+    pub(crate) fn matches(&self, command: &Value, drafts: &[EventDraft]) -> bool {
+        &self.command == command
+            && self.drafts.len() == drafts.len()
+            && self
+                .drafts
+                .iter()
+                .zip(drafts)
+                .all(|(left, right)| left.same_intent(right))
     }
 
     #[cfg(feature = "sqlite-system")]
-    pub(crate) fn persisted_receipt(&self, branch: BranchId, key: &str) -> Option<&Receipt> {
-        self.branches.get(&branch)?.receipts.get(key)
+    pub(crate) fn result(&self) -> &[TimelineFact] {
+        &self.result
+    }
+}
+
+impl TimelineStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     #[cfg(feature = "sqlite-system")]
@@ -246,14 +266,7 @@ impl TimelineStore {
             .get(&branch_id)
             .ok_or(TimelineError::NotFound)?;
         if let Some(receipt) = branch.receipts.get(key) {
-            return if receipt.command == command
-                && receipt.drafts.len() == drafts.len()
-                && receipt
-                    .drafts
-                    .iter()
-                    .zip(&drafts)
-                    .all(|(left, right)| left.same_intent(right))
-            {
+            return if receipt.matches(&command, &drafts) {
                 Ok(receipt.result.clone())
             } else {
                 Err(TimelineError::Conflict)
@@ -271,23 +284,8 @@ impl TimelineStore {
             .indexes
             .get(&branch_id)
             .expect("branch index initialized");
-        let mut pending = AppendIndex::new(index);
-        let mut result = Vec::with_capacity(drafts.len());
-        let mut sequence = expected_head;
-        for draft in &drafts {
-            Self::validate(&pending, draft)?;
-            sequence = sequence
-                .checked_add(1)
-                .ok_or(TimelineError::Invalid("sequence overflow"))?;
-            let fact = TimelineFact {
-                session_id: branch.info.session_id,
-                branch_id,
-                sequence,
-                draft: draft.clone(),
-            };
-            pending.record(&fact);
-            result.push(fact);
-        }
+        let result = Self::validate_batch(branch.info, expected_head, &drafts, index)?;
+        let sequence = expected_head + result.len() as u64;
         let branch = self
             .branches
             .get_mut(&branch_id)
@@ -296,16 +294,43 @@ impl TimelineStore {
         branch.events.extend(result.iter().cloned());
         branch.receipts.insert(
             key.to_string(),
-            Receipt {
-                command,
-                drafts,
-                result: result.clone(),
-            },
+            Receipt::new(command, drafts, result.clone()),
         );
         self.indexes
             .get_mut(&branch_id)
             .expect("branch index initialized")
             .extend(&result);
+        Ok(result)
+    }
+
+    /// The only semantic append validator. Both in-memory and storage-backed
+    /// repositories provide a read-only index over the same visible branch world.
+    pub(crate) fn validate_batch(
+        branch: BranchInfo,
+        expected_head: u64,
+        drafts: &[EventDraft],
+        base: &dyn WorldLookup,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        if branch.head_sequence != expected_head {
+            return Err(TimelineError::ConcurrentWrite);
+        }
+        let mut pending = AppendIndex::new(base);
+        let mut result = Vec::with_capacity(drafts.len());
+        let mut sequence = expected_head;
+        for draft in drafts {
+            Self::validate(&pending, draft)?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(TimelineError::Invalid("sequence overflow"))?;
+            let fact = TimelineFact {
+                session_id: branch.session_id,
+                branch_id: branch.id,
+                sequence,
+                draft: draft.clone(),
+            };
+            pending.record(&fact);
+            result.push(fact);
+        }
         Ok(result)
     }
 
@@ -380,14 +405,14 @@ impl TimelineStore {
         if draft.schema_version != 1 {
             return Err(TimelineError::Invalid("unsupported event schema version"));
         }
-        if index.kind(draft.id).is_some() {
+        if index.kind(draft.id)?.is_some() {
             return Err(TimelineError::Conflict);
         }
         if let Some(ref external) = draft.external_message_id {
             if external.is_empty() || external.trim() != external {
                 return Err(TimelineError::Invalid("invalid external message identity"));
             }
-            if index.has_external(external) {
+            if index.has_external(external)? {
                 return Err(TimelineError::Conflict);
             }
         }
@@ -462,7 +487,7 @@ impl TimelineStore {
                 )?)?]
             };
             for id in ids {
-                let target = index.kind(id).ok_or(TimelineError::NotFound)?;
+                let target = index.kind(id)?.ok_or(TimelineError::NotFound)?;
                 if !matches!(
                     target,
                     EventKind::PlayerMessage
@@ -472,7 +497,9 @@ impl TimelineStore {
                 ) || draft
                     .observers
                     .iter()
-                    .any(|&observer| !index.knows(observer, id))
+                    .try_fold(false, |missing, &observer| {
+                        Ok::<_, TimelineError>(missing || !index.knows(observer, id)?)
+                    })?
                 {
                     return Err(TimelineError::Invalid("cannot modify unknown message"));
                 }
@@ -513,16 +540,14 @@ impl TimelineStore {
             if !relations.insert((link.relation, link.event_id)) {
                 return Err(TimelineError::Invalid("duplicate causal link"));
             }
-            let target = index.kind(link.event_id).ok_or(TimelineError::NotFound)?;
+            let target = index.kind(link.event_id)?.ok_or(TimelineError::NotFound)?;
             match link.relation {
                 CausalRelation::ReplyTo | CausalRelation::ReactTo => {
-                    if draft.kind != EventKind::CharacterMessage
-                        || !draft
-                            .actor
-                            .as_deref()
-                            .and_then(CharacterId::parse)
-                            .is_some_and(|actor| index.knows(actor, link.event_id))
-                    {
+                    let actor_knows = match draft.actor.as_deref().and_then(CharacterId::parse) {
+                        Some(actor) => index.knows(actor, link.event_id)?,
+                        None => false,
+                    };
+                    if draft.kind != EventKind::CharacterMessage || !actor_knows {
                         return Err(TimelineError::Invalid(
                             "response target is not known to actor",
                         ));

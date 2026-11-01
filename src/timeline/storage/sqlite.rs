@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
-    Branch, BranchId, BranchInfo, EventDraft, KnownEvent, Receipt, SessionId, TimelineError,
-    TimelineFact, TimelineRepository, TimelineStore,
+    Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt, SessionId,
+    TimelineError, TimelineFact, TimelineRepository, TimelineStore, WorldLookup,
 };
 use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
 
@@ -109,6 +109,33 @@ CREATE TABLE IF NOT EXISTS timeline_receipts(
     PRIMARY KEY(branch_id, operation_key),
     FOREIGN KEY(branch_id) REFERENCES timeline_branches(branch_id)
 );
+CREATE TABLE IF NOT EXISTS timeline_fact_keys(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    external_id TEXT,
+    kind_json TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence)
+);
+CREATE INDEX IF NOT EXISTS timeline_keys_event ON timeline_fact_keys(branch_id,event_id,sequence);
+CREATE INDEX IF NOT EXISTS timeline_keys_external ON timeline_fact_keys(branch_id,external_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_acquisitions(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id,event_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_acquisitions_by_event
+    ON timeline_acquisitions(branch_id,character_id,event_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_resets(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_resets_by_character
+    ON timeline_resets(branch_id,character_id,sequence);
 CREATE TABLE IF NOT EXISTS timeline_active_selection(
     slot TEXT PRIMARY KEY CHECK(slot='core'),
     branch_id TEXT NOT NULL,
@@ -283,7 +310,6 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<String, TimelineError> {
 /// SQLite 3 development libraries are required when the `sqlite-system` feature is enabled.
 pub struct SqliteTimelineRepository {
     path: PathBuf,
-    cache: Option<(BranchId, u64, TimelineStore)>,
 }
 
 impl SqliteTimelineRepository {
@@ -294,7 +320,6 @@ impl SqliteTimelineRepository {
         }
         let repo = Self {
             path: path.to_path_buf(),
-            cache: None,
         };
         let conn = repo.connection()?;
         conn.exec("PRAGMA journal_mode = WAL")?;
@@ -303,8 +328,17 @@ impl SqliteTimelineRepository {
             conn.exec(SCHEMA)?;
             let versions = conn.query("SELECT version FROM timeline_schema", &[])?;
             match versions.as_slice() {
-                [] => conn.write("INSERT INTO timeline_schema(version) VALUES('1')", &[]),
-                [version] if version[0] == "1" => Ok(()),
+                [] => conn.write("INSERT INTO timeline_schema(version) VALUES('2')", &[]),
+                [version] if version[0] == "2" => Ok(()),
+                [version] if version[0] == "1" => {
+                    for row in conn.query(
+                        "SELECT fact_json FROM timeline_events ORDER BY branch_id,sequence",
+                        &[],
+                    )? {
+                        index_fact(&conn, &decode::<TimelineFact>(&row[0])?)?;
+                    }
+                    conn.write("UPDATE timeline_schema SET version='2'", &[])
+                }
                 _ => Err(storage("unsupported timeline schema version")),
             }
         })();
@@ -325,7 +359,6 @@ impl SqliteTimelineRepository {
         &mut self,
         apply: impl FnOnce(&Connection, &mut TimelineStore) -> Result<T, TimelineError>,
     ) -> Result<T, TimelineError> {
-        self.cache = None;
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
         let result = (|| {
@@ -417,44 +450,123 @@ fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
     TimelineStore::load_persisted(branches)
 }
 
-fn load_lineage(connection: &Connection, leaf: BranchId) -> Result<TimelineStore, TimelineError> {
-    let mut infos = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut next = Some(leaf);
-    while let Some(id) = next {
-        if !visited.insert(id) {
-            return Err(storage("cyclic branch lineage"));
+/// Materialized *facts*, not domain decisions. These indexes are derived from
+/// immutable events and may be rebuilt from them during schema migration.
+fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineError> {
+    use crate::timeline::domain::CausalRelation;
+    let branch = fact.branch_id.0.to_string();
+    let sequence = fact.sequence.to_string();
+    conn.write(
+        "INSERT INTO timeline_fact_keys(branch_id,sequence,event_id,external_id,kind_json) VALUES(?,?,?,nullif(?,''),?)",
+        &[&branch,&sequence,&fact.draft.id.0.to_string(),
+          fact.draft.external_message_id.as_deref().unwrap_or(""),&encode(&fact.draft.kind)?],
+    )?;
+    for observer in &fact.draft.observers {
+        let character = observer.to_string();
+        conn.write(
+            "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
+            &[&branch,&sequence,&character,&fact.draft.id.0.to_string()],
+        )?;
+        if fact.draft.kind == EventKind::CharacterContextReset {
+            conn.write(
+                "INSERT INTO timeline_resets(branch_id,sequence,character_id) VALUES(?,?,?)",
+                &[&branch, &sequence, &character],
+            )?;
         }
-        let info = branch_info(connection, id)?;
-        next = info.parent;
-        infos.push(info);
-    }
-    let mut branches = Vec::with_capacity(infos.len());
-    for info in infos.into_iter().rev() {
-        let branch_id = info.id.0.to_string();
-        let mut events = Vec::new();
-        for row in connection.query(
-            "SELECT fact_json FROM timeline_events WHERE branch_id=? ORDER BY sequence",
-            &[&branch_id],
-        )? {
-            events.push(decode(&row[0])?);
-        }
-        let mut receipts = std::collections::HashMap::new();
-        if info.id == leaf {
-            for row in connection.query(
-                "SELECT operation_key, receipt_json FROM timeline_receipts WHERE branch_id=?",
-                &[&branch_id],
-            )? {
-                receipts.insert(row[0].clone(), decode::<Receipt>(&row[1])?);
+        if fact.draft.kind == EventKind::EventObserved {
+            for link in &fact.draft.links {
+                if link.relation == CausalRelation::Observes {
+                    conn.write(
+                        "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
+                        &[&branch,&sequence,&character,&link.event_id.0.to_string()],
+                    )?;
+                }
             }
         }
-        branches.push(Branch {
-            info,
-            events,
-            receipts,
-        });
     }
-    TimelineStore::load_persisted(branches)
+    Ok(())
+}
+
+/// A bounded branch lineage with each ancestor cutoff; siblings never leak
+/// into this read-only lookup. The transaction holds a stable branch world.
+struct IndexedWorld<'a> {
+    connection: &'a Connection,
+    lineage: Vec<(BranchId, u64)>,
+}
+
+impl<'a> IndexedWorld<'a> {
+    fn new(connection: &'a Connection, branch: BranchId) -> Result<Self, TimelineError> {
+        let mut lineage = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut next = Some(branch);
+        let mut ceiling = None;
+        while let Some(id) = next {
+            if !seen.insert(id) {
+                return Err(storage("cyclic branch lineage"));
+            }
+            let info = branch_info(connection, id)?;
+            lineage.push((id, ceiling.unwrap_or(info.head_sequence)));
+            ceiling = Some(info.fork_sequence);
+            next = info.parent;
+        }
+        Ok(Self {
+            connection,
+            lineage,
+        })
+    }
+    fn max_position(
+        &self,
+        table: &str,
+        character: CharacterId,
+        event: Option<EventId>,
+    ) -> Result<Option<u64>, TimelineError> {
+        let mut maximum = None;
+        for (branch, cutoff) in &self.lineage {
+            let id = branch.0.to_string();
+            let ceiling = cutoff.to_string();
+            let character = character.to_string();
+            let rows = if let Some(event) = event {
+                self.connection.query("SELECT max(sequence) FROM timeline_acquisitions WHERE branch_id=? AND character_id=? AND event_id=? AND sequence<=?",
+                    &[&id,&character,&event.0.to_string(),&ceiling])?
+            } else {
+                debug_assert_eq!(table, "timeline_resets");
+                self.connection.query("SELECT max(sequence) FROM timeline_resets WHERE branch_id=? AND character_id=? AND sequence<=?",
+                    &[&id,&character,&ceiling])?
+            };
+            if let Some(row) = rows.first()
+                && !row[0].is_empty()
+            {
+                let position = parse_u64(&row[0])?;
+                maximum = Some(maximum.map_or(position, |old: u64| old.max(position)));
+            }
+        }
+        Ok(maximum)
+    }
+}
+
+impl WorldLookup for IndexedWorld<'_> {
+    fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query("SELECT kind_json FROM timeline_fact_keys WHERE branch_id=? AND event_id=? AND sequence<=? ORDER BY sequence DESC LIMIT 1",
+                &[&branch.0.to_string(),&event.0.to_string(),&cutoff.to_string()])?;
+            if let Some(row) = rows.first() {
+                return Ok(Some(decode(&row[0])?));
+            }
+        }
+        Ok(None)
+    }
+    fn has_external(&self, external: &str) -> Result<bool, TimelineError> {
+        for (branch, cutoff) in &self.lineage {
+            if !self.connection.query("SELECT 1 FROM timeline_fact_keys WHERE branch_id=? AND external_id=? AND sequence<=? LIMIT 1",
+                &[&branch.0.to_string(),external,&cutoff.to_string()])?.is_empty() { return Ok(true); }
+        }
+        Ok(false)
+    }
+    fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError> {
+        let acquired = self.max_position("timeline_acquisitions", character, Some(event))?;
+        let reset = self.max_position("timeline_resets", character, None)?;
+        Ok(acquired.is_some_and(|position| reset.is_none_or(|reset| position >= reset)))
+    }
 }
 
 fn save_branch(
@@ -478,6 +590,16 @@ fn save_branch(
         .map(|id| id.0.to_string())
         .unwrap_or_default();
     connection.write("INSERT INTO timeline_branches(branch_id,session_id,parent_id,fork_sequence,head_sequence,checkpoint_id) VALUES (?, ?, nullif(?,''), ?, ?, nullif(?,'')) ON CONFLICT(branch_id) DO UPDATE SET head_sequence=excluded.head_sequence", &[&branch_id, &session_id, &parent, &fork, &head, &checkpoint])?;
+    for table in [
+        "timeline_fact_keys",
+        "timeline_acquisitions",
+        "timeline_resets",
+    ] {
+        connection.write(
+            &format!("DELETE FROM {table} WHERE branch_id=?"),
+            &[&branch_id],
+        )?;
+    }
     connection.write(
         "DELETE FROM timeline_events WHERE branch_id=?",
         &[&branch_id],
@@ -487,6 +609,7 @@ fn save_branch(
             "INSERT INTO timeline_events(branch_id,sequence,fact_json) VALUES(?, ?, ?)",
             &[&branch_id, &fact.sequence.to_string(), &encode(fact)?],
         )?;
+        index_fact(connection, fact)?;
         for observer in &fact.draft.observers {
             connection.write(
                 "INSERT INTO timeline_observers(branch_id,sequence,character_id) VALUES(?, ?, ?)",
@@ -511,39 +634,37 @@ fn save_branch(
     Ok(())
 }
 
-fn save_append(
+fn save_indexed_append(
     connection: &Connection,
-    store: &TimelineStore,
-    branch_id: BranchId,
+    branch: BranchId,
     previous_head: u64,
     key: &str,
-    events: &[TimelineFact],
+    receipt: &Receipt,
 ) -> Result<(), TimelineError> {
-    let branch = branch_id.0.to_string();
-    let new_head = store.branch(branch_id)?.head_sequence.to_string();
-    let previous = previous_head.to_string();
+    let id = branch.0.to_string();
+    let head = previous_head
+        .checked_add(receipt.result().len() as u64)
+        .ok_or(TimelineError::Invalid("sequence overflow"))?;
     connection.write(
         "UPDATE timeline_branches SET head_sequence=? WHERE branch_id=? AND head_sequence=?",
-        &[&new_head, &branch, &previous],
+        &[&head.to_string(), &id, &previous_head.to_string()],
     )?;
-    for event in events {
+    for fact in receipt.result() {
         connection.write(
-            "INSERT INTO timeline_events(branch_id,sequence,fact_json) VALUES(?, ?, ?)",
-            &[&branch, &event.sequence.to_string(), &encode(event)?],
+            "INSERT INTO timeline_events(branch_id,sequence,fact_json) VALUES(?,?,?)",
+            &[&id, &fact.sequence.to_string(), &encode(fact)?],
         )?;
-        for observer in &event.draft.observers {
+        for observer in &fact.draft.observers {
             connection.write(
-                "INSERT INTO timeline_observers(branch_id,sequence,character_id) VALUES(?, ?, ?)",
-                &[&branch, &event.sequence.to_string(), &observer.to_string()],
+                "INSERT INTO timeline_observers(branch_id,sequence,character_id) VALUES(?,?,?)",
+                &[&id, &fact.sequence.to_string(), &observer.to_string()],
             )?;
         }
+        index_fact(connection, fact)?;
     }
-    let receipt = store
-        .persisted_receipt(branch_id, key)
-        .ok_or_else(|| storage("missing committed operation receipt"))?;
     connection.write(
-        "INSERT INTO timeline_receipts(branch_id,operation_key,receipt_json) VALUES(?, ?, ?)",
-        &[&branch, key, &encode(receipt)?],
+        "INSERT INTO timeline_receipts(branch_id,operation_key,receipt_json) VALUES(?,?,?)",
+        &[&id, key, &encode(receipt)?],
     )?;
     Ok(())
 }
@@ -679,36 +800,45 @@ impl TimelineRepository for SqliteTimelineRepository {
         connection.exec("BEGIN IMMEDIATE")?;
         let result = (|| {
             let current_revision = revision(&connection)?;
-            let mut store = match self.cache.take() {
-                Some((cached_branch, cached_revision, cached))
-                    if cached_branch == branch && cached_revision == current_revision =>
-                {
-                    cached
-                }
-                _ => load_lineage(&connection, branch)?,
-            };
-            let previous_head = store.branch(branch)?.head_sequence;
-            let already_committed = store.persisted_receipt(branch, key).is_some();
-            let facts = store.append(branch, expected_head, key, command, drafts)?;
-            let new_revision = if already_committed {
-                current_revision
-            } else {
-                save_append(&connection, &store, branch, previous_head, key, &facts)?;
-                advance_revision(&connection, current_revision)?
-            };
-            Ok((facts, new_revision, store))
+            let info = branch_info(&connection, branch)?;
+            if key.is_empty() || key.trim() != key {
+                return Err(TimelineError::Invalid(
+                    "operation key must be canonical and nonempty",
+                ));
+            }
+            if !command.is_object() {
+                return Err(TimelineError::Invalid(
+                    "operation command must be an object",
+                ));
+            }
+            let rows = connection.query(
+                "SELECT receipt_json FROM timeline_receipts WHERE branch_id=? AND operation_key=?",
+                &[&branch.0.to_string(), key],
+            )?;
+            if let Some(row) = rows.first() {
+                let receipt: Receipt = decode(&row[0])?;
+                return if receipt.matches(&command, &drafts) {
+                    Ok(receipt.result().to_vec())
+                } else {
+                    Err(TimelineError::Conflict)
+                };
+            }
+            if info.head_sequence != expected_head {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            let world = IndexedWorld::new(&connection, branch)?;
+            let facts = TimelineStore::validate_batch(info, expected_head, &drafts, &world)?;
+            let receipt = Receipt::new(command, drafts, facts.clone());
+            save_indexed_append(&connection, branch, expected_head, key, &receipt)?;
+            advance_revision(&connection, current_revision)?;
+            Ok(facts)
         })();
         match result {
-            Ok((facts, cached_revision, store)) => {
-                if let Err(error) = connection.exec("COMMIT") {
-                    self.cache = None;
-                    return Err(error);
-                }
-                self.cache = Some((branch, cached_revision, store));
+            Ok(facts) => {
+                connection.exec("COMMIT")?;
                 Ok(facts)
             }
             Err(error) => {
-                self.cache = None;
                 connection.exec("ROLLBACK")?;
                 Err(error)
             }
@@ -873,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn warmed_cache_is_discarded_after_sqlite_failure() {
+    fn indexed_append_recovers_from_sqlite_failure() {
         let db = TestDb::new();
         let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
         let branch = BranchId::new();
@@ -888,7 +1018,6 @@ mod tests {
             )],
         )
         .unwrap();
-        assert!(repo.cache.is_some());
         let conn = Connection::open(&db.0).unwrap();
         conn.exec("CREATE TRIGGER timeline_test_warm_fail BEFORE INSERT ON timeline_events BEGIN SELECT RAISE(ABORT, 'injected warmed failure'); END").unwrap();
         assert!(matches!(
@@ -903,7 +1032,6 @@ mod tests {
             ),
             Err(TimelineError::Storage(_))
         ));
-        assert!(repo.cache.is_none());
         assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
         conn.exec("DROP TRIGGER timeline_test_warm_fail").unwrap();
         repo.append(
@@ -917,6 +1045,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(repo.world(branch).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn version_one_database_migrates_indices_without_changing_facts() {
+        let db = TestDb::new();
+        let branch = BranchId::new();
+        let session = SessionId::new();
+        let mut first = SqliteTimelineRepository::open(&db.0).unwrap();
+        first.create_session(session, branch).unwrap();
+        let mut secret = EventDraft::new(EventKind::UnityEvent);
+        secret.observers.insert(CharacterId::Mita);
+        secret.external_message_id = Some("source:legacy".into());
+        let id = secret.id;
+        let facts = first
+            .append(branch, 0, "legacy", json!({}), vec![secret])
+            .unwrap();
+        drop(first);
+
+        let conn = Connection::open(&db.0).unwrap();
+        conn.exec("UPDATE timeline_schema SET version=1").unwrap();
+        for table in [
+            "timeline_fact_keys",
+            "timeline_acquisitions",
+            "timeline_resets",
+        ] {
+            conn.write(&format!("DELETE FROM {table}"), &[]).unwrap();
+        }
+        drop(conn);
+
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.world(branch).unwrap(), facts);
+        assert_eq!(
+            reopened.knows(branch, CharacterId::Mita, id, None),
+            Ok(true)
+        );
+        assert_eq!(
+            reopened.knows(branch, CharacterId::KindMita, id, None),
+            Ok(false)
+        );
+        let mut duplicate = EventDraft::new(EventKind::UnityEvent);
+        duplicate.external_message_id = Some("source:legacy".into());
+        assert_eq!(
+            reopened.append(branch, 1, "collision", json!({}), vec![duplicate]),
+            Err(TimelineError::Conflict)
+        );
+        assert_eq!(
+            SqliteTimelineRepository::open(&db.0)
+                .unwrap()
+                .world(branch)
+                .unwrap(),
+            facts
+        );
     }
 
     #[test]

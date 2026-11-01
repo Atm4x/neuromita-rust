@@ -2,7 +2,17 @@ use std::collections::{HashMap, HashSet};
 
 use crate::identity::{CharacterId, EventId};
 
+use super::model::TimelineError;
 use super::model::{CausalRelation, EventKind, TimelineFact};
+
+/// Read-only facts needed by the single domain append validator.
+/// A repository can answer these with indexed storage reads without reconstructing
+/// a full world. No storage-specific rule is encoded in this contract.
+pub(crate) trait WorldLookup {
+    fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError>;
+    fn has_external(&self, external: &str) -> Result<bool, TimelineError>;
+    fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError>;
+}
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorldIndex {
@@ -18,7 +28,7 @@ struct KnowledgeChange {
 }
 
 pub(super) struct AppendIndex<'a> {
-    base: &'a WorldIndex,
+    base: &'a dyn WorldLookup,
     kinds: HashMap<EventId, EventKind>,
     external_ids: HashSet<String>,
     knowledge: HashMap<CharacterId, KnowledgeChange>,
@@ -61,8 +71,25 @@ impl WorldIndex {
     }
 }
 
+impl WorldLookup for WorldIndex {
+    fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
+        Ok(self.kinds.get(&event).copied())
+    }
+
+    fn has_external(&self, external: &str) -> Result<bool, TimelineError> {
+        Ok(self.external_ids.contains(external))
+    }
+
+    fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError> {
+        Ok(self
+            .known
+            .get(&character)
+            .is_some_and(|ids| ids.contains(&event)))
+    }
+}
+
 impl<'a> AppendIndex<'a> {
-    pub(super) fn new(base: &'a WorldIndex) -> Self {
+    pub(super) fn new(base: &'a dyn WorldLookup) -> Self {
         Self {
             base,
             kinds: HashMap::new(),
@@ -71,30 +98,36 @@ impl<'a> AppendIndex<'a> {
         }
     }
 
-    pub(super) fn kind(&self, event: EventId) -> Option<EventKind> {
-        self.kinds
-            .get(&event)
-            .or_else(|| self.base.kinds.get(&event))
-            .copied()
+    pub(super) fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
+        if let Some(kind) = self.kinds.get(&event) {
+            Ok(Some(*kind))
+        } else {
+            self.base.kind(event)
+        }
     }
 
-    pub(super) fn has_external(&self, external: &str) -> bool {
-        self.external_ids.contains(external) || self.base.external_ids.contains(external)
+    pub(super) fn has_external(&self, external: &str) -> Result<bool, TimelineError> {
+        if self.external_ids.contains(external) {
+            Ok(true)
+        } else {
+            self.base.has_external(external)
+        }
     }
 
-    pub(super) fn knows(&self, character: CharacterId, event: EventId) -> bool {
+    pub(super) fn knows(
+        &self,
+        character: CharacterId,
+        event: EventId,
+    ) -> Result<bool, TimelineError> {
         if let Some(change) = self.knowledge.get(&character) {
             if change.added.contains(&event) {
-                return true;
+                return Ok(true);
             }
             if change.reset {
-                return false;
+                return Ok(false);
             }
         }
-        self.base
-            .known
-            .get(&character)
-            .is_some_and(|events| events.contains(&event))
+        self.base.knows(character, event)
     }
 
     pub(super) fn record(&mut self, fact: &TimelineFact) {
