@@ -8,7 +8,7 @@ mod model;
 mod projection;
 mod replies;
 mod repository;
-pub(crate) use replies::accepted_reply_count;
+pub(crate) use replies::{accepted_reply_count, accepted_reply_request};
 mod store;
 mod world;
 

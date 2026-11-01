@@ -279,3 +279,102 @@ async fn reset_is_durable_and_repeatable_without_erasing_historical_context() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn application_reconciles_accepted_reply_after_restart_without_request_registry() {
+    use neuromita::request::RequestId;
+    use neuromita::timeline::{
+        domain::{
+            AppendGuard, CausalLink, CausalRelation, EventDraft, EventKind, TimelineRepository,
+        },
+        selection::TimelineSelectionRepository,
+        storage::SqliteTimelineRepository,
+    };
+    use serde_json::json;
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let path =
+        std::env::temp_dir().join(format!("neuromita-accepted-recovery-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let branch = BranchId::new();
+    let request = RequestId(Uuid::new_v4());
+    let reply = {
+        let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+        repo.create_session(session, branch).unwrap();
+        let selection = repo.select_branch(branch, None).unwrap();
+        let mut input = EventDraft::new(EventKind::PlayerMessage);
+        input.actor = Some("player".into());
+        input.observers.insert(CharacterId::Mita);
+        input.payload.insert("content".into(), json!("question"));
+        input
+            .payload
+            .insert("request_id".into(), json!(request.to_string()));
+        let target = input.id;
+        repo.append(branch, 0, "input", json!({}), vec![input])
+            .unwrap();
+
+        let mut draft = EventDraft::new(EventKind::CharacterMessage);
+        draft.actor = Some(CharacterId::Mita.to_string());
+        draft.observers.insert(CharacterId::Mita);
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.to_string()));
+        draft
+            .payload
+            .insert("content".into(), json!("committed response"));
+        draft.links.push(CausalLink {
+            relation: CausalRelation::ReplyTo,
+            event_id: target,
+        });
+        repo.append_guarded(
+            branch,
+            1,
+            &format!("reply:{}", request),
+            json!({}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: selection.generation,
+                context: Some((CharacterId::Mita, 0, Some(target))),
+                accepted_reply_revision: Some((CharacterId::Mita, 0)),
+            },
+        )
+        .unwrap()
+        .pop()
+        .unwrap()
+    };
+    for _ in 0..2 {
+        let app = ApplicationLifecycle::start(config(path.clone(), session, branch))
+            .await
+            .unwrap();
+        let at = app.at();
+        assert_eq!(at.through, reply.sequence);
+        assert_eq!(app.active_requests(), 0);
+        assert_eq!(
+            app.accepted_reply_at(CharacterId::Mita, request, at)
+                .unwrap(),
+            Some(reply.clone())
+        );
+        assert!(
+            app.accepted_reply_at(
+                CharacterId::Mita,
+                request,
+                neuromita::timeline::ContextAnchor {
+                    branch_id: branch.0,
+                    through: 1,
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            app.accepted_reply_at(CharacterId::KindMita, request, at)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(app.at(), at);
+        app.shutdown().await.unwrap();
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

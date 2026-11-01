@@ -1,4 +1,5 @@
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::identity::{CharacterId, EventId};
 
@@ -18,6 +19,37 @@ pub trait TimelineRepository {
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError>;
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError>;
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError>;
+    /// Reconcile an uncertain request after restart using committed source facts.
+    /// None means no accepted reply in this branch prefix, not that the request
+    /// failed or was cancelled. This does not restore in-memory request status.
+    fn accepted_reply_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        request: Uuid,
+        through: Option<u64>,
+    ) -> Result<Option<TimelineFact>, TimelineError> {
+        let info = self.branch(branch)?;
+        let bound = through.unwrap_or(info.head_sequence);
+        if bound > info.head_sequence {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        let mut accepted = None;
+        for fact in self.world(branch)? {
+            if fact.sequence > bound {
+                break;
+            }
+            if super::accepted_reply_request(&fact, character) == Some(request) {
+                if accepted.is_some() {
+                    return Err(TimelineError::Conflict);
+                }
+                accepted = Some(fact);
+            }
+        }
+        Ok(accepted)
+    }
     /// Stable ascending page of direct facts; observer filters direct witnesses,
     /// not derived knowledge or later disclosures.
     fn read(

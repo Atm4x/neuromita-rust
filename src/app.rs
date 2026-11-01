@@ -357,6 +357,22 @@ impl ApplicationLifecycle {
             .reset_character_context(expected, character, id)
     }
 
+    /// Read-only reconciliation of a request after an uncertain shutdown.
+    /// Some proves the reply was committed in the selected historical prefix;
+    /// None does not prove that the request was cancelled or failed.
+    /// A successful lookup never replays generation or effects.
+    pub fn accepted_reply_at(
+        &self,
+        character: CharacterId,
+        request: RequestId,
+        at: crate::timeline::ContextAnchor,
+    ) -> Result<Option<TimelineFact>, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .accepted_reply_at(character, request, at)
+    }
+
     pub fn timeline(&self) -> Vec<TimelineEvent> {
         self.timeline
             .lock()

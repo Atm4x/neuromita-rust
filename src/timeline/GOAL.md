@@ -199,3 +199,9 @@
   prefix) for accepted replies; a versioned derived index is a separate
   optimization task. This is **not** durable atomic storage of arbitrary
   mutable `CharacterState` or external effects.
+
+
+## Примирение результата запроса после перезапуска (2026-11-01)
+
+- [x] Read-only `ApplicationLifecycle::accepted_reply_at(character, request, anchor)` возвращает канонический `CharacterMessage` для указанного RequestId, актёра и исторического префикса той же сессии. Проверены fork cutoff, reset, SQLite reopen, отсутствие request registry и отсутствие повторного выполнения операции. [Семантика и ограничения](RECOVERY.md).
+- [ ] Полный crash recovery request lifecycle, инварианты внешних effects и восстановление технических статусов — **не закрыто**. `None` от lookup не означает отмену или ошибку; source facts не содержат достаточно информации для такого вывода.

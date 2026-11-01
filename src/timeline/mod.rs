@@ -469,6 +469,19 @@ impl SessionTimeline {
         )
     }
 
+    /// Find only a committed character reply in an immutable branch prefix.
+    /// Unanswered/cancelled/unfinished requests are intentionally indistinguishable.
+    pub(crate) fn accepted_reply_at(
+        &self,
+        character: CharacterId,
+        request: RequestId,
+        at: ContextAnchor,
+    ) -> Result<Option<domain::TimelineFact>, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        self.store
+            .accepted_reply_at(branch, character, request.0, Some(at.through))
+    }
+
     pub(crate) fn reaction_cause_at(
         &self,
         character: CharacterId,
