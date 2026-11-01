@@ -203,3 +203,79 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_is_durable_and_repeatable_without_erasing_historical_context() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let path = std::env::temp_dir().join(format!("neuromita-durable-reset-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let reset = neuromita::timeline::EventId::new();
+    let before = {
+        let app = ApplicationLifecycle::start(config(path.clone(), session, root))
+            .await
+            .unwrap();
+        ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Before reset".into()).unwrap(),
+        )
+        .unwrap();
+        let before = app.at();
+        let selection = app.timeline_selection();
+        assert_eq!(
+            app.reset_character_context(selection, CharacterId::Mita, reset),
+            Ok(reset)
+        );
+        assert_eq!(app.at().through, before.through + 1);
+        assert!(
+            app.character(CharacterId::Mita)
+                .unwrap()
+                .get_context(app.at())
+                .await
+                .unwrap()
+                .view
+                .messages()
+                .is_empty()
+        );
+        app.shutdown().await.unwrap();
+        before
+    };
+    let reopened = ApplicationLifecycle::start(config(path.clone(), session, root))
+        .await
+        .unwrap();
+    let selection = reopened.timeline_selection();
+    let at = reopened.at();
+    assert_eq!(at.through, before.through + 1);
+    assert_eq!(
+        reopened.reset_character_context(selection, CharacterId::Mita, reset),
+        Ok(reset)
+    );
+    assert_eq!(reopened.at(), at);
+    let handler = reopened.character(CharacterId::Mita).unwrap();
+    assert!(
+        handler
+            .get_context(at)
+            .await
+            .unwrap()
+            .view
+            .messages()
+            .is_empty()
+    );
+    let original = handler.get_context(before).await.unwrap();
+    assert_eq!(original.view.messages()[0].content, "Before reset");
+    assert!(
+        reopened
+            .character(CharacterId::KindMita)
+            .unwrap()
+            .get_context(before)
+            .await
+            .unwrap()
+            .view
+            .messages()
+            .is_empty()
+    );
+    reopened.shutdown().await.unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

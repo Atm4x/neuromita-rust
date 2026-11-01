@@ -34,7 +34,7 @@ use crate::{
         SessionTimeline, TimelineConfig, TimelineEvent,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
-        selection::TimelineSelection,
+        selection::{TimelineAdmission, TimelineSelection},
     },
     voice::{UnavailableVoiceProvider, VoiceProvider},
 };
@@ -132,7 +132,7 @@ impl RequestIngress for TimelineRequestIngress {
         character: CharacterId,
         input: &UserInput,
         intent: TurnIntent,
-    ) -> Result<TimelineSelection, SubmitError> {
+    ) -> Result<TimelineAdmission, SubmitError> {
         let mut timeline = self
             .timeline
             .lock()
@@ -151,7 +151,9 @@ impl RequestIngress for TimelineRequestIngress {
                 )
                 .map_err(|_| SubmitError::TimelineUnavailable)?;
         }
-        Ok(selection)
+        timeline
+            .admission(character, selection)
+            .map_err(|_| SubmitError::TimelineUnavailable)
     }
 }
 
@@ -205,12 +207,17 @@ impl ApplicationLifecycle {
         for id in CharacterId::ALL {
             let (send, receive) = mpsc::channel(limits.request_queue.get());
             handlers.insert(id, send);
+            let context_updates = timeline
+                .lock()
+                .expect("timeline lock poisoned")
+                .observe_context_epoch(id);
             let worker = MessageHandler {
                 character: characters.get(id).expect("hardcoded character exists"),
                 registry: Arc::clone(&registry),
                 generator: Arc::clone(&generator),
                 voice: Arc::clone(&voice),
                 selection_updates: selection_updates.clone(),
+                context_updates,
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),
@@ -334,6 +341,20 @@ impl ApplicationLifecycle {
             .lock()
             .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
             .ingest_semantic_events(expected, batch)
+    }
+
+    /// Forget current knowledge of one character without deleting canonical events.
+    /// In-flight local generation for that character is invalidated after commit.
+    pub fn reset_character_context(
+        &self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        id: EventId,
+    ) -> Result<EventId, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .reset_character_context(expected, character, id)
     }
 
     pub fn timeline(&self) -> Vec<TimelineEvent> {

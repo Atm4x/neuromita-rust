@@ -9,6 +9,12 @@ pub struct TimelineSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineAdmission {
+    pub selection: TimelineSelection,
+    pub context_epoch: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineTurn {
     pub selection: TimelineSelection,
     pub context_head: u64,

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::watch;
 
@@ -20,7 +20,7 @@ pub mod storage;
 pub mod view;
 
 use legacy::{legacy_event, make_draft};
-use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
+use selection::{SessionWorkspace, TimelineAdmission, TimelineSelection, TimelineTurn};
 use view::{MitaView, TimelineMessageQueries};
 
 #[cfg(feature = "sqlite-system")]
@@ -102,6 +102,7 @@ pub(crate) struct SessionTimeline {
     store: Box<dyn TimelineRepository + Send>,
     workspace: SessionWorkspace,
     selection_updates: watch::Sender<TimelineSelection>,
+    context_updates: HashMap<CharacterId, watch::Sender<u64>>,
     #[cfg(feature = "sqlite-system")]
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
@@ -117,10 +118,13 @@ impl SessionTimeline {
         workspace
             .select(&store, branch, None)
             .expect("fresh branch exists");
+        let context_updates =
+            Self::context_channels(&store, branch).expect("fresh branch context epochs exist");
         Self {
             branch,
             store: Box::new(store),
             selection_updates: watch::channel(workspace.selected().expect("selection set")).0,
+            context_updates,
             workspace,
             #[cfg(feature = "sqlite-system")]
             selection_repository: None,
@@ -147,11 +151,13 @@ impl SessionTimeline {
                 if store.branch(selection.branch_id)?.session_id != session {
                     return Err(domain::TimelineError::Conflict);
                 }
+                let context_updates = Self::context_channels(&store, selection.branch_id)?;
                 Ok(Self {
                     branch: selection.branch_id,
                     store: Box::new(store),
                     workspace: SessionWorkspace::from_selection(selection),
                     selection_updates: watch::channel(selection).0,
+                    context_updates,
                     selection_repository: Some(selection_repository),
                 })
             }
@@ -178,6 +184,30 @@ impl SessionTimeline {
         if let Some(repository) = &self.selection_repository
             && repository.selection()? != Some(selection)
         {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admission(
+        &self,
+        character: CharacterId,
+        selection: TimelineSelection,
+    ) -> Result<TimelineAdmission, domain::TimelineError> {
+        self.assert_selection(selection)?;
+        Ok(TimelineAdmission {
+            selection,
+            context_epoch: self.store.context_epoch(self.branch, character)?,
+        })
+    }
+
+    pub(crate) fn assert_admission(
+        &self,
+        character: CharacterId,
+        admission: TimelineAdmission,
+    ) -> Result<(), domain::TimelineError> {
+        self.assert_selection(admission.selection)?;
+        if self.store.context_epoch(self.branch, character)? != admission.context_epoch {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         Ok(())
@@ -216,6 +246,54 @@ impl SessionTimeline {
         Ok(())
     }
 
+    fn context_channels(
+        store: &dyn TimelineRepository,
+        branch: BranchId,
+    ) -> Result<HashMap<CharacterId, watch::Sender<u64>>, domain::TimelineError> {
+        CharacterId::ALL
+            .into_iter()
+            .map(|character| {
+                let epoch = store.context_epoch(branch, character)?;
+                Ok((character, watch::channel(epoch).0))
+            })
+            .collect()
+    }
+
+    pub(crate) fn observe_context_epoch(&self, character: CharacterId) -> watch::Receiver<u64> {
+        self.context_updates[&character].subscribe()
+    }
+
+    /// Reset is a semantic fact, not a request or a mutation of past events.
+    /// The local character watcher is notified only after the guarded append commits.
+    pub(crate) fn reset_character_context(
+        &mut self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        id: EventId,
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.id = id;
+        reset.observers.insert(character);
+        self.store.append_guarded(
+            self.branch,
+            self.anchor().through,
+            &format!("context-reset:{}", id.0),
+            json!({"character": character.to_string()}),
+            vec![reset],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+            },
+        )?;
+        let epoch = self.store.context_epoch(self.branch, character)?;
+        let sender = &self.context_updates[&character];
+        if *sender.borrow() != epoch {
+            sender.send_replace(epoch);
+        }
+        Ok(id)
+    }
+
     pub(crate) fn observe_selection(&self) -> watch::Receiver<TimelineSelection> {
         self.selection_updates.subscribe()
     }
@@ -237,6 +315,14 @@ impl SessionTimeline {
         if self.workspace.selected() != Some(expected) {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
+        let epochs = CharacterId::ALL
+            .into_iter()
+            .map(|character| {
+                self.store
+                    .context_epoch(branch, character)
+                    .map(|epoch| (character, epoch))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         #[cfg(feature = "sqlite-system")]
         let new_selection = if let Some(repository) = &mut self.selection_repository {
             repository.select_branch(branch, Some(expected))?
@@ -250,6 +336,9 @@ impl SessionTimeline {
             .select(self.store.as_ref(), branch, Some(expected))?;
         self.workspace.install_selection(new_selection);
         self.branch = branch;
+        for (character, epoch) in epochs {
+            self.context_updates[&character].send_replace(epoch);
+        }
         self.selection_updates.send_replace(new_selection);
         Ok(new_selection)
     }

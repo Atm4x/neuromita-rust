@@ -161,3 +161,10 @@
 - [x] `CharacterHandle::get_context` can inspect an inactive branch of the selected session without changing the selected branch or starting generation. `HistoryView`, `MitaView` and derived accepted-reply counts use the same requested `ContextAnchor` (branch + prefix).
 - [x] In-memory and SQLite/reopen tests cover inherited fork prefix vs parent continuation, per-character privacy, reset with immutable earlier snapshots, foreign-session rejection and active-generation protection.
 - [ ] Full snapshot-consistent mutable `CharacterState` transaction and bounded incremental read-side remain open; inspecting an immutable prefix does not solve them.
+
+## Early local character reset cancellation (2026-11-01)
+
+- [x] Durable, idempotent addressable character reset operation with selection generation precondition. One committed reset forgets only the named character's knowledge without erasing canonical facts.
+- [x] Per-character local context-epoch observation: pending jobs pin epoch at admission; LLM and TTS are cancelled early if their character is reset before acceptance. Another character's generation continues. New requests after reset use the new epoch.
+- [x] Tests: blocked Gemini, independent character, waiting reaction, interrupted voice synthesis, idempotent reset, stale branch generation, SQLite reopen, old historical context, Clippy and Rustfmt.
+- [ ] External-process reset/selection notifications still need an independently designed transport or event mechanism; guarded accept already rejects stale commits, but cannot abort the LLM await early across processes. Full durable mutable CharacterState and effects recovery are also not implemented.

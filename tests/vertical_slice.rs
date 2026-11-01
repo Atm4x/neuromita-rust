@@ -727,3 +727,294 @@ async fn independent_player_message_is_visible_without_scheduling_generation() {
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fact() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let mita = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset.clone(),
+        UserInput::new("Question before reset".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let mita_call = server.next().await;
+    let kind = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        preset.clone(),
+        UserInput::new("KindMita stays active".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let kind_call = server.next().await;
+
+    let selected = app.timeline_selection();
+    let reset_id = neuromita::timeline::EventId::new();
+    assert_eq!(
+        app.reset_character_context(selected, CharacterId::Mita, reset_id),
+        Ok(reset_id)
+    );
+    assert!(matches!(
+        finished(&mita).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(matches!(kind.snapshot().state, RequestState::Processing(_)));
+    assert_eq!(app.at().through, 3);
+    assert_eq!(
+        app.reset_character_context(selected, CharacterId::Mita, reset_id),
+        Ok(reset_id)
+    );
+    assert_eq!(app.at().through, 3);
+
+    let mita_view = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert!(mita_view.view.messages().is_empty());
+    assert_eq!(mita_view.state.accepted_replies, 0);
+
+    kind_call
+        .respond
+        .send(Reply::Text("KindMita answered"))
+        .unwrap();
+    assert!(matches!(
+        finished(&kind).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let old = app.timeline();
+    assert!(old.iter().any(|event| {
+        event.request_id == Some(mita.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+    assert!(!old.iter().any(|event| {
+        event.request_id == Some(mita.id())
+            && matches!(event.content, EventContent::CharacterReply { .. })
+    }));
+
+    let next = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("After reset".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let next_call = server.next().await;
+    assert_eq!(user_texts(&next_call.body), ["After reset"]);
+    next_call.respond.send(Reply::Text("New answer")).unwrap();
+    assert!(matches!(
+        finished(&next).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    drop(mita_call);
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_reset_is_rejected_without_cancelling_current_request() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let selected = app.timeline_selection();
+    app.select_timeline_branch(selected.branch_id, selected)
+        .unwrap();
+    let reply = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("Valid after reselection".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = server.next().await;
+    let at = app.at();
+    assert!(
+        app.reset_character_context(
+            selected,
+            CharacterId::Mita,
+            neuromita::timeline::EventId::new()
+        )
+        .is_err()
+    );
+    assert_eq!(app.at(), at);
+    assert!(matches!(
+        reply.snapshot().state,
+        RequestState::Processing(_)
+    ));
+    call.respond.send(Reply::Text("answer")).unwrap();
+    assert!(matches!(
+        finished(&reply).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+struct PausedVoice(mpsc::UnboundedSender<oneshot::Sender<()>>);
+
+impl neuromita::voice::VoiceProvider for PausedVoice {
+    fn synthesize(
+        &self,
+        _text: Arc<str>,
+        _options: neuromita::voice::VoiceOptions,
+    ) -> neuromita::voice::VoiceFuture<'_> {
+        Box::pin(async {
+            let (send, receive) = oneshot::channel();
+            self.0.send(send).unwrap();
+            let _ = receive.await;
+            Ok(neuromita::voice::AudioArtifact {
+                format: neuromita::voice::AudioFormat::Wave,
+                bytes: Arc::from([0u8; 4]),
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let (voice_started, mut voice_calls) = mpsc::unbounded_channel();
+    let mut config = ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.voice = Arc::new(PausedVoice(voice_started));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let reply = ChatApi::reply(
+        ReplyRequest::new(
+            CharacterId::Mita,
+            preset,
+            UserInput::new("Question requiring voice".into()).unwrap(),
+            RequestSource::Presenter,
+        )
+        .with_voice(neuromita::voice::VoicePlan::Synthesize(
+            neuromita::voice::VoiceOptions {
+                voice: "voice-id".into(),
+                volume: neuromita::settings::Volume::new(80).unwrap(),
+            },
+        )),
+    )
+    .unwrap();
+    let provider_call = server.next().await;
+    provider_call
+        .respond
+        .send(Reply::Text("spoken reply"))
+        .unwrap();
+    let voice_release = timeout(Duration::from_secs(10), voice_calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reset_id = neuromita::timeline::EventId::new();
+    assert_eq!(
+        app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset_id),
+        Ok(reset_id)
+    );
+    assert!(matches!(
+        finished(&reply).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(voice_release.send(()).is_err());
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_cancels_queued_reaction_admitted_before_reset() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let cause = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .observe(UserInput::new("Known door opened".into()).unwrap())
+        .await
+        .unwrap();
+    let first = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset.clone(),
+        UserInput::new("First blocking request".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let blocked = server.next().await;
+    let reaction = ChatApi::react(ReactRequest::new(
+        CharacterId::Mita,
+        preset,
+        cause,
+        UserInput::new("React to door".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let reset = neuromita::timeline::EventId::new();
+    app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset)
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(matches!(
+        finished(&reaction).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(server.calls.try_recv().is_err());
+    assert_eq!(app.at().through, 3);
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    drop(blocked);
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}

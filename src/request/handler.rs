@@ -18,6 +18,7 @@ pub(crate) struct MessageHandler {
     pub(crate) generator: Arc<ResponseGenerator>,
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
+    pub(crate) context_updates: watch::Receiver<u64>,
 }
 
 impl MessageHandler {
@@ -64,7 +65,7 @@ impl MessageHandler {
                 message.input().clone(),
                 message.intent(),
                 message.at(),
-                record.admission_selection(),
+                record.admission(),
             ) => context,
         };
         let context = match prepared {
@@ -100,6 +101,11 @@ impl MessageHandler {
                 record.finish_cancelled();
                 return;
             }
+            _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
+                record.cancel();
+                record.finish_cancelled();
+                return;
+            }
             response = self.generator.generate(request) => response,
         };
         let proposed = match generated {
@@ -122,6 +128,11 @@ impl MessageHandler {
                     biased;
                     _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
                     _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
+                        record.cancel();
+                        record.finish_cancelled();
+                        return;
+                    }
+                    _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
                         record.cancel();
                         record.finish_cancelled();
                         return;
@@ -150,6 +161,17 @@ impl MessageHandler {
             Err(error) => RequestOutcome::InternalError(record.failure(error.to_string())),
         };
         record.finish(outcome);
+    }
+}
+
+async fn context_epoch_changed(mut updates: watch::Receiver<u64>, captured: u64) {
+    loop {
+        if *updates.borrow_and_update() != captured {
+            return;
+        }
+        if updates.changed().await.is_err() {
+            return;
+        }
     }
 }
 

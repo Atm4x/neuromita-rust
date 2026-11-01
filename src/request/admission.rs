@@ -9,7 +9,7 @@ use super::{Message, RequestDiscovery, RequestHandle, RequestRegistry, SubmitErr
 use crate::{
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
-    timeline::selection::TimelineSelection,
+    timeline::selection::TimelineAdmission,
 };
 
 pub(crate) trait RequestIngress: Send + Sync {
@@ -25,7 +25,7 @@ pub(crate) trait RequestIngress: Send + Sync {
         character: CharacterId,
         input: &UserInput,
         intent: TurnIntent,
-    ) -> Result<TimelineSelection, SubmitError>;
+    ) -> Result<TimelineAdmission, SubmitError>;
 }
 
 pub(crate) struct ChatApiState {
@@ -70,13 +70,13 @@ impl ChatApiState {
             mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
         })?;
         let id = RequestId::new();
-        let selection = self.ingress.admit(
+        let admission = self.ingress.admit(
             id,
             request.character_id(),
             request.input(),
             request.intent(),
         )?;
-        let handle = self.registry.register(Box::new(request), id, selection);
+        let handle = self.registry.register(Box::new(request), id, admission);
         permit.send(id);
         Ok(handle)
     }

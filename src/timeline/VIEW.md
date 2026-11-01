@@ -132,3 +132,29 @@ Gemini формирует **user-level** последовательность и
 - `SessionTimeline::capture_context` remains deliberately **active-branch-only** for generation: `ContextPosition::At` cannot be used to create a response against an unselected branch. Inspecting an alternate branch never changes selection generation, writes facts, or cancels running requests.
 - Historical views are detached. Appending or resetting the alternate branch cannot mutate an earlier returned view. A foreign session and a position beyond the branch head are rejected. Reading after SQLite reopen uses the same saved branch and prefix.
 - This is a read-only functional extension, **not** a completed unified SQLite read transaction with external mutable `CharacterState`, a bounded incremental MitaView cache, a full timeline archive or a generalized time-travel runtime.
+
+## Addressed local reset cancellation (2026-11-01)
+
+- `ApplicationLifecycle::reset_character_context(selection, character, event_id)` creates
+  a durable, observer-scoped `CharacterContextReset` with an idempotent receipt.
+  Selection generation is checked before writing; a failed or stale reset does not
+  notify workers or append a fact. Repeating a committed operation with the same
+  event ID does not advance the head or emit a spurious update.
+- The Core maintains one local `context_epoch` notification per character. Its value
+  comes from the selected branch's canonical reset epoch; it is updated **after**
+  a successful guarded reset. `MessageHandler` races ongoing LLM and voice work
+  against both selection and character-specific epoch updates. A reset affecting
+  Mita cannot cancel a KindMita request.
+- Admission pins `(selection, context_epoch)` before a request enters the queue;
+  `CharacterHandler` compares both when processing begins. Queued `react/initiate`
+  requests admitted before reset are cancelled without creating a new generation.
+  Previously published player speech remains in the canonical history, though
+  its content is forgotten in the new subjective view until disclosed again.
+- Existing final `append_guarded` checks remain mandatory. Local early cancellation
+  is a resource-saving mechanism, not a substitute for atomic commit-time guards.
+
+**Not implemented:** changes committed by another process to the same SQLite
+repository do not directly push these in-process notifications; external reset
+or selection changes are still detected by the final guarded acceptance check.
+Likewise, this work does not add durable mutable CharacterState beyond the
+existing accepted-reply projection. No Unity transport or polling service added.

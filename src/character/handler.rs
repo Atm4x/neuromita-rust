@@ -19,7 +19,7 @@ use crate::{
     interaction::{TurnIntent, UserInput},
     timeline::{
         ContextAnchor, ContextPosition, EventId, SessionTimeline,
-        selection::{TimelineSelection, TimelineTurn},
+        selection::{TimelineAdmission, TimelineTurn},
     },
     voice::AudioArtifact,
 };
@@ -56,7 +56,7 @@ enum Command {
         input: UserInput,
         intent: TurnIntent,
         at: ContextPosition,
-        admission: TimelineSelection,
+        admission: TimelineAdmission,
         reply: oneshot::Sender<Result<CharacterContext, CharacterError>>,
     },
     Accept {
@@ -115,7 +115,7 @@ impl CharacterHandle {
         input: UserInput,
         intent: TurnIntent,
         at: ContextPosition,
-        admission: TimelineSelection,
+        admission: TimelineAdmission,
     ) -> Result<CharacterContext, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -270,11 +270,12 @@ impl CharacterHandler {
         intent: TurnIntent,
         at: ContextPosition,
     ) -> Result<CharacterContext, CharacterError> {
-        let selection = self
-            .timeline
-            .lock()
-            .expect("timeline mutex poisoned")
-            .selection();
+        let admission = {
+            let timeline = self.timeline.lock().expect("timeline mutex poisoned");
+            timeline
+                .admission(self.character.id, timeline.selection())
+                .unwrap()
+        };
         if intent == TurnIntent::Reply {
             self.timeline
                 .lock()
@@ -287,7 +288,7 @@ impl CharacterHandler {
                 )
                 .map_err(CharacterError::Internal)?;
         }
-        self.context_admitted(request, input, intent, at, selection)
+        self.context_admitted(request, input, intent, at, admission)
     }
 
     fn context_admitted(
@@ -296,14 +297,14 @@ impl CharacterHandler {
         input: UserInput,
         intent: TurnIntent,
         at: ContextPosition,
-        admission: TimelineSelection,
+        admission: TimelineAdmission,
     ) -> Result<CharacterContext, CharacterError> {
         let mut timeline = self
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         timeline
-            .assert_selection(admission)
+            .assert_admission(self.character.id, admission)
             .map_err(|_| CharacterError::StaleState)?;
         if intent == TurnIntent::Reply {
             timeline
