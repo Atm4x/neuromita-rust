@@ -1,3 +1,4 @@
+mod conversation;
 pub mod gemini;
 mod provider;
 

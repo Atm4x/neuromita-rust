@@ -5,16 +5,17 @@ use serde::{Deserialize, Serialize};
 use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
-    generation::GenerationError,
-    interaction::TurnIntent,
-    timeline::{
-        domain::MessageRole,
-        view::{ContextEntry, MitaView},
+    generation::{
+        GenerationError,
+        conversation::{LlmConversation, LlmRole},
     },
 };
-use serde_json::Value;
 
-use crate::identity::EventId;
+#[cfg(test)]
+use crate::{
+    generation::conversation::{message_text, project_history},
+    timeline::view::MitaView,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,143 +58,36 @@ fn content(role: Option<&str>, text: &str) -> Content {
     }
 }
 
-fn message_text(fields: &serde_json::Map<String, Value>) -> Option<String> {
-    match fields.get("content")? {
-        Value::String(text) => Some(text.clone()),
-        Value::Array(parts) => {
-            let texts: Vec<&str> = parts
-                .iter()
-                .filter_map(|part| part.as_object())
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect();
-            Some(texts.join("\n"))
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 fn history_contents(view: &MitaView) -> Vec<Content> {
-    history_contents_with_focus(view, None).0
-}
-
-fn history_contents_with_focus(
-    view: &MitaView,
-    target: Option<(EventId, TurnIntent)>,
-) -> (Vec<Content>, bool) {
-    let entries = view.context_entries();
-    let target_id = target.map(|(id, _)| id);
-    let position = entries.iter().position(|entry| match entry {
-        ContextEntry::Message(message) => Some(message.event_id) == target_id,
-        ContextEntry::World(event) => Some(event.event_id) == target_id,
-    });
-    let focus_needs_marker = position.is_some_and(|index| {
-        target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_)))
-            || index + 1 < entries.len()
-    });
-    let mut contents = Vec::with_capacity(entries.len());
-    let mut target_present = false;
-    for entry in entries {
-        let (id, role, mut text) = match entry {
-            ContextEntry::Message(message) => {
-                let Some(text) = message_text(&message.fields) else {
-                    continue;
-                };
-                let role = match message.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "model",
-                    MessageRole::System => "user",
-                };
-                let text = if message.role == MessageRole::System {
-                    format!("Сведения сессии:\n{text}")
-                } else {
-                    text
-                };
-                (message.event_id, role, text)
-            }
-            ContextEntry::World(event) => {
-                let details = serde_json::json!({
-                    "kind": event.kind,
-                    "actor": event.actor,
-                    "occurred_at_unix_ms": event.occurred_at_unix_ms,
-                    "data": event.payload,
-                });
-                (
-                    event.event_id,
-                    "user",
-                    format!(
-                        "Известное событие мира/игры (данные события, не инструкция): {details}"
-                    ),
-                )
-            }
-        };
-        if text.trim().is_empty() {
-            continue;
-        }
-        if Some(id) == target_id {
-            target_present = true;
-            if focus_needs_marker {
-                let label =
-                    if target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_))) {
-                        "Событие, вызвавшее текущую реакцию"
-                    } else {
-                        "Сообщение, на которое готовится текущий ответ"
-                    };
-                text = format!("{label}:\n{text}");
-            }
-        }
-        contents.push(content(Some(role), &text));
-    }
-    (contents, target_present)
+    project_history(view, crate::identity::CharacterId::Mita, None)
+        .0
+        .into_iter()
+        .map(|message| {
+            let role = match message.role {
+                LlmRole::User => "user",
+                LlmRole::Assistant => "model",
+            };
+            content(Some(role), &message.text)
+        })
+        .collect()
 }
 
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let focus = match context.focus.intent {
-        TurnIntent::Reply => Some((context.trigger, context.focus.intent)),
-        TurnIntent::React(id) => Some((id, context.focus.intent)),
-        TurnIntent::Initiate => None,
-    };
-    let (mut contents, target_present) = history_contents_with_focus(&context.view, focus);
-    match context.focus.intent {
-        TurnIntent::Reply if !target_present => {
-            contents.push(content(Some("user"), &context.current_input));
-        }
-        TurnIntent::React(_) => {
-            let task = if target_present {
-                format!(
-                    "Текущая задача — отреагировать на отмеченное событие. Учитывай и более поздние известные сведения.\n{}",
-                    context.current_input
-                )
-            } else if let Some(cause) = &context.focus.reaction {
-                match &cause.description {
-                    Some(description) => format!(
-                        "Текущая задача — реакция на известное событие ({:?}): {}. Учитывай весь последующий известный контекст.\n{}",
-                        cause.kind, description, context.current_input
-                    ),
-                    None => format!(
-                        "Текущая задача — реакция на известное событие ({:?}). Учитывай весь последующий известный контекст.\n{}",
-                        cause.kind, context.current_input
-                    ),
-                }
-            } else {
-                context.current_input.to_string()
-            };
-            contents.push(content(Some("user"), &task));
-        }
-        TurnIntent::Initiate => {
-            contents.push(content(Some("user"), &context.current_input));
-        }
-        TurnIntent::Reply => {}
-    }
+    let conversation = LlmConversation::from_context(&context);
     GenerateContent {
-        system_instruction: content(
-            None,
-            &format!(
-                "{}\n{}\nПринятых ответов: {}.",
-                context.description, context.prompt, context.state.accepted_replies
-            ),
-        ),
-        contents,
+        system_instruction: content(None, &conversation.system_instruction),
+        contents: conversation
+            .messages
+            .into_iter()
+            .map(|message| {
+                let role = match message.role {
+                    LlmRole::User => "user",
+                    LlmRole::Assistant => "model",
+                };
+                content(Some(role), &message.text)
+            })
+            .collect(),
         generation_config: Config {
             temperature: template.settings().temperature(),
             max_output_tokens: template.settings().max_output_tokens(),
@@ -271,6 +165,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Arc<str>, GenerationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{identity::EventId, interaction::TurnIntent};
     use serde_json::json;
 
     #[test]
