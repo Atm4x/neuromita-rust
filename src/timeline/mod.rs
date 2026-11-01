@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub use crate::identity::EventId;
+pub mod conversation;
 pub mod domain;
 pub mod ingress;
 mod legacy;
@@ -615,6 +616,53 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
             batch,
+        )
+    }
+
+    /// Commit a shared conversation message once for all its witnesses.
+    /// The message is independent of LLM admission and never starts generation.
+    pub(crate) fn publish_conversation_message(
+        &mut self,
+        expected: TimelineSelection,
+        message: conversation::ConversationMessage,
+    ) -> Result<domain::TimelineFact, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let head = self.anchor().through;
+        conversation::append_conversation_message(
+            self.store.as_mut(),
+            self.branch,
+            head,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+            message,
+        )
+    }
+
+    /// Disclose an existing message to new witnesses without duplicating it.
+    pub(crate) fn disclose_conversation_message(
+        &mut self,
+        expected: TimelineSelection,
+        operation: EventId,
+        source: EventId,
+        witnesses: std::collections::BTreeSet<CharacterId>,
+    ) -> Result<domain::TimelineFact, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let head = self.anchor().through;
+        conversation::disclose_conversation_message(
+            self.store.as_mut(),
+            self.branch,
+            head,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+            operation,
+            source,
+            witnesses,
         )
     }
 

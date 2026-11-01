@@ -21,6 +21,7 @@
 - [x] Presence как fold `CharacterJoined` / `CharacterLeft` без ретроактивного раскрытия фактов.
 - [x] Fork только от checkpoint; prefix cutoff + отдельное продолжение родителя, включая nested forks.
 - [x] Правки/скрытие/восстановление сообщений как независимые факты; базовая per-character `character_messages()` проекция.
+- [x] Публичная запись общего conversation message как одного факта: speaker, target, participants, witnesses, per-character role; позднее раскрытие без дублирования сообщения ([CONVERSATION.md](CONVERSATION.md)).
 - [ ] Полная Python `CharacterMessageProjection` (UI metadata, bounded paging, cache, resize semantics).
 - [ ] Полная валидация versioned JSON-envelope, UTC-ISO и всех Python-правил; текущий Rust домен хранит UTC Unix milliseconds.
 - [ ] Унификация внешних `string` identities с Python при импорте архивов (сейчас доменные IDs UUID).

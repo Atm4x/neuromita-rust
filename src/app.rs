@@ -32,6 +32,7 @@ use crate::{
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
+        conversation::ConversationMessage,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
         message_actions::MessageAction,
@@ -342,6 +343,32 @@ impl ApplicationLifecycle {
             .lock()
             .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
             .ingest_semantic_events(expected, batch)
+    }
+
+    /// Publish one conversation fact shared by its witnesses, without generating a reply.
+    pub fn publish_conversation_message(
+        &self,
+        expected: TimelineSelection,
+        message: ConversationMessage,
+    ) -> Result<TimelineFact, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .publish_conversation_message(expected, message)
+    }
+
+    /// Make a committed conversation message known to additional listeners.
+    pub fn disclose_conversation_message(
+        &self,
+        expected: TimelineSelection,
+        operation: EventId,
+        source: EventId,
+        witnesses: std::collections::BTreeSet<CharacterId>,
+    ) -> Result<TimelineFact, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .disclose_conversation_message(expected, operation, source, witnesses)
     }
 
     /// Change the presentation of already known conversation messages for one character.
