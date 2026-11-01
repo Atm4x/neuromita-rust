@@ -133,3 +133,17 @@
 - [x] Регрессионные тесты: старый reply target при новых сообщениях; нетекстовое событие как причина реакции, новые сообщения, приватность между персонажами; message-only вход → следующий prompt без запроса при публикации; SQLite reopen.
 
 **Не закрыто:** полная типизированная передача семантических Unity payload в мультимодальный provider, массовый broadcast сообщения, durable CharacterState и межпроцессная ранняя отмена. `ConversationTimeline` требует дальнейшего покрытия обратными сообщениями, реакциями и интеграцией игровых producers.
+
+## Субъективные semantic world events в MitaView (2026-11-01)
+
+- [x] `MitaView.world_events()` и `context_entries()` объединяют известные
+  сообщения и смысловые world/game события по времени *приобретения знания*;
+  оригинальные JSON данные не преобразуются в предполагаемый формат Unity IPC.
+- [x] Gemini получает известные миру события как user-level structured data,
+  учитывает позднее раскрытие и reset, не отсекает поздние сообщения относительно
+  `reply_to/react_to`, не дублирует известную причину.
+- [x] Контрактные тесты in-memory и SQLite на private witnesses, disclosure,
+  snapshot, reset/relearn и fork cutoff.
+- [ ] Проверить актуальный Unity/Python wire-контракт и реализовать настоящий
+  ingress от работающих игровых producers. Проекция **не** означает завершение
+  Unity ingress из этапа D. См. GitHub Issues #1 и #13.

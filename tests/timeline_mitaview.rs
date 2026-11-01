@@ -305,3 +305,168 @@ fn generation_snapshot_includes_later_known_messages_in_sqlite() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+fn run_world_context_contract(repo: &mut dyn TimelineRepository) {
+    use neuromita::timeline::view::ContextEntry;
+
+    let root = BranchId::new();
+    repo.create_session(SessionId::new(), root).unwrap();
+    let mut door = EventDraft::new(EventKind::UnityEvent);
+    door.observers.insert(CharacterId::Mita);
+    door.payload.insert("action".into(), json!("door_open"));
+    door.payload
+        .insert("position".into(), json!({"x": 4, "y": 2}));
+    let door_id = door.id;
+    push(repo, root, vec![door]);
+
+    let mut secret = EventDraft::new(EventKind::GameAction);
+    secret.observers.insert(CharacterId::KindMita);
+    secret.payload.insert("move".into(), json!("hidden move"));
+    let secret_id = secret.id;
+    push(repo, root, vec![secret]);
+    push(
+        repo,
+        root,
+        vec![player("Why is the door open?", &[CharacterId::Mita])],
+    );
+
+    let pre_disclosure =
+        TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
+    assert_eq!(pre_disclosure.count(), 1);
+    assert_eq!(pre_disclosure.world_events().len(), 1);
+    assert_eq!(pre_disclosure.world_events()[0].event_id, door_id);
+    assert_eq!(pre_disclosure.world_events()[0].payload["position"]["x"], 4);
+    assert!(matches!(
+        pre_disclosure.context_entries()[0],
+        ContextEntry::World(_)
+    ));
+    assert!(matches!(
+        pre_disclosure.context_entries()[1],
+        ContextEntry::Message(_)
+    ));
+    let earlier = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, Some(1)).unwrap();
+    assert_eq!(earlier.world_events().len(), 1);
+    assert_eq!(earlier.count(), 0);
+
+    let mut disclose = EventDraft::new(EventKind::EventObserved);
+    disclose.observers.insert(CharacterId::Mita);
+    disclose.links.push(CausalLink {
+        relation: CausalRelation::Observes,
+        event_id: secret_id,
+    });
+    push(repo, root, vec![disclose]);
+    let post_disclosure =
+        TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
+    assert_eq!(post_disclosure.world_events().len(), 2);
+    assert_eq!(post_disclosure.world_events()[1].event_id, secret_id);
+    assert_eq!(post_disclosure.world_events()[1].sequence, 2);
+    assert_eq!(post_disclosure.world_events()[1].learned_at, 4);
+    assert!(matches!(
+        post_disclosure.context_entries()[2],
+        ContextEntry::World(_)
+    ));
+    assert_eq!(pre_disclosure.world_events().len(), 1);
+
+    let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+    reset.observers.insert(CharacterId::Mita);
+    push(repo, root, vec![reset]);
+    let after_reset = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
+    assert_eq!(after_reset.count(), 0);
+    assert!(after_reset.world_events().is_empty());
+    assert_eq!(post_disclosure.world_events().len(), 2);
+
+    let mut relearn = EventDraft::new(EventKind::EventObserved);
+    relearn.observers.insert(CharacterId::Mita);
+    relearn.links.push(CausalLink {
+        relation: CausalRelation::Observes,
+        event_id: door_id,
+    });
+    push(repo, root, vec![relearn]);
+    let relearned = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
+    assert_eq!(relearned.world_events().len(), 1);
+    assert_eq!(relearned.world_events()[0].event_id, door_id);
+    assert_eq!(relearned.world_events()[0].learned_at, 6);
+    assert_eq!(relearned.world_events()[0].sequence, 1);
+    assert!(
+        TimelineMessageQueries::capture(repo, root, CharacterId::KindMita, None)
+            .unwrap()
+            .world_events()
+            .iter()
+            .all(|event| event.event_id != door_id)
+    );
+}
+
+#[test]
+fn world_context_preserves_visibility_acquisition_reset_and_snapshots_in_memory() {
+    let mut repository = TimelineStore::new();
+    run_world_context_contract(&mut repository);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn world_context_preserves_visibility_acquisition_reset_and_snapshots_in_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path = std::env::temp_dir().join(format!("mitaview-world-{}.sqlite", uuid::Uuid::new_v4()));
+    {
+        let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+        run_world_context_contract(&mut repository);
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+fn run_world_branch_contract(repo: &mut dyn TimelineRepository) {
+    let root = BranchId::new();
+    repo.create_session(SessionId::new(), root).unwrap();
+    let mut opened = EventDraft::new(EventKind::UnityEvent);
+    opened.observers.insert(CharacterId::Mita);
+    opened
+        .payload
+        .insert("semantic".into(), json!({"door": "opened"}));
+    push(repo, root, vec![opened]);
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    push(repo, root, vec![checkpoint]);
+
+    let alternate = BranchId::new();
+    repo.fork(root, checkpoint_id, alternate).unwrap();
+    let mut later = EventDraft::new(EventKind::GameAction);
+    later.observers.insert(CharacterId::Mita);
+    later.payload.insert("action".into(), json!("parent-only"));
+    push(repo, root, vec![later]);
+    let mut fork_event = EventDraft::new(EventKind::GameStarted);
+    fork_event.observers.insert(CharacterId::Mita);
+    fork_event.payload.insert("game".into(), json!("fork-only"));
+    push(repo, alternate, vec![fork_event]);
+
+    let main = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
+    let fork = TimelineMessageQueries::capture(repo, alternate, CharacterId::Mita, None).unwrap();
+    assert_eq!(main.world_events().len(), 2);
+    assert_eq!(fork.world_events().len(), 2);
+    assert_eq!(main.world_events()[0].payload["semantic"]["door"], "opened");
+    assert_eq!(fork.world_events()[0].payload["semantic"]["door"], "opened");
+    assert_eq!(main.world_events()[1].payload["action"], "parent-only");
+    assert_eq!(fork.world_events()[1].payload["game"], "fork-only");
+}
+
+#[test]
+fn world_context_respects_fork_cutoff_in_memory() {
+    let mut repository = TimelineStore::new();
+    run_world_branch_contract(&mut repository);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn world_context_respects_fork_cutoff_in_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path = std::env::temp_dir().join(format!("mitaview-fork-{}.sqlite", uuid::Uuid::new_v4()));
+    {
+        let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+        run_world_branch_contract(&mut repository);
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

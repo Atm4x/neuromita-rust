@@ -1,5 +1,4 @@
 mod index;
-#[cfg(feature = "sqlite-system")]
 pub(crate) use knowledge::knowledge_change;
 mod knowledge;
 #[cfg(feature = "sqlite-system")]
@@ -9,6 +8,7 @@ mod model;
 mod projection;
 mod repository;
 mod store;
+mod world;
 
 pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};
 pub use model::{
@@ -19,5 +19,6 @@ pub use projection::{character_view, knows, present_characters};
 pub use store::TimelineStore;
 #[cfg(feature = "sqlite-system")]
 pub(crate) use store::{Branch, Receipt};
+pub use world::{CharacterWorldProjection, ProjectedWorldEvent};
 
 pub use repository::TimelineRepository;

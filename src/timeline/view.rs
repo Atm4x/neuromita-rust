@@ -3,8 +3,9 @@ use serde_json::{Map, Value};
 use crate::identity::CharacterId;
 
 use super::domain::{
-    BranchId, CausalRelation, CharacterMessageProjection, EventKind, KnownEvent, MessageRole,
-    ProjectedMessage, TimelineError, TimelineRepository,
+    BranchId, CausalRelation, CharacterMessageProjection, CharacterWorldProjection, EventKind,
+    KnownEvent, MessageRole, ProjectedMessage, ProjectedWorldEvent, TimelineError,
+    TimelineRepository, knowledge_change,
 };
 
 fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
@@ -49,6 +50,21 @@ fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
     document
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextEntry {
+    Message(ProjectedMessage),
+    World(ProjectedWorldEvent),
+}
+
+impl ContextEntry {
+    fn order(&self) -> (u64, u64) {
+        match self {
+            Self::Message(message) => (message.learned_at, message.sequence),
+            Self::World(event) => (event.learned_at, event.sequence),
+        }
+    }
+}
+
 /// Detached view of a fixed branch prefix; no provider state or mutable character
 /// state is stored in the canonical timeline.
 #[derive(Debug, Clone)]
@@ -56,6 +72,7 @@ pub struct MitaView {
     pub branch: BranchId,
     pub through: u64,
     projection: CharacterMessageProjection,
+    world: CharacterWorldProjection,
 }
 
 impl MitaView {
@@ -69,6 +86,22 @@ impl MitaView {
 
     pub fn messages(&self) -> Vec<ProjectedMessage> {
         self.projection.messages()
+    }
+
+    pub fn world_events(&self) -> Vec<ProjectedWorldEvent> {
+        self.world.events()
+    }
+
+    /// Knowledge in acquisition order, regardless of when the event occurred.
+    pub fn context_entries(&self) -> Vec<ContextEntry> {
+        let mut entries: Vec<_> = self
+            .messages()
+            .into_iter()
+            .map(ContextEntry::Message)
+            .chain(self.world.events().into_iter().map(ContextEntry::World))
+            .collect();
+        entries.sort_by_key(ContextEntry::order);
+        entries
     }
 
     pub fn provider_messages(&self) -> Vec<Map<String, Value>> {
@@ -104,6 +137,7 @@ impl TimelineMessageQueries {
             ));
         }
         let mut projection = CharacterMessageProjection::new(character);
+        let mut world = CharacterWorldProjection::new();
         let mut cursor = 0_u64;
         loop {
             let page = repository.read(branch, cursor, Some(head), 128, Some(character))?;
@@ -120,17 +154,24 @@ impl TimelineMessageQueries {
                                     "disclosure target is not in past",
                                 ));
                             }
-                            projection.observe(&KnownEvent {
+                            let disclosed = KnownEvent {
                                 fact: original,
                                 learned_at: fact.sequence,
-                            });
+                            };
+                            projection.observe(&disclosed);
+                            world.observe(&disclosed);
                         }
                     }
                 }
-                projection.observe(&KnownEvent {
+                let known = KnownEvent {
                     fact: fact.clone(),
                     learned_at: fact.sequence,
-                });
+                };
+                if knowledge_change(fact, character).is_some_and(|change| change.reset) {
+                    world.reset();
+                }
+                projection.observe(&known);
+                world.observe(&known);
             }
             cursor = page.last().expect("nonempty page").sequence;
         }
@@ -138,6 +179,7 @@ impl TimelineMessageQueries {
             branch,
             through: head,
             projection,
+            world,
         })
     }
 }
