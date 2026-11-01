@@ -12,10 +12,10 @@ Every utterance is one `ConversationMessage: Message + Event`, regardless of whe
 
 1. The orchestration layer (currently Unity) publishes the **existing** utterance as a canonical event using `ChatApi::publish_conversation_message`, `ApplicationLifecycle::publish_conversation_message`, or TCP `publish_message`. Publication never starts generation.
 2. Unity decides which character should answer, whether this is a reply, reaction, or initiation, and who witnesses the resulting response.
-3. `ChatApi::reply(ReplyRequest::new(character, preset, message_event_id, source))` requires a visible **Message**. It cannot be called on arbitrary game events, and it never creates a synthetic player message.
-4. `ChatApi::react(ReactRequest::new(character, preset, event_id, instruction, source))` accepts **any** directly visible Event, including Unity gameplay events. It rejects unseen or reset events before generation.
-5. `ChatApi::initiate(InitiateRequest::new(character, preset, instruction, source))` has no trigger event. It uses the character's current MitaView.
-6. The executor generates a response using the configured LLM provider, preserving the separate structured-output processing contract. It accepts one new character Message with a `ReplyTo` causal link for replies, `ReactTo` for reactions, or no causal target for initiation. Nothing auto-schedules the next dialogue turn.
+3. `ChatApi::reply(ReplyRequest::new(character, message_event_id, source))` requires a visible **Message**. It cannot be called on arbitrary game events, and it never creates a synthetic player message.
+4. `ChatApi::react(ReactRequest::new(character, event_id, instruction, source))` accepts **any** directly visible Event, including Unity gameplay events. It rejects unseen or reset events before generation.
+5. `ChatApi::initiate(InitiateRequest::new(character, instruction, source))` has no trigger event. It uses the character's current MitaView.
+6. When a queued command starts generation, the executor resolves the assigned preset once from the current settings and materializes a `GenerationPreset` for `GenerationRequest::new(context, preset)`; queued commands observe new assignments, running commands do not. See [`../generation/PRESETS.md`](../generation/PRESETS.md). The executor generates a response using the configured LLM provider, preserving the separate structured-output processing contract. It accepts one new character Message with a `ReplyTo` causal link for replies, `ReactTo` for reactions, or no causal target for initiation. Nothing auto-schedules the next dialogue turn.
 
 No `ReplyTarget::Input`, `.to_event`, `UserInput` guidance on Reply, generated `ProactiveOpportunity` or TTS policy inside the command is required. The internal `GenerationCommand` is an execution interface, not a domain Message. `ChatApi::send` is not public.
 

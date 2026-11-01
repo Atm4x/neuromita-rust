@@ -210,7 +210,7 @@ async fn complete_minimal_contracts() {
     assert!(ApplicationLifecycle::start(invalid).await.is_err());
     storage
         .save(&StoredSettings {
-            schema_version: 1,
+            schema_version: neuromita::settings::SETTINGS_SCHEMA_VERSION,
             revision: 7,
             settings: AppSettings::initial_profile(),
         })

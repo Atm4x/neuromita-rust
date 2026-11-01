@@ -1,6 +1,12 @@
 mod conversation;
 pub mod gemini;
+mod presets;
 mod provider;
+pub use presets::{
+    EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
+    PresetCatalogError, PresetCredentials, PresetDefinition, PresetId, PresetRecord,
+    PresetRepository,
+};
 
 pub use provider::{
     GenerationError, GenerationProvider, GenerationRequest, ProposedResponse, ProviderFuture,

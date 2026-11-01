@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     character::{AcceptedResponse, CharacterId},
-    generation::{GenerationError, GenerationPreset},
+    generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
     timeline::{ContextPosition, EventId, conversation::ConversationAudience},
@@ -20,7 +20,6 @@ pub enum RequestSource {
 
 pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn character_id(&self) -> CharacterId;
-    fn preset(&self) -> &GenerationPreset;
     fn guidance(&self) -> &str;
     fn source(&self) -> RequestSource;
     fn intent(&self) -> TurnIntent;
@@ -31,7 +30,6 @@ pub trait GenerationCommand: Send + Sync + fmt::Debug {
 #[derive(Debug)]
 pub struct ReplyRequest {
     character_id: CharacterId,
-    preset: GenerationPreset,
     message: EventId,
     source: RequestSource,
     at: ContextPosition,
@@ -39,15 +37,9 @@ pub struct ReplyRequest {
 }
 
 impl ReplyRequest {
-    pub fn new(
-        character_id: CharacterId,
-        preset: GenerationPreset,
-        message: EventId,
-        source: RequestSource,
-    ) -> Self {
+    pub fn new(character_id: CharacterId, message: EventId, source: RequestSource) -> Self {
         Self {
             character_id,
-            preset,
             message,
             source,
             at: ContextPosition::Latest,
@@ -67,9 +59,6 @@ impl ReplyRequest {
 impl GenerationCommand for ReplyRequest {
     fn character_id(&self) -> CharacterId {
         self.character_id
-    }
-    fn preset(&self) -> &GenerationPreset {
-        &self.preset
     }
     fn guidance(&self) -> &str {
         ""
@@ -91,7 +80,6 @@ impl GenerationCommand for ReplyRequest {
 #[derive(Debug)]
 pub struct ReactRequest {
     character_id: CharacterId,
-    preset: GenerationPreset,
     event: EventId,
     guidance: Arc<str>,
     source: RequestSource,
@@ -101,14 +89,12 @@ pub struct ReactRequest {
 impl ReactRequest {
     pub fn new(
         character: CharacterId,
-        preset: GenerationPreset,
         event: EventId,
         instruction: impl Into<Arc<str>>,
         source: RequestSource,
     ) -> Self {
         Self {
             character_id: character,
-            preset,
             event,
             guidance: instruction.into(),
             source,
@@ -128,9 +114,6 @@ impl ReactRequest {
 impl GenerationCommand for ReactRequest {
     fn character_id(&self) -> CharacterId {
         self.character_id
-    }
-    fn preset(&self) -> &GenerationPreset {
-        &self.preset
     }
     fn guidance(&self) -> &str {
         &self.guidance
@@ -152,7 +135,6 @@ impl GenerationCommand for ReactRequest {
 #[derive(Debug)]
 pub struct InitiateRequest {
     character_id: CharacterId,
-    preset: GenerationPreset,
     guidance: Arc<str>,
     source: RequestSource,
     at: ContextPosition,
@@ -161,13 +143,11 @@ pub struct InitiateRequest {
 impl InitiateRequest {
     pub fn new(
         character: CharacterId,
-        preset: GenerationPreset,
         instruction: impl Into<Arc<str>>,
         source: RequestSource,
     ) -> Self {
         Self {
             character_id: character,
-            preset,
             guidance: instruction.into(),
             source,
             at: ContextPosition::Latest,
@@ -186,9 +166,6 @@ impl InitiateRequest {
 impl GenerationCommand for InitiateRequest {
     fn character_id(&self) -> CharacterId {
         self.character_id
-    }
-    fn preset(&self) -> &GenerationPreset {
-        &self.preset
     }
     fn guidance(&self) -> &str {
         &self.guidance

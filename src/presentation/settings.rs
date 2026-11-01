@@ -2,15 +2,22 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use crate::settings::{
-    AppSettings, SettingsError, SettingsOwner, SettingsSnapshot, VoiceSettings, Volume,
+use crate::{
+    character::CharacterId,
+    settings::{
+        AppSettings, CharactersSettings, PresetId, PresetSelection, PresetSettings, SettingsError,
+        SettingsOwner, SettingsSnapshot, VoiceSettings, Volume,
+    },
 };
+
+type PropertyReader<T> = Arc<dyn Fn(&AppSettings) -> T + Send + Sync>;
+type PropertyWriter<T> = Arc<dyn Fn(&SettingsOwner, T) -> Result<(), SettingsError> + Send + Sync>;
 
 pub struct BoundProperty<T> {
     owner: Arc<SettingsOwner>,
     source: watch::Receiver<Arc<SettingsSnapshot>>,
-    project: fn(&AppSettings) -> T,
-    write: fn(&SettingsOwner, T) -> Result<(), SettingsError>,
+    project: PropertyReader<T>,
+    write: PropertyWriter<T>,
 }
 
 impl<T: Clone> Clone for BoundProperty<T> {
@@ -18,8 +25,8 @@ impl<T: Clone> Clone for BoundProperty<T> {
         Self {
             owner: Arc::clone(&self.owner),
             source: self.source.clone(),
-            project: self.project,
-            write: self.write,
+            project: Arc::clone(&self.project),
+            write: Arc::clone(&self.write),
         }
     }
 }
@@ -27,14 +34,14 @@ impl<T: Clone> Clone for BoundProperty<T> {
 impl<T: Clone + PartialEq> BoundProperty<T> {
     fn new(
         owner: Arc<SettingsOwner>,
-        project: fn(&AppSettings) -> T,
-        write: fn(&SettingsOwner, T) -> Result<(), SettingsError>,
+        project: impl Fn(&AppSettings) -> T + Send + Sync + 'static,
+        write: impl Fn(&SettingsOwner, T) -> Result<(), SettingsError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             source: owner.subscribe(),
             owner,
-            project,
-            write,
+            project: Arc::new(project),
+            write: Arc::new(write),
         }
     }
     pub fn get(&self) -> T {
@@ -46,7 +53,7 @@ impl<T: Clone + PartialEq> BoundProperty<T> {
     pub fn observe(&self) -> PropertyObserver<T> {
         PropertyObserver {
             source: self.source.clone(),
-            project: self.project,
+            project: Arc::clone(&self.project),
             previous: None,
         }
     }
@@ -54,7 +61,7 @@ impl<T: Clone + PartialEq> BoundProperty<T> {
 
 pub struct PropertyObserver<T> {
     source: watch::Receiver<Arc<SettingsSnapshot>>,
-    project: fn(&AppSettings) -> T,
+    project: PropertyReader<T>,
     previous: Option<T>,
 }
 
@@ -87,14 +94,104 @@ pub struct VoiceSettingsPresenter {
     pub voice: BoundProperty<String>,
 }
 
+pub struct PresetsSettingsPresenter {
+    pub active: BoundProperty<PresetId>,
+}
+
+pub struct CharacterSettingsPresenter {
+    pub reply: BoundProperty<PresetSelection>,
+    pub react: BoundProperty<PresetSelection>,
+    pub initiate: BoundProperty<PresetSelection>,
+}
+
+impl CharacterSettingsPresenter {
+    fn new(owner: Arc<SettingsOwner>, character: CharacterId) -> Self {
+        Self {
+            reply: BoundProperty::new(
+                Arc::clone(&owner),
+                move |settings| settings.characters.for_character(character).presets.reply,
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).presets.reply = value;
+                        })
+                        .map(|_| ())
+                },
+            ),
+            react: BoundProperty::new(
+                Arc::clone(&owner),
+                move |settings| settings.characters.for_character(character).presets.react,
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).presets.react = value;
+                        })
+                        .map(|_| ())
+                },
+            ),
+            initiate: BoundProperty::new(
+                owner,
+                move |settings| {
+                    settings
+                        .characters
+                        .for_character(character)
+                        .presets
+                        .initiate
+                },
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).presets.initiate = value;
+                        })
+                        .map(|_| ())
+                },
+            ),
+        }
+    }
+}
+
+pub struct CharactersSettingsPresenter {
+    pub mita: CharacterSettingsPresenter,
+    pub kind_mita: CharacterSettingsPresenter,
+}
+
+impl CharactersSettingsPresenter {
+    pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
+        match character {
+            CharacterId::Mita => &self.mita,
+            CharacterId::KindMita => &self.kind_mita,
+        }
+    }
+}
+
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
     pub voice: VoiceSettingsPresenter,
+    pub presets: PresetsSettingsPresenter,
+    pub characters: CharactersSettingsPresenter,
 }
 impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            presets: PresetsSettingsPresenter {
+                active: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.presets.active,
+                    |owner, value| {
+                        owner
+                            .edit::<PresetSettings>(|settings| settings.active = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            characters: CharactersSettingsPresenter {
+                mita: CharacterSettingsPresenter::new(Arc::clone(&owner), CharacterId::Mita),
+                kind_mita: CharacterSettingsPresenter::new(
+                    Arc::clone(&owner),
+                    CharacterId::KindMita,
+                ),
+            },
             voice: VoiceSettingsPresenter {
                 volume: BoundProperty::new(
                     Arc::clone(&owner),
@@ -140,5 +237,73 @@ impl SettingsPresenter {
     }
     pub fn observe(&self) -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
         self.owner.observe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{
+        MemorySettingsRepository, SettingsConfig, SettingsLifecycle, SettingsSource,
+    };
+
+    #[tokio::test]
+    async fn character_preset_bindings_are_independent_and_observable() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::Initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+
+        let react = &presenter.characters.mita.react;
+        let mut updates = react.observe();
+        assert_eq!(updates.next().await.unwrap(), PresetSelection::Active);
+        react.set(PresetSelection::Specific(PresetId(7))).unwrap();
+        assert_eq!(
+            updates.next().await.unwrap(),
+            PresetSelection::Specific(PresetId(7))
+        );
+        assert_eq!(react.get(), PresetSelection::Specific(PresetId(7)));
+        assert_eq!(
+            presenter.characters.kind_mita.react.get(),
+            PresetSelection::Active
+        );
+        assert_eq!(
+            presenter.characters.mita.reply.get(),
+            PresetSelection::Active
+        );
+
+        owner
+            .edit::<CharactersSettings>(|settings| {
+                settings.mita.presets.react = PresetSelection::Specific(PresetId(9));
+            })
+            .unwrap();
+        assert_eq!(
+            updates.next().await.unwrap(),
+            PresetSelection::Specific(PresetId(9))
+        );
+
+        let mut active = presenter.presets.active.observe();
+        assert_eq!(active.next().await.unwrap(), PresetId(0));
+        presenter.presets.active.set(PresetId(5)).unwrap();
+        assert_eq!(active.next().await.unwrap(), PresetId(5));
+        assert_eq!(
+            owner
+                .snapshot_all()
+                .unwrap()
+                .values
+                .selected_preset(CharacterId::Mita, crate::interaction::TurnIntent::Initiate),
+            PresetId(5)
+        );
+        assert_eq!(
+            owner.snapshot_all().unwrap().values.selected_preset(
+                CharacterId::Mita,
+                crate::interaction::TurnIntent::React(crate::identity::EventId::new())
+            ),
+            PresetId(9)
+        );
     }
 }

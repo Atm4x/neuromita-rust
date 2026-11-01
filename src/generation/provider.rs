@@ -24,6 +24,12 @@ pub struct GenerationRequest {
     pub preset: GenerationPreset,
 }
 
+impl GenerationRequest {
+    pub fn new(context: CharacterContext, preset: GenerationPreset) -> Self {
+        Self { context, preset }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProposedResponse {
     pub text: Arc<str>,

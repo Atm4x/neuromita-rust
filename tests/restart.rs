@@ -159,11 +159,10 @@ fn initial() -> SettingsSource {
     SettingsSource::Initial(neuromita::settings::AppSettings::initial_profile())
 }
 
-fn reply(model: &str, text: &str) -> Result<RequestHandle, SubmitError> {
+fn reply(_model: &str, text: &str) -> Result<RequestHandle, SubmitError> {
     let event = ChatApi::publish_message(CharacterId::Mita, UserInput::new(text.into()).unwrap())?;
     ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset(model),
         event,
         RequestSource::Presenter,
     ))

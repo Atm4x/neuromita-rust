@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::SettingsError;
+use crate::generation::PresetId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
@@ -62,9 +63,66 @@ pub struct InterfaceSettings {
     pub font_size: u16,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetSelection {
+    #[default]
+    Active,
+    Specific(PresetId),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationPresets {
+    pub reply: PresetSelection,
+    pub react: PresetSelection,
+    pub initiate: PresetSelection,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharacterSettings {
+    pub presets: OperationPresets,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharactersSettings {
+    pub mita: CharacterSettings,
+    pub kind_mita: CharacterSettings,
+}
+
+impl CharactersSettings {
+    pub fn for_character(&self, id: crate::character::CharacterId) -> &CharacterSettings {
+        match id {
+            crate::character::CharacterId::Mita => &self.mita,
+            crate::character::CharacterId::KindMita => &self.kind_mita,
+        }
+    }
+
+    pub fn for_character_mut(
+        &mut self,
+        id: crate::character::CharacterId,
+    ) -> &mut CharacterSettings {
+        match id {
+            crate::character::CharacterId::Mita => &mut self.mita,
+            crate::character::CharacterId::KindMita => &mut self.kind_mita,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresetSettings {
+    pub active: PresetId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub presets: PresetSettings,
+    pub characters: CharactersSettings,
     pub voice: VoiceSettings,
     pub capture: CaptureSettings,
     pub interface: InterfaceSettings,
@@ -73,6 +131,8 @@ pub struct AppSettings {
 impl AppSettings {
     pub fn initial_profile() -> Self {
         Self {
+            presets: PresetSettings::default(),
+            characters: CharactersSettings::default(),
             voice: VoiceSettings {
                 volume: Volume(80),
                 in_launcher: false,
@@ -90,6 +150,23 @@ impl AppSettings {
             },
         }
     }
+    pub fn selected_preset(
+        &self,
+        character: crate::character::CharacterId,
+        intent: crate::interaction::TurnIntent,
+    ) -> PresetId {
+        let assigned = &self.characters.for_character(character).presets;
+        let selection = match intent {
+            crate::interaction::TurnIntent::Reply(_) => assigned.reply,
+            crate::interaction::TurnIntent::React(_) => assigned.react,
+            crate::interaction::TurnIntent::Initiate => assigned.initiate,
+        };
+        match selection {
+            PresetSelection::Active => self.presets.active,
+            PresetSelection::Specific(id) => id,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), SettingsError> {
         if self.voice.voice.trim().is_empty() {
             return Err(SettingsError::Validation(
@@ -131,6 +208,8 @@ macro_rules! section {
         }
     };
 }
+section!(PresetSettings, presets);
+section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);

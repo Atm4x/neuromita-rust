@@ -130,13 +130,8 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
     audience.seen_by.insert(CharacterId::Mita);
 
     let handle = ChatApi::reply(
-        ReplyRequest::new(
-            CharacterId::KindMita,
-            preset(),
-            source_id,
-            RequestSource::Presenter,
-        )
-        .with_audience(audience),
+        ReplyRequest::new(CharacterId::KindMita, source_id, RequestSource::Presenter)
+            .with_audience(audience),
     )
     .unwrap();
 
@@ -206,7 +201,6 @@ async fn reply_requires_a_target_known_to_the_selected_character() {
         .unwrap();
     let result = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
-        preset(),
         source_id,
         RequestSource::Presenter,
     ));
@@ -241,7 +235,6 @@ async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
 
     let rejected = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
-        preset(),
         source_id,
         RequestSource::Presenter,
     ));
@@ -249,7 +242,6 @@ async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
     assert_eq!(app.at().through, 1);
     let handle = ChatApi::react(ReactRequest::new(
         CharacterId::KindMita,
-        preset(),
         source_id,
         Arc::clone(
             UserInput::new("React verbally to the observed door opening".into())
@@ -317,7 +309,6 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
             .unwrap();
         let handle = ChatApi::reply(ReplyRequest::new(
             CharacterId::KindMita,
-            preset(),
             source_id,
             RequestSource::Presenter,
         ))

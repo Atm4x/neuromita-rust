@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{character::CharacterRegistry, request::ChatApiState, settings::SettingsOwner};
+use crate::{
+    character::CharacterRegistry, generation::PresetCatalog, request::ChatApiState,
+    settings::SettingsOwner,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationStatus {
@@ -17,6 +20,7 @@ pub(crate) struct ApiBindings {
     pub(crate) chat: Arc<ChatApiState>,
     pub(crate) characters: CharacterRegistry,
     pub(crate) settings: Arc<SettingsOwner>,
+    pub(crate) presets: Arc<PresetCatalog>,
 }
 
 struct Slot {

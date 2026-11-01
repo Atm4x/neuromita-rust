@@ -110,7 +110,7 @@ impl RequestRecord {
         let trace = RequestTrace {
             metadata: snapshot.metadata.clone(),
             guidance: Arc::from(message.guidance()),
-            preset_description: format!("{:?}", message.preset()),
+            preset_description: String::new(),
             context: None,
             generated_text: None,
             transitions: vec![RequestTransition {
@@ -164,6 +164,12 @@ impl RequestRecord {
     fn retire(&self) {
         if let Some(registry) = self.registry.upgrade() {
             registry.complete(self);
+        }
+    }
+
+    pub(crate) fn set_preset_description(&self, description: String) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.preset_description = description;
         }
     }
 
@@ -315,29 +321,13 @@ impl RequestRecord {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Barrier, time::Duration};
+    use std::sync::Barrier;
 
     use super::*;
-    use crate::{
-        character::CharacterId,
-        generation::{
-            GenerationPreset, ProviderTemplate,
-            gemini::{GeminiTemplate, GenerationSettings},
-        },
-        identity::EventId,
-    };
+    use crate::{character::CharacterId, identity::EventId};
 
     fn request() -> ReplyRequest {
-        let settings = GenerationSettings::new(0.7, 32, Duration::from_secs(1)).unwrap();
-        let preset = GenerationPreset::new(ProviderTemplate::Gemini(
-            GeminiTemplate::google("test-model", "test-key", settings).unwrap(),
-        ));
-        ReplyRequest::new(
-            CharacterId::Mita,
-            preset,
-            EventId::new(),
-            RequestSource::Presenter,
-        )
+        ReplyRequest::new(CharacterId::Mita, EventId::new(), RequestSource::Presenter)
     }
 
     fn selection() -> TimelineSelection {

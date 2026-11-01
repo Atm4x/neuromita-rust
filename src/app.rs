@@ -16,7 +16,7 @@ pub use crate::runtime::ApplicationStatus;
 
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
-    generation::{GenerationPreset, ResponseGenerator},
+    generation::{GenerationPreset, PresetCatalog, ResponseGenerator},
     identity::EventId,
     interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
@@ -50,7 +50,7 @@ pub struct RuntimeLimits {
 }
 
 pub struct ApplicationConfig {
-    pub preset: GenerationPreset,
+    pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
@@ -67,9 +67,9 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
     ) -> Self {
         Self {
-            server: ServerConfig::test_protocol(bind, CharacterId::Mita, preset.clone()),
+            server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
-            preset,
+            presets: PresetCatalog::single(preset),
             generator,
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
@@ -188,7 +188,7 @@ impl ApplicationLifecycle {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
-            preset,
+            presets,
             generator,
             limits,
             voice,
@@ -213,6 +213,7 @@ impl ApplicationLifecycle {
             limits.character_commands.get(),
         );
         let generator = Arc::new(generator);
+        let presets = Arc::new(presets);
         let settings_owner = settings.owner();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
@@ -229,6 +230,7 @@ impl ApplicationLifecycle {
                 generator: Arc::clone(&generator),
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
+                presets: Arc::clone(&presets),
                 selection_updates: selection_updates.clone(),
                 context_updates,
             };
@@ -243,7 +245,6 @@ impl ApplicationLifecycle {
         let discovery = api.registry.observe();
         let (chat, runner) = PresenterRunner::new(
             Arc::clone(&api),
-            preset,
             discovery,
             limits.presenter_updates.get(),
             limits.retained_finished.get(),
@@ -257,6 +258,7 @@ impl ApplicationLifecycle {
             chat: api,
             characters,
             settings: settings_owner,
+            presets: Arc::clone(&presets),
         });
         let mut owner = ApplicationOwner {
             bindings: Arc::clone(&bindings),

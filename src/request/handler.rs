@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
-    generation::{GenerationRequest, ResponseGenerator},
-    settings::{SettingsOwner, VoiceSettings},
+    generation::{GenerationRequest, PresetCatalog, ResponseGenerator},
+    settings::SettingsOwner,
     timeline::selection::TimelineSelection,
     voice::{VoiceOptions, VoiceProvider},
 };
@@ -19,6 +19,7 @@ pub(crate) struct MessageHandler {
     pub(crate) generator: Arc<ResponseGenerator>,
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
+    pub(crate) presets: Arc<PresetCatalog>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
 }
@@ -84,8 +85,8 @@ impl MessageHandler {
                 return;
             }
         };
-        let voice_settings = match self.settings.snapshot::<VoiceSettings>() {
-            Ok(snapshot) => snapshot.value,
+        let settings = match self.settings.snapshot_all() {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 record.finish(RequestOutcome::InternalError(
                     record.failure(error.to_string()),
@@ -93,6 +94,7 @@ impl MessageHandler {
                 return;
             }
         };
+        let voice_settings = settings.values.voice.clone();
         let voice_enabled = match message.source() {
             RequestSource::Presenter => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
@@ -108,10 +110,26 @@ impl MessageHandler {
             turn: context.turn,
         };
         record.prepared(context.clone());
-        let request = GenerationRequest {
-            context,
-            preset: message.preset().clone(),
+        let preset_id = settings
+            .values
+            .selected_preset(message.character_id(), message.intent());
+        let preset = match self.presets.get(preset_id) {
+            Ok(Some(preset)) => preset,
+            Ok(None) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(format!("assigned preset {:?} does not exist", preset_id)),
+                ));
+                return;
+            }
+            Err(error) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(error.to_string()),
+                ));
+                return;
+            }
         };
+        record.set_preset_description(format!("{:?}", preset));
+        let request = GenerationRequest::new(context, preset);
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }

@@ -298,7 +298,6 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
 
     let external = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::KindMita,
             UserInput::new("external client".into()).unwrap(),
@@ -538,7 +537,6 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("first message".into()).unwrap(),
@@ -556,7 +554,6 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
         .unwrap();
     let reaction = ChatApi::react(ReactRequest::new(
         CharacterId::Mita,
-        preset.clone(),
         cause,
         Arc::clone(UserInput::new("React to the door".into()).unwrap().text()),
         RequestSource::Presenter,
@@ -564,7 +561,6 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     .unwrap();
     let question = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("Why did you open the door?".into()).unwrap(),
@@ -644,7 +640,6 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("active request".into()).unwrap(),
@@ -656,7 +651,6 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     let blocked = server.next().await;
     let waiting = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("queued and already spoken".into()).unwrap(),
@@ -727,7 +721,6 @@ async fn independent_player_message_is_visible_without_scheduling_generation() {
 
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("New question".into()).unwrap(),
@@ -773,7 +766,6 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
 
     let mita = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("Question before reset".into()).unwrap(),
@@ -785,7 +777,6 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     let mita_call = server.next().await;
     let kind = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::KindMita,
             UserInput::new("KindMita stays active".into()).unwrap(),
@@ -842,7 +833,6 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
 
     let next = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("After reset".into()).unwrap(),
@@ -883,7 +873,6 @@ async fn stale_reset_is_rejected_without_cancelling_current_request() {
         .unwrap();
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("Valid after reselection".into()).unwrap(),
@@ -971,7 +960,6 @@ async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
         .unwrap();
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("Question requiring voice".into()).unwrap(),
@@ -1035,7 +1023,6 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
         .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
-        preset.clone(),
         neuromita::api::ChatApi::publish_message(
             CharacterId::Mita,
             UserInput::new("First blocking request".into()).unwrap(),
@@ -1047,7 +1034,6 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     let blocked = server.next().await;
     let reaction = ChatApi::react(ReactRequest::new(
         CharacterId::Mita,
-        preset,
         cause,
         Arc::clone(UserInput::new("React to door".into()).unwrap().text()),
         RequestSource::Presenter,
@@ -1111,7 +1097,6 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
     let stale = ChatApi::reply(
         ReplyRequest::new(
             CharacterId::Mita,
-            preset.clone(),
             neuromita::api::ChatApi::publish_message(
                 CharacterId::Mita,
                 UserInput::new("Try old context".into()).unwrap(),
@@ -1141,7 +1126,6 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
 
     let independent = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
-        preset,
         neuromita::api::ChatApi::publish_message(
             CharacterId::KindMita,
             UserInput::new("Your own earlier view".into()).unwrap(),
@@ -1221,7 +1205,6 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     let reply = ChatApi::reply(
         ReplyRequest::new(
             CharacterId::Mita,
-            preset.clone(),
             message_id,
             RequestSource::Client(Uuid::new_v4()),
         )
@@ -1281,7 +1264,6 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     let private_reply = ChatApi::reply(
         ReplyRequest::new(
             CharacterId::KindMita,
-            preset.clone(),
             neuromita::api::ChatApi::publish_message(
                 CharacterId::KindMita,
                 UserInput::new("A private reply".into()).unwrap(),
@@ -1321,7 +1303,6 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     let react = ChatApi::react(
         ReactRequest::new(
             CharacterId::KindMita,
-            preset.clone(),
             neuromita::timeline::EventId(
                 Uuid::parse_str(source[1]["timeline_event_id"].as_str().unwrap()).unwrap(),
             ),
@@ -1356,7 +1337,6 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     let initiate = ChatApi::initiate(
         neuromita::request::InitiateRequest::new(
             CharacterId::Mita,
-            preset.clone(),
             Arc::clone(
                 UserInput::new("Say something to both".into())
                     .unwrap()
@@ -1407,7 +1387,6 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert!(matches!(
         ChatApi::reply(ReplyRequest::new(
             CharacterId::Mita,
-            preset.clone(),
             message_id,
             RequestSource::Client(Uuid::new_v4())
         )),
@@ -1417,4 +1396,167 @@ async fn generated_character_messages_use_shared_conversation_audience() {
 
     app.shutdown().await.unwrap();
     server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preset_is_resolved_only_when_queued_generation_begins() {
+    use std::collections::BTreeMap;
+
+    use neuromita::{
+        generation::PresetCatalog,
+        settings::{CharactersSettings, PresetId, PresetSelection, PresetSettings, SettingsApi},
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let named = |name: &str| {
+        GenerationPreset::new(ProviderTemplate::Gemini(
+            GeminiTemplate::new(
+                &server.endpoint,
+                name,
+                "test-key",
+                GenerationSettings::new(0.7, 512, Duration::from_secs(10)).unwrap(),
+            )
+            .unwrap(),
+        ))
+    };
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let mut config = ApplicationConfig::minimal(
+        named("alpha"),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.presets = PresetCatalog::new(BTreeMap::from([
+        (PresetId(0), named("alpha")),
+        (PresetId(1), named("beta")),
+    ]));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "one".into())
+        .unwrap();
+    let first_call = server.next().await;
+    assert!(first_call.path.contains("models/alpha:generateContent"));
+    let waiting = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "two".into())
+        .unwrap();
+
+    SettingsApi::edit::<PresetSettings>(|settings| {
+        settings.active = PresetId(1);
+    })
+    .unwrap();
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.mita.presets.react = PresetSelection::Specific(PresetId(0));
+    })
+    .unwrap();
+
+    first_call.respond.send(Reply::Text("first reply")).unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let second_call = server.next().await;
+    assert!(second_call.path.contains("models/beta:generateContent"));
+    second_call
+        .respond
+        .send(Reply::Text("second reply"))
+        .unwrap();
+    assert!(matches!(
+        finished(&waiting).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    let event = ChatApi::publish_message(
+        CharacterId::Mita,
+        UserInput::new("react to this".into()).unwrap(),
+    )
+    .unwrap();
+    let reaction = ChatApi::react(ReactRequest::new(
+        CharacterId::Mita,
+        event,
+        "react",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let reaction_call = server.next().await;
+    assert!(reaction_call.path.contains("models/alpha:generateContent"));
+    reaction_call.respond.send(Reply::Text("reaction")).unwrap();
+    assert!(matches!(
+        finished(&reaction).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.mita.presets.reply = PresetSelection::Specific(PresetId(999));
+    })
+    .unwrap();
+    let missing = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "missing".into())
+        .unwrap();
+    assert!(matches!(
+        finished(&missing).await.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert!(server.calls.try_recv().is_err());
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
+    use neuromita::{
+        api::PresetApi,
+        generation::{GeminiPresetDefinition, PresetCatalogError, PresetDefinition, PresetRecord},
+        settings::SettingsApi,
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    assert!(matches!(
+        PresetApi::list(),
+        Err(PresetCatalogError::Unavailable)
+    ));
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://localhost:8800/v1beta/"),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let settings_before = SettingsApi::snapshot_all().unwrap();
+    let make = |model: &str| PresetRecord {
+        name: model.into(),
+        definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            endpoint: "http://127.0.0.1:8800/v1beta/".into(),
+            model: model.into(),
+            credential_env: "EXAMPLE_GEMINI_KEY".into(),
+            temperature: 0.7,
+            max_output_tokens: 128,
+            timeout_ms: 2000,
+        }),
+    };
+    let id = PresetApi::create(make("first")).unwrap();
+    assert_eq!(PresetApi::list().unwrap().len(), 1);
+    PresetApi::update(id, make("second")).unwrap();
+    assert_eq!(PresetApi::list().unwrap()[0].1.name, "second");
+    assert_eq!(
+        SettingsApi::snapshot_all().unwrap().revision,
+        settings_before.revision
+    );
+    PresetApi::delete(id).unwrap();
+    assert!(PresetApi::list().unwrap().is_empty());
+    app.shutdown().await.unwrap();
+    assert!(matches!(
+        PresetApi::list(),
+        Err(PresetCatalogError::Unavailable)
+    ));
 }

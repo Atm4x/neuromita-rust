@@ -160,12 +160,6 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
         .await
         .unwrap();
     let character = CharacterId::Mita;
-    let template = GeminiTemplate::google(
-        "unused-model",
-        "unused-test-key",
-        GenerationSettings::new(0.0, 64, Duration::from_secs(2)).unwrap(),
-    )
-    .unwrap();
     let source_event = ChatApi::publish_message(
         character,
         UserInput::new("persisted before generation".into()).unwrap(),
@@ -173,7 +167,6 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
     .unwrap();
     let handle = ChatApi::reply(ReplyRequest::new(
         character,
-        GenerationPreset::new(ProviderTemplate::Gemini(template)),
         source_event,
         RequestSource::Presenter,
     ))

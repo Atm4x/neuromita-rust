@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 use crate::{
     character::{CharacterError, CharacterHandle, CharacterId},
+    generation::{PresetCatalogError, PresetId, PresetRecord},
     interaction::UserInput,
     request::{
         GenerationCommand, InitiateRequest, ReactRequest, ReplyRequest, RequestDiscovery,
@@ -24,6 +25,32 @@ impl CharacterApi {
             .ok()
             .and_then(|bindings| bindings.characters.get(id))
             .ok_or(CharacterError::Unavailable)
+    }
+}
+
+pub struct PresetApi;
+
+impl PresetApi {
+    fn catalog() -> Result<Arc<crate::generation::PresetCatalog>, PresetCatalogError> {
+        runtime::current()
+            .map(|bindings| Arc::clone(&bindings.presets))
+            .map_err(|_| PresetCatalogError::Unavailable)
+    }
+
+    pub fn list() -> Result<Vec<(PresetId, PresetRecord)>, PresetCatalogError> {
+        Ok(Self::catalog()?.list())
+    }
+
+    pub fn create(record: PresetRecord) -> Result<PresetId, PresetCatalogError> {
+        Self::catalog()?.create(record)
+    }
+
+    pub fn update(id: PresetId, record: PresetRecord) -> Result<(), PresetCatalogError> {
+        Self::catalog()?.update(id, record)
+    }
+
+    pub fn delete(id: PresetId) -> Result<(), PresetCatalogError> {
+        Self::catalog()?.delete(id)
     }
 }
 

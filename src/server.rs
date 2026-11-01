@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 use crate::{
     character::CharacterId,
-    generation::GenerationPreset,
     identity::EventId,
     lifecycle::Lifecycle,
     request::{
@@ -34,7 +33,6 @@ use crate::{
 pub struct ServerConfig {
     pub bind: SocketAddr,
     pub test_character: CharacterId,
-    pub preset: GenerationPreset,
     pub max_clients: NonZeroUsize,
     pub outbound_capacity: NonZeroUsize,
     pub max_command_bytes: NonZeroUsize,
@@ -42,15 +40,10 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn test_protocol(
-        bind: SocketAddr,
-        test_character: CharacterId,
-        preset: GenerationPreset,
-    ) -> Self {
+    pub fn test_protocol(bind: SocketAddr, test_character: CharacterId) -> Self {
         Self {
             bind,
             test_character,
-            preset,
             max_clients: NonZeroUsize::new(16).expect("positive"),
             outbound_capacity: NonZeroUsize::new(64).expect("positive"),
             max_command_bytes: NonZeroUsize::new(65536).expect("positive"),
@@ -425,16 +418,16 @@ async fn client(
                             UserInput::new("test".to_owned())
                                 .map_err(|error| error.to_string())
                                 .and_then(|input| api.chat.publish_message(config.test_character, input).map_err(|error| error.to_string()))
-                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, config.preset.clone(), message, source)).map_err(|error| error.to_string()))
+                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, message, source)).map_err(|error| error.to_string()))
                         }
                         Command::Reply { character, message_id, audience } => {
-                            api.chat.send(ReplyRequest::new(character, config.preset.clone(), EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(ReplyRequest::new(character, EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
                         }
                         Command::React { character, event_id, instruction, audience } => {
-                            api.chat.send(ReactRequest::new(character, config.preset.clone(), EventId(event_id), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(ReactRequest::new(character, EventId(event_id), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
                         }
                         Command::Initiate { character, instruction, audience } => {
-                            api.chat.send(InitiateRequest::new(character, config.preset.clone(), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(InitiateRequest::new(character, instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
                         }
                         _ => unreachable!(),
                     };
