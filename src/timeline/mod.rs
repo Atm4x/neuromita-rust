@@ -16,6 +16,7 @@ pub mod domain;
 mod legacy;
 pub mod selection;
 pub mod storage;
+pub mod view;
 
 use legacy::{legacy_event, make_draft};
 use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};

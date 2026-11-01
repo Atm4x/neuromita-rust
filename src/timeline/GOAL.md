@@ -88,6 +88,14 @@
 
 Единый `domain::knowledge_change` определяет получение/сброс знания; SQLite и in-memory индексы и read-проекция не определяют его независимо. `append_guarded` атомарно проверяет persisted selection, context epoch и trigger в SQLite `BEGIN IMMEDIATE`; `CharacterHandler` интерпретирует конфликт как устаревшую приёмку. `legacy.rs` содержит преобразование старого формата, `storage/sqlite/native.rs` изолирует unsafe FFI. Внешняя мгновенная отмена, durable commit состояния персонажа, read-side paging MitaView и сквозной recovery **не закрыты**.
 
+## MitaView read-side: первый функциональный пакет (2026-11-01)
+
+- [x] Независимый `domain::CharacterMessageProjection` поддерживает per-character знания, reset, позднее раскрытие, edit/hide/restore, мультимодальный JSON payload без SQL/provider зависимостей.
+- [x] `timeline::view::TimelineMessageQueries::capture` читает direct witnesses постранично через единый `TimelineRepository`, адресно разрешает disclosure и возвращает immutable `MitaView` со стабильным `branch/through`, `messages/page/count/contains`.
+- [x] Provider/UI map адаптирован отдельно от domain, с сохранением вложенных полей. Проверены in-memory/SQLite и fork/history snapshot. [Архитектура и ограничения](VIEW.md).
+
+**Это не закрывает** оставшиеся чекбоксы Stage A/C: нет кеша MitaView, полного Python format/time/resize parity, отдельной атомарной CharacterState snapshot и wiring всех ChatAPI/Unity consumers. Bounded read pages не означают bounded total work на каждый capture.
+
 ## Следующий пакет изменений
 
 Холодный SQLite append и инструмент замера добавлены; дальше — бенчмарки **release** при 50k+ событиях и глубокой lineage, ограниченные read-side MitaView/контекстные summary, ранняя адресная отмена при reset и внешнем переключении, затем согласованное восстановление владельцев состояния. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует единый TimelineRepository (transient либо SQLite) через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.

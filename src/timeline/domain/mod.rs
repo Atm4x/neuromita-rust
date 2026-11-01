@@ -10,7 +10,7 @@ mod projection;
 mod repository;
 mod store;
 
-pub use messages::{MessageRole, ProjectedMessage, character_messages};
+pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};
 pub use model::{
     AppendGuard, BranchId, BranchInfo, CausalLink, CausalRelation, EventDraft, EventKind,
     KnownEvent, SessionId, TimelineError, TimelineFact,
