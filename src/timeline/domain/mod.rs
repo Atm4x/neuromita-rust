@@ -6,7 +6,9 @@ pub(crate) use index::WorldLookup;
 mod messages;
 mod model;
 mod projection;
+mod replies;
 mod repository;
+pub(crate) use replies::accepted_reply_count;
 mod store;
 mod world;
 

@@ -302,6 +302,7 @@ impl SessionTimeline {
             AppendGuard {
                 selection_generation: expected.generation,
                 context: None,
+                accepted_reply_revision: None,
             },
         )?;
         let epoch = self.store.context_epoch(self.branch, character)?;
@@ -461,27 +462,11 @@ impl SessionTimeline {
         at: ContextAnchor,
     ) -> Result<u64, domain::TimelineError> {
         let branch = self.inspection_branch(at)?;
-        let mut count = 0_u64;
-        let actor = character.to_string();
-        for fact in self.store.world(branch)? {
-            if fact.sequence > at.through {
-                break;
-            }
-            if fact.draft.kind == EventKind::CharacterMessage
-                && fact.draft.actor.as_deref() == Some(actor.as_str())
-                && fact
-                    .draft
-                    .payload
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
-            {
-                count = count
-                    .checked_add(1)
-                    .ok_or(domain::TimelineError::Invalid("reply count overflow"))?;
-            }
-        }
-        Ok(count)
+        let facts = self.store.world(branch)?;
+        domain::accepted_reply_count(
+            facts.iter().take_while(|fact| fact.sequence <= at.through),
+            character,
+        )
     }
 
     pub(crate) fn reaction_cause_at(
@@ -556,7 +541,7 @@ impl SessionTimeline {
     ) -> Result<EventId, String> {
         let mut draft = make_draft(id, EventKind::CharacterObservation, character, text, None);
         draft.actor = Some(character.to_string());
-        self.commit(format!("observe:{}", id.0), draft, None)
+        self.commit(format!("observe:{}", id.0), draft, None, None)
             .map_err(|error| error.to_string())?;
         Ok(id)
     }
@@ -585,6 +570,7 @@ impl SessionTimeline {
             AppendGuard {
                 selection_generation: expected.generation,
                 context: None,
+                accepted_reply_revision: None,
             },
             batch,
         )
@@ -622,7 +608,7 @@ impl SessionTimeline {
             || format!("message:{}", id.0),
             |request| format!("input:{}", request.0),
         );
-        self.commit(operation_key, draft, None)
+        self.commit(operation_key, draft, None, None)
             .map_err(|error| error.to_string())
     }
 
@@ -678,7 +664,7 @@ impl SessionTimeline {
                 });
             }
         }
-        self.commit(format!("input:{}", request.0), draft, Some(pinned))
+        self.commit(format!("input:{}", request.0), draft, Some(pinned), None)
     }
 
     pub(crate) fn append_reply(
@@ -686,11 +672,15 @@ impl SessionTimeline {
         character: CharacterId,
         request: RequestId,
         trigger: EventId,
-        context: ContextAnchor,
         turn: TimelineTurn,
+        expected_revision: u64,
         text: Arc<str>,
     ) -> Result<EventId, domain::TimelineError> {
         self.assert_turn(turn)?;
+        let context = ContextAnchor {
+            branch_id: turn.selection.branch_id.0,
+            through: turn.context_head,
+        };
         if context.branch_id != self.branch.0 || context.through > self.anchor().through {
             return Err(domain::TimelineError::Invalid(
                 "context does not belong to the active timeline",
@@ -745,7 +735,12 @@ impl SessionTimeline {
                 event_id: trigger,
             });
         }
-        self.commit(format!("reply:{}", request.0), draft, Some(turn))?;
+        self.commit(
+            format!("reply:{}", request.0),
+            draft,
+            Some(turn),
+            Some((character, expected_revision)),
+        )?;
         Ok(id)
     }
 
@@ -769,6 +764,7 @@ impl SessionTimeline {
         operation_key: String,
         draft: EventDraft,
         turn: Option<TimelineTurn>,
+        accepted_reply_revision: Option<(CharacterId, u64)>,
     ) -> Result<(), domain::TimelineError> {
         let current = self.selection();
         if turn.is_some_and(|turn| turn.selection != current) {
@@ -777,6 +773,7 @@ impl SessionTimeline {
         let guard = AppendGuard {
             selection_generation: current.generation,
             context: turn.map(|turn| (turn.character, turn.context_epoch, turn.trigger)),
+            accepted_reply_revision,
         };
         let head = self.anchor().through;
         self.store.append_guarded(
@@ -807,7 +804,6 @@ mod tests {
         let mut timeline = SessionTimeline::new();
         let request = RequestId::new();
         let trigger = EventId::new();
-        let at = timeline.anchor();
         timeline
             .append_player_message(CharacterId::Mita, request, trigger, Arc::from("hello"))
             .unwrap();
@@ -826,8 +822,8 @@ mod tests {
                     CharacterId::Mita,
                     request,
                     trigger,
-                    at,
                     turn,
+                    0,
                     Arc::from("answer")
                 )
                 .is_err()

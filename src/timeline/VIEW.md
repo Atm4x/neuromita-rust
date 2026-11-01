@@ -173,3 +173,20 @@ existing accepted-reply projection. No Unity transport or polling service added.
 - `CharacterHandler` rejects a stale turn before invoking the generator. The final repository `append_guarded` remains the atomic authority if another writer changes the epoch afterward.
 - `react/initiate` also guard creation of their `ProactiveOpportunity` against the captured epoch, so a stale request cannot leave a new trigger fact behind. Ordinary later events without a reset do not invalidate a previously captured turn.
 - In-memory and two-connection SQLite regressions cover reset + re-disclosure between context capture and pin creation, rejection of stale proactive writes, and unchanged historical snapshots. This is **not** a full transaction across mutable character state, external participants, or a push-based notification channel from other processes.
+
+## Accepted reply CAS at commit (2026-11-01)
+
+- The `CharacterState.accepted_replies/revision` projection keeps its existing
+  canonical definition (actor-matching accepted `CharacterMessage` with a valid
+  request UUID); it is independent of subjective reset, hiding, and display.
+- A pre-commit `CharacterHandler` read is useful for early rejection, but cannot
+  protect against another SQLite writer accepting a reply immediately after it.
+  Therefore `append_reply` also passes the **captured expected revision** to
+  the repository's guarded append, which rechecks the same derived count inside
+  its write transaction. Failed CAS writes no reply or receipt and returns
+  `ConcurrentWrite` to the handler.
+- A later unrelated world event or another character's accepted reply does not
+  invalidate the current character's revision. The guard is scoped to the
+  current branch's inherited prefix, and a reopened database derives the same
+  count. This does not make external mutable state/effects durable; counting
+  canonical replies remains linear in the branch's fact history for now.

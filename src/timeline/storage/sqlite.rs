@@ -608,6 +608,16 @@ impl SqliteTimelineRepository {
                     }
                 }
             }
+            if let Some(guard) = guard
+                && let Some((character, expected_revision)) = guard.accepted_reply_revision
+            {
+                let facts = read_page(&connection, branch, 0, None, i64::MAX as usize, None)?;
+                if crate::timeline::domain::accepted_reply_count(&facts, character)?
+                    != expected_revision
+                {
+                    return Err(TimelineError::ConcurrentWrite);
+                }
+            }
             if key.is_empty() || key.trim() != key {
                 return Err(TimelineError::Invalid(
                     "operation key must be canonical and nonempty",
@@ -1019,7 +1029,8 @@ mod tests {
                 vec![draft.clone()],
                 AppendGuard {
                     selection_generation: selection.generation,
-                    context: None
+                    context: None,
+                    accepted_reply_revision: None,
                 },
             ),
             Err(TimelineError::ConcurrentWrite),
@@ -1035,7 +1046,8 @@ mod tests {
                     vec![draft],
                     AppendGuard {
                         selection_generation: changed.generation,
-                        context: None
+                        context: None,
+                        accepted_reply_revision: None,
                     },
                 )
                 .is_ok()
@@ -1060,6 +1072,7 @@ mod tests {
         let guard = AppendGuard {
             selection_generation: selected.generation,
             context: Some((CharacterId::Mita, 0, Some(source_id))),
+            accepted_reply_revision: None,
         };
         let reply = || {
             let mut fact = EventDraft::new(EventKind::CharacterMessage);
@@ -1111,6 +1124,7 @@ mod tests {
         let guard = AppendGuard {
             selection_generation: selection.generation,
             context: None,
+            accepted_reply_revision: None,
         };
         let stored = repo
             .append_guarded(branch, 0, "receipt", json!({}), vec![draft.clone()], guard)

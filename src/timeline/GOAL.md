@@ -182,3 +182,20 @@
 - [x] React/initiate trigger creation has a guarded context epoch; a concurrent reset (including reset followed by reacquisition of the cause) rejects the stale work without recording an orphan proactive trigger.
 - [x] Deterministic in-memory and two-connection SQLite regressions for reset/relearn between capture and turn pin, plus non-reset concurrent append, ensure generation cancellation without erasing immutable history.
 - [ ] External SQLite writers still do not push immediate cancellation notifications; no full multi-component snapshot or durable CharacterState transaction is claimed.
+
+## Atomic accepted-reply revision (2026-11-01)
+
+- [x] The existing narrow `CharacterState.revision` is derived from accepted
+  `CharacterMessage` facts on the selected branch. `AppendGuard` now carries the
+  expected **character-specific** accepted-reply revision. For both in-memory and
+  SQLite repositories, the revision is checked as part of the guarded append;
+  SQLite checks it under the same `BEGIN IMMEDIATE` transaction as the reply.
+- [x] Two independent SQLite connections cannot accept two responses prepared
+  against the same character revision, even if the second connection observes
+  the updated branch head after its earlier state read. Another character's
+  reply does not invalidate this revision. Fork cutoffs, reset, and SQLite
+  reopen do not create another mutable reply counter.
+- [ ] The current check scans canonical branch facts (including inherited
+  prefix) for accepted replies; a versioned derived index is a separate
+  optimization task. This is **not** durable atomic storage of arbitrary
+  mutable `CharacterState` or external effects.

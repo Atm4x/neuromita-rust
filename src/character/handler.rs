@@ -413,8 +413,8 @@ impl CharacterHandler {
                 self.character.id,
                 request,
                 context.trigger,
-                context.anchor,
                 context.turn,
+                context.state_revision,
                 Arc::clone(&text),
             )
             .map_err(|error| match error {

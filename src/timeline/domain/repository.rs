@@ -146,6 +146,12 @@ impl TimelineRepository for TimelineStore {
                 return Err(TimelineError::ConcurrentWrite);
             }
         }
+        if let Some((character, expected_revision)) = guard.accepted_reply_revision {
+            let facts = TimelineStore::world(self, branch)?;
+            if super::accepted_reply_count(&facts, character)? != expected_revision {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+        }
         TimelineStore::append(self, branch, expected_head, key, command, drafts)
     }
     fn context_epoch_at(

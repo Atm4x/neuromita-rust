@@ -30,6 +30,7 @@ fn append(
         AppendGuard {
             selection_generation: 1,
             context: None,
+            accepted_reply_revision: None,
         },
         batch,
     )
@@ -273,6 +274,7 @@ fn sqlite_semantic_ingress_rejects_a_reselected_branch_before_commit() {
             AppendGuard {
                 selection_generation: selected.generation,
                 context: None,
+                accepted_reply_revision: None,
             },
             batch.clone(),
         ),
@@ -286,6 +288,7 @@ fn sqlite_semantic_ingress_rejects_a_reselected_branch_before_commit() {
         AppendGuard {
             selection_generation: newer.generation,
             context: None,
+            accepted_reply_revision: None,
         },
         batch,
     )

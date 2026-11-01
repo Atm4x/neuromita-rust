@@ -160,6 +160,8 @@ pub struct BranchInfo {
 pub struct AppendGuard {
     pub selection_generation: u64,
     pub context: Option<(CharacterId, u64, Option<EventId>)>,
+    /// Expected revision of canonical accepted replies, checked with the append.
+    pub accepted_reply_revision: Option<(CharacterId, u64)>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
