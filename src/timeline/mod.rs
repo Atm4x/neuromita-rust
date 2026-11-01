@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::watch;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -87,6 +89,7 @@ pub(crate) struct SessionTimeline {
     branch: BranchId,
     store: Box<dyn TimelineRepository + Send>,
     workspace: SessionWorkspace,
+    selection_updates: watch::Sender<TimelineSelection>,
     #[cfg(feature = "sqlite-system")]
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
@@ -105,6 +108,7 @@ impl SessionTimeline {
         Self {
             branch,
             store: Box::new(store),
+            selection_updates: watch::channel(workspace.selected().expect("selection set")).0,
             workspace,
             #[cfg(feature = "sqlite-system")]
             selection_repository: None,
@@ -135,6 +139,7 @@ impl SessionTimeline {
                     branch: selection.branch_id,
                     store: Box::new(store),
                     workspace: SessionWorkspace::from_selection(selection),
+                    selection_updates: watch::channel(selection).0,
                     selection_repository: Some(selection_repository),
                 })
             }
@@ -159,6 +164,10 @@ impl SessionTimeline {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         Ok(())
+    }
+
+    pub(crate) fn observe_selection(&self) -> watch::Receiver<TimelineSelection> {
+        self.selection_updates.subscribe()
     }
 
     pub(crate) fn selection(&self) -> TimelineSelection {
@@ -191,6 +200,7 @@ impl SessionTimeline {
             .select(self.store.as_ref(), branch, Some(expected))?;
         self.workspace.install_selection(new_selection);
         self.branch = branch;
+        self.selection_updates.send_replace(new_selection);
         Ok(new_selection)
     }
 

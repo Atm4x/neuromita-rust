@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterHandle},
     generation::{GenerationRequest, ResponseGenerator},
+    timeline::selection::TimelineSelection,
     voice::{VoicePlan, VoiceProvider},
 };
 
@@ -16,6 +17,7 @@ pub(crate) struct MessageHandler {
     pub(crate) registry: Arc<RequestRegistry>,
     pub(crate) generator: Arc<ResponseGenerator>,
     pub(crate) voice: Arc<dyn VoiceProvider>,
+    pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
 }
 
 impl MessageHandler {
@@ -82,6 +84,11 @@ impl MessageHandler {
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
+            _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
+                record.cancel();
+                record.finish_cancelled();
+                return;
+            }
             response = self.generator.generate(request) => response,
         };
         let proposed = match generated {
@@ -103,6 +110,11 @@ impl MessageHandler {
                 tokio::select! {
                     biased;
                     _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
+                    _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
+                        record.cancel();
+                        record.finish_cancelled();
+                        return;
+                    }
                     audio = self.voice.synthesize(Arc::clone(&text), options.clone()) => audio.map(Some),
                 }
             }
@@ -127,6 +139,20 @@ impl MessageHandler {
             Err(error) => RequestOutcome::InternalError(record.failure(error.to_string())),
         };
         record.finish(outcome);
+    }
+}
+
+async fn selection_changed(
+    mut updates: watch::Receiver<TimelineSelection>,
+    captured: TimelineSelection,
+) {
+    loop {
+        if *updates.borrow_and_update() != captured {
+            return;
+        }
+        if updates.changed().await.is_err() {
+            return;
+        }
     }
 }
 

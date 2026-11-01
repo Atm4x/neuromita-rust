@@ -1,3 +1,4 @@
+mod index;
 mod messages;
 mod model;
 mod projection;

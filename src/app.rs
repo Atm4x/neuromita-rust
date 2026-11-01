@@ -130,6 +130,10 @@ impl ApplicationLifecycle {
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
+        let selection_updates = timeline
+            .lock()
+            .expect("timeline lock poisoned")
+            .observe_selection();
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
@@ -149,6 +153,7 @@ impl ApplicationLifecycle {
                 registry: Arc::clone(&registry),
                 generator: Arc::clone(&generator),
                 voice: Arc::clone(&voice),
+                selection_updates: selection_updates.clone(),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),

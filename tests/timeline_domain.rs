@@ -547,3 +547,87 @@ fn deterministic_branch_world_stress_preserves_contiguous_history_and_private_fa
         }
     }
 }
+
+#[test]
+fn failed_batch_does_not_mutate_incremental_knowledge_index() {
+    let (mut timeline, root) = setup();
+    let mut question = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    question.actor = Some("player".into());
+    let question_id = question.id;
+    push(&mut timeline, root, "question", vec![question]);
+
+    let reset = fact(EventKind::CharacterContextReset, CharacterId::Mita);
+    let invalid = EventDraft::new(EventKind::CharacterMessage);
+    let head = timeline.branch(root).unwrap().head_sequence;
+    assert!(
+        timeline
+            .append(root, head, "bad-batch", json!({}), vec![reset, invalid])
+            .is_err()
+    );
+    assert!(
+        timeline
+            .knows(root, CharacterId::Mita, question_id, None)
+            .unwrap()
+    );
+
+    let mut answer = fact(EventKind::CharacterMessage, CharacterId::Mita);
+    answer.actor = Some(CharacterId::Mita.to_string());
+    answer.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: question_id,
+    });
+    push(&mut timeline, root, "answer", vec![answer]);
+    assert_eq!(timeline.branch(root).unwrap().head_sequence, 2);
+}
+
+#[test]
+fn one_batch_reset_and_disclosure_restore_response_rights() {
+    let (mut timeline, root) = setup();
+    let mut question = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    question.actor = Some("player".into());
+    let question_id = question.id;
+    push(&mut timeline, root, "question", vec![question]);
+
+    let reset = fact(EventKind::CharacterContextReset, CharacterId::Mita);
+    let mut premature = fact(EventKind::CharacterMessage, CharacterId::Mita);
+    premature.actor = Some(CharacterId::Mita.to_string());
+    premature.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: question_id,
+    });
+    assert!(
+        timeline
+            .append(
+                root,
+                1,
+                "before-disclosure",
+                json!({}),
+                vec![reset.clone(), premature]
+            )
+            .is_err()
+    );
+
+    let mut disclosure = fact(EventKind::EventObserved, CharacterId::Mita);
+    disclosure.links.push(CausalLink {
+        relation: CausalRelation::Observes,
+        event_id: question_id,
+    });
+    let mut answer = fact(EventKind::CharacterMessage, CharacterId::Mita);
+    answer.actor = Some(CharacterId::Mita.to_string());
+    answer.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: question_id,
+    });
+    push(
+        &mut timeline,
+        root,
+        "after-disclosure",
+        vec![reset, disclosure, answer],
+    );
+    assert!(
+        timeline
+            .knows(root, CharacterId::Mita, question_id, None)
+            .unwrap()
+    );
+    assert_eq!(timeline.branch(root).unwrap().head_sequence, 4);
+}

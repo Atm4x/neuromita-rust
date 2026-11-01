@@ -471,10 +471,9 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
         .select_timeline_branch(selected.branch_id, selected)
         .unwrap();
     assert!(changed.generation > selected.generation);
-    active.respond.send(Reply::Text("stale result")).unwrap();
     assert!(matches!(
         finished(&pending).await.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        RequestState::Cancelled
     ));
     assert_eq!(
         app.character(CharacterId::Mita)
@@ -495,12 +494,9 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
         .chat
         .reply(CharacterId::Mita, "new selection".into())
         .unwrap();
-    server
-        .next()
-        .await
-        .respond
-        .send(Reply::Text("current result"))
-        .unwrap();
+    let next = server.next().await;
+    drop(active);
+    next.respond.send(Reply::Text("current result")).unwrap();
     assert!(matches!(
         finished(&fresh).await.state,
         RequestState::Finished(RequestOutcome::Success(_))

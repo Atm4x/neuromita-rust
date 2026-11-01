@@ -6,11 +6,12 @@ use serde_json::{Map, Value};
 use crate::identity::{CharacterId, EventId};
 
 use super::{
+    index::{AppendIndex, WorldIndex},
     model::{
         BranchId, BranchInfo, CausalRelation, EventDraft, EventKind, KnownEvent, SessionId,
         TimelineError, TimelineFact,
     },
-    projection::{character_view, knows, present_characters},
+    projection::{character_view, present_characters},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub(crate) struct Branch {
 #[derive(Debug, Clone, Default)]
 pub struct TimelineStore {
     branches: HashMap<BranchId, Branch>,
+    indexes: HashMap<BranchId, WorldIndex>,
 }
 
 impl TimelineStore {
@@ -95,7 +97,10 @@ impl TimelineStore {
                 return Err(TimelineError::Storage("invalid root branch".into()));
             }
         }
-        let store = Self { branches: map };
+        let store = Self {
+            branches: map,
+            indexes: HashMap::new(),
+        };
         for info in store.branches.values().map(|branch| branch.info) {
             let mut visited = HashSet::new();
             let mut cursor = Some(info.id);
@@ -257,11 +262,20 @@ impl TimelineStore {
         if expected_head != branch.info.head_sequence {
             return Err(TimelineError::ConcurrentWrite);
         }
-        let mut prefix = self.world(branch_id)?;
+        if !self.indexes.contains_key(&branch_id) {
+            let world = self.world(branch_id)?;
+            self.indexes
+                .insert(branch_id, WorldIndex::from_facts(&world));
+        }
+        let index = self
+            .indexes
+            .get(&branch_id)
+            .expect("branch index initialized");
+        let mut pending = AppendIndex::new(index);
         let mut result = Vec::with_capacity(drafts.len());
         let mut sequence = expected_head;
         for draft in &drafts {
-            self.validate(&prefix, draft)?;
+            Self::validate(&pending, draft)?;
             sequence = sequence
                 .checked_add(1)
                 .ok_or(TimelineError::Invalid("sequence overflow"))?;
@@ -271,7 +285,7 @@ impl TimelineStore {
                 sequence,
                 draft: draft.clone(),
             };
-            prefix.push(fact.clone());
+            pending.record(&fact);
             result.push(fact);
         }
         let branch = self
@@ -288,6 +302,10 @@ impl TimelineStore {
                 result: result.clone(),
             },
         );
+        self.indexes
+            .get_mut(&branch_id)
+            .expect("branch index initialized")
+            .extend(&result);
         Ok(result)
     }
 
@@ -351,7 +369,7 @@ impl TimelineStore {
         Ok(info)
     }
 
-    fn validate(&self, prefix: &[TimelineFact], draft: &EventDraft) -> Result<(), TimelineError> {
+    fn validate(index: &AppendIndex<'_>, draft: &EventDraft) -> Result<(), TimelineError> {
         if draft
             .actor
             .as_deref()
@@ -362,17 +380,14 @@ impl TimelineStore {
         if draft.schema_version != 1 {
             return Err(TimelineError::Invalid("unsupported event schema version"));
         }
-        if prefix.iter().any(|fact| fact.draft.id == draft.id) {
+        if index.kind(draft.id).is_some() {
             return Err(TimelineError::Conflict);
         }
         if let Some(ref external) = draft.external_message_id {
             if external.is_empty() || external.trim() != external {
                 return Err(TimelineError::Invalid("invalid external message identity"));
             }
-            if prefix
-                .iter()
-                .any(|fact| fact.draft.external_message_id.as_ref() == Some(external))
-            {
+            if index.has_external(external) {
                 return Err(TimelineError::Conflict);
             }
         }
@@ -447,12 +462,9 @@ impl TimelineStore {
                 )?)?]
             };
             for id in ids {
-                let target = prefix
-                    .iter()
-                    .find(|fact| fact.draft.id == id)
-                    .ok_or(TimelineError::NotFound)?;
+                let target = index.kind(id).ok_or(TimelineError::NotFound)?;
                 if !matches!(
-                    target.draft.kind,
+                    target,
                     EventKind::PlayerMessage
                         | EventKind::CharacterMessage
                         | EventKind::CharacterObservation
@@ -460,7 +472,7 @@ impl TimelineStore {
                 ) || draft
                     .observers
                     .iter()
-                    .any(|&observer| !knows(prefix, observer, id))
+                    .any(|&observer| !index.knows(observer, id))
                 {
                     return Err(TimelineError::Invalid("cannot modify unknown message"));
                 }
@@ -501,10 +513,7 @@ impl TimelineStore {
             if !relations.insert((link.relation, link.event_id)) {
                 return Err(TimelineError::Invalid("duplicate causal link"));
             }
-            let target = prefix
-                .iter()
-                .find(|fact| fact.draft.id == link.event_id)
-                .ok_or(TimelineError::NotFound)?;
+            let target = index.kind(link.event_id).ok_or(TimelineError::NotFound)?;
             match link.relation {
                 CausalRelation::ReplyTo | CausalRelation::ReactTo => {
                     if draft.kind != EventKind::CharacterMessage
@@ -512,14 +521,14 @@ impl TimelineStore {
                             .actor
                             .as_deref()
                             .and_then(CharacterId::parse)
-                            .is_some_and(|actor| knows(prefix, actor, link.event_id))
+                            .is_some_and(|actor| index.knows(actor, link.event_id))
                     {
                         return Err(TimelineError::Invalid(
                             "response target is not known to actor",
                         ));
                     }
                     if link.relation == CausalRelation::ReplyTo {
-                        if !target.draft.kind.is_message() {
+                        if !target.is_message() {
                             return Err(TimelineError::Invalid("reply target must be a message"));
                         }
                         reply = true;
