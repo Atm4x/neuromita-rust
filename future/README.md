@@ -5,19 +5,26 @@
 ## Читать по порядку
 
 1. [Текущая модель и границы ответственности](current-model.md).
-2. [Статический ChatApi и приём обращений](chat-api-contract.md).
-3. [Очередь, состояния запроса и право выполнения](message-handler.md).
-4. [Наблюдение, обнаружение запросов и техническая история](request-observation.md).
-5. [Генерация, ResponseEffect, отмена и принятие результата](generation-and-effects.md).
-6. [Lifecycle, создание объектов и владение](lifecycles-and-ownership.md).
-7. [Настройки, presenters и binding](presentation-and-settings.md).
-8. [SessionTimeline: временные привязки](session-timeline.md).
-9. [Механизм, исследованный в отдельной Python-ветке](session-timeline-source.md).
-10. [Первый исполняемый срез: реализованные файлы, провайдерский контракт и ограничения](first-slice.md).
-11. [Минимальная реализация всех обсуждённых контрактов](minimal-contracts.md).
-12. [Чеклист реализации и передачи](implementation-checklist.md), [handoff веб-агенту](../HANDOFF.md).
+3. [Корневая карта функциональных примитивов, клиентов и вызовов](root-primitives-and-client-contexts.md).
+3. [Статический ChatApi и приём обращений](chat-api-contract.md).
+4. [Очередь, состояния запроса и право выполнения](message-handler.md).
+5. [Наблюдение, обнаружение запросов и техническая история](request-observation.md).
+6. [Генерация, ResponseEffect, отмена и принятие результата](generation-and-effects.md).
+7. [Lifecycle, создание объектов и владение](lifecycles-and-ownership.md).
+8. [Настройки, presenters и binding](presentation-and-settings.md).
+9. [SessionTimeline: временные привязки](session-timeline.md).
+10. [Механизм, исследованный в отдельной Python-ветке](session-timeline-source.md).
+11. [Первый исполняемый срез: реализованные файлы, провайдерский контракт и ограничения](first-slice.md).
+12. [Минимальная реализация всех обсуждённых контрактов](minimal-contracts.md).
+13. [Чеклист реализации и передачи](implementation-checklist.md), [handoff веб-агенту](../HANDOFF.md).
 
 [Прежнее имя ResponseService](response-service-contract.md) оставлено как указатель на актуальный ChatApi.
+
+## Принятые границы клиентов и примитивов
+
+Один конечный пользователь работает с одним Core из Unity или через полноценный Launcher/Sandbox-мессенджер; это разные источники контекста, а не независимые пользователи. Unity владеет игровым миром, Sandbox предоставляет собственный контекст дистанционной переписки, SessionTimeline фиксирует события, а MitaView является вычисляемой субъективной проекцией. [Карта с вызовами, владением и границами реализации](root-primitives-and-client-contexts.md).
+
+Роли **Api**, **Lifecycle**, **Handler** обозначают способы доступа, активного существования и адресного управления, а не обязательную трёхслойную структуру каждого модуля.
 
 ## Статус документов
 
