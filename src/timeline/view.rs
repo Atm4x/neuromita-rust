@@ -49,30 +49,6 @@ fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
     document
 }
 
-/// Explicit prompt inclusion policy, separate from a character's knowledge.
-/// Later world notes and observations may be relevant to a reaction, while later
-/// unrelated dialogue must not silently become part of its conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptHistoryPolicy {
-    AllVisible,
-    CauseScoped { cause_sequence: u64 },
-}
-
-impl PromptHistoryPolicy {
-    fn includes(self, message: &ProjectedMessage) -> bool {
-        match self {
-            Self::AllVisible => true,
-            Self::CauseScoped { cause_sequence } => {
-                message.sequence <= cause_sequence
-                    || !matches!(
-                        message.kind,
-                        EventKind::PlayerMessage | EventKind::CharacterMessage
-                    )
-            }
-        }
-    }
-}
-
 /// Detached view of a fixed branch prefix; no provider state or mutable character
 /// state is stored in the canonical timeline.
 #[derive(Debug, Clone)]
@@ -93,13 +69,6 @@ impl MitaView {
 
     pub fn messages(&self) -> Vec<ProjectedMessage> {
         self.projection.messages()
-    }
-
-    pub fn prompt_messages(&self, policy: PromptHistoryPolicy) -> Vec<ProjectedMessage> {
-        self.messages()
-            .into_iter()
-            .filter(|message| policy.includes(message))
-            .collect()
     }
 
     pub fn provider_messages(&self) -> Vec<Map<String, Value>> {

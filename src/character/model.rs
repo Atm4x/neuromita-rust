@@ -2,11 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     identity::CharacterId,
-    timeline::{
-        ContextAnchor, EventId, HistoryView,
-        selection::TimelineTurn,
-        view::{MitaView, PromptHistoryPolicy},
-    },
+    timeline::{ContextAnchor, EventId, HistoryView, selection::TimelineTurn, view::MitaView},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +50,6 @@ pub struct CharacterContext {
     pub state: CharacterState,
     pub history: HistoryView,
     pub view: MitaView,
-    pub prompt_policy: PromptHistoryPolicy,
     pub current_input: Arc<str>,
     pub trigger: EventId,
     pub anchor: ContextAnchor,

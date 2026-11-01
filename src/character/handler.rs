@@ -269,8 +269,8 @@ impl CharacterHandler {
             .map_err(CharacterError::Internal)?;
         let anchor = captured.history.at;
         let state = state_at(&timeline, self.character.id, anchor)?;
-        let prompt_policy = timeline
-            .prompt_history_policy(self.character.id, intent, anchor)
+        timeline
+            .validate_reaction_context(self.character.id, intent, anchor)
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         timeline
@@ -292,7 +292,6 @@ impl CharacterHandler {
             state,
             history: captured.history,
             view: captured.view,
-            prompt_policy,
             current_input: Arc::clone(input.text()),
             trigger: input.event_id(),
             anchor,
@@ -546,8 +545,8 @@ mod turn_tests {
     }
 
     #[test]
-    fn reactive_context_filters_later_dialogue_but_keeps_world_knowledge() {
-        use crate::timeline::{domain::MessageRole, view::PromptHistoryPolicy};
+    fn reactive_context_includes_later_known_dialogue_and_world_knowledge() {
+        use crate::timeline::domain::MessageRole;
         let mut handler = handler();
         let cause = EventId::new();
         {
@@ -579,21 +578,30 @@ mod turn_tests {
                 ContextPosition::Latest,
             )
             .unwrap();
-        assert_eq!(
-            context.prompt_policy,
-            PromptHistoryPolicy::CauseScoped { cause_sequence: 1 }
-        );
+        assert_eq!(context.anchor.through, 3);
         assert_eq!(context.view.count(), 3);
-        let messages = context.view.prompt_messages(context.prompt_policy);
-        assert_eq!(messages.len(), 2);
+        let messages = context.view.messages();
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].content, "door opened");
-        assert_eq!(messages[1].role, MessageRole::System);
-        assert_eq!(messages[1].content, "weather became rainy");
-        assert!(
-            !messages
-                .iter()
-                .any(|message| message.content.contains("unrelated"))
-        );
+        assert_eq!(messages[1].role, MessageRole::User);
+        assert_eq!(messages[1].content, "later, unrelated user input");
+        assert_eq!(messages[2].role, MessageRole::System);
+        assert_eq!(messages[2].content, "weather became rainy");
+        assert_eq!(context.current_input.as_ref(), "react to the door");
+
+        let earlier = handler
+            .timeline
+            .lock()
+            .unwrap()
+            .capture_context(
+                CharacterId::Mita,
+                ContextPosition::At(ContextAnchor {
+                    branch_id: context.anchor.branch_id,
+                    through: 1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(earlier.view.messages().len(), 1);
     }
 
     #[test]

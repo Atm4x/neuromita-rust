@@ -6,10 +6,7 @@ use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::GenerationError,
-    timeline::{
-        domain::MessageRole,
-        view::{MitaView, PromptHistoryPolicy},
-    },
+    timeline::{domain::MessageRole, view::MitaView},
 };
 use serde_json::Value;
 
@@ -69,9 +66,9 @@ fn message_text(fields: &serde_json::Map<String, Value>) -> Option<String> {
     }
 }
 
-fn history_contents(view: &MitaView, policy: PromptHistoryPolicy) -> Vec<Content> {
+fn history_contents(view: &MitaView) -> Vec<Content> {
     let mut contents = Vec::new();
-    for message in view.prompt_messages(policy) {
+    for message in view.messages() {
         let Some(text) = message_text(&message.fields) else {
             continue;
         };
@@ -90,7 +87,7 @@ fn history_contents(view: &MitaView, policy: PromptHistoryPolicy) -> Vec<Content
 }
 
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let mut contents = history_contents(&context.view, context.prompt_policy);
+    let mut contents = history_contents(&context.view);
     contents.push(content(Some("user"), &context.current_input));
     GenerateContent {
         system_instruction: content(
@@ -223,7 +220,7 @@ mod tests {
         add(&mut repository, branch, "note", note);
         let visible =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&visible, PromptHistoryPolicy::AllVisible);
+        let contents = history_contents(&visible);
         let encoded: Vec<_> = contents
             .iter()
             .map(|item| serde_json::to_value(item).unwrap())
@@ -248,7 +245,7 @@ mod tests {
         add(&mut repository, branch, "hide", hidden);
         let after_hide =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&after_hide, PromptHistoryPolicy::AllVisible);
+        let contents = history_contents(&after_hide);
         assert_eq!(contents.len(), 2);
         assert_eq!(serde_json::to_value(&contents[0]).unwrap()["role"], "model");
 
@@ -257,8 +254,62 @@ mod tests {
         add(&mut repository, branch, "reset", reset);
         let after_reset =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&after_reset, PromptHistoryPolicy::AllVisible);
+        let contents = history_contents(&after_reset);
         assert!(contents.is_empty());
+    }
+
+    #[test]
+    fn reactive_provider_history_keeps_questions_after_the_cause() {
+        use crate::{
+            identity::CharacterId,
+            timeline::{
+                domain::{BranchId, EventDraft, EventKind, SessionId, TimelineStore},
+                view::TimelineMessageQueries,
+            },
+        };
+
+        let mut repository = TimelineStore::new();
+        let branch = BranchId::new();
+        repository.create_session(SessionId::new(), branch).unwrap();
+        for (key, kind, content) in [
+            ("door", EventKind::CharacterObservation, "Door opened"),
+            ("question", EventKind::PlayerMessage, "Why did you open it?"),
+            ("weather", EventKind::SessionNote, "Rain started"),
+        ] {
+            let mut draft = EventDraft::new(kind);
+            match kind {
+                EventKind::PlayerMessage => draft.actor = Some("player".into()),
+                EventKind::CharacterObservation => {
+                    draft.actor = Some(CharacterId::Mita.to_string())
+                }
+                _ => {}
+            }
+            draft.observers.insert(CharacterId::Mita);
+            draft.payload.insert("content".into(), json!(content));
+            let head = repository.branch(branch).unwrap().head_sequence;
+            repository
+                .append(branch, head, key, json!({}), vec![draft])
+                .unwrap();
+        }
+
+        let before_question =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, Some(1))
+                .unwrap();
+        assert_eq!(history_contents(&before_question).len(), 1);
+
+        let when_generation_starts =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+        let encoded: Vec<_> = history_contents(&when_generation_starts)
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap())
+            .collect();
+        assert_eq!(encoded.len(), 3);
+        assert_eq!(encoded[0]["parts"][0]["text"], "Door opened");
+        assert_eq!(encoded[1]["parts"][0]["text"], "Why did you open it?");
+        assert_eq!(
+            encoded[2]["parts"][0]["text"],
+            "Сведения сессии:\nRain started"
+        );
     }
 
     #[test]

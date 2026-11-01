@@ -20,7 +20,7 @@ pub mod view;
 
 use legacy::{legacy_event, make_draft};
 use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
-use view::{MitaView, PromptHistoryPolicy, TimelineMessageQueries};
+use view::{MitaView, TimelineMessageQueries};
 
 #[cfg(feature = "sqlite-system")]
 use selection::TimelineSelectionRepository;
@@ -299,35 +299,31 @@ impl SessionTimeline {
         Ok(count)
     }
 
-    pub(crate) fn prompt_history_policy(
+    pub(crate) fn validate_reaction_context(
         &self,
         character: CharacterId,
         intent: TurnIntent,
         at: ContextAnchor,
-    ) -> Result<PromptHistoryPolicy, domain::TimelineError> {
-        match intent {
-            TurnIntent::Reply | TurnIntent::Initiate => Ok(PromptHistoryPolicy::AllVisible),
-            TurnIntent::React(target) => {
-                if at.branch_id != self.branch.0 {
-                    return Err(domain::TimelineError::Invalid(
-                        "reaction context branch mismatch",
-                    ));
-                }
-                let fact = self.store.event(self.branch, target)?;
-                if fact.sequence > at.through
-                    || !self
-                        .store
-                        .knows(self.branch, character, target, Some(at.through))?
-                {
-                    return Err(domain::TimelineError::Invalid(
-                        "reaction cause was not known at captured context",
-                    ));
-                }
-                Ok(PromptHistoryPolicy::CauseScoped {
-                    cause_sequence: fact.sequence,
-                })
-            }
+    ) -> Result<(), domain::TimelineError> {
+        let TurnIntent::React(target) = intent else {
+            return Ok(());
+        };
+        if at.branch_id != self.branch.0 {
+            return Err(domain::TimelineError::Invalid(
+                "reaction context branch mismatch",
+            ));
         }
+        let fact = self.store.event(self.branch, target)?;
+        if fact.sequence > at.through
+            || !self
+                .store
+                .knows(self.branch, character, target, Some(at.through))?
+        {
+            return Err(domain::TimelineError::Invalid(
+                "reaction cause was not known at captured context",
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
