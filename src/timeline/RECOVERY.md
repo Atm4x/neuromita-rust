@@ -12,3 +12,31 @@ This is a **read-only confirmation** of a committed character reply; it is not a
 - The repository's default implementation performs a whole-branch `world()` read and filters by requested prefix. It is correct but **not** a bounded/optimized read path.
 
 To recover a complete execution outcome across a crash, the system would additionally need a deliberately designed durable protocol covering technical request status and external effects. Do not infer those states from absent Timeline facts or write technical request statuses into canonical semantic history by default.
+
+## Read-only request evidence
+
+`ApplicationLifecycle::request_evidence_at(character, request_id, anchor)` provides
+**canonical evidence**, not a restored live request state. It inspects one
+immutable branch prefix, including fork cutoffs, without switching selection:
+
+- `AcceptedReply(fact)`: an accepted `CharacterMessage` with that `RequestId`
+  and actor was committed in the prefix. Does not prove external effects succeeded.
+- `PlayerInput(fact)`: an admitted `PlayerMessage` carrying that `RequestId`
+  and explicitly visible to the character exists, **but no accepted reply**
+  exists in the prefix. This does not prove generation started or remains pending.
+- `ProactiveTrigger(fact)`: an addressed `ProactiveOpportunity` was recorded
+  without an accepted reply. For react/initiate this means preparation reached
+  the timeline, **not** that the request completed or that LLM started.
+- `NoRecord`: no matching canonical fact. This is not proof of cancellation,
+  failure or even that admission did not happen (e.g. react queued but never run).
+
+Ambiguous duplicate evidence of the same kind, or both an admitted player input
+and proactive trigger for one request/character, returns `Conflict` rather than
+selecting an arbitrary event. A message-only `ChatApi::publish_message` has no
+`RequestId` and is not misidentified as admission. Cross-character facts and
+facts beyond the requested historical cutoff are not considered.
+
+This requires **no extra durable status table**. It cannot recover in-memory
+`RequestHandle`, reproduce voice output, guarantee exactly-once external effects,
+or recover a `RequestId` lost when the process crashes between storing its
+input and returning the handle. Full durable request lifecycle remains open.

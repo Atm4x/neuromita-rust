@@ -373,6 +373,20 @@ impl ApplicationLifecycle {
             .accepted_reply_at(character, request, at)
     }
 
+    /// Inspect the strongest durable evidence of a request in one historical prefix.
+    /// It never recreates a RequestHandle, repeats generation or infers cancellation.
+    pub fn request_evidence_at(
+        &self,
+        character: CharacterId,
+        request: RequestId,
+        at: crate::timeline::ContextAnchor,
+    ) -> Result<crate::timeline::domain::RequestEvidence, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .request_evidence_at(character, request, at)
+    }
+
     pub fn timeline(&self) -> Vec<TimelineEvent> {
         self.timeline
             .lock()

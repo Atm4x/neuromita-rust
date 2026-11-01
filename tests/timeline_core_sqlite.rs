@@ -354,6 +354,28 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
                 .unwrap(),
             Some(reply.clone())
         );
+        assert_eq!(
+            app.request_evidence_at(CharacterId::Mita, request, at)
+                .unwrap(),
+            neuromita::timeline::domain::RequestEvidence::AcceptedReply(reply.clone())
+        );
+        assert!(matches!(
+            app.request_evidence_at(
+                CharacterId::Mita,
+                request,
+                neuromita::timeline::ContextAnchor {
+                    branch_id: branch.0,
+                    through: 1,
+                },
+            )
+            .unwrap(),
+            neuromita::timeline::domain::RequestEvidence::PlayerInput(_)
+        ));
+        assert_eq!(
+            app.request_evidence_at(CharacterId::KindMita, request, at)
+                .unwrap(),
+            neuromita::timeline::domain::RequestEvidence::NoRecord
+        );
         assert!(
             app.accepted_reply_at(
                 CharacterId::Mita,

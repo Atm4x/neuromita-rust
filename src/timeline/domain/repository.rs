@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::identity::{CharacterId, EventId};
 
 use super::{
-    AppendGuard, BranchId, BranchInfo, EventDraft, KnownEvent, SessionId, TimelineError,
-    TimelineFact, TimelineStore,
+    AppendGuard, BranchId, BranchInfo, EventDraft, KnownEvent, RequestEvidence, SessionId,
+    TimelineError, TimelineFact, TimelineStore,
 };
 
 /// Semantic timeline operations; SQLite and future CFMD must obey identical laws.
@@ -49,6 +49,29 @@ pub trait TimelineRepository {
             }
         }
         Ok(accepted)
+    }
+    /// Inspect canonical evidence without claiming the request is still running.
+    /// An absent record does not establish cancellation, failure or non-admission.
+    fn request_evidence_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        request: Uuid,
+        through: Option<u64>,
+    ) -> Result<RequestEvidence, TimelineError> {
+        let info = self.branch(branch)?;
+        let bound = through.unwrap_or(info.head_sequence);
+        if bound > info.head_sequence {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        let facts = self.world(branch)?;
+        super::request_evidence::request_evidence(
+            facts.iter().take_while(|fact| fact.sequence <= bound),
+            character,
+            request,
+        )
     }
     /// Stable ascending page of direct facts; observer filters direct witnesses,
     /// not derived knowledge or later disclosures.

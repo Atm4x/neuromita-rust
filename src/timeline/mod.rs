@@ -482,6 +482,19 @@ impl SessionTimeline {
             .accepted_reply_at(branch, character, request.0, Some(at.through))
     }
 
+    /// Read-only evidence of ingress, proactive dispatch or committed reply.
+    /// It does not recover the process-local request state or replay work.
+    pub(crate) fn request_evidence_at(
+        &self,
+        character: CharacterId,
+        request: RequestId,
+        at: ContextAnchor,
+    ) -> Result<domain::RequestEvidence, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        self.store
+            .request_evidence_at(branch, character, request.0, Some(at.through))
+    }
+
     pub(crate) fn reaction_cause_at(
         &self,
         character: CharacterId,
