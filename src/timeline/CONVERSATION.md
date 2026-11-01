@@ -1,5 +1,10 @@
 # One canonical conversation message
 
+**Normative knowledge rule:** [KNOWLEDGE.md](KNOWLEDGE.md). Hearing a retelling
+of event X creates a new message event Y; the listener learns Y, not X.
+The older late-disclosure behavior below is an implementation gap, not an
+approved semantic contract.
+
 A conversation utterance is one `ConversationMessage`, regardless of its producer:
 player, character, or an accepted generated reply. Its `speaker` is a typed
 `ConversationSpeaker::Player | Character(CharacterId)`; the Timeline event kind
@@ -22,9 +27,10 @@ The canonical fact has a single EventId, sequence, author, JSON content and
 optional causal links. Per-character views derive `assistant` for the author
 and `user` for other listeners from that same fact. A character can speak to
 another character, several characters, or the player; the audience does not
-need to contain the player. Only `seen_by` characters see the utterance. To
-share it later, `disclose_conversation_message` records `EventObserved` without
-changing or copying the original message.
+need to contain the player. Only characters that directly observed this
+utterance may know this event. If a character tells someone about an earlier
+utterance, that retelling is **another** `ConversationMessage`; it must not
+retroactively disclose the original. The former `disclose_conversation_message` / `EventObserved` mechanism has been removed; retellings must be new messages.
 
 ## Producers
 

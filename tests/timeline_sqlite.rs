@@ -89,15 +89,22 @@ fn contract(repo: &mut dyn TimelineRepository) {
             .knows(root, CharacterId::KindMita, first_id, None)
             .unwrap()
     );
-    let mut disclosure = mk(EventKind::EventObserved, &[CharacterId::KindMita]);
-    disclosure.links.push(CausalLink {
-        relation: CausalRelation::Observes,
+    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::KindMita]);
+    retelling.actor = Some("player".into());
+    retelling.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
         event_id: first_id,
     });
-    append(repo, root, "disclosure", disclosure);
-    assert_eq!(
-        repo.view(root, CharacterId::KindMita, None).unwrap()[0].learned_at,
-        3
+    let retold_id = retelling.id;
+    append(repo, root, "retelling", retelling);
+    assert!(
+        !repo
+            .knows(root, CharacterId::KindMita, first_id, None)
+            .unwrap()
+    );
+    assert!(
+        repo.knows(root, CharacterId::KindMita, retold_id, None)
+            .unwrap()
     );
     let mut checkpoint = mk(EventKind::Checkpoint, &[]);
     checkpoint
@@ -517,16 +524,18 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
         repo.fork(root, checkpoint_id, child).unwrap();
         repo.fork(root, checkpoint_id, sibling).unwrap();
     }
-    let mut disclosure = mk(EventKind::EventObserved, &[CharacterId::KindMita]);
-    disclosure.links.push(CausalLink {
-        relation: CausalRelation::Observes,
+    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::KindMita]);
+    retelling.actor = Some("player".into());
+    retelling.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
         event_id: secret_id,
     });
+    let retold_id = retelling.id;
     let mut reset = mk(EventKind::CharacterContextReset, &[CharacterId::KindMita]);
     reset.external_message_id = Some("context-reset".into());
     for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
         let head = repo.branch(child).unwrap().head_sequence;
-        repo.append(child, head, "disclose", json!({}), vec![disclosure.clone()])
+        repo.append(child, head, "retell", json!({}), vec![retelling.clone()])
             .unwrap();
         let head = repo.branch(child).unwrap().head_sequence;
         repo.append(child, head, "reset", json!({}), vec![reset.clone()])
@@ -565,23 +574,24 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
         ),
         Err(TimelineError::Invalid(_))
     ));
-    let mut relearn = disclosure;
-    relearn.id = neuromita::timeline::EventId::new();
-    let mut renewed_reply = reply;
-    renewed_reply.id = neuromita::timeline::EventId::new();
-    let commands = vec![relearn, renewed_reply];
-    let expected = memory.append(
-        child,
-        head,
-        "relearn-and-reply",
-        json!({}),
-        commands.clone(),
-    );
-    let actual = sql.append(child, head, "relearn-and-reply", json!({}), commands);
+    let mut new_retelling = retelling;
+    new_retelling.id = neuromita::timeline::EventId::new();
+    let new_retelling_id = new_retelling.id;
+    let commands = vec![new_retelling];
+    let expected = memory.append(child, head, "new-retelling", json!({}), commands.clone());
+    let actual = sql.append(child, head, "new-retelling", json!({}), commands);
     assert_eq!(actual, expected);
     assert_eq!(
         sql.knows(child, CharacterId::KindMita, secret_id, None),
+        Ok(false)
+    );
+    assert_eq!(
+        sql.knows(child, CharacterId::KindMita, new_retelling_id, None),
         Ok(true)
+    );
+    assert_eq!(
+        sql.knows(child, CharacterId::KindMita, retold_id, None),
+        Ok(false)
     );
     assert_eq!(
         sql.knows(sibling, CharacterId::KindMita, secret_id, None),

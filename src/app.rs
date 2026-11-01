@@ -215,6 +215,7 @@ impl ApplicationLifecycle {
             limits.character_commands.get(),
         );
         let generator = Arc::new(generator);
+        let settings_owner = settings.owner();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -229,6 +230,7 @@ impl ApplicationLifecycle {
                 registry: Arc::clone(&registry),
                 generator: Arc::clone(&generator),
                 voice: Arc::clone(&voice),
+                settings: Arc::clone(&settings_owner),
                 selection_updates: selection_updates.clone(),
                 context_updates,
             };
@@ -241,10 +243,8 @@ impl ApplicationLifecycle {
         });
         let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
         let discovery = api.registry.observe();
-        let settings_owner = settings.owner();
         let (chat, runner) = PresenterRunner::new(
             Arc::clone(&api),
-            Arc::clone(&settings_owner),
             preset,
             discovery,
             limits.presenter_updates.get(),
@@ -366,20 +366,6 @@ impl ApplicationLifecycle {
             .lock()
             .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
             .publish_conversation_message(expected, message)
-    }
-
-    /// Make a committed conversation message known to additional listeners.
-    pub fn disclose_conversation_message(
-        &self,
-        expected: TimelineSelection,
-        operation: EventId,
-        source: EventId,
-        witnesses: std::collections::BTreeSet<CharacterId>,
-    ) -> Result<TimelineFact, TimelineError> {
-        self.timeline
-            .lock()
-            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
-            .disclose_conversation_message(expected, operation, source, witnesses)
     }
 
     /// Change the presentation of already known conversation messages for one character.

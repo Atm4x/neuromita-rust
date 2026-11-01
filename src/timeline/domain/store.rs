@@ -569,7 +569,6 @@ impl TimelineStore {
         let mut relations = HashSet::new();
         let mut reply = false;
         let mut react = false;
-        let mut observed = 0;
         for link in &draft.links {
             if !relations.insert((link.relation, link.event_id)) {
                 return Err(TimelineError::Invalid("duplicate causal link"));
@@ -595,7 +594,6 @@ impl TimelineStore {
                         react = true;
                     }
                 }
-                CausalRelation::Observes => observed += 1,
                 CausalRelation::CausedBy => {}
             }
         }
@@ -604,11 +602,7 @@ impl TimelineStore {
                 "turn cannot reply and react together",
             ));
         }
-        for relation in [
-            CausalRelation::ReplyTo,
-            CausalRelation::ReactTo,
-            CausalRelation::Observes,
-        ] {
+        for relation in [CausalRelation::ReplyTo, CausalRelation::ReactTo] {
             if draft
                 .links
                 .iter()
@@ -618,17 +612,6 @@ impl TimelineStore {
             {
                 return Err(TimelineError::Invalid("multiple causal targets"));
             }
-        }
-        if draft.kind == EventKind::EventObserved {
-            if observed != 1 || draft.observers.is_empty() {
-                return Err(TimelineError::Invalid(
-                    "disclosure needs one target and recipients",
-                ));
-            }
-        } else if observed > 0 {
-            return Err(TimelineError::Invalid(
-                "only disclosure may use observes link",
-            ));
         }
         Ok(())
     }

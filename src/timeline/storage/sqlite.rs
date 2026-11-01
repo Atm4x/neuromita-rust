@@ -281,7 +281,8 @@ fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineErro
                 &[&branch, &sequence, &character],
             )?;
         }
-        for acquired in change.acquired {
+        {
+            let acquired = change.acquired;
             conn.write(
                 "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
                 &[&branch, &sequence, &character, &acquired.0.to_string()],

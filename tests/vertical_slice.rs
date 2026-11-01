@@ -908,20 +908,30 @@ async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
     );
     config.voice = Arc::new(PausedVoice(voice_started));
     let app = ApplicationLifecycle::start(config).await.unwrap();
-    let reply = ChatApi::reply(
-        ReplyRequest::new(
-            CharacterId::Mita,
-            preset,
-            UserInput::new("Question requiring voice".into()).unwrap(),
-            RequestSource::Presenter,
-        )
-        .with_voice(neuromita::voice::VoicePlan::Synthesize(
-            neuromita::voice::VoiceOptions {
-                voice: "voice-id".into(),
-                volume: neuromita::settings::Volume::new(80).unwrap(),
-            },
-        )),
-    )
+    app.presenter()
+        .settings
+        .voice
+        .in_launcher
+        .set(true)
+        .unwrap();
+    app.presenter()
+        .settings
+        .voice
+        .voice
+        .set("voice-id".into())
+        .unwrap();
+    app.presenter()
+        .settings
+        .voice
+        .volume
+        .set(neuromita::settings::Volume::new(80).unwrap())
+        .unwrap();
+    let reply = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("Question requiring voice".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
     .unwrap();
     let provider_call = server.next().await;
     provider_call

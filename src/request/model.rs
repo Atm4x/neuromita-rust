@@ -9,7 +9,7 @@ use crate::{
     identity::RequestId,
     interaction::{ReplyTarget, TurnIntent, UserInput},
     timeline::{ContextPosition, EventId, conversation::ConversationAudience},
-    voice::{VoiceError, VoicePlan},
+    voice::VoiceError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,13 +18,12 @@ pub enum RequestSource {
     Client(Uuid),
 }
 
-pub trait Message: Send + Sync + fmt::Debug {
+pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn character_id(&self) -> CharacterId;
     fn preset(&self) -> &GenerationPreset;
     fn input(&self) -> &UserInput;
     fn source(&self) -> RequestSource;
     fn intent(&self) -> TurnIntent;
-    fn voice(&self) -> &VoicePlan;
     fn at(&self) -> ContextPosition;
     fn audience(&self) -> &ConversationAudience;
     fn input_audience(&self) -> Option<&ConversationAudience> {
@@ -38,7 +37,6 @@ pub struct ReplyRequest {
     preset: GenerationPreset,
     input: UserInput,
     source: RequestSource,
-    voice: VoicePlan,
     at: ContextPosition,
     audience: ConversationAudience,
     input_audience: ConversationAudience,
@@ -57,16 +55,11 @@ impl ReplyRequest {
             preset,
             input,
             source,
-            voice: VoicePlan::Disabled,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
             input_audience: ConversationAudience::player_to(character_id),
             target: ReplyTarget::Input,
         }
-    }
-    pub fn with_voice(mut self, voice: VoicePlan) -> Self {
-        self.voice = voice;
-        self
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.at = at;
@@ -89,7 +82,7 @@ impl ReplyRequest {
     }
 }
 
-impl Message for ReplyRequest {
+impl GenerationCommand for ReplyRequest {
     fn character_id(&self) -> CharacterId {
         self.character_id
     }
@@ -104,9 +97,6 @@ impl Message for ReplyRequest {
     }
     fn intent(&self) -> TurnIntent {
         TurnIntent::Reply(self.target)
-    }
-    fn voice(&self) -> &VoicePlan {
-        &self.voice
     }
     fn at(&self) -> ContextPosition {
         self.at
@@ -140,10 +130,6 @@ impl ReactRequest {
             event,
         }
     }
-    pub fn with_voice(mut self, voice: VoicePlan) -> Self {
-        self.message = self.message.with_voice(voice);
-        self
-    }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.message = self.message.at(at);
         self
@@ -153,7 +139,7 @@ impl ReactRequest {
         self
     }
 }
-impl Message for ReactRequest {
+impl GenerationCommand for ReactRequest {
     fn character_id(&self) -> CharacterId {
         self.message.character_id()
     }
@@ -169,11 +155,8 @@ impl Message for ReactRequest {
     fn intent(&self) -> TurnIntent {
         TurnIntent::React(self.event)
     }
-    fn voice(&self) -> &VoicePlan {
-        self.message.voice()
-    }
     fn at(&self) -> ContextPosition {
-        Message::at(&self.message)
+        GenerationCommand::at(&self.message)
     }
     fn audience(&self) -> &ConversationAudience {
         self.message.audience()
@@ -195,10 +178,6 @@ impl InitiateRequest {
             message: ReplyRequest::new(character, preset, instruction, source),
         }
     }
-    pub fn with_voice(mut self, voice: VoicePlan) -> Self {
-        self.message = self.message.with_voice(voice);
-        self
-    }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.message = self.message.at(at);
         self
@@ -208,7 +187,7 @@ impl InitiateRequest {
         self
     }
 }
-impl Message for InitiateRequest {
+impl GenerationCommand for InitiateRequest {
     fn character_id(&self) -> CharacterId {
         self.message.character_id()
     }
@@ -224,11 +203,8 @@ impl Message for InitiateRequest {
     fn intent(&self) -> TurnIntent {
         TurnIntent::Initiate
     }
-    fn voice(&self) -> &VoicePlan {
-        self.message.voice()
-    }
     fn at(&self) -> ContextPosition {
-        Message::at(&self.message)
+        GenerationCommand::at(&self.message)
     }
     fn audience(&self) -> &ConversationAudience {
         self.message.audience()

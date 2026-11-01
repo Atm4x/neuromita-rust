@@ -6,8 +6,8 @@ use crate::{
     character::{CharacterError, CharacterHandle, CharacterId},
     interaction::UserInput,
     request::{
-        InitiateRequest, Message, ReactRequest, ReplyRequest, RequestDiscovery, RequestHandle,
-        RequestId, SubmitError,
+        GenerationCommand, InitiateRequest, ReactRequest, ReplyRequest, RequestDiscovery,
+        RequestHandle, RequestId, SubmitError,
     },
     runtime::{self, ApiUnavailable},
     settings::{
@@ -41,15 +41,15 @@ impl ChatApi {
     }
 
     pub fn reply(request: ReplyRequest) -> Result<RequestHandle, SubmitError> {
-        Self::send(request)
+        Self::submit(request)
     }
     pub fn react(request: ReactRequest) -> Result<RequestHandle, SubmitError> {
-        Self::send(request)
+        Self::submit(request)
     }
     pub fn initiate(request: InitiateRequest) -> Result<RequestHandle, SubmitError> {
-        Self::send(request)
+        Self::submit(request)
     }
-    pub fn send(request: impl Message + 'static) -> Result<RequestHandle, SubmitError> {
+    fn submit(request: impl GenerationCommand + 'static) -> Result<RequestHandle, SubmitError> {
         runtime::current()
             .map_err(SubmitError::from)?
             .chat

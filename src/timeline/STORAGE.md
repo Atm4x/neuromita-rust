@@ -53,7 +53,7 @@ CFMD-адаптер реализует **те же** предметные кон
 
 ## Холодный append без полной реконструкции (схема 2)
 
-Семантическая проверка одна: `TimelineStore::validate_batch` с доменным контрактом `WorldLookup`. In-memory реализация читает `WorldIndex`, SQLite — производные индексные факты (`timeline_fact_keys`, `timeline_acquisitions`, `timeline_resets`) по явной цепочке предков и cutoff. Это **не SQL-валидатор**: он не принимает решение, допустима ли ссылка, ответ, disclosure или edit; возвращает минимальные свидетельства доменному валидатору.
+Семантическая проверка одна: `TimelineStore::validate_batch` с доменным контрактом `WorldLookup`. In-memory реализация читает `WorldIndex`, SQLite — производные индексные факты (`timeline_fact_keys`, `timeline_acquisitions`, `timeline_resets`) по явной цепочке предков и cutoff. Это **не SQL-валидатор**: он не принимает решение, допустима ли ссылка, ответ, direct observation или edit; возвращает минимальные свидетельства доменному валидатору.
 
 `timeline_events` и `timeline_receipts` остаются каноническими. Индексные таблицы заполняются в той же транзакции, что и публикация событий, и могут быть перестроены из журнала. При открытии schema 1→2 выполняется один транзакционный rebuild. Удаление сведений из индексных таблиц само по себе не является удалением истории. Внешний CFMD адаптер должен предоставлять эквивалентный `WorldLookup` из своих поддерживаемых запросов, не копируя SQL-схему и не переопределяя доменные правила.
 
@@ -61,6 +61,6 @@ CFMD-адаптер реализует **те же** предметные кон
 
 ## Локальные архитектурные границы
 
-`domain::knowledge_change` единожды определяет последствия факта для свидетеля (reset/acquisition/disclosure). `WorldIndex`, `character_view` и SQLite `index_fact` интерпретируют только результат этой операции. `SqliteTimelineRepository::append_guarded` проверяет generation и опциональную пару epoch/trigger под той же блокировкой и транзакцией, где записывает факт. Конфликт selection не может быть обойдён повторным receipt.
+`domain::knowledge_change` единожды определяет последствия факта для свидетеля (reset/direct acquisition). `WorldIndex`, `character_view` и SQLite `index_fact` интерпретируют только результат этой операции. `SqliteTimelineRepository::append_guarded` проверяет generation и опциональную пару epoch/trigger под той же блокировкой и транзакцией, где записывает факт. Конфликт selection не может быть обойдён повторным receipt.
 
 `SQLite event()`, `knows()` и `context_epoch()` выполняют индексированные lookup по родовой цепочке, не восстанавливая весь мир. Полные `world()` и `character_view()` остаются дорогими read-side операциями; MitaView paging/summaries — отдельная незакрытая задача. Сырой C-FFI SQLite изолирован в `storage/sqlite/native.rs`; legacy-проекция вынесена в `timeline/legacy.rs`, а данные событий остаются в доменном формате.

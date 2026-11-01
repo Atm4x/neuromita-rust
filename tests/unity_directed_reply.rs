@@ -9,7 +9,10 @@ use neuromita::{
         ProviderTemplate, ResponseGenerator,
         gemini::{GeminiTemplate, GenerationSettings},
     },
-    request::{ReplyRequest, RequestOutcome, RequestSource, RequestState, SubmitError, UserInput},
+    request::{
+        ReactRequest, ReplyRequest, RequestOutcome, RequestSource, RequestState, SubmitError,
+        UserInput,
+    },
     timeline::{
         EventContent, TimelineConfig,
         conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
@@ -225,7 +228,7 @@ async fn reply_requires_a_target_known_to_the_selected_character() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unified_reply_can_target_an_observed_unity_event() {
+async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
     let _lock = TEST_LOCK.lock().await;
     let (sent, mut calls) = mpsc::unbounded_channel();
     let app = ApplicationLifecycle::start(config(sent)).await.unwrap();
@@ -243,15 +246,24 @@ async fn unified_reply_can_target_an_observed_unity_event() {
             .is_err()
     );
 
-    let handle = ChatApi::reply(
+    let rejected = ChatApi::reply(
         ReplyRequest::new(
             CharacterId::KindMita,
             preset(),
-            UserInput::new("React verbally to the observed door opening".into()).unwrap(),
+            UserInput::new("An event is not a message".into()).unwrap(),
             RequestSource::Presenter,
         )
         .to_event(source_id),
-    )
+    );
+    assert!(matches!(rejected, Err(SubmitError::InvalidReplyTarget)));
+    assert_eq!(app.at().through, 1);
+    let handle = ChatApi::react(ReactRequest::new(
+        CharacterId::KindMita,
+        preset(),
+        source_id,
+        UserInput::new("React verbally to the observed door opening".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
     .unwrap();
     let generated = timeout(Duration::from_secs(5), calls.recv())
         .await
@@ -279,7 +291,7 @@ async fn unified_reply_can_target_an_observed_unity_event() {
     );
     assert!(events.iter().any(|event| matches!(
         event.content,
-        EventContent::CharacterReply { reply_to, .. } if reply_to == source_id
+        EventContent::Reaction { target, .. } if target == source_id
     )));
     assert!(
         timeout(Duration::from_millis(50), calls.recv())

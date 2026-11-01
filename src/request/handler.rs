@@ -7,8 +7,9 @@ use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
     generation::{GenerationRequest, ResponseGenerator},
+    settings::{SettingsOwner, VoiceSettings},
     timeline::selection::TimelineSelection,
-    voice::{VoicePlan, VoiceProvider},
+    voice::{VoiceOptions, VoiceProvider},
 };
 
 #[derive(Clone)]
@@ -17,6 +18,7 @@ pub(crate) struct MessageHandler {
     pub(crate) registry: Arc<RequestRegistry>,
     pub(crate) generator: Arc<ResponseGenerator>,
     pub(crate) voice: Arc<dyn VoiceProvider>,
+    pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
 }
@@ -55,7 +57,7 @@ impl MessageHandler {
         }
     }
 
-    async fn process(&self, record: Arc<RequestRecord>, message: Box<dyn Message>) {
+    async fn process(&self, record: Arc<RequestRecord>, message: Box<dyn GenerationCommand>) {
         let id = record.snapshot().metadata.id;
         let prepared = tokio::select! {
             biased;
@@ -82,6 +84,23 @@ impl MessageHandler {
                 return;
             }
         };
+        let voice_settings = match self.settings.snapshot::<VoiceSettings>() {
+            Ok(snapshot) => snapshot.value,
+            Err(error) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(error.to_string()),
+                ));
+                return;
+            }
+        };
+        let voice_enabled = match message.source() {
+            RequestSource::Presenter => voice_settings.in_launcher,
+            RequestSource::Client(_) => voice_settings.in_game,
+        };
+        let voice_options = voice_enabled.then_some(VoiceOptions {
+            voice: voice_settings.voice,
+            volume: voice_settings.volume,
+        });
         let acceptance = AcceptanceContext {
             anchor: context.anchor,
             trigger: context.trigger,
@@ -117,9 +136,9 @@ impl MessageHandler {
         };
         let text = proposed.text;
         record.text_ready(Arc::clone(&text));
-        let voice = match message.voice() {
-            VoicePlan::Disabled => Ok(None),
-            VoicePlan::Synthesize(options) => {
+        let voice = match voice_options {
+            None => Ok(None),
+            Some(options) => {
                 if !record.generating_voice(Arc::clone(&text)) {
                     record.finish_cancelled();
                     return;
@@ -137,7 +156,7 @@ impl MessageHandler {
                         record.finish_cancelled();
                         return;
                     }
-                    audio = self.voice.synthesize(Arc::clone(&text), options.clone()) => audio.map(Some),
+                    audio = self.voice.synthesize(Arc::clone(&text), options) => audio.map(Some),
                 }
             }
         };

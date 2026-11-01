@@ -28,7 +28,7 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 ```
 
 - `domain::CharacterMessageProjection` — deterministic fold по `KnownEvent`. Домен отвечает за знание, reset, видимость, ревизии, роль и идентичность сообщения. Не знает про SQLite, HTTP, Python-сервисы или формат ChatAPI.
-- `TimelineMessageQueries` — read-side orchestrator поверх одного `TimelineRepository`: фиксирует branch/head, читает только direct witnesses небольшими страницами, адресно разрешает ссылки `EventObserved`, передаёт домену знания в порядке получения. Не записывает events или mutable CharacterState.
+- `TimelineMessageQueries` — read-side orchestrator поверх одного `TimelineRepository`: фиксирует branch/head, читает только direct witnesses небольшими страницами, не разыменовывает причинные ссылки, передаёт домену непосредственные факты в порядке наблюдения. Не записывает events или mutable CharacterState.
 - `MitaView` — независимый snapshot через `branch` + `through`, с `messages`, `provider_messages`, `page(limit, offset)`, `count`, `contains`. Копии результатов detached; чтение исторического `at` не привязывает результат к текущему head.
 - Provider/UI map — **адаптер** `timeline::view`, а не модель доменного события. Сохранены произвольные вложенные поля `payload.message` и типизированный JSON `content`, включая мультимодальные массивы.
 
@@ -114,10 +114,11 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 сообщениями мира автоматически. `count()`, `page()` и `provider_messages()`
 по-прежнему относятся только к сообщениям и сохраняют прежние контракты.
 
-Один и тот же факт виден персонажу только после получения знания. Позднее
-`EventObserved` ставит `learned_at` равным времени раскрытия. После
-`CharacterContextReset` ранее известные факты больше не входят в контекст,
-пока персонаж не узнает их заново. Fork наследует только префикс родителя;
+Один и тот же факт виден персонажу только при непосредственном наблюдении;
+`learned_at` соответствует sequence этого наблюдения. Причинные ссылки
+на старый факт не раскрывают его. После `CharacterContextReset` ранее известные
+факты больше не входят в текущий контекст: последующий рассказ о них
+создаёт новое сообщение, но не восстанавливает оригинал. Fork наследует только префикс родителя;
 продолжение соседней ветви не появляется в `MitaView`. Снимок фиксирован на
 `through` и не меняется при дальнейшем append.
 

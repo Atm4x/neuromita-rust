@@ -19,7 +19,7 @@ pub(crate) struct RequestRecord {
 struct Execution {
     snapshot: Arc<RequestSnapshot>,
     phase: EffectPhase,
-    message: Option<Box<dyn Message>>,
+    message: Option<Box<dyn GenerationCommand>>,
     trace: Option<RequestTrace>,
     draft_text: Option<Arc<str>>,
 }
@@ -91,7 +91,7 @@ impl RequestObserver {
 
 impl RequestRecord {
     pub(crate) fn new(
-        message: Box<dyn Message>,
+        message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
         registry: Weak<RegistryInner>,
@@ -111,7 +111,6 @@ impl RequestRecord {
             metadata: snapshot.metadata.clone(),
             input: message.input().clone(),
             preset_description: format!("{:?}", message.preset()),
-            voice: message.voice().clone(),
             context: None,
             generated_text: None,
             transitions: vec![RequestTransition {
@@ -172,7 +171,7 @@ impl RequestRecord {
         self.admission
     }
 
-    pub(crate) fn try_start(&self) -> Option<Box<dyn Message>> {
+    pub(crate) fn try_start(&self) -> Option<Box<dyn GenerationCommand>> {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if !matches!(inner.snapshot.state, RequestState::Pending) {
             return None;

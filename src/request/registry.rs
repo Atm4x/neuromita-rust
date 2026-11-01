@@ -83,7 +83,7 @@ impl RequestRegistry {
 
     pub(crate) fn register(
         &self,
-        message: Box<dyn Message>,
+        message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
     ) -> RequestHandle {

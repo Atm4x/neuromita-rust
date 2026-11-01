@@ -538,6 +538,13 @@ impl SessionTimeline {
             ));
         }
         let fact = self.store.event(self.branch, target)?;
+        if matches!(intent, TurnIntent::Reply(ReplyTarget::Event(_)))
+            && !fact.draft.kind.is_message()
+        {
+            return Err(domain::TimelineError::Invalid(
+                "reply target must be a conversation message",
+            ));
+        }
         if fact.sequence > at.through
             || !self
                 .store
@@ -649,31 +656,6 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
             message,
-        )
-    }
-
-    /// Disclose an existing message to new witnesses without duplicating it.
-    pub(crate) fn disclose_conversation_message(
-        &mut self,
-        expected: TimelineSelection,
-        operation: EventId,
-        source: EventId,
-        witnesses: std::collections::BTreeSet<CharacterId>,
-    ) -> Result<domain::TimelineFact, domain::TimelineError> {
-        self.assert_selection(expected)?;
-        let head = self.anchor().through;
-        conversation::disclose_conversation_message(
-            self.store.as_mut(),
-            self.branch,
-            head,
-            AppendGuard {
-                selection_generation: expected.generation,
-                context: None,
-                accepted_reply_revision: None,
-            },
-            operation,
-            source,
-            witnesses,
         )
     }
 
@@ -800,9 +782,11 @@ impl SessionTimeline {
                     .insert("legacy_intent".into(), json!("initiate"));
             }
             TurnIntent::Reply(ReplyTarget::Event(target)) => {
-                if !self
-                    .store
-                    .knows(self.branch, character, target, Some(context.through))?
+                let reply_target = self.store.event(self.branch, target)?;
+                if !reply_target.draft.kind.is_message()
+                    || !self
+                        .store
+                        .knows(self.branch, character, target, Some(context.through))?
                 {
                     return Err(domain::TimelineError::Invalid(
                         "reply target must be a known event",
@@ -1052,7 +1036,7 @@ mod tests {
         assert_eq!(timeline.anchor().through, 2);
     }
 
-    fn reset_and_relearn(
+    fn reset_and_retell(
         store: &mut dyn TimelineRepository,
         branch: BranchId,
         original: EventId,
@@ -1060,27 +1044,41 @@ mod tests {
     ) {
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
         reset.observers.insert(CharacterId::Mita);
-        let mut disclosure = EventDraft::new(EventKind::EventObserved);
-        disclosure.observers.insert(CharacterId::Mita);
-        disclosure.links.push(CausalLink {
-            relation: CausalRelation::Observes,
+        let mut retelling = EventDraft::new(EventKind::PlayerMessage);
+        retelling.actor = Some("player".into());
+        retelling.observers.insert(CharacterId::Mita);
+        retelling.links.push(CausalLink {
+            relation: CausalRelation::CausedBy,
             event_id: original,
         });
+        let retelling_id = retelling.id;
         let head = store.branch(branch).unwrap().head_sequence;
         store
-            .append(branch, head, key, json!({}), vec![reset, disclosure])
+            .append(branch, head, key, json!({}), vec![reset, retelling])
             .unwrap();
         assert!(
-            store
+            !store
                 .knows(branch, CharacterId::Mita, original, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .knows(branch, CharacterId::Mita, retelling_id, None)
                 .unwrap()
         );
     }
 
-    fn assert_stale_pin(timeline: &SessionTimeline, original: EventId, at: ContextAnchor) {
-        let pin = timeline
-            .capture_turn(CharacterId::Mita, original, at)
-            .unwrap();
+    fn assert_stale_pin(
+        timeline: &SessionTimeline,
+        pin: TimelineTurn,
+        original: EventId,
+        at: ContextAnchor,
+    ) {
+        assert!(
+            timeline
+                .capture_turn(CharacterId::Mita, original, at)
+                .is_err()
+        );
         assert_eq!(pin.context_head, at.through);
         assert_eq!(pin.context_epoch, 0);
         assert!(
@@ -1097,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_epoch_cannot_be_replaced_by_later_reset_and_relearning() {
+    fn captured_epoch_cannot_be_replaced_by_later_reset_and_retelling() {
         let mut timeline = SessionTimeline::new();
         let original = EventId::new();
         timeline
@@ -1109,14 +1107,17 @@ mod tests {
         let at = captured.history.at;
         assert_eq!(captured.view.messages()[0].content, "original");
 
+        let pin = timeline
+            .capture_turn(CharacterId::Mita, original, at)
+            .unwrap();
         let branch = timeline.branch;
-        reset_and_relearn(
+        reset_and_retell(
             timeline.store.as_mut(),
             branch,
             original,
-            "reset-and-relearn",
+            "reset-and-retell",
         );
-        assert_stale_pin(&timeline, original, at);
+        assert_stale_pin(&timeline, pin, original, at);
         assert_eq!(captured.view.messages()[0].content, "original");
 
         let before = timeline.anchor().through;
@@ -1159,7 +1160,7 @@ mod tests {
 
     #[cfg(feature = "sqlite-system")]
     #[test]
-    fn external_sqlite_reset_and_relearning_cannot_repin_old_prompt() {
+    fn external_sqlite_reset_and_retelling_cannot_repin_old_prompt() {
         let path =
             std::env::temp_dir().join(format!("neuromita-snapshot-epoch-{}.db", Uuid::new_v4()));
         let session = SessionId::new();
@@ -1179,9 +1180,12 @@ mod tests {
             .unwrap()
             .history
             .at;
+        let pin = timeline
+            .capture_turn(CharacterId::Mita, original, at)
+            .unwrap();
         let mut external = storage::SqliteTimelineRepository::open(&path).unwrap();
-        reset_and_relearn(&mut external, branch, original, "remote-reset-and-relearn");
-        assert_stale_pin(&timeline, original, at);
+        reset_and_retell(&mut external, branch, original, "remote-reset-and-retell");
+        assert_stale_pin(&timeline, pin, original, at);
 
         let before = timeline.anchor().through;
         assert_eq!(

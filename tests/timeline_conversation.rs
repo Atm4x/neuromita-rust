@@ -1,10 +1,7 @@
 use neuromita::{
     character::CharacterId,
     timeline::{
-        conversation::{
-            ConversationMessage, ConversationSpeaker, append_conversation_message,
-            disclose_conversation_message,
-        },
+        conversation::{ConversationMessage, ConversationSpeaker, append_conversation_message},
         domain::{
             AppendGuard, BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId,
             TimelineError, TimelineFact, TimelineRepository, TimelineStore,
@@ -134,41 +131,30 @@ fn contract(
     assert_eq!(mita.messages()[1].event_id, kind.messages()[0].event_id);
     assert_eq!(kind.messages()[0].learned_at, 2);
 
-    let disclosure_id = neuromita::timeline::EventId::new();
-    let guard = AppendGuard {
-        selection_generation: 1,
-        context: None,
-        accepted_reply_revision: None,
-    };
-    let disclosure = disclose_conversation_message(
-        repo,
-        branch,
-        2,
-        guard,
-        disclosure_id,
-        incoming.id,
-        [CharacterId::KindMita].into(),
-    )
-    .unwrap();
-    assert_eq!(disclosure.sequence, 3);
-    assert_eq!(
-        disclose_conversation_message(
-            repo,
-            branch,
-            3,
-            guard,
-            disclosure_id,
-            incoming.id,
-            [CharacterId::KindMita].into(),
-        )
-        .unwrap(),
-        disclosure,
+    let mut retelling = ConversationMessage::new(
+        "dialogue:kind:retelling",
+        ConversationSpeaker::Character(CharacterId::KindMita),
+        json!("Mita answered a question before you arrived"),
+        [CharacterId::Mita],
     );
+    retelling.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
+        event_id: incoming.id,
+    });
+    let retold = publish(repo, branch, retelling.clone()).unwrap();
+    assert_eq!(retold.sequence, 3);
+    assert_eq!(publish(repo, branch, retelling).unwrap(), retold);
     let kind = TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None).unwrap();
     assert_eq!(kind.count(), 2);
-    assert_eq!(kind.messages()[1].event_id, incoming.id);
-    assert_eq!(kind.messages()[1].learned_at, 3);
-    assert_eq!(kind.messages()[0].sequence, 2);
+    assert!(
+        !repo
+            .knows(branch, CharacterId::KindMita, incoming.id, None)
+            .unwrap()
+    );
+    assert!(
+        repo.knows(branch, CharacterId::KindMita, retold.draft.id, None)
+            .unwrap()
+    );
     assert_eq!(before.count(), 1);
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
@@ -223,7 +209,7 @@ fn one_canonical_conversation_message_for_multiple_listeners_sqlite_reopen() {
         assert_eq!(kind.provider_messages()[0]["role"], "user");
         assert_eq!(
             kind.provider_messages()[1]["content"],
-            json!([{"type":"text", "text":"Private question"}])
+            json!("Mita answered a question before you arrived")
         );
     }
     for suffix in ["", "-wal", "-shm"] {
@@ -336,15 +322,18 @@ async fn application_publishes_shared_conversation_without_generating() {
         .await
         .unwrap();
     assert_eq!(before_disclosure.view.count(), 1);
-    let shared = app
-        .disclose_conversation_message(
-            selection,
-            neuromita::timeline::EventId::new(),
-            private_fact.draft.id,
-            [CharacterId::KindMita].into(),
-        )
-        .unwrap();
-    assert_eq!(shared.draft.kind, EventKind::EventObserved);
+    let mut report = ConversationMessage::new(
+        "shared:retelling",
+        ConversationSpeaker::Character(CharacterId::Mita),
+        json!("A private question was asked"),
+        [CharacterId::KindMita],
+    );
+    report.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
+        event_id: private_fact.draft.id,
+    });
+    let shared = app.publish_conversation_message(selection, report).unwrap();
+    assert_eq!(shared.draft.kind, EventKind::CharacterMessage);
     let after = app
         .character(CharacterId::KindMita)
         .unwrap()
@@ -352,7 +341,8 @@ async fn application_publishes_shared_conversation_without_generating() {
         .await
         .unwrap();
     assert_eq!(after.view.count(), 2);
-    assert_eq!(after.view.messages()[1].event_id, private_fact.draft.id);
+    assert_eq!(after.view.messages()[1].event_id, shared.draft.id);
+    assert_ne!(after.view.messages()[1].event_id, private_fact.draft.id);
     assert_eq!(app.active_requests(), 0);
     app.shutdown().await.unwrap();
 }

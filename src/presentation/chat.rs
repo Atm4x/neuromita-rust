@@ -15,9 +15,8 @@ use crate::{
         ReplyRequest, RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestSnapshot,
         RequestSource, SubmitError, UserInput,
     },
-    settings::{SettingsError, SettingsOwner, VoiceSettings},
+    settings::SettingsError,
     timeline::{ContextPosition, EventId},
-    voice::{VoiceOptions, VoicePlan},
 };
 
 #[derive(Debug, Clone)]
@@ -50,7 +49,6 @@ pub enum PresenterError {
 #[derive(Clone)]
 pub struct ChatPresenter {
     api: Arc<ChatApiState>,
-    settings: Arc<SettingsOwner>,
     preset: GenerationPreset,
     model: watch::Receiver<Arc<ChatModel>>,
 }
@@ -68,18 +66,7 @@ impl ChatPresenter {
             input,
             RequestSource::Presenter,
         );
-        Ok(self.api.send(request.with_voice(self.voice_plan()?))?)
-    }
-    fn voice_plan(&self) -> Result<VoicePlan, SettingsError> {
-        let voice = self.settings.snapshot::<VoiceSettings>()?.value;
-        Ok(if voice.in_launcher {
-            VoicePlan::Synthesize(VoiceOptions {
-                voice: voice.voice,
-                volume: voice.volume,
-            })
-        } else {
-            VoicePlan::Disabled
-        })
+        Ok(self.api.send(request)?)
     }
     pub fn react(
         &self,
@@ -94,8 +81,7 @@ impl ChatPresenter {
             target,
             input,
             RequestSource::Presenter,
-        )
-        .with_voice(self.voice_plan()?);
+        );
         Ok(self.api.send(request)?)
     }
     pub fn initiate(
@@ -109,8 +95,7 @@ impl ChatPresenter {
             self.preset.clone(),
             input,
             RequestSource::Presenter,
-        )
-        .with_voice(self.voice_plan()?);
+        );
         Ok(self.api.send(request)?)
     }
     pub fn reply_at(
@@ -125,8 +110,7 @@ impl ChatPresenter {
             UserInput::new(text)?,
             RequestSource::Presenter,
         )
-        .at(at)
-        .with_voice(self.voice_plan()?);
+        .at(at);
         Ok(self.api.send(request)?)
     }
 
@@ -166,7 +150,6 @@ pub(crate) struct PresenterRunner {
 impl PresenterRunner {
     pub(crate) fn new(
         api: Arc<ChatApiState>,
-        settings: Arc<SettingsOwner>,
         preset: GenerationPreset,
         discovery: RequestDiscovery,
         capacity: usize,
@@ -182,7 +165,6 @@ impl PresenterRunner {
         let (updates, receive) = mpsc::channel(capacity);
         let presenter = ChatPresenter {
             api: Arc::clone(&api),
-            settings,
             preset,
             model: receive_model,
         };

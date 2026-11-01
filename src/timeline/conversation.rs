@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::domain::{
-    AppendGuard, BranchId, CausalLink, CausalRelation, EventDraft, EventKind, TimelineError,
-    TimelineFact, TimelineRepository,
+    AppendGuard, BranchId, CausalLink, Event, EventDraft, EventKind, TimelineError, TimelineFact,
+    TimelineRepository,
 };
 
 /// A speaker's stable identity, independent of how each listener renders its role.
@@ -57,6 +57,15 @@ impl ConversationAudience {
     }
 }
 
+/// A semantic utterance is an event with an author and separate routing metadata.
+/// A recipient is not necessarily a witness; witnessing never follows causal links.
+pub trait Message: Event {
+    fn speaker(&self) -> ConversationSpeaker;
+    fn targets(&self) -> &BTreeSet<ConversationSpeaker>;
+    fn participants(&self) -> &BTreeSet<ConversationSpeaker>;
+    fn content(&self) -> &Value;
+}
+
 /// One conversation message, regardless of whether player, character or generation produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
@@ -70,6 +79,43 @@ pub struct ConversationMessage {
     pub request_id: Option<RequestId>,
     pub reply_to: Option<EventId>,
     pub context: Option<ContextAnchor>,
+}
+
+impl Event for ConversationMessage {
+    fn event_id(&self) -> EventId {
+        self.id
+    }
+    fn kind(&self) -> EventKind {
+        match self.speaker {
+            ConversationSpeaker::Player => EventKind::PlayerMessage,
+            ConversationSpeaker::Character(_) => EventKind::CharacterMessage,
+        }
+    }
+    fn witnesses(&self) -> BTreeSet<CharacterId> {
+        let mut witnesses = self.audience.seen_by.clone();
+        if let ConversationSpeaker::Character(character) = self.speaker {
+            witnesses.insert(character);
+        }
+        witnesses
+    }
+    fn links(&self) -> &[CausalLink] {
+        &self.links
+    }
+}
+
+impl Message for ConversationMessage {
+    fn speaker(&self) -> ConversationSpeaker {
+        self.speaker
+    }
+    fn targets(&self) -> &BTreeSet<ConversationSpeaker> {
+        &self.audience.targets
+    }
+    fn participants(&self) -> &BTreeSet<ConversationSpeaker> {
+        &self.audience.participants
+    }
+    fn content(&self) -> &Value {
+        &self.content
+    }
 }
 
 impl ConversationMessage {
@@ -115,10 +161,7 @@ impl ConversationMessage {
                 "conversation message requires content",
             ));
         }
-        let kind = match self.speaker {
-            ConversationSpeaker::Player => EventKind::PlayerMessage,
-            ConversationSpeaker::Character(_) => EventKind::CharacterMessage,
-        };
+        let kind = self.kind();
         let mut witnesses = self.audience.seen_by;
         if let ConversationSpeaker::Character(character) = self.speaker {
             witnesses.insert(character);
@@ -186,47 +229,5 @@ pub fn append_conversation_message(
     )?;
     facts.into_iter().next().ok_or(TimelineError::Invalid(
         "conversation message must commit one fact",
-    ))
-}
-
-/// Share an existing conversation message with additional witnesses without
-/// creating a second message or changing its original audience.
-pub fn disclose_conversation_message(
-    repository: &mut dyn TimelineRepository,
-    branch: BranchId,
-    expected_head: u64,
-    guard: AppendGuard,
-    disclosure_id: EventId,
-    source: EventId,
-    witnesses: BTreeSet<CharacterId>,
-) -> Result<TimelineFact, TimelineError> {
-    if witnesses.is_empty() {
-        return Err(TimelineError::Invalid(
-            "conversation disclosure requires witnesses",
-        ));
-    }
-    let original = repository.event(branch, source)?;
-    if !original.draft.kind.is_message() {
-        return Err(TimelineError::Invalid(
-            "conversation disclosure requires a message",
-        ));
-    }
-    let mut draft = EventDraft::new(EventKind::EventObserved);
-    draft.id = disclosure_id;
-    draft.observers = witnesses;
-    draft.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: source,
-    });
-    let facts = repository.append_guarded(
-        branch,
-        expected_head,
-        &format!("conversation-disclosure:{}", disclosure_id.0),
-        json!({}),
-        vec![draft],
-        guard,
-    )?;
-    facts.into_iter().next().ok_or(TimelineError::Invalid(
-        "conversation disclosure must commit one fact",
     ))
 }

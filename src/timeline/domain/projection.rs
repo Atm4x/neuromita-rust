@@ -9,27 +9,19 @@ use super::{
 
 pub fn character_view(facts: &[TimelineFact], character: CharacterId) -> Vec<KnownEvent> {
     let mut known = HashMap::<EventId, KnownEvent>::new();
-    let mut previous = HashMap::<EventId, &TimelineFact>::new();
     for fact in facts {
         if let Some(change) = knowledge_change(fact, character) {
             if change.reset {
                 known.clear();
             }
-            for id in change.acquired {
-                let original = if id == fact.draft.id {
-                    Some(fact)
-                } else {
-                    previous.get(&id).copied()
-                };
-                if let Some(original) = original {
-                    known.entry(id).or_insert_with(|| KnownEvent {
-                        fact: original.clone(),
-                        learned_at: fact.sequence,
-                    });
-                }
-            }
+            known.insert(
+                change.acquired,
+                KnownEvent {
+                    fact: fact.clone(),
+                    learned_at: fact.sequence,
+                },
+            );
         }
-        previous.insert(fact.draft.id, fact);
     }
     let mut output: Vec<_> = known.into_values().collect();
     output.sort_by_key(|known| (known.learned_at, known.fact.sequence));

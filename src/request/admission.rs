@@ -5,7 +5,7 @@ use std::{
 
 use tokio::sync::mpsc;
 
-use super::{Message, RequestDiscovery, RequestHandle, RequestRegistry, SubmitError};
+use super::{GenerationCommand, RequestDiscovery, RequestHandle, RequestRegistry, SubmitError};
 use crate::{
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
@@ -56,7 +56,7 @@ impl ChatApiState {
     }
     pub(crate) fn send(
         &self,
-        request: impl Message + 'static,
+        request: impl GenerationCommand + 'static,
     ) -> Result<RequestHandle, SubmitError> {
         let accepting = self.accepting.lock().expect("admission mutex poisoned");
         if !*accepting {

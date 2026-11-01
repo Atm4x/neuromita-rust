@@ -3,9 +3,8 @@ use serde_json::{Map, Value};
 use crate::identity::CharacterId;
 
 use super::domain::{
-    BranchId, CausalRelation, CharacterMessageProjection, CharacterWorldProjection, EventKind,
-    KnownEvent, MessageRole, ProjectedMessage, ProjectedWorldEvent, TimelineError,
-    TimelineRepository, knowledge_change,
+    BranchId, CharacterMessageProjection, CharacterWorldProjection, KnownEvent, MessageRole,
+    ProjectedMessage, ProjectedWorldEvent, TimelineError, TimelineRepository, knowledge_change,
 };
 
 fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
@@ -122,7 +121,6 @@ pub struct TimelineMessageQueries;
 
 impl TimelineMessageQueries {
     /// Scans direct witnesses through a fixed head in bounded repository pages.
-    /// Disclosure resolves original facts without exposing undisclosed information.
     pub fn capture(
         repository: &dyn TimelineRepository,
         branch: BranchId,
@@ -145,24 +143,6 @@ impl TimelineMessageQueries {
                 break;
             }
             for fact in &page {
-                if fact.draft.kind == EventKind::EventObserved {
-                    for link in &fact.draft.links {
-                        if link.relation == CausalRelation::Observes {
-                            let original = repository.event(branch, link.event_id)?;
-                            if original.sequence >= fact.sequence {
-                                return Err(TimelineError::Invalid(
-                                    "disclosure target is not in past",
-                                ));
-                            }
-                            let disclosed = KnownEvent {
-                                fact: original,
-                                learned_at: fact.sequence,
-                            };
-                            projection.observe(&disclosed);
-                            world.observe(&disclosed);
-                        }
-                    }
-                }
                 let known = KnownEvent {
                     fact: fact.clone(),
                     learned_at: fact.sequence,

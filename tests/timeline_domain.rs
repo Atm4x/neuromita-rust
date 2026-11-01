@@ -147,62 +147,48 @@ fn empty_batch_gets_receipt_without_inventing_event() {
 }
 
 #[test]
-fn character_only_learns_private_event_by_explicit_disclosure() {
+fn retelling_never_grants_prior_event_knowledge() {
     let (mut timeline, root) = setup();
     let secret = fact(EventKind::UnityEvent, CharacterId::Mita);
     let secret_id = secret.id;
     push(&mut timeline, root, "secret", vec![secret]);
+    let mut retelling = fact(EventKind::CharacterMessage, CharacterId::KindMita);
+    retelling.actor = Some(CharacterId::Mita.to_string());
+    retelling.observers.insert(CharacterId::Mita);
+    retelling.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
+        event_id: secret_id,
+    });
+    let report_id = retelling.id;
+    push(&mut timeline, root, "retelling", vec![retelling]);
     assert!(
         !timeline
             .knows(root, CharacterId::KindMita, secret_id, None)
             .unwrap()
     );
-    let mut disclosure = fact(EventKind::EventObserved, CharacterId::KindMita);
-    disclosure.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: secret_id,
-    });
-    push(&mut timeline, root, "disclose", vec![disclosure]);
-    let view = timeline.view(root, CharacterId::KindMita, None).unwrap();
-    let revealed = view
-        .iter()
-        .find(|event| event.fact.draft.id == secret_id)
-        .unwrap();
-    assert_eq!(revealed.learned_at, 2);
-    assert_eq!(revealed.fact.sequence, 1);
+    assert!(
+        timeline
+            .knows(root, CharacterId::KindMita, report_id, None)
+            .unwrap()
+    );
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, secret_id, Some(1))
+            .knows(root, CharacterId::KindMita, report_id, Some(1))
             .unwrap()
     );
-}
 
-#[test]
-fn context_reset_forgets_and_subsequent_disclosure_restores_knowledge() {
-    let (mut timeline, root) = setup();
-    let secret = fact(EventKind::UnityEvent, CharacterId::Mita);
-    let id = secret.id;
-    push(&mut timeline, root, "secret", vec![secret]);
-    push(
-        &mut timeline,
-        root,
-        "reset",
-        vec![fact(EventKind::CharacterContextReset, CharacterId::Mita)],
-    );
-    assert!(!timeline.knows(root, CharacterId::Mita, id, None).unwrap());
-    let mut disclose = fact(EventKind::EventObserved, CharacterId::Mita);
-    disclose.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: id,
-    });
-    push(&mut timeline, root, "relearn", vec![disclose]);
-    let view = timeline.view(root, CharacterId::Mita, None).unwrap();
-    assert_eq!(
-        view.iter()
-            .find(|known| known.fact.draft.id == id)
+    let mut reset = fact(EventKind::CharacterContextReset, CharacterId::KindMita);
+    reset.payload.insert("reason".into(), json!("forget"));
+    push(&mut timeline, root, "reset", vec![reset]);
+    assert!(
+        !timeline
+            .knows(root, CharacterId::KindMita, report_id, None)
             .unwrap()
-            .learned_at,
-        3
+    );
+    assert!(
+        !timeline
+            .knows(root, CharacterId::KindMita, secret_id, None)
+            .unwrap()
     );
 }
 
@@ -227,9 +213,9 @@ fn response_cannot_target_unknown_or_future_events() {
     response.observers.insert(CharacterId::Mita);
     response.actor = Some(CharacterId::Mita.to_string());
     push(&mut timeline, root, "known", vec![response]);
-    let mut missing = fact(EventKind::EventObserved, CharacterId::Mita);
+    let mut missing = fact(EventKind::UnityEvent, CharacterId::Mita);
     missing.links.push(CausalLink {
-        relation: CausalRelation::Observes,
+        relation: CausalRelation::CausedBy,
         event_id: neuromita::timeline::EventId::new(),
     });
     assert_eq!(
@@ -581,7 +567,7 @@ fn failed_batch_does_not_mutate_incremental_knowledge_index() {
 }
 
 #[test]
-fn one_batch_reset_and_disclosure_restore_response_rights() {
+fn reset_and_retelling_in_one_batch_do_not_restore_original_reply_rights() {
     let (mut timeline, root) = setup();
     let mut question = fact(EventKind::PlayerMessage, CharacterId::Mita);
     question.actor = Some("player".into());
@@ -589,45 +575,33 @@ fn one_batch_reset_and_disclosure_restore_response_rights() {
     push(&mut timeline, root, "question", vec![question]);
 
     let reset = fact(EventKind::CharacterContextReset, CharacterId::Mita);
-    let mut premature = fact(EventKind::CharacterMessage, CharacterId::Mita);
-    premature.actor = Some(CharacterId::Mita.to_string());
-    premature.links.push(CausalLink {
-        relation: CausalRelation::ReplyTo,
+    let mut report = fact(EventKind::CharacterMessage, CharacterId::Mita);
+    report.actor = Some(CharacterId::Mita.to_string());
+    report.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
         event_id: question_id,
     });
+    let report_id = report.id;
+    push(&mut timeline, root, "reset-and-retell", vec![reset, report]);
     assert!(
-        timeline
-            .append(
-                root,
-                1,
-                "before-disclosure",
-                json!({}),
-                vec![reset.clone(), premature]
-            )
-            .is_err()
-    );
-
-    let mut disclosure = fact(EventKind::EventObserved, CharacterId::Mita);
-    disclosure.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: question_id,
-    });
-    let mut answer = fact(EventKind::CharacterMessage, CharacterId::Mita);
-    answer.actor = Some(CharacterId::Mita.to_string());
-    answer.links.push(CausalLink {
-        relation: CausalRelation::ReplyTo,
-        event_id: question_id,
-    });
-    push(
-        &mut timeline,
-        root,
-        "after-disclosure",
-        vec![reset, disclosure, answer],
-    );
-    assert!(
-        timeline
+        !timeline
             .knows(root, CharacterId::Mita, question_id, None)
             .unwrap()
     );
-    assert_eq!(timeline.branch(root).unwrap().head_sequence, 4);
+    assert!(
+        timeline
+            .knows(root, CharacterId::Mita, report_id, None)
+            .unwrap()
+    );
+
+    let mut invalid = fact(EventKind::CharacterMessage, CharacterId::Mita);
+    invalid.actor = Some(CharacterId::Mita.to_string());
+    invalid.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: question_id,
+    });
+    assert!(matches!(
+        timeline.append(root, 3, "reply-to-forgotten", json!({}), vec![invalid]),
+        Err(TimelineError::Invalid(_))
+    ));
 }

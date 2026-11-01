@@ -57,7 +57,7 @@ impl WorldIndex {
             if change.reset {
                 known.clear();
             }
-            known.extend(change.acquired);
+            known.insert(change.acquired);
         }
     }
 
@@ -139,7 +139,7 @@ impl<'a> AppendIndex<'a> {
                 change.reset = true;
                 change.added.clear();
             }
-            change.added.extend(effect.acquired);
+            change.added.insert(effect.acquired);
         }
     }
 }

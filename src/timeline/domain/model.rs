@@ -54,7 +54,6 @@ pub enum EventKind {
     GameEnded,
     PlayerInactive,
     ProactiveOpportunity,
-    EventObserved,
     SessionNote,
     MessageHidden,
     MessageRevised,
@@ -76,13 +75,21 @@ pub enum CausalRelation {
     ReplyTo,
     ReactTo,
     CausedBy,
-    Observes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CausalLink {
     pub relation: CausalRelation,
     pub event_id: EventId,
+}
+
+/// Domain interface for an immutable occurrence, independent of its storage representation.
+/// The Timeline decides effective knowledge using actual witnesses and reset history.
+pub trait Event {
+    fn event_id(&self) -> EventId;
+    fn kind(&self) -> EventKind;
+    fn witnesses(&self) -> BTreeSet<CharacterId>;
+    fn links(&self) -> &[CausalLink];
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,12 +137,42 @@ impl EventDraft {
     }
 }
 
+impl Event for EventDraft {
+    fn event_id(&self) -> EventId {
+        self.id
+    }
+    fn kind(&self) -> EventKind {
+        self.kind
+    }
+    fn witnesses(&self) -> BTreeSet<CharacterId> {
+        self.observers.clone()
+    }
+    fn links(&self) -> &[CausalLink] {
+        &self.links
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineFact {
     pub session_id: SessionId,
     pub branch_id: BranchId,
     pub sequence: u64,
     pub draft: EventDraft,
+}
+
+impl Event for TimelineFact {
+    fn event_id(&self) -> EventId {
+        self.draft.event_id()
+    }
+    fn kind(&self) -> EventKind {
+        self.draft.kind()
+    }
+    fn witnesses(&self) -> BTreeSet<CharacterId> {
+        self.draft.witnesses()
+    }
+    fn links(&self) -> &[CausalLink] {
+        self.draft.links()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

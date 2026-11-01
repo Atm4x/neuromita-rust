@@ -280,7 +280,7 @@ mod tests {
         timeline::{
             conversation::{
                 ConversationAudience, ConversationMessage, ConversationSpeaker,
-                append_conversation_message, disclose_conversation_message,
+                append_conversation_message,
             },
             domain::{AppendGuard, BranchId, SessionId, TimelineStore},
             view::TimelineMessageQueries,
@@ -352,54 +352,57 @@ mod tests {
     }
 
     #[test]
-    fn overheard_message_retains_its_original_addressee_after_disclosure() {
+    fn witnessed_retelling_never_exposes_the_original_private_message() {
         let mut store = TimelineStore::new();
         let branch = BranchId::new();
         store.create_session(SessionId::new(), branch).unwrap();
 
-        let mut message = ConversationMessage::new(
-            "hello-b",
+        let mut original = ConversationMessage::new(
+            "private-b-to-player",
             ConversationSpeaker::Character(CharacterId::KindMita),
             json!("Только для игрока"),
-            [CharacterId::KindMita],
+            [],
         );
-        message.audience.targets.insert(ConversationSpeaker::Player);
-        message.audience.participants.extend([
+        original
+            .audience
+            .targets
+            .insert(ConversationSpeaker::Player);
+        let original_id = append(&mut store, branch, original);
+
+        let mut retelling = ConversationMessage::new(
+            "b-retells-private",
             ConversationSpeaker::Character(CharacterId::KindMita),
-            ConversationSpeaker::Player,
-        ]);
-        let id = append(&mut store, branch, message);
-        let before =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+            json!("Я говорила кое-что игроку"),
+            [CharacterId::Mita],
+        );
+        retelling
+            .audience
+            .targets
+            .insert(ConversationSpeaker::Character(CharacterId::Mita));
+        retelling.links.push(crate::timeline::domain::CausalLink {
+            relation: crate::timeline::domain::CausalRelation::CausedBy,
+            event_id: original_id,
+        });
+        let retelling_id = append(&mut store, branch, retelling);
         assert!(
-            project_history(&before, CharacterId::Mita, None)
-                .0
-                .is_empty()
+            !store
+                .knows(branch, CharacterId::Mita, original_id, None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .knows(branch, CharacterId::Mita, retelling_id, None)
+                .unwrap()
         );
 
-        let head = store.branch(branch).unwrap().head_sequence;
-        disclose_conversation_message(
-            &mut store,
-            branch,
-            head,
-            AppendGuard {
-                selection_generation: 1,
-                context: None,
-                accepted_reply_revision: None,
-            },
-            EventId::new(),
-            id,
-            [CharacterId::Mita].into(),
-        )
-        .unwrap();
-        let after =
+        let view =
             TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
-        let (messages, _) = project_history(&after, CharacterId::Mita, None);
+        let (messages, _) = project_history(&view, CharacterId::Mita, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, LlmRole::User);
         assert_eq!(
             messages[0].text,
-            "[Собеседник: kind-mita -> player] Только для игрока"
+            "[Собеседник: kind-mita -> mita] Я говорила кое-что игроку"
         );
     }
 

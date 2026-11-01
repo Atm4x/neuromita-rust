@@ -27,7 +27,6 @@ use crate::{
     },
     runtime::{self, ApiBindings},
     settings::{VoiceSettings, Volume},
-    voice::{VoiceOptions, VoicePlan},
 };
 
 pub struct ServerConfig {
@@ -342,9 +341,7 @@ async fn client(
                         Command::Reply { character, text } => (character, text),
                         _ => unreachable!(),
                     };
-                    let voice = api.settings.snapshot::<VoiceSettings>().map_err(io::Error::other)?.value;
-                    let voice = if voice.in_game { VoicePlan::Synthesize(VoiceOptions { voice: voice.voice, volume: voice.volume }) } else { VoicePlan::Disabled };
-                    let request = UserInput::new(text).map(|input| ReplyRequest::new(character, config.preset.clone(), input, RequestSource::Client(client_id)).with_voice(voice));
+                    let request = UserInput::new(text).map(|input| ReplyRequest::new(character, config.preset.clone(), input, RequestSource::Client(client_id)));
                     let handle = match request.map_err(|error| error.to_string()).and_then(|request| api.chat.send(request).map_err(|error| error.to_string())) {
                         Ok(handle) => handle,
                         Err(error) => { send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error}), &stop).await?; continue; }

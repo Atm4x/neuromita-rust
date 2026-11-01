@@ -15,7 +15,7 @@ mod world;
 
 pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};
 pub use model::{
-    AppendGuard, BranchId, BranchInfo, CausalLink, CausalRelation, EventDraft, EventKind,
+    AppendGuard, BranchId, BranchInfo, CausalLink, CausalRelation, Event, EventDraft, EventKind,
     KnownEvent, SessionId, TimelineError, TimelineFact,
 };
 pub use projection::{character_view, knows, present_characters};

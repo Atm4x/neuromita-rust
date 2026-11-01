@@ -59,19 +59,23 @@ fn run_projection_contract(repo: &mut dyn TimelineRepository) {
         0
     );
 
-    let mut disclosure = EventDraft::new(EventKind::EventObserved);
-    disclosure.observers.insert(CharacterId::KindMita);
-    disclosure.links.push(CausalLink {
-        relation: CausalRelation::Observes,
+    let mut report = player("Mita mentioned a private topic", &[CharacterId::KindMita]);
+    report.actor = Some("player".into());
+    report.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
         event_id: secret_id,
     });
-    push(repo, branch, vec![disclosure]);
+    let report_id = report.id;
+    push(repo, branch, vec![report]);
     let learned =
         TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None).unwrap();
     assert_eq!(learned.count(), 1);
-    assert_eq!(learned.provider_messages()[0]["timeline_sequence"], 1);
-    assert_eq!(learned.provider_messages()[0]["timeline_learned_at"], 2);
-
+    assert_eq!(learned.messages()[0].event_id, report_id);
+    assert!(
+        !repo
+            .knows(branch, CharacterId::KindMita, secret_id, None)
+            .unwrap()
+    );
     let mut revise = mutation(
         EventKind::MessageRevised,
         CharacterId::Mita,
@@ -94,7 +98,7 @@ fn run_projection_contract(repo: &mut dyn TimelineRepository) {
         TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None)
             .unwrap()
             .provider_messages()[0]["content"],
-        json!([{"type":"text","text":"private"}])
+        json!([{"type":"text","text":"Mita mentioned a private topic"}])
     );
 
     push(
@@ -141,20 +145,19 @@ fn run_projection_contract(repo: &mut dyn TimelineRepository) {
         0
     );
     assert_eq!(first.count(), 1);
-    let mut disclose_again = EventDraft::new(EventKind::EventObserved);
-    disclose_again.observers.insert(CharacterId::Mita);
-    disclose_again.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: secret_id,
-    });
-    push(repo, branch, vec![disclose_again]);
-    let relearned = TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None).unwrap();
-    assert_eq!(relearned.count(), 1);
-    assert_eq!(relearned.messages()[0].learned_at, 7);
-    assert_eq!(relearned.messages()[0].content, "");
-    assert_eq!(
-        relearned.provider_messages()[0]["content"],
-        json!([{"type":"text","text":"private"}])
+    let later_report = player(
+        "I remember hearing about a private question",
+        &[CharacterId::Mita],
+    );
+    let report_id = later_report.id;
+    push(repo, branch, vec![later_report]);
+    let current = TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None).unwrap();
+    assert_eq!(current.count(), 1);
+    assert_eq!(current.messages()[0].event_id, report_id);
+    assert!(
+        !repo
+            .knows(branch, CharacterId::Mita, secret_id, None)
+            .unwrap()
     );
     let before_reset =
         TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, Some(5)).unwrap();
@@ -348,23 +351,21 @@ fn run_world_context_contract(repo: &mut dyn TimelineRepository) {
     assert_eq!(earlier.world_events().len(), 1);
     assert_eq!(earlier.count(), 0);
 
-    let mut disclose = EventDraft::new(EventKind::EventObserved);
-    disclose.observers.insert(CharacterId::Mita);
-    disclose.links.push(CausalLink {
-        relation: CausalRelation::Observes,
+    let mut report = player("Someone mentioned a hidden move", &[CharacterId::Mita]);
+    report.links.push(CausalLink {
+        relation: CausalRelation::CausedBy,
         event_id: secret_id,
     });
-    push(repo, root, vec![disclose]);
+    push(repo, root, vec![report]);
     let post_disclosure =
         TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
-    assert_eq!(post_disclosure.world_events().len(), 2);
-    assert_eq!(post_disclosure.world_events()[1].event_id, secret_id);
-    assert_eq!(post_disclosure.world_events()[1].sequence, 2);
-    assert_eq!(post_disclosure.world_events()[1].learned_at, 4);
-    assert!(matches!(
-        post_disclosure.context_entries()[2],
-        ContextEntry::World(_)
-    ));
+    assert_eq!(post_disclosure.world_events().len(), 1);
+    assert_eq!(post_disclosure.count(), 2);
+    assert!(
+        !repo
+            .knows(root, CharacterId::Mita, secret_id, None)
+            .unwrap()
+    );
     assert_eq!(pre_disclosure.world_events().len(), 1);
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
@@ -373,20 +374,16 @@ fn run_world_context_contract(repo: &mut dyn TimelineRepository) {
     let after_reset = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
     assert_eq!(after_reset.count(), 0);
     assert!(after_reset.world_events().is_empty());
-    assert_eq!(post_disclosure.world_events().len(), 2);
+    assert_eq!(post_disclosure.world_events().len(), 1);
 
-    let mut relearn = EventDraft::new(EventKind::EventObserved);
-    relearn.observers.insert(CharacterId::Mita);
-    relearn.links.push(CausalLink {
-        relation: CausalRelation::Observes,
-        event_id: door_id,
-    });
-    push(repo, root, vec![relearn]);
+    let after_report = player("The door had opened earlier", &[CharacterId::Mita]);
+    let report_id = after_report.id;
+    push(repo, root, vec![after_report]);
     let relearned = TimelineMessageQueries::capture(repo, root, CharacterId::Mita, None).unwrap();
-    assert_eq!(relearned.world_events().len(), 1);
-    assert_eq!(relearned.world_events()[0].event_id, door_id);
-    assert_eq!(relearned.world_events()[0].learned_at, 6);
-    assert_eq!(relearned.world_events()[0].sequence, 1);
+    assert_eq!(relearned.world_events().len(), 0);
+    assert_eq!(relearned.count(), 1);
+    assert_eq!(relearned.messages()[0].event_id, report_id);
+    assert!(!repo.knows(root, CharacterId::Mita, door_id, None).unwrap());
     assert!(
         TimelineMessageQueries::capture(repo, root, CharacterId::KindMita, None)
             .unwrap()
