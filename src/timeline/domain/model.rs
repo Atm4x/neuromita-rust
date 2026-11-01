@@ -144,7 +144,7 @@ pub struct KnownEvent {
     pub learned_at: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub id: BranchId,
     pub session_id: SessionId,
@@ -164,4 +164,6 @@ pub enum TimelineError {
     ConcurrentWrite,
     #[error("invalid timeline operation: {0}")]
     Invalid(&'static str),
+    #[error("timeline storage failed: {0}")]
+    Storage(String),
 }

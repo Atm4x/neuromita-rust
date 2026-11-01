@@ -1,6 +1,6 @@
 use crate::identity::{CharacterId, EventId};
 
-use super::domain::{BranchId, EventKind, TimelineError, TimelineStore};
+use super::domain::{BranchId, EventKind, TimelineError, TimelineRepository};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineSelection {
@@ -17,6 +17,17 @@ pub struct TimelineTurn {
     pub trigger: Option<EventId>,
 }
 
+/// Durable compare-and-set selection independent of the chosen storage engine.
+/// Selecting even the same branch must advance the generation.
+pub trait TimelineSelectionRepository {
+    fn selection(&self) -> Result<Option<TimelineSelection>, TimelineError>;
+    fn select_branch(
+        &mut self,
+        branch: BranchId,
+        expected: Option<TimelineSelection>,
+    ) -> Result<TimelineSelection, TimelineError>;
+}
+
 #[derive(Default)]
 pub struct SessionWorkspace {
     selected: Option<TimelineSelection>,
@@ -29,7 +40,7 @@ impl SessionWorkspace {
 
     pub fn select(
         &mut self,
-        store: &TimelineStore,
+        store: &dyn TimelineRepository,
         branch: BranchId,
         expected: Option<TimelineSelection>,
     ) -> Result<TimelineSelection, TimelineError> {
@@ -53,7 +64,7 @@ impl SessionWorkspace {
 
     pub fn capture(
         &self,
-        store: &TimelineStore,
+        store: &dyn TimelineRepository,
         character: CharacterId,
         trigger: Option<EventId>,
     ) -> Result<TimelineTurn, TimelineError> {
@@ -75,7 +86,7 @@ impl SessionWorkspace {
 
     pub fn assert_current(
         &self,
-        store: &TimelineStore,
+        store: &dyn TimelineRepository,
         turn: TimelineTurn,
     ) -> Result<(), TimelineError> {
         if self.selected != Some(turn.selection)
@@ -93,7 +104,7 @@ impl SessionWorkspace {
     }
 
     fn context_epoch(
-        store: &TimelineStore,
+        store: &dyn TimelineRepository,
         branch: BranchId,
         character: CharacterId,
     ) -> Result<u64, TimelineError> {
@@ -115,7 +126,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::timeline::domain::{EventDraft, EventKind, SessionId};
+    use crate::timeline::domain::{EventDraft, EventKind, SessionId, TimelineStore};
 
     #[test]
     fn selecting_same_branch_still_invalidates_old_pins() {

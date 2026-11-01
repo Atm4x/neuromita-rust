@@ -27,11 +27,15 @@
 
 ## Этап B — постоянное хранилище и перенос между хранилищами
 
-- [ ] Реализовать `TimelineRepository` на стороне Rust с атомарной транзакционной семантикой.
-- [ ] SQLite repository, WAL, индексы, batch/receipt, durable selection, reopen/recovery.
+- [x] `TimelineRepository`: независимый объектный порт доменной семантики. CFMD должен реализовать этот же контракт без изменения событий/веток/знаний.
+- [x] SQLite (`sqlite-system`): WAL, нормализованные ветки / события / свидетели / receipts; `BEGIN IMMEDIATE` для атомарных операций и проверка `expected_head` под блокировкой записи; открытие после завершения Core.
+- [x] Отдельный порт `TimelineSelectionRepository`: durable CAS выбора ветки; повторный выбор инкрементирует generation.
+- [x] SQL-индексированное ограниченное чтение прямых фактов по ветке, позиции, количеству, непосредственному наблюдателю и inherited prefix; это ещё не готовый кеш MitaView.
+- [x] Тесты одного контракта на in-memory / SQLite: receipt после reopen, атомарный batch и SQL fault injection после обновления head, конкурентные отдельные соединения, совпадение страниц через ветвление.
+- [ ] Быстрая операция append без полного восстановления доменного store из SQLite на каждую запись. Сейчас семантика единая и корректная, но холодная запись O(вся история); обязателен бенчмарк/профилирование перед производством.
 - [ ] Перенести вложения `TimelineAssetStore` и контентно-адресуемые ссылки с верификацией.
 - [ ] Версионированный `SessionArchive`: export/import, строгая проверка дерева, ссылок, receipts и assets.
-- [ ] Параметризованные тесты одного доменного контракта на памяти и SQLite, включая отказ в середине транзакции.
+- [ ] Полный crash recovery для сквозных операций Python state participants / Unity / Character — SQLite транзакция только для timeline не решает распределённое восстановление.
 
 ## Этап C — MitaView / история / наблюдения
 
@@ -44,10 +48,11 @@
 ## Этап D — связи с живым ядром и средами
 
 - [x] Подключить in-memory доменный `TimelineStore` как единственный источник фактов в действующем `SessionTimeline` (`timeline/mod.rs`); старые `HistoryView`/`EventContent` стали вычисляемыми compatibility-проекциями.
-- [ ] Сменить in-memory backend на транзакционный durable repository, сохранив эту единственность истории.
+- [x] В `ApplicationConfig.timeline` можно **явно** выбрать SQLite repository по пути/SessionId/BranchId (опциональная Cargo feature `sqlite-system`), единственное хранилище событий для работающего Core. Старый transient-режим сохранён как явно выбранная конфигурация.
+- [ ] Подключить live `MessageHandler` к durable selection / turn pins: порт выбора и локальная validation есть, но смена ветки не влияет на текущий обработчик запросов.
 - [ ] Завершить согласованный `CharacterHandler.prepare`/`accept` и транзакционную приёмку state/effects.
 - [x] Локальный контракт `SessionWorkspace`: selection CAS, generation, pin и validation для reset/смены ветки; **пока не подключён** к работающему Request/CharacterHandler.
-- [ ] `SessionTimelineRuntime`: durable selection, pin в реальном MessageHandler, отмена токенов, полноценное восстановление перед активацией.
+- [ ] `SessionTimelineRuntime`: уже есть SQLite durable selection CAS, но ещё нет pin в реальном MessageHandler, отмены токенов и восстановления владельцев состояния перед активацией.
 - [ ] `ConversationTimeline`: message identities, reply/react/initiate; отдельные факты речи и наблюдений.
 - [ ] Unity ingress: сведения о мире, видимость, приватность, игровые события, idempotent receipts.
 - [ ] Launcher Sandbox: самостоятельный messenger context (удалённое общение), без симуляции Unity.
@@ -67,8 +72,9 @@
 - [x] `cargo clippy --offline --all-targets -- -D warnings`.
 - [x] `cargo fmt --check`.
 - [x] Domain parity tests на ветвление, receipts, causal, знание, reset, presentation edits (18 integration (including deterministic stress and concurrency) + 3 workspace unit + 2 compatibility unit).
+- [x] SQLite integration (feature `sqlite-system`): domain parity, SQL fault injection, reopen, конкурентные записи, индексированные страницы, durable selection и реальный Core restart.
 - [x] Проверено, что новые timeline/domain и selection импортируют только identity/interaction и собственные низовые компоненты; инверсии `timeline -> character/request` не добавлены. Это ручная проверка направленности, не автоматическое доказательство компилятором.
 
 ## Следующий пакет изменений
 
-Довести SQLite repository до той же транзакционной семантики, что и базовый доменный store, затем подключить selection/turn pins и restore через реальный `CharacterHandler`. **CharacterHandler уже использует новый in-memory store через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.
+Ускорить SQLite append без полного чтения хранилища и подключить durable selection/turn pins и restore через реальный `CharacterHandler`. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует новый in-memory store через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::identity::{CharacterId, EventId};
@@ -12,21 +13,21 @@ use super::{
     projection::{character_view, knows, present_characters},
 };
 
-#[derive(Debug, Clone)]
-struct Receipt {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Receipt {
     command: Value,
     drafts: Vec<EventDraft>,
     result: Vec<TimelineFact>,
 }
 
-#[derive(Debug)]
-struct Branch {
-    info: BranchInfo,
-    events: Vec<TimelineFact>,
-    receipts: HashMap<String, Receipt>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Branch {
+    pub(crate) info: BranchInfo,
+    pub(crate) events: Vec<TimelineFact>,
+    pub(crate) receipts: HashMap<String, Receipt>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TimelineStore {
     branches: HashMap<BranchId, Branch>,
 }
@@ -34,6 +35,78 @@ pub struct TimelineStore {
 impl TimelineStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn persisted_receipt(&self, branch: BranchId, key: &str) -> Option<&Receipt> {
+        self.branches.get(&branch)?.receipts.get(key)
+    }
+
+    pub(crate) fn persisted_branches(&self) -> Vec<Branch> {
+        let mut branches: Vec<_> = self.branches.values().cloned().collect();
+        branches.sort_by_key(|branch| branch.info.id.0);
+        branches
+    }
+
+    pub(crate) fn load_persisted(branches: Vec<Branch>) -> Result<Self, TimelineError> {
+        let mut map = HashMap::new();
+        let mut roots = HashMap::new();
+        for branch in branches {
+            let info = branch.info;
+            if info.parent.is_none() && roots.insert(info.session_id, info.id).is_some() {
+                return Err(TimelineError::Storage("duplicate session root".into()));
+            }
+            if info.fork_sequence.checked_add(branch.events.len() as u64)
+                != Some(info.head_sequence)
+            {
+                return Err(TimelineError::Storage("invalid branch event count".into()));
+            }
+            for (index, event) in branch.events.iter().enumerate() {
+                if event.sequence != info.fork_sequence + index as u64 + 1
+                    || event.session_id != info.session_id
+                    || event.branch_id != info.id
+                {
+                    return Err(TimelineError::Storage(
+                        "invalid persisted event identity".into(),
+                    ));
+                }
+            }
+            if map.insert(info.id, branch).is_some() {
+                return Err(TimelineError::Storage("duplicate branch identity".into()));
+            }
+        }
+        for branch in map.values() {
+            let info = branch.info;
+            if let Some(parent) = info.parent {
+                let parent_info = map
+                    .get(&parent)
+                    .ok_or_else(|| TimelineError::Storage("missing parent branch".into()))?
+                    .info;
+                if parent_info.session_id != info.session_id
+                    || info.fork_sequence == 0
+                    || info.fork_sequence > parent_info.head_sequence
+                    || info.checkpoint.is_none()
+                {
+                    return Err(TimelineError::Storage("invalid branch lineage".into()));
+                }
+            } else if info.fork_sequence != 0 || info.checkpoint.is_some() {
+                return Err(TimelineError::Storage("invalid root branch".into()));
+            }
+        }
+        let store = Self { branches: map };
+        for info in store.branches.values().map(|branch| branch.info) {
+            let mut visited = HashSet::new();
+            let mut cursor = Some(info.id);
+            while let Some(id) = cursor {
+                if !visited.insert(id) {
+                    return Err(TimelineError::Storage("cyclic branch lineage".into()));
+                }
+                cursor = store
+                    .branches
+                    .get(&id)
+                    .and_then(|branch| branch.info.parent);
+            }
+        }
+        Ok(store)
     }
 
     pub fn create_session(

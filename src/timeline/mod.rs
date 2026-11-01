@@ -12,10 +12,11 @@ use crate::{
 pub use crate::identity::EventId;
 pub mod domain;
 pub mod selection;
+pub mod storage;
 
 use domain::{
     BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId, TimelineFact,
-    TimelineStore,
+    TimelineRepository, TimelineStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,9 +68,19 @@ pub struct HistoryView {
     pub events: Vec<TimelineEvent>,
 }
 
+pub enum TimelineConfig {
+    Transient,
+    #[cfg(feature = "sqlite-system")]
+    Sqlite {
+        database: std::path::PathBuf,
+        session: SessionId,
+        root: BranchId,
+    },
+}
+
 pub(crate) struct SessionTimeline {
     branch: BranchId,
-    store: TimelineStore,
+    store: Box<dyn TimelineRepository + Send>,
 }
 
 impl SessionTimeline {
@@ -79,7 +90,30 @@ impl SessionTimeline {
         store
             .create_session(SessionId::new(), branch)
             .expect("fresh session must create its branch");
-        Self { branch, store }
+        Self {
+            branch,
+            store: Box::new(store),
+        }
+    }
+
+    pub(crate) fn from_config(config: TimelineConfig) -> Result<Self, domain::TimelineError> {
+        match config {
+            TimelineConfig::Transient => Ok(Self::new()),
+            #[cfg(feature = "sqlite-system")]
+            TimelineConfig::Sqlite {
+                database,
+                session,
+                root,
+            } => {
+                use storage::SqliteTimelineRepository;
+                let mut store = SqliteTimelineRepository::open(database)?;
+                store.create_session(session, root)?;
+                Ok(Self {
+                    branch: root,
+                    store: Box::new(store),
+                })
+            }
+        }
     }
 
     pub(crate) fn anchor(&self) -> ContextAnchor {

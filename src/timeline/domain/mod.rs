@@ -1,6 +1,7 @@
 mod messages;
 mod model;
 mod projection;
+mod repository;
 mod store;
 
 pub use messages::{MessageRole, ProjectedMessage, character_messages};
@@ -10,3 +11,6 @@ pub use model::{
 };
 pub use projection::{character_view, knows, present_characters};
 pub use store::TimelineStore;
+pub(crate) use store::{Branch, Receipt};
+
+pub use repository::TimelineRepository;

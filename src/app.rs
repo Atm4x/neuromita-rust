@@ -26,7 +26,7 @@ use crate::{
         AppSettings, MemorySettingsRepository, SettingsConfig, SettingsError, SettingsLifecycle,
         SettingsSource,
     },
-    timeline::{SessionTimeline, TimelineEvent},
+    timeline::{SessionTimeline, TimelineConfig, TimelineEvent, domain::TimelineError},
     voice::{UnavailableVoiceProvider, VoiceProvider},
 };
 
@@ -44,6 +44,7 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub settings: SettingsConfig,
+    pub timeline: TimelineConfig,
     pub server: ServerConfig,
 }
 
@@ -56,6 +57,7 @@ impl ApplicationConfig {
     ) -> Self {
         Self {
             server: ServerConfig::test_protocol(bind, CharacterId::Mita, preset.clone()),
+            timeline: TimelineConfig::Transient,
             preset,
             generator,
             limits,
@@ -76,6 +78,8 @@ pub enum ApplicationError {
     Task(String),
     #[error(transparent)]
     Settings(#[from] SettingsError),
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
     #[error("server: {0}")]
     Server(#[from] std::io::Error),
 }
@@ -115,12 +119,13 @@ impl ApplicationLifecycle {
             limits,
             voice,
             settings,
+            timeline,
             server,
         } = config;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
-        let timeline = Arc::new(Mutex::new(SessionTimeline::new()));
+        let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
