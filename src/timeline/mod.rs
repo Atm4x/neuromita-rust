@@ -337,14 +337,14 @@ impl SessionTimeline {
         Ok(count)
     }
 
-    pub(crate) fn validate_reaction_context(
+    pub(crate) fn reaction_cause_at(
         &self,
         character: CharacterId,
         intent: TurnIntent,
         at: ContextAnchor,
-    ) -> Result<(), domain::TimelineError> {
+    ) -> Result<Option<domain::TimelineFact>, domain::TimelineError> {
         let TurnIntent::React(target) = intent else {
-            return Ok(());
+            return Ok(None);
         };
         if at.branch_id != self.branch.0 {
             return Err(domain::TimelineError::Invalid(
@@ -361,7 +361,7 @@ impl SessionTimeline {
                 "reaction cause was not known at captured context",
             ));
         }
-        Ok(())
+        Ok(Some(fact))
     }
 
     #[cfg(test)]
@@ -421,9 +421,32 @@ impl SessionTimeline {
         id: EventId,
         text: Arc<str>,
     ) -> Result<(), String> {
-        let mut draft = make_draft(id, EventKind::PlayerMessage, character, text, Some(request));
+        self.write_player_message(character, id, text, Some(request))
+    }
+
+    pub(crate) fn publish_player_message(
+        &mut self,
+        character: CharacterId,
+        id: EventId,
+        text: Arc<str>,
+    ) -> Result<(), String> {
+        self.write_player_message(character, id, text, None)
+    }
+
+    fn write_player_message(
+        &mut self,
+        character: CharacterId,
+        id: EventId,
+        text: Arc<str>,
+        request: Option<RequestId>,
+    ) -> Result<(), String> {
+        let mut draft = make_draft(id, EventKind::PlayerMessage, character, text, request);
         draft.actor = Some("player".to_string());
-        self.commit(format!("input:{}", request.0), draft, None)
+        let operation_key = request.map_or_else(
+            || format!("message:{}", id.0),
+            |request| format!("input:{}", request.0),
+        );
+        self.commit(operation_key, draft, None)
             .map_err(|error| error.to_string())
     }
 
@@ -618,6 +641,42 @@ mod tests {
                 .is_err()
         );
         assert_eq!(timeline.anchor().through, 2);
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn standalone_message_remains_durable_without_request_receipt() {
+        let path = std::env::temp_dir().join(format!(
+            "neuromita-standalone-message-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let id = EventId::new();
+        for reopen in [false, true] {
+            let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            if !reopen {
+                timeline
+                    .publish_player_message(CharacterId::Mita, id, Arc::from("independent input"))
+                    .unwrap();
+            }
+            let events = timeline.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].id, id);
+            assert_eq!(events[0].request_id, None);
+            let captured = timeline
+                .capture_context(CharacterId::Mita, ContextPosition::Latest)
+                .unwrap();
+            assert_eq!(captured.view.messages()[0].content, "independent input");
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

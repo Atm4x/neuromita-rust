@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use crate::{
     identity::CharacterId,
-    timeline::{ContextAnchor, EventId, HistoryView, selection::TimelineTurn, view::MitaView},
+    interaction::TurnIntent,
+    timeline::{
+        ContextAnchor, EventId, HistoryView, domain::EventKind, selection::TimelineTurn,
+        view::MitaView,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +46,19 @@ impl Character {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionCause {
+    pub event_id: EventId,
+    pub kind: EventKind,
+    pub description: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationFocus {
+    pub intent: TurnIntent,
+    pub reaction: Option<ReactionCause>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CharacterContext {
     pub character_id: CharacterId,
@@ -52,6 +69,7 @@ pub struct CharacterContext {
     pub view: MitaView,
     pub current_input: Arc<str>,
     pub trigger: EventId,
+    pub focus: GenerationFocus,
     pub anchor: ContextAnchor,
     pub(crate) turn: TimelineTurn,
 }

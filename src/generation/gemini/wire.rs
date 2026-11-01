@@ -6,9 +6,12 @@ use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::GenerationError,
+    interaction::TurnIntent,
     timeline::{domain::MessageRole, view::MitaView},
 };
 use serde_json::Value;
+
+use crate::identity::EventId;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,14 +69,45 @@ fn message_text(fields: &serde_json::Map<String, Value>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn history_contents(view: &MitaView) -> Vec<Content> {
-    let mut contents = Vec::new();
-    for message in view.messages() {
-        let Some(text) = message_text(&message.fields) else {
+    history_contents_with_focus(view, None).0
+}
+
+fn history_contents_with_focus(
+    view: &MitaView,
+    target: Option<(EventId, TurnIntent)>,
+) -> (Vec<Content>, bool) {
+    let messages = view.messages();
+    let target_id = target.map(|(id, _)| id);
+    let focus_needs_marker = target.is_some_and(|(id, intent)| {
+        messages
+            .iter()
+            .position(|message| message.event_id == id)
+            .is_some_and(|index| {
+                matches!(intent, TurnIntent::React(_)) || index + 1 < messages.len()
+            })
+    });
+    let mut contents = Vec::with_capacity(messages.len());
+    let mut target_present = false;
+    for message in messages {
+        let Some(mut text) = message_text(&message.fields) else {
             continue;
         };
         if text.trim().is_empty() {
             continue;
+        }
+        if Some(message.event_id) == target_id {
+            target_present = true;
+            if focus_needs_marker {
+                let label =
+                    if target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_))) {
+                        "Событие, вызвавшее текущую реакцию"
+                    } else {
+                        "Сообщение, на которое готовится текущий ответ"
+                    };
+                text = format!("{label}:\n{text}");
+            }
         }
         match message.role {
             MessageRole::User => contents.push(content(Some("user"), &text)),
@@ -83,18 +117,46 @@ fn history_contents(view: &MitaView) -> Vec<Content> {
             }
         }
     }
-    contents
+    (contents, target_present)
 }
 
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let mut contents = history_contents(&context.view);
-    if !context
-        .view
-        .messages()
-        .iter()
-        .any(|message| message.event_id == context.trigger)
-    {
-        contents.push(content(Some("user"), &context.current_input));
+    let focus = match context.focus.intent {
+        TurnIntent::Reply => Some((context.trigger, context.focus.intent)),
+        TurnIntent::React(id) => Some((id, context.focus.intent)),
+        TurnIntent::Initiate => None,
+    };
+    let (mut contents, target_present) = history_contents_with_focus(&context.view, focus);
+    match context.focus.intent {
+        TurnIntent::Reply if !target_present => {
+            contents.push(content(Some("user"), &context.current_input));
+        }
+        TurnIntent::React(_) => {
+            let task = if target_present {
+                format!(
+                    "Текущая задача — отреагировать на отмеченное событие. Учитывай и более поздние известные сведения.\n{}",
+                    context.current_input
+                )
+            } else if let Some(cause) = &context.focus.reaction {
+                match &cause.description {
+                    Some(description) => format!(
+                        "Текущая задача — реакция на известное событие ({:?}): {}. Учитывай весь последующий известный контекст.\n{}",
+                        cause.kind, description, context.current_input
+                    ),
+                    None => format!(
+                        "Текущая задача — реакция на известное событие ({:?}). Учитывай весь последующий известный контекст.\n{}",
+                        cause.kind, context.current_input
+                    ),
+                }
+            } else {
+                context.current_input.to_string()
+            };
+            contents.push(content(Some("user"), &task));
+        }
+        TurnIntent::Initiate => {
+            contents.push(content(Some("user"), &context.current_input));
+        }
+        TurnIntent::Reply => {}
     }
     GenerateContent {
         system_instruction: content(
@@ -317,6 +379,200 @@ mod tests {
             encoded[2]["parts"][0]["text"],
             "Сведения сессии:\nRain started"
         );
+    }
+
+    #[test]
+    fn reply_focus_marks_old_target_without_dropping_newer_messages() {
+        use crate::{
+            character::{CharacterState, GenerationFocus},
+            identity::CharacterId,
+            timeline::{
+                ContextAnchor, HistoryView,
+                domain::{BranchId, EventDraft, EventKind, SessionId, TimelineStore},
+                selection::{TimelineSelection, TimelineTurn},
+                view::TimelineMessageQueries,
+            },
+        };
+        let branch = BranchId::new();
+        let mut store = TimelineStore::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        let mut ids = Vec::new();
+        for (key, content) in [("target", "old question"), ("newer", "new question")] {
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Mita);
+            draft.payload.insert("content".into(), json!(content));
+            ids.push(draft.id);
+            let head = store.branch(branch).unwrap().head_sequence;
+            store
+                .append(branch, head, key, json!({}), vec![draft])
+                .unwrap();
+        }
+        let view =
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+        let context = CharacterContext {
+            character_id: CharacterId::Mita,
+            description: Arc::from("Mita"),
+            prompt: Arc::from("Speak naturally"),
+            state: CharacterState {
+                accepted_replies: 0,
+                revision: 0,
+            },
+            history: HistoryView {
+                at: ContextAnchor {
+                    branch_id: branch.0,
+                    through: 2,
+                },
+                events: vec![],
+            },
+            view,
+            current_input: Arc::from("old question"),
+            trigger: ids[0],
+            focus: GenerationFocus {
+                intent: TurnIntent::Reply,
+                reaction: None,
+            },
+            anchor: ContextAnchor {
+                branch_id: branch.0,
+                through: 2,
+            },
+            turn: TimelineTurn {
+                selection: TimelineSelection {
+                    branch_id: branch,
+                    generation: 1,
+                },
+                context_head: 2,
+                character: CharacterId::Mita,
+                context_epoch: 0,
+                trigger: Some(ids[0]),
+            },
+        };
+        let template = GeminiTemplate::google(
+            "test-model",
+            "test-key",
+            super::super::GenerationSettings::new(0.5, 64, std::time::Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(encode(context, &template)).unwrap();
+        let contents = encoded["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert!(
+            contents[0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("old question")
+        );
+        assert!(
+            contents[0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("на которое готовится текущий ответ")
+        );
+        assert_eq!(contents[1]["parts"][0]["text"], "new question");
+        assert_eq!(encoded.to_string().matches("old question").count(), 1);
+    }
+
+    #[test]
+    fn reaction_focus_includes_non_message_cause_without_leaking_other_characters() {
+        use crate::{
+            character::{CharacterState, GenerationFocus, ReactionCause},
+            identity::CharacterId,
+            timeline::{
+                ContextAnchor, HistoryView,
+                domain::{BranchId, EventDraft, EventKind, SessionId, TimelineStore},
+                selection::{TimelineSelection, TimelineTurn},
+                view::TimelineMessageQueries,
+            },
+        };
+        let branch = BranchId::new();
+        let mut store = TimelineStore::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        let mut cause = EventDraft::new(EventKind::UnityEvent);
+        cause.observers.insert(CharacterId::Mita);
+        cause.payload.insert("content".into(), json!("door opened"));
+        let cause_id = cause.id;
+        let mut question = EventDraft::new(EventKind::PlayerMessage);
+        question.observers.insert(CharacterId::Mita);
+        question.actor = Some("player".into());
+        question
+            .payload
+            .insert("content".into(), json!("Why did the door open?"));
+        let mut secret = EventDraft::new(EventKind::PlayerMessage);
+        secret.observers.insert(CharacterId::KindMita);
+        secret.actor = Some("player".into());
+        secret
+            .payload
+            .insert("content".into(), json!("only KindMita knows"));
+        for (key, draft) in [
+            ("cause", cause),
+            ("question", question),
+            ("private", secret),
+        ] {
+            let head = store.branch(branch).unwrap().head_sequence;
+            store
+                .append(branch, head, key, json!({}), vec![draft])
+                .unwrap();
+        }
+        let view =
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+        let context = CharacterContext {
+            character_id: CharacterId::Mita,
+            description: Arc::from("Mita"),
+            prompt: Arc::from("Speak naturally"),
+            state: CharacterState {
+                accepted_replies: 0,
+                revision: 0,
+            },
+            history: HistoryView {
+                at: ContextAnchor {
+                    branch_id: branch.0,
+                    through: 3,
+                },
+                events: vec![],
+            },
+            view,
+            current_input: Arc::from("Comment on the event"),
+            trigger: EventId::new(),
+            focus: GenerationFocus {
+                intent: TurnIntent::React(cause_id),
+                reaction: Some(ReactionCause {
+                    event_id: cause_id,
+                    kind: EventKind::UnityEvent,
+                    description: Some(Arc::from("door opened")),
+                }),
+            },
+            anchor: ContextAnchor {
+                branch_id: branch.0,
+                through: 3,
+            },
+            turn: TimelineTurn {
+                selection: TimelineSelection {
+                    branch_id: branch,
+                    generation: 1,
+                },
+                context_head: 3,
+                character: CharacterId::Mita,
+                context_epoch: 0,
+                trigger: None,
+            },
+        };
+        let template = GeminiTemplate::google(
+            "test-model",
+            "test-key",
+            super::super::GenerationSettings::new(0.5, 64, std::time::Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+        let encoded = serde_json::to_value(encode(context, &template)).unwrap();
+        let user = encoded["contents"].as_array().unwrap();
+        assert_eq!(user.len(), 2);
+        assert_eq!(user[0]["parts"][0]["text"], "Why did the door open?");
+        let last = user[1]["parts"][0]["text"].as_str().unwrap();
+        assert!(last.contains("UnityEvent"));
+        assert!(last.contains("door opened"));
+        assert!(last.contains("Comment on the event"));
+        assert!(!encoded.to_string().contains("only KindMita knows"));
     }
 
     #[test]

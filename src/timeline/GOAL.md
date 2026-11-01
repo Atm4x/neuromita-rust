@@ -110,7 +110,7 @@
 - [x] Узкий `CharacterState` (accepted replies/revision) восстанавливается по фактам принятых ответов конкретной ветви, не по субъективной HistoryView. Reset/hide не обнуляют счётчик, SQLite reopen сохраняет его. На приёмке счётчик перечитывается для выявления сторонних изменений.
 - [x] Контрактная проверка In-memory/SQLite, включая cause snapshot и provider rules; локальные и SQLite-тесты Rust 1.98.1.
 
-**Граница:** полный mutable CharacterState не сделан durable/atomic с Timeline; подсчёт принятых ответов по канонической истории сейчас O(история). И `reply`, и `react` используют все известные персонажу события на зафиксированном при исполнении anchor. Входы `ChatApi.reply` теперь публикуются при admission до исполнения; отдельный публичный message-only ingress по-прежнему не реализован.
+**Граница:** полный mutable CharacterState не сделан durable/atomic с Timeline; подсчёт принятых ответов по канонической истории сейчас O(история). И `reply`, и `react` используют все известные персонажу события на зафиксированном при исполнении anchor. Входы `ChatApi.reply` теперь публикуются при admission до исполнения; публичный message-only ingress реализован отдельно и не создаёт RequestRecord.
 
 ## Следующий пакет изменений
 
@@ -123,4 +123,13 @@
 - [x] Admission pinning: selection generation связывает очередь с выбранным миром; stale queued requests отменяются без перехода в новую ветку. Отдельные `append_player_message`/`append_proactive_trigger` и `RequestIngress` в application composition не загрязняют domain правилами request registry.
 - [x] Тесты: отложенная `react` видит позднее `reply` до фактического dispatch; отменённое ожидающее сообщение остаётся; отказ из-за queue overflow не пишет факт; SQLite reopen сохраняет опубликованное сообщение; reselect инвалидирует очередь.
 
-**Открыто:** независимый от генерации публичный ввод сообщений; межпроцессная быстрая отмена без ожидания очереди; согласованная транзакция mutable CharacterState и provider multimodal parts. Не считать ingress-стадию самостоятельным завершением `ConversationTimeline`/`SessionRestoration`.
+**Открыто:** межпроцессная быстрая отмена без ожидания очереди; согласованная транзакция mutable CharacterState и provider multimodal parts. Не считать ingress-стадию самостоятельным завершением `ConversationTimeline`/`SessionRestoration`.
+
+## Публикация без генерации и явная цель ответа (2026-11-01)
+
+- [x] `ChatApi::publish_message(character, input)` записывает `PlayerMessage` независимо от `RequestRegistry`/LLM/очереди. В Timeline нет выдуманного `request_id`: операция идемпотентна по `message:<EventId>`, сохраняется SQLite-reopen, видна лишь указанному персонажу. Запись требует активного Core и актуального selection, отказ не создаёт запрос к провайдеру.
+- [x] `GenerationFocus` внутри `CharacterContext` отдельно хранит `TurnIntent` и разрешённую `ReactionCause` (id, kind, текстовое описание, если есть). Причина `react` проверяется на знание персонажем в фиксированном `ContextAnchor`; MitaView остаётся неизменённой read-моделью и включает все доступные последующие факты.
+- [x] Gemini-адаптер обозначает цель `reply`, если за ней появились более поздние сообщения, не копируя сам текст целевого сообщения второй раз. Для `react` обозначает уже известное событие, в том числе UnityEvent, отсутствующее в текстовой MitaView. Внешние инструкции не попадают в provider `systemInstruction`.
+- [x] Регрессионные тесты: старый reply target при новых сообщениях; нетекстовое событие как причина реакции, новые сообщения, приватность между персонажами; message-only вход → следующий prompt без запроса при публикации; SQLite reopen.
+
+**Не закрыто:** полная типизированная передача семантических Unity payload в мультимодальный provider, массовый broadcast сообщения, durable CharacterState и межпроцессная ранняя отмена. `ConversationTimeline` требует дальнейшего покрытия обратными сообщениями, реакциями и интеграцией игровых producers.

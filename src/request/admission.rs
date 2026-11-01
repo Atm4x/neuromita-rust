@@ -7,12 +7,18 @@ use tokio::sync::mpsc;
 
 use super::{Message, RequestDiscovery, RequestHandle, RequestRegistry, SubmitError};
 use crate::{
-    identity::{CharacterId, RequestId},
+    identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
     timeline::selection::TimelineSelection,
 };
 
 pub(crate) trait RequestIngress: Send + Sync {
+    fn publish_message(
+        &self,
+        character: CharacterId,
+        input: &UserInput,
+    ) -> Result<EventId, SubmitError>;
+
     fn admit(
         &self,
         request: RequestId,
@@ -73,6 +79,18 @@ impl ChatApiState {
         let handle = self.registry.register(Box::new(request), id, selection);
         permit.send(id);
         Ok(handle)
+    }
+
+    pub(crate) fn publish_message(
+        &self,
+        character: CharacterId,
+        input: UserInput,
+    ) -> Result<EventId, SubmitError> {
+        let accepting = self.accepting.lock().expect("admission mutex poisoned");
+        if !*accepting {
+            return Err(SubmitError::Stopped);
+        }
+        self.ingress.publish_message(character, &input)
     }
 
     pub(crate) fn observe_requests(&self) -> Result<RequestDiscovery, SubmitError> {

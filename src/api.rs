@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 use crate::{
     character::{CharacterError, CharacterHandle, CharacterId},
+    interaction::UserInput,
     request::{
         InitiateRequest, Message, ReactRequest, ReplyRequest, RequestDiscovery, RequestHandle,
         RequestId, SubmitError,
@@ -13,6 +14,7 @@ use crate::{
         SectionSnapshot, SettingsApi, SettingsError, SettingsOwner, SettingsSection,
         SettingsSnapshot,
     },
+    timeline::EventId,
 };
 
 pub struct CharacterApi;
@@ -28,6 +30,16 @@ impl CharacterApi {
 pub struct ChatApi;
 
 impl ChatApi {
+    pub fn publish_message(
+        character: CharacterId,
+        input: UserInput,
+    ) -> Result<EventId, SubmitError> {
+        runtime::current()
+            .map_err(SubmitError::from)?
+            .chat
+            .publish_message(character, input)
+    }
+
     pub fn reply(request: ReplyRequest) -> Result<RequestHandle, SubmitError> {
         Self::send(request)
     }

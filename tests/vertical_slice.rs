@@ -336,10 +336,12 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     assert!(late_observer.next().await.unwrap().is_none());
 
     let cancelled_call = server.next().await;
-    assert_eq!(
-        user_texts(&cancelled_call.body),
-        ["first", "never starts", "cancel during generation"]
-    );
+    let cancelled_user = user_texts(&cancelled_call.body);
+    assert_eq!(cancelled_user.len(), 3);
+    assert_eq!(cancelled_user[0], "first");
+    assert_eq!(cancelled_user[1], "never starts");
+    assert!(cancelled_user[2].contains("cancel during generation"));
+    assert!(cancelled_user[2].contains("Сообщение, на которое готовится текущий ответ"));
     assert_eq!(cancelled_call.body["contents"][3]["role"], "model");
     assert_eq!(
         cancelled_call.body["contents"][3]["parts"][0]["text"],
@@ -569,7 +571,11 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     let reaction_call = server.next().await;
     let user = user_texts(&reaction_call.body);
     assert!(user.contains(&"Why did you open the door?"));
-    assert!(user.contains(&"React to the door"));
+    assert!(user.iter().any(|text| text.contains("React to the door")));
+    assert!(
+        user.iter()
+            .any(|text| text.contains("отреагировать на отмеченное событие"))
+    );
     assert_eq!(
         user.iter()
             .filter(|text| **text == "Why did you open the door?")
@@ -588,7 +594,7 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     assert_eq!(
         user_texts(&question_call.body)
             .iter()
-            .filter(|text| **text == "Why did you open the door?")
+            .filter(|text| text.contains("Why did you open the door?"))
             .count(),
         1
     );
@@ -656,6 +662,68 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
             && matches!(event.content, EventContent::CharacterReply { .. })
     }));
     drop(blocked);
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn independent_player_message_is_visible_without_scheduling_generation() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> =
+        Arc::new(CheckedProvider(GeminiProvider::new().unwrap()));
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let input = UserInput::new("Message without an LLM request".into()).unwrap();
+    let event_id = input.event_id();
+    assert_eq!(
+        ChatApi::publish_message(CharacterId::Mita, input).unwrap(),
+        event_id
+    );
+    ChatApi::publish_message(
+        CharacterId::KindMita,
+        UserInput::new("Only KindMita can hear this".into()).unwrap(),
+    )
+    .unwrap();
+    let world = app.timeline();
+    assert_eq!(world.len(), 2);
+    assert!(
+        world
+            .iter()
+            .any(|event| event.id == event_id && event.request_id.is_none())
+    );
+
+    let reply = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("New question".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = server.next().await;
+    assert_eq!(
+        user_texts(&call.body),
+        ["Message without an LLM request", "New question"]
+    );
+    assert!(
+        !call
+            .body
+            .to_string()
+            .contains("Only KindMita can hear this")
+    );
+    call.respond.send(Reply::Text("response")).unwrap();
+    assert!(matches!(
+        finished(&reply).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }

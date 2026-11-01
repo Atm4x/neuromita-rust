@@ -11,7 +11,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CharacterContext, CharacterId, CharacterState, CharacterView, ResponseEffect, model::Character,
+    CharacterContext, CharacterId, CharacterState, CharacterView, ResponseEffect,
+    model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
     identity::RequestId,
@@ -314,9 +315,19 @@ impl CharacterHandler {
             .map_err(CharacterError::Internal)?;
         let anchor = captured.history.at;
         let state = state_at(&timeline, self.character.id, anchor)?;
-        timeline
-            .validate_reaction_context(self.character.id, intent, anchor)
-            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        let reaction = timeline
+            .reaction_cause_at(self.character.id, intent, anchor)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?
+            .map(|fact| ReactionCause {
+                event_id: fact.draft.id,
+                kind: fact.draft.kind,
+                description: fact
+                    .draft
+                    .payload
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(Arc::from),
+            });
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         if intent != TurnIntent::Reply {
             timeline
@@ -341,6 +352,7 @@ impl CharacterHandler {
             view: captured.view,
             current_input: Arc::clone(input.text()),
             trigger: input.event_id(),
+            focus: GenerationFocus { intent, reaction },
             anchor,
             turn,
         })

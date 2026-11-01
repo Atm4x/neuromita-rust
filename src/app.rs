@@ -17,6 +17,7 @@ pub use crate::runtime::ApplicationStatus;
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
+    identity::EventId,
     interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
@@ -106,6 +107,24 @@ struct TimelineRequestIngress {
 }
 
 impl RequestIngress for TimelineRequestIngress {
+    fn publish_message(
+        &self,
+        character: CharacterId,
+        input: &UserInput,
+    ) -> Result<EventId, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        timeline
+            .assert_selection(timeline.selection())
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        timeline
+            .publish_player_message(character, input.event_id(), Arc::clone(input.text()))
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        Ok(input.event_id())
+    }
+
     fn admit(
         &self,
         request: RequestId,
