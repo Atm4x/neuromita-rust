@@ -1,0 +1,29 @@
+name: Temporary timeline source bundle
+on:
+  push:
+    branches: [bridge/timeline-audit-source-20261101]
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create verified Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --tags
+          git bundle create repository.bundle --all
+          git bundle verify repository.bundle
+          git bundle list-heads repository.bundle
+          sha256sum repository.bundle > repository.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: timeline-rust-repository-bundle
+          path: |
+            repository.bundle
+            repository.bundle.sha256
+          retention-days: 1
