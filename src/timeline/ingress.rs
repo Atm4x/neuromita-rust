@@ -100,6 +100,11 @@ pub fn append_semantic_batch(
     if batch.events.is_empty() {
         return Err(TimelineError::Invalid("semantic batch must contain events"));
     }
+    let source_times: Vec<u64> = batch
+        .events
+        .iter()
+        .map(|event| event.occurred_at_unix_ms)
+        .collect();
     let drafts = batch
         .events
         .into_iter()
@@ -109,7 +114,7 @@ pub fn append_semantic_batch(
         branch,
         expected_head,
         &format!("semantic:{}", batch.operation_id),
-        json!({"kind": "semantic_world_ingress"}),
+        json!({"kind": "semantic_world_ingress", "source_times": source_times}),
         drafts,
         guard,
     )

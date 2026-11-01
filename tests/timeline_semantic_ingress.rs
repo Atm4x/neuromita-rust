@@ -91,6 +91,14 @@ fn contract(
     );
     assert_eq!(repository.branch(branch).unwrap().head_sequence, 3);
 
+    let mut different_time = batch.clone();
+    different_time.events[0].occurred_at_unix_ms += 1;
+    assert_eq!(
+        append(repository, branch, different_time),
+        Err(TimelineError::Conflict)
+    );
+    assert_eq!(repository.branch(branch).unwrap().head_sequence, 3);
+
     let valid = event(EventKind::GameEnded, &[CharacterId::Mita], "ChessWin");
     let invalid = event(
         EventKind::CharacterContextReset,

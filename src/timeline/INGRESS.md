@@ -13,7 +13,7 @@
 - `timeline::ingress::SemanticBatch` — одна операция с внешней стабильной идентичностью и последовательностью `SemanticEvent`.
 - `SemanticEvent` несёт собственный стабильный ID, тип, origin actor, явных свидетелей, структурированный payload и source timestamp. Не моделирует сетевой request/response Unity и не решает, какие свидетели имеют право получать событие.
 - Поддерживаются `UnityEvent`, `GameStarted/GameAction/GameEnded`, `CharacterJoined/Left`, `PlayerInactive`, `ProactiveOpportunity`; записи чата, reset знаний и администраторские изменения не маскируются под игровые события.
-- `append_semantic_batch` выполняет один guarded append. Если событие в пакете недопустимо, не записывается ничего. Повтор того же operation ID с теми же event IDs и данными возвращает исходный receipt. При изменении содержимого — конфликт.
+- `append_semantic_batch` выполняет один guarded append. Если событие в пакете недопустимо, не записывается ничего. Повтор того же operation ID с теми же event IDs, исходным временем и данными возвращает исходный receipt. При изменении содержимого или source timestamp — конфликт.
 - `ApplicationLifecycle::publish_semantic_events(selection, batch)` подключает операцию к живому Core без создания LLM-запроса. Выбор ветки/поколения проверяется перед записью и в той же SQLite-транзакции.
 - Сохранённые события поступают в уже существующий `MitaView` по правилам видимости и `learned_at`. Причина `react` не отсекает более поздние известные события.
 
