@@ -73,6 +73,54 @@ pub trait TimelineRepository {
             request,
         )
     }
+    /// Recover an admitted request identity from an input/event identity known
+    /// before submission. Only canonical PlayerMessage/ProactiveOpportunity
+    /// events carrying a RequestId qualify; no process-local state is inferred.
+    fn request_evidence_for_input_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        input: EventId,
+        through: Option<u64>,
+    ) -> Result<Option<(Uuid, RequestEvidence)>, TimelineError> {
+        let info = self.branch(branch)?;
+        let bound = through.unwrap_or(info.head_sequence);
+        if bound > info.head_sequence {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        let fact = match self.event(branch, input) {
+            Ok(fact) if fact.sequence <= bound => fact,
+            Ok(_) | Err(TimelineError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let addressed = match fact.draft.kind {
+            super::EventKind::PlayerMessage => {
+                fact.draft.actor.as_deref() == Some("player")
+                    && fact.draft.observers.contains(&character)
+            }
+            super::EventKind::ProactiveOpportunity => {
+                fact.draft.actor.as_deref().and_then(CharacterId::parse) == Some(character)
+                    && fact.draft.observers.contains(&character)
+            }
+            _ => false,
+        };
+        if !addressed {
+            return Ok(None);
+        }
+        let Some(request) = fact
+            .draft
+            .payload
+            .get("request_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+        else {
+            return Ok(None);
+        };
+        let evidence = self.request_evidence_at(branch, character, request, Some(bound))?;
+        Ok(Some((request, evidence)))
+    }
     /// Stable ascending page of direct facts; observer filters direct witnesses,
     /// not derived knowledge or later disclosures.
     fn read(

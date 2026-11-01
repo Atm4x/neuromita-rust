@@ -387,6 +387,20 @@ impl ApplicationLifecycle {
             .request_evidence_at(character, request, at)
     }
 
+    /// Reconcile by the input EventId retained before submitting a request.
+    /// NoRecord and an absent match are not evidence of cancellation or failure.
+    pub fn request_evidence_for_input_at(
+        &self,
+        character: CharacterId,
+        input: EventId,
+        at: crate::timeline::ContextAnchor,
+    ) -> Result<Option<(RequestId, crate::timeline::domain::RequestEvidence)>, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .request_evidence_for_input_at(character, input, at)
+    }
+
     pub fn timeline(&self) -> Vec<TimelineEvent> {
         self.timeline
             .lock()

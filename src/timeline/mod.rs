@@ -495,6 +495,20 @@ impl SessionTimeline {
             .request_evidence_at(branch, character, request.0, Some(at.through))
     }
 
+    /// Recover the request associated with an input identity retained before
+    /// submitting it, without resurrecting process-local execution.
+    pub(crate) fn request_evidence_for_input_at(
+        &self,
+        character: CharacterId,
+        input: EventId,
+        at: ContextAnchor,
+    ) -> Result<Option<(RequestId, domain::RequestEvidence)>, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        self.store
+            .request_evidence_for_input_at(branch, character, input, Some(at.through))
+            .map(|value| value.map(|(request, evidence)| (RequestId(request), evidence)))
+    }
+
     pub(crate) fn reaction_cause_at(
         &self,
         character: CharacterId,

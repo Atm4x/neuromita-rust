@@ -40,3 +40,33 @@ This requires **no extra durable status table**. It cannot recover in-memory
 `RequestHandle`, reproduce voice output, guarantee exactly-once external effects,
 or recover a `RequestId` lost when the process crashes between storing its
 input and returning the handle. Full durable request lifecycle remains open.
+
+## Caller-retained input identity
+
+`UserInput::with_event_id(event_id, text)` lets the caller choose and **persist** an
+`EventId` before submitting a reply, reaction, or initiation. The normal
+`UserInput::new` already allocates an `EventId`, retrievable with `event_id()`,
+but this value will be lost if the caller does not save it before submission.
+
+`ApplicationLifecycle::request_evidence_for_input_at(character, event_id, anchor)`
+uses that retained identity to find an **already committed** `PlayerMessage` or
+`ProactiveOpportunity` addressed to the character. If it contains a valid
+`RequestId`, the result contains `(RequestId, RequestEvidence)` for the chosen
+immutable branch prefix. This also supports read-only inspection of saved
+branches in the same session, without changing selection or restarting LLM/TTS.
+A plain `publish_message` has no request identity and returns `None`. A reset
+does not erase the input or accepted evidence; a fork only inherits its
+checkpoint prefix. Duplicate/ambiguous request evidence returns `Conflict`.
+
+For `reply`, input admission writes a `PlayerMessage` *before* the request
+handle is returned. Reusing the exact input `EventId` in a second submission
+does not create another message: event identity uniqueness rejects the second
+append. The caller should **reconcile**, not blindly retry generation. For
+`react/initiate`, the `ProactiveOpportunity` is written later, after context
+capture. Therefore `None` may mean the operation crashed or was cancelled
+before that durable trigger existed; it is **not** an exactly-once retry
+guarantee for those intents. Branch/session and `EventId` must be retained by
+the caller for meaningful recovery; this API does not persist client state.
+
+The lookup requires no separate request-status store and does not restore the
+process-local `RequestHandle` or assert anything about voice/external effects.

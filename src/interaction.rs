@@ -20,6 +20,12 @@ pub struct UserInput {
 
 impl UserInput {
     pub fn new(text: String) -> Result<Self, InputError> {
+        Self::with_event_id(EventId::new(), text)
+    }
+
+    /// Supply a caller-retained identity before submitting an input. It can
+    /// reconcile a request if the process exits before returning its handle.
+    pub fn with_event_id(event_id: EventId, text: String) -> Result<Self, InputError> {
         if text.trim().is_empty() {
             return Err(InputError::Empty);
         }
@@ -27,7 +33,7 @@ impl UserInput {
             return Err(InputError::TooLarge);
         }
         Ok(Self {
-            event_id: EventId::new(),
+            event_id,
             text: Arc::from(text),
         })
     }

@@ -407,3 +407,123 @@ fn request_evidence_survives_sqlite_reopen_without_a_request_registry() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+#[test]
+fn preissued_input_identity_recovers_request_without_handle() {
+    use neuromita::request::UserInput;
+    use neuromita::timeline::domain::RequestEvidence;
+
+    let input_id = neuromita::timeline::EventId::new();
+    let supplied_input = UserInput::with_event_id(input_id, "hello".into()).unwrap();
+    assert_eq!(supplied_input.event_id(), input_id);
+    assert!(UserInput::with_event_id(input_id, "   ".into()).is_err());
+
+    let mut repo = TimelineStore::new();
+    let root = BranchId::new();
+    let child = BranchId::new();
+    repo.create_session(SessionId::new(), root).unwrap();
+    let req = RequestId(Uuid::new_v4());
+    let mut draft = input(req, CharacterId::Mita);
+    draft.id = input_id;
+    let admitted = append(&mut repo, root, "first", draft);
+    let lookup = |repo: &TimelineStore, branch, character, through| {
+        repo.request_evidence_for_input_at(branch, character, input_id, through)
+            .unwrap()
+    };
+    assert_eq!(lookup(&repo, root, CharacterId::Mita, Some(0)), None);
+    assert_eq!(lookup(&repo, root, CharacterId::KindMita, None), None);
+    assert_eq!(
+        lookup(&repo, root, CharacterId::Mita, None),
+        Some((req.0, RequestEvidence::PlayerInput(admitted.clone())))
+    );
+
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    append(&mut repo, root, "checkpoint", checkpoint);
+    repo.fork(root, checkpoint_id, child).unwrap();
+    let accepted = append(&mut repo, root, "reply", reply(req, CharacterId::Mita));
+    assert_eq!(
+        lookup(&repo, root, CharacterId::Mita, None),
+        Some((req.0, RequestEvidence::AcceptedReply(accepted)))
+    );
+    assert_eq!(
+        lookup(&repo, child, CharacterId::Mita, None),
+        Some((req.0, RequestEvidence::PlayerInput(admitted)))
+    );
+    assert!(matches!(
+        repo.request_evidence_for_input_at(root, CharacterId::Mita, input_id, Some(10_000)),
+        Err(TimelineError::Invalid(_))
+    ));
+}
+
+#[test]
+fn preissued_identity_matches_proactive_trigger_not_message_only() {
+    use neuromita::timeline::domain::RequestEvidence;
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let request = RequestId(Uuid::new_v4());
+    let mut proactive = EventDraft::new(EventKind::ProactiveOpportunity);
+    proactive.actor = Some(CharacterId::Mita.to_string());
+    proactive.observers.insert(CharacterId::Mita);
+    proactive
+        .payload
+        .insert("request_id".into(), json!(request.to_string()));
+    let recorded = append(&mut repo, branch, "trigger", proactive);
+    assert_eq!(
+        repo.request_evidence_for_input_at(branch, CharacterId::Mita, recorded.draft.id, None),
+        Ok(Some((
+            request.0,
+            RequestEvidence::ProactiveTrigger(recorded.clone())
+        )))
+    );
+    assert_eq!(
+        repo.request_evidence_for_input_at(branch, CharacterId::KindMita, recorded.draft.id, None),
+        Ok(None)
+    );
+    let mut plain = EventDraft::new(EventKind::PlayerMessage);
+    plain.actor = Some("player".into());
+    plain.observers.insert(CharacterId::Mita);
+    let plain = append(&mut repo, branch, "plain", plain);
+    assert_eq!(
+        repo.request_evidence_for_input_at(branch, CharacterId::Mita, plain.draft.id, None),
+        Ok(None)
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn preissued_identity_survives_sqlite_restart_and_resists_duplicate() {
+    use neuromita::timeline::{domain::RequestEvidence, storage::SqliteTimelineRepository};
+    let path = std::env::temp_dir().join(format!("neuromita-by-input-{}.db", Uuid::new_v4()));
+    let branch = BranchId::new();
+    let request = RequestId(Uuid::new_v4());
+    let input_id = neuromita::timeline::EventId::new();
+    {
+        let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let mut first = input(request, CharacterId::Mita);
+        first.id = input_id;
+        append(&mut repo, branch, "admit", first);
+    }
+    {
+        let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+        let evidence = repo
+            .request_evidence_for_input_at(branch, CharacterId::Mita, input_id, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evidence.0, request.0);
+        assert!(matches!(evidence.1, RequestEvidence::PlayerInput(_)));
+        let mut duplicate = input(RequestId(Uuid::new_v4()), CharacterId::Mita);
+        duplicate.id = input_id;
+        assert_eq!(
+            repo.append(branch, 1, "duplicate", json!({}), vec![duplicate]),
+            Err(TimelineError::Conflict)
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

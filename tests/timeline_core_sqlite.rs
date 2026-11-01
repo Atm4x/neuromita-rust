@@ -359,6 +359,18 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
                 .unwrap(),
             neuromita::timeline::domain::RequestEvidence::AcceptedReply(reply.clone())
         );
+        assert_eq!(
+            app.request_evidence_for_input_at(
+                CharacterId::Mita,
+                reply.draft.links[0].event_id,
+                at,
+            )
+            .unwrap(),
+            Some((
+                request,
+                neuromita::timeline::domain::RequestEvidence::AcceptedReply(reply.clone()),
+            ))
+        );
         assert!(matches!(
             app.request_evidence_at(
                 CharacterId::Mita,
