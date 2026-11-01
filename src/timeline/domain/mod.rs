@@ -11,6 +11,7 @@ pub use model::{
 };
 pub use projection::{character_view, knows, present_characters};
 pub use store::TimelineStore;
+#[cfg(feature = "sqlite-system")]
 pub(crate) use store::{Branch, Receipt};
 
 pub use repository::TimelineRepository;

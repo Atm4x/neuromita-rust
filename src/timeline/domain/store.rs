@@ -37,16 +37,19 @@ impl TimelineStore {
         Self::default()
     }
 
+    #[cfg(feature = "sqlite-system")]
     pub(crate) fn persisted_receipt(&self, branch: BranchId, key: &str) -> Option<&Receipt> {
         self.branches.get(&branch)?.receipts.get(key)
     }
 
+    #[cfg(feature = "sqlite-system")]
     pub(crate) fn persisted_branches(&self) -> Vec<Branch> {
         let mut branches: Vec<_> = self.branches.values().cloned().collect();
         branches.sort_by_key(|branch| branch.info.id.0);
         branches
     }
 
+    #[cfg(feature = "sqlite-system")]
     pub(crate) fn load_persisted(branches: Vec<Branch>) -> Result<Self, TimelineError> {
         let mut map = HashMap::new();
         let mut roots = HashMap::new();
