@@ -280,6 +280,8 @@ pub enum SubmitError {
     QueueClosed,
     #[error("character is unavailable")]
     CharacterUnavailable,
+    #[error("timeline could not accept the request input")]
+    TimelineUnavailable,
 }
 
 #[derive(Debug, Error)]

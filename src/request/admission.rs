@@ -5,24 +5,41 @@ use std::{
 
 use tokio::sync::mpsc;
 
-use super::{Message, RequestDiscovery, RequestHandle, RequestId, RequestRegistry, SubmitError};
-use crate::identity::CharacterId;
+use super::{Message, RequestDiscovery, RequestHandle, RequestRegistry, SubmitError};
+use crate::{
+    identity::{CharacterId, RequestId},
+    interaction::{TurnIntent, UserInput},
+    timeline::selection::TimelineSelection,
+};
+
+pub(crate) trait RequestIngress: Send + Sync {
+    fn admit(
+        &self,
+        request: RequestId,
+        character: CharacterId,
+        input: &UserInput,
+        intent: TurnIntent,
+    ) -> Result<TimelineSelection, SubmitError>;
+}
 
 pub(crate) struct ChatApiState {
     accepting: Mutex<bool>,
     pub(crate) registry: Arc<RequestRegistry>,
     handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
+    ingress: Arc<dyn RequestIngress>,
 }
 
 impl ChatApiState {
     pub(crate) fn new(
         registry: Arc<RequestRegistry>,
         handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
+        ingress: Arc<dyn RequestIngress>,
     ) -> Self {
         Self {
             accepting: Mutex::new(true),
             registry,
             handlers,
+            ingress,
         }
     }
 
@@ -46,8 +63,15 @@ impl ChatApiState {
             mpsc::error::TrySendError::Full(_) => SubmitError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
         })?;
-        let handle = self.registry.register(Box::new(request));
-        permit.send(handle.id());
+        let id = RequestId::new();
+        let selection = self.ingress.admit(
+            id,
+            request.character_id(),
+            request.input(),
+            request.intent(),
+        )?;
+        let handle = self.registry.register(Box::new(request), id, selection);
+        permit.send(id);
         Ok(handle)
     }
 

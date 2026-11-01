@@ -166,6 +166,44 @@ impl SessionTimeline {
             .capture(self.store.as_ref(), character, Some(trigger))
     }
 
+    pub(crate) fn assert_selection(
+        &self,
+        selection: TimelineSelection,
+    ) -> Result<(), domain::TimelineError> {
+        if self.selection() != selection {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        #[cfg(feature = "sqlite-system")]
+        if let Some(repository) = &self.selection_repository
+            && repository.selection()? != Some(selection)
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_admitted_input(
+        &self,
+        character: CharacterId,
+        request: RequestId,
+        input: &crate::interaction::UserInput,
+    ) -> Result<(), domain::TimelineError> {
+        let fact = self.store.event(self.branch, input.event_id())?;
+        if fact.draft.kind != EventKind::PlayerMessage
+            || fact.draft.actor.as_deref() != Some("player")
+            || fact.draft.payload.get("request_id").and_then(Value::as_str)
+                != Some(request.0.to_string().as_str())
+            || fact.draft.payload.get("content").and_then(Value::as_str)
+                != Some(input.text().as_ref())
+            || !self
+                .store
+                .knows(self.branch, character, input.event_id(), None)?
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+
     pub(crate) fn assert_turn(&self, turn: TimelineTurn) -> Result<(), domain::TimelineError> {
         self.workspace.assert_current(self.store.as_ref(), turn)?;
         #[cfg(feature = "sqlite-system")]
@@ -376,7 +414,20 @@ impl SessionTimeline {
             })
     }
 
-    pub(crate) fn append_input(
+    pub(crate) fn append_player_message(
+        &mut self,
+        character: CharacterId,
+        request: RequestId,
+        id: EventId,
+        text: Arc<str>,
+    ) -> Result<(), String> {
+        let mut draft = make_draft(id, EventKind::PlayerMessage, character, text, Some(request));
+        draft.actor = Some("player".to_string());
+        self.commit(format!("input:{}", request.0), draft, None)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn append_proactive_trigger(
         &mut self,
         character: CharacterId,
         request: RequestId,
@@ -384,13 +435,15 @@ impl SessionTimeline {
         text: Arc<str>,
         intent: TurnIntent,
     ) -> Result<(), String> {
-        let kind = match intent {
-            TurnIntent::Reply => EventKind::PlayerMessage,
-            TurnIntent::React(_) | TurnIntent::Initiate => EventKind::ProactiveOpportunity,
-        };
-        let mut draft = make_draft(id, kind, character, text, Some(request));
+        let mut draft = make_draft(
+            id,
+            EventKind::ProactiveOpportunity,
+            character,
+            text,
+            Some(request),
+        );
         match intent {
-            TurnIntent::Reply => draft.actor = Some("player".to_string()),
+            TurnIntent::Reply => return Err("reply requires an admitted player message".into()),
             TurnIntent::Initiate => {
                 draft
                     .payload
@@ -415,8 +468,7 @@ impl SessionTimeline {
             }
         }
         self.commit(format!("input:{}", request.0), draft, None)
-            .map_err(|error| error.to_string())?;
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn append_reply(
@@ -544,13 +596,7 @@ mod tests {
         let trigger = EventId::new();
         let at = timeline.anchor();
         timeline
-            .append_input(
-                CharacterId::Mita,
-                request,
-                trigger,
-                Arc::from("hello"),
-                TurnIntent::Reply,
-            )
+            .append_player_message(CharacterId::Mita, request, trigger, Arc::from("hello"))
             .unwrap();
         let turn = timeline.capture_turn(CharacterId::Mita, trigger).unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
@@ -580,13 +626,7 @@ mod tests {
         let request = RequestId::new();
         let event = EventId::new();
         timeline
-            .append_input(
-                CharacterId::Mita,
-                request,
-                event,
-                Arc::from("hello"),
-                TurnIntent::Reply,
-            )
+            .append_player_message(CharacterId::Mita, request, event, Arc::from("hello"))
             .unwrap();
         assert_eq!(timeline.store.world(timeline.branch).unwrap().len(), 1);
         assert_eq!(timeline.events().len(), 1);

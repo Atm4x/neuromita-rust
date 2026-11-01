@@ -4,12 +4,14 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{registry::RegistryInner, *};
+use crate::timeline::selection::TimelineSelection;
 
 pub(crate) struct RequestRecord {
     inner: Mutex<Execution>,
     updates: watch::Sender<Arc<RequestSnapshot>>,
     pub(crate) cancellation: CancellationToken,
     registry: Weak<RegistryInner>,
+    admission_selection: TimelineSelection,
 }
 
 struct Execution {
@@ -86,10 +88,15 @@ impl RequestObserver {
 }
 
 impl RequestRecord {
-    pub(crate) fn new(message: Box<dyn Message>, registry: Weak<RegistryInner>) -> Arc<Self> {
+    pub(crate) fn new(
+        message: Box<dyn Message>,
+        id: RequestId,
+        admission_selection: TimelineSelection,
+        registry: Weak<RegistryInner>,
+    ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
             metadata: RequestMetadata {
-                id: RequestId::new(),
+                id,
                 character_id: message.character_id(),
                 source: message.source(),
                 intent: message.intent(),
@@ -122,6 +129,7 @@ impl RequestRecord {
             updates,
             cancellation: CancellationToken::new(),
             registry,
+            admission_selection,
         })
     }
 
@@ -156,6 +164,10 @@ impl RequestRecord {
         if let Some(registry) = self.registry.upgrade() {
             registry.complete(self);
         }
+    }
+
+    pub(crate) fn admission_selection(&self) -> TimelineSelection {
+        self.admission_selection
     }
 
     pub(crate) fn try_start(&self) -> Option<Box<dyn Message>> {
@@ -326,11 +338,18 @@ mod tests {
         )
     }
 
+    fn selection() -> TimelineSelection {
+        TimelineSelection {
+            branch_id: crate::timeline::domain::BranchId::new(),
+            generation: 1,
+        }
+    }
+
     #[test]
     fn cancellation_and_acceptance_have_one_winner() {
         for _ in 0..64 {
             let registry = RequestRegistry::new(4);
-            let handle = registry.register(Box::new(request()));
+            let handle = registry.register(Box::new(request()), RequestId::new(), selection());
             let record = Arc::clone(&handle.record);
             assert!(record.try_start().is_some());
             let barrier = Barrier::new(2);
@@ -364,7 +383,7 @@ mod tests {
     #[test]
     fn queued_cancel_prevents_start_and_keeps_terminal_handle() {
         let registry = RequestRegistry::new(4);
-        let handle = registry.register(Box::new(request()));
+        let handle = registry.register(Box::new(request()), RequestId::new(), selection());
         assert_eq!(handle.cancel(), CancelResult::Cancelled);
         assert!(handle.record.try_start().is_none());
         assert_eq!(registry.active_count(), 0);

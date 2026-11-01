@@ -3,13 +3,14 @@
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 use neuromita::{
+    api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     character::CharacterId,
     generation::{
         GenerationPreset, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
     },
-    request::UserInput,
+    request::{ReplyRequest, RequestSource, UserInput},
     timeline::{
         EventContent, TimelineConfig,
         domain::{BranchId, SessionId},
@@ -146,5 +147,59 @@ async fn core_restores_durable_active_branch_and_character_state() {
     reopened.shutdown().await.unwrap();
     for suffix in ["", "-shm", "-wal"] {
         let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let path = std::env::temp_dir().join(format!("neuromita-ingress-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let branch = BranchId::new();
+    let app = ApplicationLifecycle::start(config(path.clone(), session, branch))
+        .await
+        .unwrap();
+    let character = CharacterId::Mita;
+    let template = GeminiTemplate::google(
+        "unused-model",
+        "unused-test-key",
+        GenerationSettings::new(0.0, 64, Duration::from_secs(2)).unwrap(),
+    )
+    .unwrap();
+    let handle = ChatApi::reply(ReplyRequest::new(
+        character,
+        GenerationPreset::new(ProviderTemplate::Gemini(template)),
+        UserInput::new("persisted before generation".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    assert!(app.timeline().iter().any(|event| {
+        event.request_id == Some(handle.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+    handle.cancel();
+    app.shutdown().await.unwrap();
+    let reopened = ApplicationLifecycle::start(config(path.clone(), session, branch))
+        .await
+        .unwrap();
+    assert!(reopened.timeline().iter().any(|event| {
+        event.request_id == Some(handle.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+    assert!(
+        reopened
+            .character(character)
+            .unwrap()
+            .get_context(reopened.at())
+            .await
+            .unwrap()
+            .view
+            .messages()
+            .iter()
+            .any(|message| message.content == "persisted before generation")
+    );
+    reopened.shutdown().await.unwrap();
+    for suffix in ["", "-shm", "-wal"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }

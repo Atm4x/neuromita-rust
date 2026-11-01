@@ -7,6 +7,7 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 
 use super::*;
+use crate::timeline::selection::TimelineSelection;
 
 pub(crate) struct RequestRegistry {
     inner: Arc<RegistryInner>,
@@ -80,8 +81,13 @@ impl RequestRegistry {
         }
     }
 
-    pub(crate) fn register(&self, message: Box<dyn Message>) -> RequestHandle {
-        let record = RequestRecord::new(message, Arc::downgrade(&self.inner));
+    pub(crate) fn register(
+        &self,
+        message: Box<dyn Message>,
+        id: RequestId,
+        selection: TimelineSelection,
+    ) -> RequestHandle {
+        let record = RequestRecord::new(message, id, selection, Arc::downgrade(&self.inner));
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");
         records.insert(handle.id(), record);

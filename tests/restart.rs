@@ -217,7 +217,8 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
 
     let accepted = reply("first", "accepted before restart").unwrap();
     let call = next(&mut calls).await;
-    assert!(call.context.history.events.is_empty());
+    assert_eq!(call.context.history.events.len(), 1);
+    assert_eq!(call.context.view.count(), 1);
     call.reply
         .send(Arc::from("first accepted response"))
         .unwrap();
@@ -392,7 +393,8 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     let request = reply("second", "new application").unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.model, "second");
-    assert!(call.context.history.events.is_empty());
+    assert_eq!(call.context.history.events.len(), 1);
+    assert_eq!(call.context.view.count(), 1);
     call.reply
         .send(Arc::from("second accepted response"))
         .unwrap();

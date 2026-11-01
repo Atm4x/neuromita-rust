@@ -98,7 +98,7 @@
 
 ## ContextCapture и интеграция MitaView (2026-11-01)
 
-- [x] Один immutable prefix через `SessionTimeline::capture_context` для MitaView и compatibility HistoryView; `CharacterHandler::prepare` берёт их до append входного сообщения, state с тем же anchor; `CharacterView` экспортирует domain view вместе с legacy history.
+- [x] Один immutable prefix через `SessionTimeline::capture_context` для MitaView и compatibility HistoryView; `CharacterHandler::prepare` берёт их на исполнении из фиксированного prefix, в который уже входит принятый при admission `PlayerMessage`, state с тем же anchor; `CharacterView` экспортирует domain view вместе с legacy history.
 - [x] Gemini использует предметные сообщения MitaView вместо разбора legacy EventContent, сохраняет роли user/model, не включает скрытые события или знания другого персонажа; SessionNote остаётся user-level контентом, без повышения привилегий provider system instruction.
 - [x] Регрессионные тесты на отсутствие дублирования текущего input, исторический prefix, private/hidden/reset и мультимодальные текстовые фрагменты; базовые и SQLite тесты, Clippy.
 
@@ -110,8 +110,17 @@
 - [x] Узкий `CharacterState` (accepted replies/revision) восстанавливается по фактам принятых ответов конкретной ветви, не по субъективной HistoryView. Reset/hide не обнуляют счётчик, SQLite reopen сохраняет его. На приёмке счётчик перечитывается для выявления сторонних изменений.
 - [x] Контрактная проверка In-memory/SQLite, включая cause snapshot и provider rules; локальные и SQLite-тесты Rust 1.98.1.
 
-**Граница:** полный mutable CharacterState не сделан durable/atomic с Timeline; подсчёт принятых ответов по канонической истории сейчас O(история). И `reply`, и `react` используют все известные персонажу события на зафиксированном при исполнении anchor. Входы ещё не исполненных ChatAPI-запросов пока не публикуются при постановке в очередь; отделение приёма пользовательского сообщения от запроса на генерацию остаётся предметной задачей.
+**Граница:** полный mutable CharacterState не сделан durable/atomic с Timeline; подсчёт принятых ответов по канонической истории сейчас O(история). И `reply`, и `react` используют все известные персонажу события на зафиксированном при исполнении anchor. Входы `ChatApi.reply` теперь публикуются при admission до исполнения; отдельный публичный message-only ingress по-прежнему не реализован.
 
 ## Следующий пакет изменений
 
 Холодный SQLite append и инструмент замера добавлены. В текущем цикле большие бенчмарки отложены: приоритет — политика контекста и snapshot-consistent MitaView, полная provider/UI schema, ранняя адресная отмена при reset/внешнем переключении и затем согласованное восстановление владельцев состояния. Release-бенчмарки 50k+ событий остаются отложенной проверкой, не блокирующей предметную разработку. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует единый TimelineRepository (transient либо SQLite) через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.
+
+## Входящие сообщения до исполнения запросов (2026-11-01)
+
+- [x] `reply` записывает `PlayerMessage` в канонический Timeline **при принятии** после успешного резервирования очереди, до регистрации RequestRecord. Сообщение остаётся фактом при cancellation и переживает SQLite reopen. При отказе из-за capacity новое событие не возникает.
+- [x] При `prepare` захватывается актуальный известный prefix, включая ожидающие сообщения; собственный опубликованный trigger проверяется по request id, actor, content и знанию персонажа и не записывается повторно. Gemini не повторяет собственное сообщение в контексте.
+- [x] Admission pinning: selection generation связывает очередь с выбранным миром; stale queued requests отменяются без перехода в новую ветку. Отдельные `append_player_message`/`append_proactive_trigger` и `RequestIngress` в application composition не загрязняют domain правилами request registry.
+- [x] Тесты: отложенная `react` видит позднее `reply` до фактического dispatch; отменённое ожидающее сообщение остаётся; отказ из-за queue overflow не пишет факт; SQLite reopen сохраняет опубликованное сообщение; reselect инвалидирует очередь.
+
+**Открыто:** независимый от генерации публичный ввод сообщений; межпроцессная быстрая отмена без ожидания очереди; согласованная транзакция mutable CharacterState и provider multimodal parts. Не считать ingress-стадию самостоятельным завершением `ConversationTimeline`/`SessionRestoration`.

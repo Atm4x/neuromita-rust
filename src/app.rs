@@ -17,9 +17,12 @@ pub use crate::runtime::ApplicationStatus;
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
+    interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
-    request::{ChatApiState, MessageHandler, RequestRegistry},
+    request::{
+        ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
+    },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
@@ -98,6 +101,40 @@ pub struct ApplicationLifecycle {
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
 }
 
+struct TimelineRequestIngress {
+    timeline: Arc<Mutex<SessionTimeline>>,
+}
+
+impl RequestIngress for TimelineRequestIngress {
+    fn admit(
+        &self,
+        request: RequestId,
+        character: CharacterId,
+        input: &UserInput,
+        intent: TurnIntent,
+    ) -> Result<TimelineSelection, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        let selection = timeline.selection();
+        timeline
+            .assert_selection(selection)
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if intent == TurnIntent::Reply {
+            timeline
+                .append_player_message(
+                    character,
+                    request,
+                    input.event_id(),
+                    Arc::clone(input.text()),
+                )
+                .map_err(|_| SubmitError::TimelineUnavailable)?;
+        }
+        Ok(selection)
+    }
+}
+
 struct ApplicationOwner {
     bindings: Arc<ApiBindings>,
     workers_stop: CancellationToken,
@@ -159,7 +196,10 @@ impl ApplicationLifecycle {
                 worker.run_queue(receive, workers_stop.clone()),
             ));
         }
-        let api = Arc::new(ChatApiState::new(registry, handlers));
+        let ingress: Arc<dyn RequestIngress> = Arc::new(TimelineRequestIngress {
+            timeline: Arc::clone(&timeline),
+        });
+        let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
         let discovery = api.registry.observe();
         let settings_owner = settings.owner();
         let (chat, runner) = PresenterRunner::new(

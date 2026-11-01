@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::{
-    character::{AcceptanceContext, CharacterHandle},
+    character::{AcceptanceContext, CharacterError, CharacterHandle},
     generation::{GenerationRequest, ResponseGenerator},
     timeline::selection::TimelineSelection,
     voice::{VoicePlan, VoiceProvider},
@@ -59,10 +59,21 @@ impl MessageHandler {
         let prepared = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
-            context = self.character.prepare(id, message.input().clone(), message.intent(), message.at()) => context,
+            context = self.character.prepare(
+                id,
+                message.input().clone(),
+                message.intent(),
+                message.at(),
+                record.admission_selection(),
+            ) => context,
         };
         let context = match prepared {
             Ok(context) => context,
+            Err(CharacterError::StaleState) => {
+                record.cancel();
+                record.finish_cancelled();
+                return;
+            }
             Err(error) => {
                 record.finish(RequestOutcome::InternalError(
                     record.failure(error.to_string()),

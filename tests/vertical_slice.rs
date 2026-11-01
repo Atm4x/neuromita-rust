@@ -10,8 +10,8 @@ use neuromita::{
     },
     presentation::ChatPresenter,
     request::{
-        CancelResult, ReplyRequest, RequestHandle, RequestId, RequestOutcome, RequestSource,
-        RequestState, SubmitError, UserInput,
+        CancelResult, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
+        RequestSource, RequestState, SubmitError, UserInput,
     },
     timeline::EventContent,
 };
@@ -338,11 +338,11 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     let cancelled_call = server.next().await;
     assert_eq!(
         user_texts(&cancelled_call.body),
-        ["first", "cancel during generation"]
+        ["first", "never starts", "cancel during generation"]
     );
-    assert_eq!(cancelled_call.body["contents"][1]["role"], "model");
+    assert_eq!(cancelled_call.body["contents"][3]["role"], "model");
     assert_eq!(
-        cancelled_call.body["contents"][1]["parts"][0]["text"],
+        cancelled_call.body["contents"][3]["parts"][0]["text"],
         "first reply"
     );
     assert_eq!(running_cancel.cancel(), CancelResult::Requested);
@@ -390,7 +390,8 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         .unwrap();
     let next_call = server.next().await;
     assert!(!next_call.body.to_string().contains("must not be accepted"));
-    assert!(!next_call.body.to_string().contains("never starts"));
+    assert!(next_call.body.to_string().contains("never starts"));
+    assert!(!next_call.body.to_string().contains("queue overflow"));
     next_call.respond.send(Reply::Text("second reply")).unwrap();
     assert!(matches!(
         finished(&next).await.state,
@@ -417,11 +418,14 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
             .iter()
             .any(|event| event.request_id == Some(first.id()))
     );
-    assert!(
-        !events
-            .iter()
-            .any(|event| event.request_id == Some(queued.id()))
-    );
+    assert!(events.iter().any(|event| {
+        event.request_id == Some(queued.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+    assert!(!events.iter().any(|event| {
+        event.request_id == Some(queued.id())
+            && matches!(event.content, EventContent::CharacterReply { .. })
+    }));
 
     let interrupted = presenter
         .reply(CharacterId::Mita, "stop application".into())
@@ -501,6 +505,157 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
         finished(&fresh).await.state,
         RequestState::Finished(RequestOutcome::Success(_))
     ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> =
+        Arc::new(CheckedProvider(GeminiProvider::new().unwrap()));
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let first = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset.clone(),
+        UserInput::new("first message".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let first_call = server.next().await;
+    let cause = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .observe(UserInput::new("door opened".into()).unwrap())
+        .await
+        .unwrap();
+    let reaction = ChatApi::react(ReactRequest::new(
+        CharacterId::Mita,
+        preset.clone(),
+        cause,
+        UserInput::new("React to the door".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let question = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("Why did you open the door?".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    assert!(app.timeline().iter().any(|event| {
+        event.request_id == Some(question.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+
+    first_call
+        .respond
+        .send(Reply::Text("first answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let reaction_call = server.next().await;
+    let user = user_texts(&reaction_call.body);
+    assert!(user.contains(&"Why did you open the door?"));
+    assert!(user.contains(&"React to the door"));
+    assert_eq!(
+        user.iter()
+            .filter(|text| **text == "Why did you open the door?")
+            .count(),
+        1
+    );
+    reaction_call
+        .respond
+        .send(Reply::Text("because it was closed"))
+        .unwrap();
+    assert!(matches!(
+        finished(&reaction).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let question_call = server.next().await;
+    assert_eq!(
+        user_texts(&question_call.body)
+            .iter()
+            .filter(|text| **text == "Why did you open the door?")
+            .count(),
+        1
+    );
+    question_call
+        .respond
+        .send(Reply::Text("the door is open"))
+        .unwrap();
+    assert!(matches!(
+        finished(&question).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_input_survives_selection_change_but_stale_generation_does_not_start() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> =
+        Arc::new(CheckedProvider(GeminiProvider::new().unwrap()));
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let first = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset.clone(),
+        UserInput::new("active request".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let blocked = server.next().await;
+    let waiting = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        preset,
+        UserInput::new("queued and already spoken".into()).unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let selected = app.timeline_selection();
+    app.select_timeline_branch(selected.branch_id, selected)
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(matches!(
+        finished(&waiting).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(server.calls.try_recv().is_err());
+    let events = app.timeline();
+    assert!(events.iter().any(|event| {
+        event.request_id == Some(waiting.id())
+            && matches!(event.content, EventContent::PlayerMessage { .. })
+    }));
+    assert!(!events.iter().any(|event| {
+        event.request_id == Some(waiting.id())
+            && matches!(event.content, EventContent::CharacterReply { .. })
+    }));
+    drop(blocked);
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }

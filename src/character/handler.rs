@@ -16,7 +16,10 @@ use super::{
 use crate::{
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
-    timeline::{ContextAnchor, ContextPosition, EventId, SessionTimeline, selection::TimelineTurn},
+    timeline::{
+        ContextAnchor, ContextPosition, EventId, SessionTimeline,
+        selection::{TimelineSelection, TimelineTurn},
+    },
     voice::AudioArtifact,
 };
 
@@ -52,6 +55,7 @@ enum Command {
         input: UserInput,
         intent: TurnIntent,
         at: ContextPosition,
+        admission: TimelineSelection,
         reply: oneshot::Sender<Result<CharacterContext, CharacterError>>,
     },
     Accept {
@@ -110,6 +114,7 @@ impl CharacterHandle {
         input: UserInput,
         intent: TurnIntent,
         at: ContextPosition,
+        admission: TimelineSelection,
     ) -> Result<CharacterContext, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -118,6 +123,7 @@ impl CharacterHandle {
                 input,
                 intent,
                 at,
+                admission,
                 reply,
             })
             .await
@@ -203,9 +209,11 @@ impl CharacterHandler {
                     input,
                     intent,
                     at,
+                    admission,
                     reply,
                 } => {
-                    let _ = reply.send(self.context(request, input, intent, at));
+                    let _ =
+                        reply.send(self.context_admitted(request, input, intent, at, admission));
                 }
                 Command::Accept {
                     request,
@@ -253,6 +261,7 @@ impl CharacterHandler {
         }
     }
 
+    #[cfg(test)]
     fn context(
         &mut self,
         request: RequestId,
@@ -260,10 +269,46 @@ impl CharacterHandler {
         intent: TurnIntent,
         at: ContextPosition,
     ) -> Result<CharacterContext, CharacterError> {
+        let selection = self
+            .timeline
+            .lock()
+            .expect("timeline mutex poisoned")
+            .selection();
+        if intent == TurnIntent::Reply {
+            self.timeline
+                .lock()
+                .expect("timeline mutex poisoned")
+                .append_player_message(
+                    self.character.id,
+                    request,
+                    input.event_id(),
+                    Arc::clone(input.text()),
+                )
+                .map_err(CharacterError::Internal)?;
+        }
+        self.context_admitted(request, input, intent, at, selection)
+    }
+
+    fn context_admitted(
+        &mut self,
+        request: RequestId,
+        input: UserInput,
+        intent: TurnIntent,
+        at: ContextPosition,
+        admission: TimelineSelection,
+    ) -> Result<CharacterContext, CharacterError> {
         let mut timeline = self
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        timeline
+            .assert_selection(admission)
+            .map_err(|_| CharacterError::StaleState)?;
+        if intent == TurnIntent::Reply {
+            timeline
+                .verify_admitted_input(self.character.id, request, &input)
+                .map_err(|_| CharacterError::StaleState)?;
+        }
         let captured = timeline
             .capture_context(self.character.id, at)
             .map_err(CharacterError::Internal)?;
@@ -273,15 +318,17 @@ impl CharacterHandler {
             .validate_reaction_context(self.character.id, intent, anchor)
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
-        timeline
-            .append_input(
-                self.character.id,
-                request,
-                input.event_id(),
-                Arc::clone(input.text()),
-                intent,
-            )
-            .map_err(CharacterError::Internal)?;
+        if intent != TurnIntent::Reply {
+            timeline
+                .append_proactive_trigger(
+                    self.character.id,
+                    request,
+                    input.event_id(),
+                    Arc::clone(input.text()),
+                    intent,
+                )
+                .map_err(CharacterError::Internal)?;
+        }
         let turn = timeline
             .capture_turn(self.character.id, input.event_id())
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
@@ -535,7 +582,8 @@ mod turn_tests {
         let (next_request, next_context) = prepare(&mut handler);
         assert_eq!(next_context.state.accepted_replies, 1);
         assert_eq!(next_context.state.revision, 1);
-        assert!(next_context.view.messages().is_empty());
+        assert_eq!(next_context.view.messages().len(), 1);
+        assert_eq!(next_context.view.messages()[0].content, "hello");
         accept(&mut handler, next_request, acceptance(&next_context)).unwrap();
         assert_eq!(handler.character.state.accepted_replies, 2);
         assert_eq!(
@@ -555,12 +603,11 @@ mod turn_tests {
                 .observe(CharacterId::Mita, cause, Arc::from("door opened"))
                 .unwrap();
             timeline
-                .append_input(
+                .append_player_message(
                     CharacterId::Mita,
                     RequestId::new(),
                     EventId::new(),
                     Arc::from("later, unrelated user input"),
-                    TurnIntent::Reply,
                 )
                 .unwrap();
             let mut note = EventDraft::new(EventKind::SessionNote);
@@ -664,7 +711,7 @@ mod turn_tests {
             };
             let (request, context) = prepare(&mut handler);
             assert_eq!(context.state.accepted_replies, 1);
-            assert_eq!(context.view.count(), 0);
+            assert_eq!(context.view.count(), 1);
             accept(&mut handler, request, acceptance(&context)).unwrap();
             assert_eq!(handler.character.state.accepted_replies, 2);
         }
@@ -693,17 +740,17 @@ mod turn_tests {
                 ContextPosition::Latest,
             )
             .unwrap();
-        assert_eq!(snapshot.anchor.through, 1);
+        assert_eq!(snapshot.anchor.through, 2);
         assert_eq!(snapshot.view.through, snapshot.anchor.through);
         assert_eq!(snapshot.history.at, snapshot.anchor);
-        assert_eq!(snapshot.view.count(), 1);
+        assert_eq!(snapshot.view.count(), 2);
         assert!(snapshot.view.contains(&original.0.to_string()));
-        assert!(!snapshot.view.contains(&input_id.0.to_string()));
+        assert!(snapshot.view.contains(&input_id.0.to_string()));
         assert_eq!(snapshot.current_input.as_ref(), "new request");
         assert_eq!(handler.timeline.lock().unwrap().anchor().through, 2);
 
         let old = handler.view(snapshot.anchor).unwrap();
-        assert_eq!(old.view.count(), 1);
+        assert_eq!(old.view.count(), 2);
         assert_eq!(old.view.through, snapshot.anchor.through);
         assert_eq!(old.history.at, snapshot.anchor);
         let first = handler.timeline.lock().unwrap().anchor();

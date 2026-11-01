@@ -88,7 +88,14 @@ fn history_contents(view: &MitaView) -> Vec<Content> {
 
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
     let mut contents = history_contents(&context.view);
-    contents.push(content(Some("user"), &context.current_input));
+    if !context
+        .view
+        .messages()
+        .iter()
+        .any(|message| message.event_id == context.trigger)
+    {
+        contents.push(content(Some("user"), &context.current_input));
+    }
     GenerateContent {
         system_instruction: content(
             None,
