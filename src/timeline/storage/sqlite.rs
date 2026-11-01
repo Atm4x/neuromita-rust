@@ -622,6 +622,12 @@ impl TimelineRepository for SqliteTimelineRepository {
         session: SessionId,
         root: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
+        match branch_info(&self.connection()?, root) {
+            Ok(info) if info.parent.is_none() && info.session_id == session => return Ok(info),
+            Ok(_) => return Err(TimelineError::Conflict),
+            Err(TimelineError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
         self.with_write(|connection, store| {
             let already_exists = store.branch(root).is_ok();
             let info = store.create_session(session, root)?;
@@ -833,6 +839,37 @@ mod tests {
                 let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
             }
         }
+    }
+
+    #[test]
+    fn reopen_existing_session_does_not_change_timeline_revision() {
+        let db = TestDb::new();
+        let session = SessionId::new();
+        let branch = BranchId::new();
+        let mut original = SqliteTimelineRepository::open(&db.0).unwrap();
+        original.create_session(session, branch).unwrap();
+        original
+            .append(
+                branch,
+                0,
+                "event",
+                json!({}),
+                vec![EventDraft::new(
+                    crate::timeline::domain::EventKind::UnityEvent,
+                )],
+            )
+            .unwrap();
+        let before = revision(&Connection::open(&db.0).unwrap()).unwrap();
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(
+            reopened
+                .create_session(session, branch)
+                .unwrap()
+                .head_sequence,
+            1
+        );
+        assert_eq!(revision(&Connection::open(&db.0).unwrap()).unwrap(), before);
+        assert_eq!(reopened.world(branch).unwrap().len(), 1);
     }
 
     #[test]

@@ -28,7 +28,7 @@ SettingsLifecycle -> SettingsRepository -> [Memory / JSON / future SQLite / futu
 
 Для `timeline` собственная структура таблиц `timeline_branches`, `timeline_events`, `timeline_observers`, `timeline_receipts`, `timeline_active_selection`, `timeline_schema`. Выбор ветки по поколениям **не** кодируется посредством SQLite rowid / data_version / транзакционного revision — это отдельная семантика Core.
 
-При явной `TimelineConfig::Sqlite { database, session, root }` рабочий Core пишет непосредственно в единственный SQLite repository; при повторном запуске с теми же IDs история и durable active selection сохраняются. `TimelineConfig::Transient` соответствует старому режиму и **не** подменяет собой SQLite при ошибках. `ApplicationLifecycle::start` возвращает ошибку, если база недоступна или имеет неподдерживаемую версию схемы. По умолчанию `ApplicationConfig::minimal()` задаёт Transient для старых тестовых сценариев.
+При явной `TimelineConfig::Sqlite { database, session, root }` рабочий Core пишет непосредственно в единственный SQLite repository; при повторном запуске с теми же IDs история и durable active selection сохраняются. Повторное `create_session` существующего root пропускает полную реконструкцию и не записывает новую revision. `TimelineConfig::Transient` соответствует старому режиму и **не** подменяет собой SQLite при ошибках. `ApplicationLifecycle::start` возвращает ошибку, если база недоступна или имеет неподдерживаемую версию схемы. По умолчанию `ApplicationConfig::minimal()` задаёт Transient для старых тестовых сценариев.
 
 ## Settings и общая физическая БД
 
