@@ -341,7 +341,12 @@ impl CharacterHandler {
                 context.turn,
                 Arc::clone(&text),
             )
-            .map_err(CharacterError::Internal)?;
+            .map_err(|error| match error {
+                crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                    CharacterError::StaleState
+                }
+                other => CharacterError::Internal(other.to_string()),
+            })?;
         self.character.state = CharacterState {
             accepted_replies,
             revision,

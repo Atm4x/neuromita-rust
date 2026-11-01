@@ -223,6 +223,23 @@ impl TimelineStore {
         ))
     }
 
+    pub fn context_epoch(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+    ) -> Result<u64, TimelineError> {
+        Ok(self
+            .world(branch)?
+            .iter()
+            .filter(|fact| {
+                fact.draft.kind == EventKind::CharacterContextReset
+                    && fact.draft.observers.contains(&character)
+            })
+            .map(|fact| fact.sequence)
+            .max()
+            .unwrap_or(0))
+    }
+
     pub fn knows(
         &self,
         branch_id: BranchId,

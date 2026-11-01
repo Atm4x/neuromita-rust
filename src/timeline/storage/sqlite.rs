@@ -1,74 +1,18 @@
-use std::{
-    ffi::{CStr, CString, c_char, c_int, c_void},
-    path::{Path, PathBuf},
-    ptr::{self, NonNull},
-};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
-    Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt, SessionId,
-    TimelineError, TimelineFact, TimelineRepository, TimelineStore, WorldLookup,
+    AppendGuard, Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt,
+    SessionId, TimelineError, TimelineFact, TimelineRepository, TimelineStore, WorldLookup,
 };
 use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
 
-#[repr(C)]
-struct Sqlite3 {
-    _private: [u8; 0],
-}
-#[repr(C)]
-struct SqliteStatement {
-    _private: [u8; 0],
-}
+mod native;
+use native::Connection;
 
-#[link(name = "sqlite3")]
-unsafe extern "C" {
-    fn sqlite3_open_v2(
-        filename: *const c_char,
-        db: *mut *mut Sqlite3,
-        flags: c_int,
-        vfs: *const c_char,
-    ) -> c_int;
-    fn sqlite3_close(db: *mut Sqlite3) -> c_int;
-    fn sqlite3_errmsg(db: *mut Sqlite3) -> *const c_char;
-    fn sqlite3_exec(
-        db: *mut Sqlite3,
-        sql: *const c_char,
-        callback: Option<
-            unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int,
-        >,
-        arg: *mut c_void,
-        errmsg: *mut *mut c_char,
-    ) -> c_int;
-    fn sqlite3_prepare_v2(
-        db: *mut Sqlite3,
-        sql: *const c_char,
-        size: c_int,
-        stmt: *mut *mut SqliteStatement,
-        tail: *mut *const c_char,
-    ) -> c_int;
-    fn sqlite3_finalize(stmt: *mut SqliteStatement) -> c_int;
-    fn sqlite3_bind_text(
-        stmt: *mut SqliteStatement,
-        index: c_int,
-        text: *const c_char,
-        size: c_int,
-        destructor: Option<unsafe extern "C" fn(*mut c_void)>,
-    ) -> c_int;
-    fn sqlite3_step(stmt: *mut SqliteStatement) -> c_int;
-    fn sqlite3_column_count(stmt: *mut SqliteStatement) -> c_int;
-    fn sqlite3_column_text(stmt: *mut SqliteStatement, index: c_int) -> *const u8;
-    fn sqlite3_column_bytes(stmt: *mut SqliteStatement, index: c_int) -> c_int;
-    fn sqlite3_busy_timeout(db: *mut Sqlite3, ms: c_int) -> c_int;
-}
-
-const SQLITE_OK: c_int = 0;
-const SQLITE_ROW: c_int = 100;
-const SQLITE_DONE: c_int = 101;
-const SQLITE_READWRITE_CREATE: c_int = 0x0000_0006;
-const SQLITE_FULLMUTEX: c_int = 0x0001_0000;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS timeline_schema(version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS timeline_revision(
@@ -144,150 +88,6 @@ CREATE TABLE IF NOT EXISTS timeline_active_selection(
 );
 ";
 
-struct Connection(NonNull<Sqlite3>);
-
-impl Connection {
-    fn open(path: &Path) -> Result<Self, TimelineError> {
-        let path = CString::new(path.to_string_lossy().as_bytes())
-            .map_err(|_| storage("database path contains NUL"))?;
-        let mut raw = ptr::null_mut();
-        let result = unsafe {
-            sqlite3_open_v2(
-                path.as_ptr(),
-                &mut raw,
-                SQLITE_READWRITE_CREATE | SQLITE_FULLMUTEX,
-                ptr::null(),
-            )
-        };
-        let Some(raw) = NonNull::new(raw) else {
-            return Err(storage("SQLite could not allocate a connection"));
-        };
-        let connection = Self(raw);
-        if result != SQLITE_OK {
-            return Err(connection.error());
-        }
-        if unsafe { sqlite3_busy_timeout(connection.0.as_ptr(), 10_000) } != SQLITE_OK {
-            return Err(connection.error());
-        }
-        connection.exec("PRAGMA foreign_keys = ON")?;
-        Ok(connection)
-    }
-
-    fn error(&self) -> TimelineError {
-        let message = unsafe { CStr::from_ptr(sqlite3_errmsg(self.0.as_ptr())) }
-            .to_string_lossy()
-            .into_owned();
-        storage(message)
-    }
-
-    fn exec(&self, sql: &str) -> Result<(), TimelineError> {
-        let sql = CString::new(sql).map_err(|_| storage("invalid SQL"))?;
-        if unsafe {
-            sqlite3_exec(
-                self.0.as_ptr(),
-                sql.as_ptr(),
-                None,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        } != SQLITE_OK
-        {
-            return Err(self.error());
-        }
-        Ok(())
-    }
-
-    fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Vec<String>>, TimelineError> {
-        let sql = CString::new(sql).map_err(|_| storage("invalid SQL"))?;
-        let mut raw = ptr::null_mut();
-        if unsafe {
-            sqlite3_prepare_v2(self.0.as_ptr(), sql.as_ptr(), -1, &mut raw, ptr::null_mut())
-        } != SQLITE_OK
-        {
-            return Err(self.error());
-        }
-        let stmt = Statement {
-            ptr: NonNull::new(raw).ok_or_else(|| storage("empty SQL statement"))?,
-            connection: self,
-        };
-        let arguments: Vec<_> = params
-            .iter()
-            .map(|param| CString::new(*param).map_err(|_| storage("SQL parameter contains NUL")))
-            .collect::<Result<_, _>>()?;
-        for (index, argument) in arguments.iter().enumerate() {
-            let len = c_int::try_from(argument.as_bytes().len())
-                .map_err(|_| storage("SQL parameter too large"))?;
-            let result = unsafe {
-                sqlite3_bind_text(
-                    stmt.ptr.as_ptr(),
-                    (index + 1) as c_int,
-                    argument.as_ptr(),
-                    len,
-                    None,
-                )
-            };
-            if result != SQLITE_OK {
-                return Err(self.error());
-            }
-        }
-        let mut rows = Vec::new();
-        loop {
-            let result = unsafe { sqlite3_step(stmt.ptr.as_ptr()) };
-            if result == SQLITE_DONE {
-                break;
-            }
-            if result != SQLITE_ROW {
-                return Err(self.error());
-            }
-            let fields = unsafe { sqlite3_column_count(stmt.ptr.as_ptr()) };
-            let mut row = Vec::with_capacity(fields as usize);
-            for index in 0..fields {
-                let ptr = unsafe { sqlite3_column_text(stmt.ptr.as_ptr(), index) };
-                if ptr.is_null() {
-                    row.push(String::new());
-                    continue;
-                }
-                let size = unsafe { sqlite3_column_bytes(stmt.ptr.as_ptr(), index) };
-                let bytes = unsafe { std::slice::from_raw_parts(ptr, size as usize) };
-                let string = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| storage("invalid SQLite UTF-8 value"))?;
-                row.push(string);
-            }
-            rows.push(row);
-        }
-        Ok(rows)
-    }
-
-    fn write(&self, sql: &str, params: &[&str]) -> Result<(), TimelineError> {
-        if !self.query(sql, params)?.is_empty() {
-            return Err(storage("unexpected SQL results"));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Connection {
-    fn drop(&mut self) {
-        unsafe {
-            sqlite3_close(self.0.as_ptr());
-        }
-    }
-}
-
-struct Statement<'a> {
-    ptr: NonNull<SqliteStatement>,
-    connection: &'a Connection,
-}
-
-impl Drop for Statement<'_> {
-    fn drop(&mut self) {
-        let result = unsafe { sqlite3_finalize(self.ptr.as_ptr()) };
-        if result != SQLITE_OK {
-            let _ = self.connection.error();
-        }
-    }
-}
-
 fn storage(message: impl Into<String>) -> TimelineError {
     TimelineError::Storage(message.into())
 }
@@ -353,6 +153,17 @@ impl SqliteTimelineRepository {
 
     fn connection(&self) -> Result<Connection, TimelineError> {
         Connection::open(&self.path)
+    }
+
+    fn read_snapshot<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> Result<T, TimelineError>,
+    ) -> Result<T, TimelineError> {
+        let connection = self.connection()?;
+        connection.exec("BEGIN")?;
+        let result = operation(&connection);
+        connection.exec("ROLLBACK")?;
+        result
     }
 
     fn with_write<T>(
@@ -453,35 +264,28 @@ fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
 /// Materialized *facts*, not domain decisions. These indexes are derived from
 /// immutable events and may be rebuilt from them during schema migration.
 fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineError> {
-    use crate::timeline::domain::CausalRelation;
     let branch = fact.branch_id.0.to_string();
     let sequence = fact.sequence.to_string();
     conn.write(
         "INSERT INTO timeline_fact_keys(branch_id,sequence,event_id,external_id,kind_json) VALUES(?,?,?,nullif(?,''),?)",
-        &[&branch,&sequence,&fact.draft.id.0.to_string(),
-          fact.draft.external_message_id.as_deref().unwrap_or(""),&encode(&fact.draft.kind)?],
+        &[&branch, &sequence, &fact.draft.id.0.to_string(),
+          fact.draft.external_message_id.as_deref().unwrap_or(""), &encode(&fact.draft.kind)?],
     )?;
     for observer in &fact.draft.observers {
         let character = observer.to_string();
-        conn.write(
-            "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
-            &[&branch,&sequence,&character,&fact.draft.id.0.to_string()],
-        )?;
-        if fact.draft.kind == EventKind::CharacterContextReset {
+        let change = crate::timeline::domain::knowledge_change(fact, *observer)
+            .expect("fact observer has knowledge");
+        if change.reset {
             conn.write(
                 "INSERT INTO timeline_resets(branch_id,sequence,character_id) VALUES(?,?,?)",
                 &[&branch, &sequence, &character],
             )?;
         }
-        if fact.draft.kind == EventKind::EventObserved {
-            for link in &fact.draft.links {
-                if link.relation == CausalRelation::Observes {
-                    conn.write(
-                        "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
-                        &[&branch,&sequence,&character,&link.event_id.0.to_string()],
-                    )?;
-                }
-            }
+        for acquired in change.acquired {
+            conn.write(
+                "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
+                &[&branch, &sequence, &character, &acquired.0.to_string()],
+            )?;
         }
     }
     Ok(())
@@ -496,15 +300,26 @@ struct IndexedWorld<'a> {
 
 impl<'a> IndexedWorld<'a> {
     fn new(connection: &'a Connection, branch: BranchId) -> Result<Self, TimelineError> {
+        Self::through(connection, branch, None)
+    }
+
+    fn through(
+        connection: &'a Connection,
+        branch: BranchId,
+        through: Option<u64>,
+    ) -> Result<Self, TimelineError> {
         let mut lineage = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut next = Some(branch);
-        let mut ceiling = None;
+        let mut ceiling = through;
         while let Some(id) = next {
             if !seen.insert(id) {
                 return Err(storage("cyclic branch lineage"));
             }
             let info = branch_info(connection, id)?;
+            if ceiling.is_some_and(|value| value > info.head_sequence) {
+                return Err(TimelineError::Invalid("read position exceeds branch head"));
+            }
             lineage.push((id, ceiling.unwrap_or(info.head_sequence)));
             ceiling = Some(info.fork_sequence);
             next = info.parent;
@@ -514,6 +329,25 @@ impl<'a> IndexedWorld<'a> {
             lineage,
         })
     }
+    fn fact(&self, event: EventId) -> Result<TimelineFact, TimelineError> {
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT e.fact_json FROM timeline_fact_keys k JOIN timeline_events e ON e.branch_id=k.branch_id AND e.sequence=k.sequence WHERE k.branch_id=? AND k.event_id=? AND k.sequence<=? ORDER BY k.sequence DESC LIMIT 1",
+                &[&branch.0.to_string(), &event.0.to_string(), &cutoff.to_string()],
+            )?;
+            if let Some(row) = rows.first() {
+                return decode(&row[0]);
+            }
+        }
+        Err(TimelineError::NotFound)
+    }
+
+    fn latest_reset(&self, character: CharacterId) -> Result<u64, TimelineError> {
+        Ok(self
+            .max_position("timeline_resets", character, None)?
+            .unwrap_or(0))
+    }
+
     fn max_position(
         &self,
         table: &str,
@@ -737,70 +571,43 @@ fn read_page(
     Ok(results)
 }
 
-impl TimelineRepository for SqliteTimelineRepository {
-    fn create_session(
-        &mut self,
-        session: SessionId,
-        root: BranchId,
-    ) -> Result<BranchInfo, TimelineError> {
-        match branch_info(&self.connection()?, root) {
-            Ok(info) if info.parent.is_none() && info.session_id == session => return Ok(info),
-            Ok(_) => return Err(TimelineError::Conflict),
-            Err(TimelineError::NotFound) => {}
-            Err(error) => return Err(error),
-        }
-        self.with_write(|connection, store| {
-            let already_exists = store.branch(root).is_ok();
-            let info = store.create_session(session, root)?;
-            if !already_exists {
-                save_branch(connection, store, root)?;
-            }
-            Ok(info)
-        })
-    }
-    fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
-        branch_info(&self.connection()?, id)
-    }
-    fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
-        let connection = self.connection()?;
-        connection.exec("BEGIN")?;
-        let result = read_page(&connection, id, 0, None, i64::MAX as usize, None);
-        connection.exec("ROLLBACK")?;
-        result
-    }
-    fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
-        self.world(branch)?
-            .into_iter()
-            .find(|fact| fact.draft.id == id)
-            .ok_or(TimelineError::NotFound)
-    }
-    fn read(
-        &self,
-        branch: BranchId,
-        after: u64,
-        through: Option<u64>,
-        limit: usize,
-        observer: Option<CharacterId>,
-    ) -> Result<Vec<TimelineFact>, TimelineError> {
-        let conn = self.connection()?;
-        conn.exec("BEGIN")?;
-        let result = read_page(&conn, branch, after, through, limit, observer);
-        conn.exec("ROLLBACK")?;
-        result
-    }
-    fn append(
+impl SqliteTimelineRepository {
+    fn append_inner(
         &mut self,
         branch: BranchId,
         expected_head: u64,
         key: &str,
         command: Value,
         drafts: Vec<EventDraft>,
+        guard: Option<AppendGuard>,
     ) -> Result<Vec<TimelineFact>, TimelineError> {
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
         let result = (|| {
             let current_revision = revision(&connection)?;
             let info = branch_info(&connection, branch)?;
+            if let Some(guard) = guard {
+                let current = read_selection(&connection)?;
+                if current
+                    != Some(TimelineSelection {
+                        branch_id: branch,
+                        generation: guard.selection_generation,
+                    })
+                {
+                    return Err(TimelineError::ConcurrentWrite);
+                }
+                if let Some((character, epoch, trigger)) = guard.context {
+                    let world = IndexedWorld::new(&connection, branch)?;
+                    if world.latest_reset(character)? != epoch {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                    if let Some(event) = trigger
+                        && !world.knows(character, event)?
+                    {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                }
+            }
             if key.is_empty() || key.trim() != key {
                 return Err(TimelineError::Invalid(
                     "operation key must be canonical and nonempty",
@@ -844,6 +651,86 @@ impl TimelineRepository for SqliteTimelineRepository {
             }
         }
     }
+}
+
+impl TimelineRepository for SqliteTimelineRepository {
+    fn create_session(
+        &mut self,
+        session: SessionId,
+        root: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        match branch_info(&self.connection()?, root) {
+            Ok(info) if info.parent.is_none() && info.session_id == session => return Ok(info),
+            Ok(_) => return Err(TimelineError::Conflict),
+            Err(TimelineError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+        self.with_write(|connection, store| {
+            let already_exists = store.branch(root).is_ok();
+            let info = store.create_session(session, root)?;
+            if !already_exists {
+                save_branch(connection, store, root)?;
+            }
+            Ok(info)
+        })
+    }
+    fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
+        branch_info(&self.connection()?, id)
+    }
+    fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
+        let connection = self.connection()?;
+        connection.exec("BEGIN")?;
+        let result = read_page(&connection, id, 0, None, i64::MAX as usize, None);
+        connection.exec("ROLLBACK")?;
+        result
+    }
+    fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
+        self.read_snapshot(|connection| IndexedWorld::new(connection, branch)?.fact(id))
+    }
+    fn read(
+        &self,
+        branch: BranchId,
+        after: u64,
+        through: Option<u64>,
+        limit: usize,
+        observer: Option<CharacterId>,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        let conn = self.connection()?;
+        conn.exec("BEGIN")?;
+        let result = read_page(&conn, branch, after, through, limit, observer);
+        conn.exec("ROLLBACK")?;
+        result
+    }
+    fn append(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        command: Value,
+        drafts: Vec<EventDraft>,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.append_inner(branch, expected_head, key, command, drafts, None)
+    }
+    fn append_guarded(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        command: Value,
+        drafts: Vec<EventDraft>,
+        guard: AppendGuard,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.append_inner(branch, expected_head, key, command, drafts, Some(guard))
+    }
+    fn context_epoch(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+    ) -> Result<u64, TimelineError> {
+        self.read_snapshot(|connection| {
+            IndexedWorld::new(connection, branch)?.latest_reset(character)
+        })
+    }
     fn fork(
         &mut self,
         parent: BranchId,
@@ -879,28 +766,30 @@ impl TimelineRepository for SqliteTimelineRepository {
         event: EventId,
         through: Option<u64>,
     ) -> Result<bool, TimelineError> {
-        Ok(self
-            .view(branch, character, through)?
-            .iter()
-            .any(|known| known.fact.draft.id == event))
+        self.read_snapshot(|connection| {
+            IndexedWorld::through(connection, branch, through)?.knows(character, event)
+        })
+    }
+}
+
+fn read_selection(connection: &Connection) -> Result<Option<TimelineSelection>, TimelineError> {
+    let rows = connection.query(
+        "SELECT branch_id, generation FROM timeline_active_selection WHERE slot='core'",
+        &[],
+    )?;
+    match rows.as_slice() {
+        [] => Ok(None),
+        [row] => Ok(Some(TimelineSelection {
+            branch_id: BranchId(parse_uuid(&row[0])?),
+            generation: parse_u64(&row[1])?,
+        })),
+        _ => Err(storage("duplicate active timeline selection")),
     }
 }
 
 impl TimelineSelectionRepository for SqliteTimelineRepository {
     fn selection(&self) -> Result<Option<TimelineSelection>, TimelineError> {
-        let connection = self.connection()?;
-        let result = connection.query(
-            "SELECT branch_id, generation FROM timeline_active_selection WHERE slot='core'",
-            &[],
-        )?;
-        match result.as_slice() {
-            [] => Ok(None),
-            [row] => Ok(Some(TimelineSelection {
-                branch_id: BranchId(parse_uuid(&row[0])?),
-                generation: parse_u64(&row[1])?,
-            })),
-            _ => Err(storage("duplicate active session selection")),
-        }
+        read_selection(&self.connection()?)
     }
 
     fn select_branch(
@@ -912,18 +801,7 @@ impl TimelineSelectionRepository for SqliteTimelineRepository {
         connection.exec("BEGIN IMMEDIATE")?;
         let result = (|| {
             branch_info(&connection, branch)?;
-            let rows = connection.query(
-                "SELECT branch_id, generation FROM timeline_active_selection WHERE slot='core'",
-                &[],
-            )?;
-            let current = match rows.as_slice() {
-                [] => None,
-                [row] => Some(TimelineSelection {
-                    branch_id: BranchId(parse_uuid(&row[0])?),
-                    generation: parse_u64(&row[1])?,
-                }),
-                _ => return Err(storage("duplicate active selection")),
-            };
+            let current = read_selection(&connection)?;
             if current != expected {
                 return Err(TimelineError::ConcurrentWrite);
             }
@@ -1120,5 +998,128 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
+    }
+    #[test]
+    fn guarded_append_is_atomic_with_external_selection_change() {
+        let db = TestDb::new();
+        let branch = BranchId::new();
+        let mut first = SqliteTimelineRepository::open(&db.0).unwrap();
+        first.create_session(SessionId::new(), branch).unwrap();
+        let selection = first.select_branch(branch, None).unwrap();
+        let mut other = SqliteTimelineRepository::open(&db.0).unwrap();
+        let changed = other.select_branch(branch, Some(selection)).unwrap();
+        let draft = EventDraft::new(EventKind::UnityEvent);
+        assert_eq!(
+            first.append_guarded(
+                branch,
+                0,
+                "guarded:1",
+                json!({}),
+                vec![draft.clone()],
+                AppendGuard {
+                    selection_generation: selection.generation,
+                    context: None
+                },
+            ),
+            Err(TimelineError::ConcurrentWrite),
+        );
+        assert_eq!(first.branch(branch).unwrap().head_sequence, 0);
+        assert!(
+            first
+                .append_guarded(
+                    branch,
+                    0,
+                    "guarded:1",
+                    json!({}),
+                    vec![draft],
+                    AppendGuard {
+                        selection_generation: changed.generation,
+                        context: None
+                    },
+                )
+                .is_ok()
+        );
+        assert_eq!(first.branch(branch).unwrap().head_sequence, 1);
+        assert_eq!(first.selection().unwrap(), Some(changed));
+    }
+
+    #[test]
+    fn guarded_append_checks_reset_and_trigger_at_commit_time() {
+        let db = TestDb::new();
+        let branch = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let selected = repo.select_branch(branch, None).unwrap();
+        let mut source = EventDraft::new(EventKind::PlayerMessage);
+        source.actor = Some("player".into());
+        source.observers.insert(CharacterId::Mita);
+        let source_id = source.id;
+        repo.append(branch, 0, "source", json!({}), vec![source])
+            .unwrap();
+        let guard = AppendGuard {
+            selection_generation: selected.generation,
+            context: Some((CharacterId::Mita, 0, Some(source_id))),
+        };
+        let reply = || {
+            let mut fact = EventDraft::new(EventKind::CharacterMessage);
+            fact.actor = Some(CharacterId::Mita.to_string());
+            fact.observers.insert(CharacterId::Mita);
+            fact.links.push(crate::timeline::domain::CausalLink {
+                relation: crate::timeline::domain::CausalRelation::ReplyTo,
+                event_id: source_id,
+            });
+            fact
+        };
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Mita);
+        repo.append(branch, 1, "reset", json!({}), vec![reset])
+            .unwrap();
+        assert_eq!(repo.context_epoch(branch, CharacterId::Mita), Ok(2));
+        assert_eq!(
+            repo.knows(branch, CharacterId::Mita, source_id, Some(1)),
+            Ok(true)
+        );
+        assert_eq!(
+            repo.knows(branch, CharacterId::Mita, source_id, None),
+            Ok(false)
+        );
+        assert_eq!(
+            repo.append_guarded(branch, 2, "reply", json!({}), vec![reply()], guard),
+            Err(TimelineError::ConcurrentWrite),
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
+        let still_unknown = AppendGuard {
+            context: Some((CharacterId::Mita, 2, Some(source_id))),
+            ..guard
+        };
+        assert_eq!(
+            repo.append_guarded(branch, 2, "reply", json!({}), vec![reply()], still_unknown),
+            Err(TimelineError::ConcurrentWrite),
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
+    }
+
+    #[test]
+    fn guarded_replay_never_bypasses_stale_selection() {
+        let db = TestDb::new();
+        let branch = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let selection = repo.select_branch(branch, None).unwrap();
+        let draft = EventDraft::new(EventKind::UnityEvent);
+        let guard = AppendGuard {
+            selection_generation: selection.generation,
+            context: None,
+        };
+        let stored = repo
+            .append_guarded(branch, 0, "receipt", json!({}), vec![draft.clone()], guard)
+            .unwrap();
+        let mut other = SqliteTimelineRepository::open(&db.0).unwrap();
+        other.select_branch(branch, Some(selection)).unwrap();
+        assert_eq!(
+            repo.append_guarded(branch, 0, "receipt", json!({}), vec![draft], guard),
+            Err(TimelineError::ConcurrentWrite),
+        );
+        assert_eq!(repo.world(branch).unwrap(), stored);
     }
 }

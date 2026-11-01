@@ -3,8 +3,8 @@ use serde_json::Value;
 use crate::identity::{CharacterId, EventId};
 
 use super::{
-    BranchId, BranchInfo, EventDraft, KnownEvent, SessionId, TimelineError, TimelineFact,
-    TimelineStore,
+    AppendGuard, BranchId, BranchInfo, EventDraft, KnownEvent, SessionId, TimelineError,
+    TimelineFact, TimelineStore,
 };
 
 /// Semantic timeline operations; SQLite and future CFMD must obey identical laws.
@@ -55,6 +55,19 @@ pub trait TimelineRepository {
         command: Value,
         drafts: Vec<EventDraft>,
     ) -> Result<Vec<TimelineFact>, TimelineError>;
+    /// Append only when the supplied selection and optional turn context remain valid.
+    /// Persistent implementations must validate all preconditions atomically with writes.
+    fn append_guarded(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        command: Value,
+        drafts: Vec<EventDraft>,
+        guard: AppendGuard,
+    ) -> Result<Vec<TimelineFact>, TimelineError>;
+    fn context_epoch(&self, branch: BranchId, character: CharacterId)
+    -> Result<u64, TimelineError>;
     fn fork(
         &mut self,
         parent: BranchId,
@@ -102,6 +115,34 @@ impl TimelineRepository for TimelineStore {
         drafts: Vec<EventDraft>,
     ) -> Result<Vec<TimelineFact>, TimelineError> {
         TimelineStore::append(self, branch, expected_head, key, command, drafts)
+    }
+    fn append_guarded(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        command: Value,
+        drafts: Vec<EventDraft>,
+        guard: AppendGuard,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        if let Some((character, epoch, trigger)) = guard.context {
+            if TimelineStore::context_epoch(self, branch, character)? != epoch {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            if let Some(event) = trigger
+                && !TimelineStore::knows(self, branch, character, event, None)?
+            {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+        }
+        TimelineStore::append(self, branch, expected_head, key, command, drafts)
+    }
+    fn context_epoch(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+    ) -> Result<u64, TimelineError> {
+        TimelineStore::context_epoch(self, branch, character)
     }
     fn fork(
         &mut self,

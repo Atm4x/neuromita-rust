@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::identity::{CharacterId, EventId};
 
 use super::model::TimelineError;
-use super::model::{CausalRelation, EventKind, TimelineFact};
+use super::{
+    knowledge::knowledge_change,
+    model::{EventKind, TimelineFact},
+};
 
 /// Read-only facts needed by the single domain append validator.
 /// A repository can answer these with indexed storage reads without reconstructing
@@ -49,18 +52,12 @@ impl WorldIndex {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
+            let change = knowledge_change(fact, *observer).expect("fact observer has knowledge");
             let known = self.known.entry(*observer).or_default();
-            if fact.draft.kind == EventKind::CharacterContextReset {
+            if change.reset {
                 known.clear();
             }
-            known.insert(fact.draft.id);
-            if fact.draft.kind == EventKind::EventObserved {
-                for link in &fact.draft.links {
-                    if link.relation == CausalRelation::Observes {
-                        known.insert(link.event_id);
-                    }
-                }
-            }
+            known.extend(change.acquired);
         }
     }
 
@@ -136,19 +133,13 @@ impl<'a> AppendIndex<'a> {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
+            let effect = knowledge_change(fact, *observer).expect("fact observer has knowledge");
             let change = self.knowledge.entry(*observer).or_default();
-            if fact.draft.kind == EventKind::CharacterContextReset {
+            if effect.reset {
                 change.reset = true;
                 change.added.clear();
             }
-            change.added.insert(fact.draft.id);
-            if fact.draft.kind == EventKind::EventObserved {
-                for link in &fact.draft.links {
-                    if link.relation == CausalRelation::Observes {
-                        change.added.insert(link.event_id);
-                    }
-                }
-            }
+            change.added.extend(effect.acquired);
         }
     }
 }

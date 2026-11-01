@@ -13,16 +13,18 @@ use crate::{
 
 pub use crate::identity::EventId;
 pub mod domain;
+mod legacy;
 pub mod selection;
 pub mod storage;
 
+use legacy::{legacy_event, make_draft};
 use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
 
 #[cfg(feature = "sqlite-system")]
 use selection::TimelineSelectionRepository;
 
 use domain::{
-    BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId, TimelineFact,
+    AppendGuard, BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId,
     TimelineRepository, TimelineStore,
 };
 
@@ -259,9 +261,10 @@ impl SessionTimeline {
         id: EventId,
         text: Arc<str>,
     ) -> Result<EventId, String> {
-        let mut draft = self.make_draft(id, EventKind::CharacterObservation, character, text, None);
+        let mut draft = make_draft(id, EventKind::CharacterObservation, character, text, None);
         draft.actor = Some(character.to_string());
-        self.commit(format!("observe:{}", id.0), draft)?;
+        self.commit(format!("observe:{}", id.0), draft, None)
+            .map_err(|error| error.to_string())?;
         Ok(id)
     }
 
@@ -287,7 +290,7 @@ impl SessionTimeline {
             TurnIntent::Reply => EventKind::PlayerMessage,
             TurnIntent::React(_) | TurnIntent::Initiate => EventKind::ProactiveOpportunity,
         };
-        let mut draft = self.make_draft(id, kind, character, text, Some(request));
+        let mut draft = make_draft(id, kind, character, text, Some(request));
         match intent {
             TurnIntent::Reply => draft.actor = Some("player".to_string()),
             TurnIntent::Initiate => {
@@ -313,7 +316,8 @@ impl SessionTimeline {
                 });
             }
         }
-        self.commit(format!("input:{}", request.0), draft)?;
+        self.commit(format!("input:{}", request.0), draft, None)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -325,37 +329,25 @@ impl SessionTimeline {
         context: ContextAnchor,
         turn: TimelineTurn,
         text: Arc<str>,
-    ) -> Result<EventId, String> {
-        self.assert_turn(turn).map_err(|error| error.to_string())?;
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_turn(turn)?;
         if context.branch_id != self.branch.0 || context.through > self.anchor().through {
-            return Err("context does not belong to the active timeline".into());
+            return Err(domain::TimelineError::Invalid(
+                "context does not belong to the active timeline",
+            ));
         }
-        let trigger_fact = self
-            .store
-            .event(self.branch, trigger)
-            .map_err(|error| error.to_string())?;
-        if !self
-            .store
-            .knows(self.branch, character, trigger, None)
-            .map_err(|error| error.to_string())?
+        let trigger_fact = self.store.event(self.branch, trigger)?;
+        if !self.store.knows(self.branch, character, trigger, None)?
             || trigger_fact.draft.kind == EventKind::CharacterMessage
         {
-            return Err("reply target is not known to this character".into());
+            return Err(domain::TimelineError::Invalid(
+                "reply target is not known to this character",
+            ));
         }
-        if self
-            .store
-            .world(self.branch)
-            .map_err(|error| error.to_string())?
-            .iter()
-            .any(|fact| {
-                fact.draft.kind == EventKind::CharacterMessage
-                    && fact.draft.payload.get("request_id") == Some(&json!(request.0.to_string()))
-            })
-        {
-            return Err("request result already accepted".into());
-        }
+        // Operation-key uniqueness is enforced atomically by the repository receipt.
+        // Reading the complete world here would be both racy and O(history).
         let id = EventId::new();
-        let mut draft = self.make_draft(
+        let mut draft = make_draft(
             id,
             EventKind::CharacterMessage,
             character,
@@ -393,7 +385,7 @@ impl SessionTimeline {
                 event_id: trigger,
             });
         }
-        self.commit(format!("reply:{}", request.0), draft)?;
+        self.commit(format!("reply:{}", request.0), draft, Some(turn))?;
         Ok(id)
     }
 
@@ -412,71 +404,31 @@ impl SessionTimeline {
             .collect()
     }
 
-    fn make_draft(
-        &self,
-        id: EventId,
-        kind: EventKind,
-        character: CharacterId,
-        text: Arc<str>,
-        request: Option<RequestId>,
-    ) -> EventDraft {
-        let mut draft = EventDraft::new(kind);
-        draft.id = id;
-        draft.actor = Some(character.to_string());
-        draft.observers.insert(character);
-        draft.payload.insert("content".into(), json!(text.as_ref()));
-        if let Some(request) = request {
-            draft
-                .payload
-                .insert("request_id".into(), json!(request.0.to_string()));
+    fn commit(
+        &mut self,
+        operation_key: String,
+        draft: EventDraft,
+        turn: Option<TimelineTurn>,
+    ) -> Result<(), domain::TimelineError> {
+        let current = self.selection();
+        if turn.is_some_and(|turn| turn.selection != current) {
+            return Err(domain::TimelineError::ConcurrentWrite);
         }
-        draft
-    }
-
-    fn commit(&mut self, operation_key: String, draft: EventDraft) -> Result<(), String> {
+        let guard = AppendGuard {
+            selection_generation: current.generation,
+            context: turn.map(|turn| (turn.character, turn.context_epoch, turn.trigger)),
+        };
         let head = self.anchor().through;
-        self.store
-            .append(self.branch, head, &operation_key, json!({}), vec![draft])
-            .map_err(|error| error.to_string())?;
+        self.store.append_guarded(
+            self.branch,
+            head,
+            &operation_key,
+            json!({}),
+            vec![draft],
+            guard,
+        )?;
         Ok(())
     }
-}
-
-fn legacy_event(fact: &TimelineFact, observer: CharacterId) -> Option<TimelineEvent> {
-    let draft = &fact.draft;
-    let text: Arc<str> = draft.payload.get("content").and_then(Value::as_str)?.into();
-    let content = match draft.kind {
-        EventKind::PlayerMessage => EventContent::PlayerMessage { text },
-        EventKind::CharacterObservation => EventContent::Observation { text },
-        EventKind::ProactiveOpportunity => {
-            match draft.payload.get("legacy_intent").and_then(Value::as_str)? {
-                "initiate" => EventContent::Initiation { text },
-                "react" => EventContent::Reaction {
-                    text,
-                    target: EventId(Uuid::parse_str(draft.payload.get("target")?.as_str()?).ok()?),
-                },
-                _ => return None,
-            }
-        }
-        EventKind::CharacterMessage => EventContent::CharacterReply {
-            text,
-            reply_to: EventId(Uuid::parse_str(draft.payload.get("reply_to")?.as_str()?).ok()?),
-            context: serde_json::from_value(draft.payload.get("context")?.clone()).ok()?,
-        },
-        _ => return None,
-    };
-    Some(TimelineEvent {
-        id: draft.id,
-        sequence: fact.sequence,
-        observer,
-        request_id: draft
-            .payload
-            .get("request_id")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .map(RequestId),
-        content,
-    })
 }
 
 #[cfg(test)]

@@ -2,35 +2,32 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::identity::{CharacterId, EventId};
 
-use super::model::{CausalRelation, EventKind, KnownEvent, TimelineFact};
+use super::{
+    knowledge::knowledge_change,
+    model::{EventKind, KnownEvent, TimelineFact},
+};
 
 pub fn character_view(facts: &[TimelineFact], character: CharacterId) -> Vec<KnownEvent> {
     let mut known = HashMap::<EventId, KnownEvent>::new();
     let mut previous = HashMap::<EventId, &TimelineFact>::new();
     for fact in facts {
-        if !fact.draft.observers.contains(&character) {
-            previous.insert(fact.draft.id, fact);
-            continue;
-        }
-        if fact.draft.kind == EventKind::CharacterContextReset {
-            known.clear();
-        }
-        known.entry(fact.draft.id).or_insert_with(|| KnownEvent {
-            fact: fact.clone(),
-            learned_at: fact.sequence,
-        });
-        if fact.draft.kind == EventKind::EventObserved
-            && let Some(link) = fact
-                .draft
-                .links
-                .iter()
-                .find(|link| link.relation == CausalRelation::Observes)
-            && let Some(original) = previous.get(&link.event_id)
-        {
-            known.entry(link.event_id).or_insert_with(|| KnownEvent {
-                fact: (*original).clone(),
-                learned_at: fact.sequence,
-            });
+        if let Some(change) = knowledge_change(fact, character) {
+            if change.reset {
+                known.clear();
+            }
+            for id in change.acquired {
+                let original = if id == fact.draft.id {
+                    Some(fact)
+                } else {
+                    previous.get(&id).copied()
+                };
+                if let Some(original) = original {
+                    known.entry(id).or_insert_with(|| KnownEvent {
+                        fact: original.clone(),
+                        learned_at: fact.sequence,
+                    });
+                }
+            }
         }
         previous.insert(fact.draft.id, fact);
     }

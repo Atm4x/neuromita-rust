@@ -154,6 +154,14 @@ pub struct BranchInfo {
     pub checkpoint: Option<EventId>,
 }
 
+/// Preconditions for accepting an event into the currently selected timeline.
+/// A durable repository checks these in the same transaction as the append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppendGuard {
+    pub selection_generation: u64,
+    pub context: Option<(CharacterId, u64, Option<EventId>)>,
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum TimelineError {
     #[error("timeline branch or event was not found in this branch world")]

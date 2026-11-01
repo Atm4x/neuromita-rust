@@ -1,6 +1,6 @@
 use crate::identity::{CharacterId, EventId};
 
-use super::domain::{BranchId, EventKind, TimelineError, TimelineRepository};
+use super::domain::{BranchId, TimelineError, TimelineRepository};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimelineSelection {
@@ -118,16 +118,7 @@ impl SessionWorkspace {
         branch: BranchId,
         character: CharacterId,
     ) -> Result<u64, TimelineError> {
-        Ok(store
-            .world(branch)?
-            .iter()
-            .filter(|fact| {
-                fact.draft.kind == EventKind::CharacterContextReset
-                    && fact.draft.observers.contains(&character)
-            })
-            .map(|fact| fact.sequence)
-            .max()
-            .unwrap_or(0))
+        store.context_epoch(branch, character)
     }
 }
 
