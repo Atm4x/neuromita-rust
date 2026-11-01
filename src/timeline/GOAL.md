@@ -168,3 +168,10 @@
 - [x] Per-character local context-epoch observation: pending jobs pin epoch at admission; LLM and TTS are cancelled early if their character is reset before acceptance. Another character's generation continues. New requests after reset use the new epoch.
 - [x] Tests: blocked Gemini, independent character, waiting reaction, interrupted voice synthesis, idempotent reset, stale branch generation, SQLite reopen, old historical context, Clippy and Rustfmt.
 - [ ] External-process reset/selection notifications still need an independently designed transport or event mechanism; guarded accept already rejects stale commits, but cannot abort the LLM await early across processes. Full durable mutable CharacterState and effects recovery are also not implemented.
+
+## Согласованность исторической генерации после reset (2026-11-01)
+
+- [x] `ContextPosition::At` проверяет эпоху знаний персонажа на запрошенном префиксе против его текущей эпохи. Если между снимком и генерацией был `CharacterContextReset`, запрос отменяется до LLM/TTS, а историческое чтение остаётся доступным.
+- [x] Индексированный SQLite и in-memory обеспечивают один контракт `context_epoch_at`, включая унаследованные префиксы fork и повторный запуск.
+- [x] End-to-end проверка через `ChatApi::reply(...).at(...)`: один персонаж не может восстановить забытые сведения, независимый адресат сохраняет доступ к своему историческому контексту; текущий выбор ветки не меняется.
+- [ ] Это не реализация выбора активного персонажа Sandbox, расширяемого реестра персонажей или полной атомарности mutable `CharacterState`.

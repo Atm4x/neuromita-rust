@@ -18,7 +18,7 @@ use crate::{
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     timeline::{
-        ContextAnchor, ContextPosition, EventId, SessionTimeline,
+        ContextAnchor, ContextCaptureError, ContextPosition, EventId, SessionTimeline,
         selection::{TimelineAdmission, TimelineTurn},
     },
     voice::AudioArtifact,
@@ -311,9 +311,13 @@ impl CharacterHandler {
                 .verify_admitted_input(self.character.id, request, &input)
                 .map_err(|_| CharacterError::StaleState)?;
         }
-        let captured = timeline
-            .capture_context(self.character.id, at)
-            .map_err(CharacterError::Internal)?;
+        let captured =
+            timeline
+                .capture_context(self.character.id, at)
+                .map_err(|error| match error {
+                    ContextCaptureError::StaleKnowledge => CharacterError::StaleState,
+                    ContextCaptureError::Invalid(reason) => CharacterError::Internal(reason),
+                })?;
         let anchor = captured.history.at;
         let state = state_at(&timeline, self.character.id, anchor)?;
         let reaction = timeline

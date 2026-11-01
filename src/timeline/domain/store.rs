@@ -223,21 +223,38 @@ impl TimelineStore {
         ))
     }
 
-    pub fn context_epoch(
+    pub fn context_epoch_at(
         &self,
         branch: BranchId,
         character: CharacterId,
+        through: Option<u64>,
     ) -> Result<u64, TimelineError> {
+        let head = self.branch(branch)?.head_sequence;
+        let ceiling = through.unwrap_or(head);
+        if ceiling > head {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
         Ok(self
             .world(branch)?
             .iter()
             .filter(|fact| {
-                fact.draft.kind == EventKind::CharacterContextReset
+                fact.sequence <= ceiling
+                    && fact.draft.kind == EventKind::CharacterContextReset
                     && fact.draft.observers.contains(&character)
             })
             .map(|fact| fact.sequence)
             .max()
             .unwrap_or(0))
+    }
+
+    pub fn context_epoch(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+    ) -> Result<u64, TimelineError> {
+        self.context_epoch_at(branch, character, None)
     }
 
     pub fn knows(

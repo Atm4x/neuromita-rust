@@ -722,13 +722,14 @@ impl TimelineRepository for SqliteTimelineRepository {
     ) -> Result<Vec<TimelineFact>, TimelineError> {
         self.append_inner(branch, expected_head, key, command, drafts, Some(guard))
     }
-    fn context_epoch(
+    fn context_epoch_at(
         &self,
         branch: BranchId,
         character: CharacterId,
+        through: Option<u64>,
     ) -> Result<u64, TimelineError> {
         self.read_snapshot(|connection| {
-            IndexedWorld::new(connection, branch)?.latest_reset(character)
+            IndexedWorld::through(connection, branch, through)?.latest_reset(character)
         })
     }
     fn fork(

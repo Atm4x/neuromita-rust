@@ -601,3 +601,66 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
         Err(TimelineError::Conflict)
     );
 }
+
+fn historic_epoch_contract(repo: &mut dyn TimelineRepository) {
+    let root = BranchId::new();
+    repo.create_session(SessionId::new(), root).unwrap();
+    append(
+        repo,
+        root,
+        "root-mita-reset",
+        mk(EventKind::CharacterContextReset, &[CharacterId::Mita]),
+    );
+    let mut checkpoint = mk(EventKind::Checkpoint, &[]);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    append(repo, root, "checkpoint", checkpoint);
+    let fork = BranchId::new();
+    let fork_start = repo.fork(root, checkpoint_id, fork).unwrap().head_sequence;
+    append(
+        repo,
+        root,
+        "root-kind-reset",
+        mk(EventKind::CharacterContextReset, &[CharacterId::KindMita]),
+    );
+    append(
+        repo,
+        fork,
+        "fork-mita-reset",
+        mk(EventKind::CharacterContextReset, &[CharacterId::Mita]),
+    );
+
+    assert_eq!(
+        repo.context_epoch_at(root, CharacterId::Mita, Some(0)),
+        Ok(0)
+    );
+    assert_eq!(
+        repo.context_epoch_at(root, CharacterId::Mita, Some(1)),
+        Ok(1)
+    );
+    assert_eq!(repo.context_epoch(root, CharacterId::KindMita), Ok(3));
+    assert_eq!(
+        repo.context_epoch_at(fork, CharacterId::Mita, Some(1)),
+        Ok(1)
+    );
+    assert_eq!(
+        repo.context_epoch_at(fork, CharacterId::Mita, Some(fork_start)),
+        Ok(1)
+    );
+    assert_eq!(
+        repo.context_epoch(fork, CharacterId::Mita),
+        Ok(fork_start + 1)
+    );
+    assert_eq!(repo.context_epoch(fork, CharacterId::KindMita), Ok(0));
+    assert!(
+        repo.context_epoch_at(fork, CharacterId::Mita, Some(fork_start + 2))
+            .is_err()
+    );
+}
+
+#[test]
+fn historical_reset_epochs_match_for_in_memory_and_sqlite_forks() {
+    historic_epoch_contract(&mut TimelineStore::new());
+    let file = DatabaseFile::new();
+    historic_epoch_contract(&mut file.open());
+}

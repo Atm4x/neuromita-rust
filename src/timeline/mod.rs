@@ -43,6 +43,14 @@ pub enum ContextPosition {
     At(ContextAnchor),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ContextCaptureError {
+    #[error("generation context belongs to a prior character knowledge epoch")]
+    StaleKnowledge,
+    #[error("{0}")]
+    Invalid(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventContent {
     PlayerMessage {
@@ -370,15 +378,31 @@ impl SessionTimeline {
         &self,
         character: CharacterId,
         position: ContextPosition,
-    ) -> Result<TimelineContextSnapshot, String> {
+    ) -> Result<TimelineContextSnapshot, ContextCaptureError> {
         let anchor = match position {
             ContextPosition::Latest => self.anchor(),
             ContextPosition::At(at) => at,
         };
         if anchor.branch_id != self.branch.0 {
-            return Err("generation context belongs to another timeline branch".into());
+            return Err(ContextCaptureError::Invalid(
+                "generation context belongs to another timeline branch".into(),
+            ));
+        }
+        if matches!(position, ContextPosition::At(_)) {
+            let captured_epoch = self
+                .store
+                .context_epoch_at(self.branch, character, Some(anchor.through))
+                .map_err(|error| ContextCaptureError::Invalid(error.to_string()))?;
+            let current_epoch = self
+                .store
+                .context_epoch(self.branch, character)
+                .map_err(|error| ContextCaptureError::Invalid(error.to_string()))?;
+            if captured_epoch != current_epoch {
+                return Err(ContextCaptureError::StaleKnowledge);
+            }
         }
         self.inspect_context_at(character, anchor)
+            .map_err(ContextCaptureError::Invalid)
     }
 
     /// Read a saved branch without selecting it or changing pending generations.

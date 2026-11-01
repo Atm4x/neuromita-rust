@@ -219,3 +219,129 @@ fn saved_branch_remains_readable_after_sqlite_reopen() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+fn historical_reset_boundary_contract(
+    timeline: &mut SessionTimeline,
+) -> (ContextAnchor, ContextAnchor) {
+    timeline
+        .publish_player_message(
+            CharacterId::Mita,
+            EventId::new(),
+            Arc::from("forgotten secret"),
+        )
+        .unwrap();
+    let before_reset = timeline.anchor();
+    let selection = timeline.selection();
+    timeline
+        .reset_character_context(selection, CharacterId::Mita, EventId::new())
+        .unwrap();
+    let after_mita_reset = timeline.anchor();
+
+    assert_eq!(
+        timeline
+            .inspect_context_at(CharacterId::Mita, before_reset)
+            .unwrap()
+            .view
+            .messages()[0]
+            .content,
+        "forgotten secret"
+    );
+    assert!(
+        timeline
+            .capture_context(CharacterId::Mita, ContextPosition::At(before_reset))
+            .is_err()
+    );
+    assert!(
+        timeline
+            .capture_context(CharacterId::KindMita, ContextPosition::At(before_reset))
+            .is_ok()
+    );
+    assert!(
+        timeline
+            .capture_context(CharacterId::Mita, ContextPosition::At(after_mita_reset))
+            .is_ok()
+    );
+    assert!(
+        timeline
+            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .unwrap()
+            .view
+            .messages()
+            .is_empty()
+    );
+
+    timeline
+        .reset_character_context(selection, CharacterId::KindMita, EventId::new())
+        .unwrap();
+    assert!(
+        timeline
+            .capture_context(CharacterId::KindMita, ContextPosition::At(before_reset))
+            .is_err()
+    );
+    assert!(
+        timeline
+            .capture_context(CharacterId::Mita, ContextPosition::At(after_mita_reset))
+            .is_ok()
+    );
+
+    (before_reset, after_mita_reset)
+}
+
+#[test]
+fn old_knowledge_is_inspectable_but_cannot_generate_after_reset() {
+    historical_reset_boundary_contract(&mut SessionTimeline::new());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn historical_knowledge_epoch_remains_protected_after_sqlite_reopen() {
+    let path = std::env::temp_dir().join(format!(
+        "neuromita-knowledge-epoch-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let (before, after) = {
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root,
+        })
+        .unwrap();
+        historical_reset_boundary_contract(&mut timeline)
+    };
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(
+        reopened
+            .capture_context(CharacterId::Mita, ContextPosition::At(before))
+            .is_err()
+    );
+    assert!(
+        reopened
+            .capture_context(CharacterId::KindMita, ContextPosition::At(before))
+            .is_err()
+    );
+    assert!(
+        reopened
+            .capture_context(CharacterId::Mita, ContextPosition::At(after))
+            .is_ok()
+    );
+    assert_eq!(
+        reopened
+            .inspect_context_at(CharacterId::Mita, before)
+            .unwrap()
+            .view
+            .messages()[0]
+            .content,
+        "forgotten secret"
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

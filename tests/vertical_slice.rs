@@ -1018,3 +1018,87 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    ChatApi::publish_message(
+        CharacterId::Mita,
+        UserInput::new("Private knowledge before reset".into()).unwrap(),
+    )
+    .unwrap();
+    let old = app.at();
+    app.reset_character_context(
+        app.timeline_selection(),
+        CharacterId::Mita,
+        neuromita::timeline::EventId::new(),
+    )
+    .unwrap();
+
+    let stale = ChatApi::reply(
+        ReplyRequest::new(
+            CharacterId::Mita,
+            preset.clone(),
+            UserInput::new("Try old context".into()).unwrap(),
+            RequestSource::Presenter,
+        )
+        .at(neuromita::timeline::ContextPosition::At(old)),
+    )
+    .unwrap();
+    assert!(matches!(
+        finished(&stale).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(server.calls.try_recv().is_err());
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(old)
+            .await
+            .unwrap()
+            .view
+            .messages()[0]
+            .content,
+        "Private knowledge before reset"
+    );
+
+    let independent = ChatApi::reply(
+        ReplyRequest::new(
+            CharacterId::KindMita,
+            preset,
+            UserInput::new("Your own earlier view".into()).unwrap(),
+            RequestSource::Presenter,
+        )
+        .at(neuromita::timeline::ContextPosition::At(old)),
+    )
+    .unwrap();
+    let call = server.next().await;
+    assert_eq!(user_texts(&call.body), ["Your own earlier view"]);
+    assert!(
+        !call
+            .body
+            .to_string()
+            .contains("Private knowledge before reset")
+    );
+    call.respond
+        .send(Reply::Text("independent answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&independent).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}

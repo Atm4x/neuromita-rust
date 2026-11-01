@@ -66,8 +66,19 @@ pub trait TimelineRepository {
         drafts: Vec<EventDraft>,
         guard: AppendGuard,
     ) -> Result<Vec<TimelineFact>, TimelineError>;
-    fn context_epoch(&self, branch: BranchId, character: CharacterId)
-    -> Result<u64, TimelineError>;
+    fn context_epoch_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        through: Option<u64>,
+    ) -> Result<u64, TimelineError>;
+    fn context_epoch(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+    ) -> Result<u64, TimelineError> {
+        self.context_epoch_at(branch, character, None)
+    }
     fn fork(
         &mut self,
         parent: BranchId,
@@ -137,12 +148,13 @@ impl TimelineRepository for TimelineStore {
         }
         TimelineStore::append(self, branch, expected_head, key, command, drafts)
     }
-    fn context_epoch(
+    fn context_epoch_at(
         &self,
         branch: BranchId,
         character: CharacterId,
+        through: Option<u64>,
     ) -> Result<u64, TimelineError> {
-        TimelineStore::context_epoch(self, branch, character)
+        TimelineStore::context_epoch_at(self, branch, character, through)
     }
     fn fork(
         &mut self,

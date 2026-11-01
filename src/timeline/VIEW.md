@@ -158,3 +158,11 @@ repository do not directly push these in-process notifications; external reset
 or selection changes are still detected by the final guarded acceptance check.
 Likewise, this work does not add durable mutable CharacterState beyond the
 existing accepted-reply projection. No Unity transport or polling service added.
+
+## Historical generation and character knowledge epochs (2026-11-01)
+
+- A read-only `CharacterHandle::get_context(old_anchor)` may inspect a saved state from before `CharacterContextReset`. It never changes selection or current knowledge.
+- Generating with an explicit `ContextPosition::At(old_anchor)` is allowed only if the anchor and current active branch are in the **same character knowledge epoch**. Otherwise preparation yields stale state and the request is cancelled before LLM/TTS. This prevents historical generation from silently reusing knowledge that the character has since forgotten.
+- `ContextPosition::Latest` continues to capture current knowledge when the worker starts. One character's reset does not invalidate another character's historical position unless that character also crossed a reset boundary.
+- `TimelineRepository::context_epoch_at` evaluates the last reset at the requested branch position, including inherited fork prefixes. SQLite uses its existing reset indexes; in-memory and SQLite follow the same contract. No separate mutable knowledge state is introduced.
+- This rule concerns explicitly addressed `CharacterId`s in the current minimal Rust Core. The Sandbox-selected character and any settings-driven character selection are not implemented here; the rule must not be confused with a client-side active-character resolver.
