@@ -1,7 +1,8 @@
 mod handler;
 mod model;
 
+pub use crate::identity::CharacterId;
 pub(crate) use handler::AcceptanceContext;
 pub(crate) use handler::CharacterRegistry;
-pub use handler::{CharacterError, CharacterHandle};
-pub use model::{CharacterContext, CharacterId, CharacterState, CharacterView, ResponseEffect};
+pub use handler::{AcceptedResponse, CharacterError, CharacterHandle};
+pub use model::{CharacterContext, CharacterState, CharacterView, ResponseEffect};

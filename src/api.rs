@@ -1,17 +1,18 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::{
     character::{CharacterError, CharacterHandle, CharacterId},
     request::{
         InitiateRequest, Message, ReactRequest, ReplyRequest, RequestDiscovery, RequestHandle,
-        RequestId, RequestRegistry, SubmitError,
+        RequestId, SubmitError,
     },
     runtime::{self, ApiUnavailable},
+    settings::{
+        SectionSnapshot, SettingsApi, SettingsError, SettingsOwner, SettingsSection,
+        SettingsSnapshot,
+    },
 };
 
 pub struct CharacterApi;
@@ -25,68 +26,6 @@ impl CharacterApi {
 }
 
 pub struct ChatApi;
-
-pub(crate) struct ChatApiState {
-    accepting: Mutex<bool>,
-    pub(crate) registry: Arc<RequestRegistry>,
-    handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
-}
-
-impl ChatApiState {
-    pub(crate) fn new(
-        registry: Arc<RequestRegistry>,
-        handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
-    ) -> Self {
-        Self {
-            accepting: Mutex::new(true),
-            registry,
-            handlers,
-        }
-    }
-
-    pub(crate) fn close(&self) {
-        *self.accepting.lock().expect("admission mutex poisoned") = false;
-        self.registry.cancel_all();
-    }
-    pub(crate) fn send(
-        &self,
-        request: impl Message + 'static,
-    ) -> Result<RequestHandle, SubmitError> {
-        let accepting = self.accepting.lock().expect("admission mutex poisoned");
-        if !*accepting {
-            return Err(SubmitError::Stopped);
-        }
-        let handler = self
-            .handlers
-            .get(&request.character_id())
-            .ok_or(SubmitError::CharacterUnavailable)?;
-        let permit = handler.try_reserve().map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => SubmitError::QueueFull,
-            mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
-        })?;
-        let handle = self.registry.register(Box::new(request));
-        permit.send(handle.id());
-        Ok(handle)
-    }
-
-    pub(crate) fn observe_requests(&self) -> Result<RequestDiscovery, SubmitError> {
-        let accepting = self.accepting.lock().expect("admission mutex poisoned");
-        if !*accepting {
-            return Err(SubmitError::Stopped);
-        }
-        Ok(self.registry.observe())
-    }
-
-    pub(crate) fn active_request(
-        &self,
-        id: RequestId,
-    ) -> Result<Option<RequestHandle>, SubmitError> {
-        if !*self.accepting.lock().expect("admission mutex poisoned") {
-            return Err(SubmitError::Stopped);
-        }
-        Ok(self.registry.get(id).map(|record| record.handle()))
-    }
-}
 
 impl ChatApi {
     pub fn reply(request: ReplyRequest) -> Result<RequestHandle, SubmitError> {
@@ -126,6 +65,50 @@ impl ChatApi {
 }
 
 impl From<ApiUnavailable> for SubmitError {
+    fn from(error: ApiUnavailable) -> Self {
+        match error {
+            ApiUnavailable::Uninitialized => Self::Uninitialized,
+            ApiUnavailable::Stopped => Self::Stopped,
+        }
+    }
+}
+
+impl SettingsApi {
+    fn owner() -> Result<Arc<SettingsOwner>, SettingsError> {
+        Ok(Arc::clone(
+            &runtime::current().map_err(SettingsError::from)?.settings,
+        ))
+    }
+    pub fn snapshot<T: SettingsSection>() -> Result<SectionSnapshot<T>, SettingsError> {
+        Self::owner()?.snapshot()
+    }
+    pub fn snapshot_all() -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        Self::owner()?.snapshot_all()
+    }
+    pub fn observe() -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
+        Self::owner()?.observe()
+    }
+    pub fn replace<T: SettingsSection>(
+        expected_revision: u64,
+        value: T,
+    ) -> Result<SectionSnapshot<T>, SettingsError> {
+        Self::owner()?.replace(expected_revision, value)
+    }
+    /// The edit must be short and must not block or re-enter SettingsApi.
+    pub fn edit<T: SettingsSection>(
+        edit: impl FnOnce(&mut T),
+    ) -> Result<SectionSnapshot<T>, SettingsError> {
+        Self::owner()?.edit(edit)
+    }
+    pub async fn flush() -> Result<(), SettingsError> {
+        Self::owner()?.flush().await
+    }
+    pub fn retry_save() -> Result<(), SettingsError> {
+        Self::owner()?.request_save()
+    }
+}
+
+impl From<ApiUnavailable> for SettingsError {
     fn from(error: ApiUnavailable) -> Self {
         match error {
             ApiUnavailable::Uninitialized => Self::Uninitialized,

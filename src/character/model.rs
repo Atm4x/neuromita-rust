@@ -1,36 +1,9 @@
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
-use crate::timeline::{ContextAnchor, EventId, HistoryView};
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum CharacterId {
-    Mita,
-    KindMita,
-}
-
-impl CharacterId {
-    pub const ALL: [Self; 2] = [Self::Mita, Self::KindMita];
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "mita" => Some(Self::Mita),
-            "kind-mita" => Some(Self::KindMita),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for CharacterId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Mita => "mita",
-            Self::KindMita => "kind-mita",
-        })
-    }
-}
+use crate::{
+    identity::CharacterId,
+    timeline::{ContextAnchor, EventId, HistoryView},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterState {

@@ -15,12 +15,11 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
-    api::ChatApiState,
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
-    request::{MessageHandler, RequestRegistry},
+    request::{ChatApiState, MessageHandler, RequestRegistry},
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{

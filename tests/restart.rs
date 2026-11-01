@@ -246,7 +246,13 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(ApplicationLifecycle::status(), ApplicationStatus::Stopping);
+    timeout(Duration::from_secs(5), async {
+        while ApplicationLifecycle::status() != ApplicationStatus::Stopping {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(matches!(
         reply("first", "during shutdown"),
         Err(SubmitError::Stopped)

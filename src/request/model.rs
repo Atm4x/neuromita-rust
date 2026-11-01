@@ -4,65 +4,18 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    character::CharacterId,
+    character::{AcceptedResponse, CharacterId},
     generation::{GenerationError, GenerationPreset},
-    timeline::{ContextAnchor, ContextPosition, EventId},
-    voice::{AudioArtifact, VoiceError, VoicePlan},
+    identity::RequestId,
+    interaction::{TurnIntent, UserInput},
+    timeline::{ContextPosition, EventId},
+    voice::{VoiceError, VoicePlan},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RequestId(pub Uuid);
-
-impl RequestId {
-    pub(crate) fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-impl fmt::Display for RequestId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestSource {
     Presenter,
     Client(Uuid),
-}
-
-#[derive(Debug, Error)]
-pub enum InputError {
-    #[error("message must not be empty")]
-    Empty,
-    #[error("message exceeds 64 KiB")]
-    TooLarge,
-}
-
-#[derive(Debug, Clone)]
-pub struct UserInput {
-    event_id: EventId,
-    text: Arc<str>,
-}
-
-impl UserInput {
-    pub fn new(text: String) -> Result<Self, InputError> {
-        if text.trim().is_empty() {
-            return Err(InputError::Empty);
-        }
-        if text.len() > 64 * 1024 {
-            return Err(InputError::TooLarge);
-        }
-        Ok(Self {
-            event_id: EventId::new(),
-            text: Arc::from(text),
-        })
-    }
-    pub fn event_id(&self) -> EventId {
-        self.event_id
-    }
-    pub fn text(&self) -> &Arc<str> {
-        &self.text
-    }
 }
 
 pub trait Message: Send + Sync + fmt::Debug {
@@ -73,13 +26,6 @@ pub trait Message: Send + Sync + fmt::Debug {
     fn intent(&self) -> TurnIntent;
     fn voice(&self) -> &VoicePlan;
     fn at(&self) -> ContextPosition;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnIntent {
-    Reply,
-    React(EventId),
-    Initiate,
 }
 
 #[derive(Debug)]
@@ -247,14 +193,6 @@ pub struct RequestMetadata {
     pub character_id: CharacterId,
     pub source: RequestSource,
     pub intent: TurnIntent,
-}
-
-#[derive(Debug, Clone)]
-pub struct AcceptedResponse {
-    pub text: Arc<str>,
-    pub event_id: EventId,
-    pub context: ContextAnchor,
-    pub audio: Option<AudioArtifact>,
 }
 
 #[derive(Debug, Clone)]

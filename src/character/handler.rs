@@ -14,7 +14,8 @@ use super::{
     CharacterContext, CharacterId, CharacterState, CharacterView, ResponseEffect, model::Character,
 };
 use crate::{
-    request::{AcceptedResponse, RequestId, TurnIntent, UserInput},
+    identity::RequestId,
+    interaction::{TurnIntent, UserInput},
     timeline::{ContextAnchor, ContextPosition, EventContent, EventId, SessionTimeline},
     voice::AudioArtifact,
 };
@@ -27,6 +28,14 @@ pub enum CharacterError {
     StaleState,
     #[error("character operation failed: {0}")]
     Internal(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AcceptedResponse {
+    pub text: Arc<str>,
+    pub event_id: EventId,
+    pub context: ContextAnchor,
+    pub audio: Option<AudioArtifact>,
 }
 
 #[derive(Debug, Clone, Copy)]

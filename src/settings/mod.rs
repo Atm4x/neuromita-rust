@@ -10,10 +10,10 @@ use thiserror::Error;
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    lifecycle::Lifecycle,
-    runtime::{self, ApiUnavailable},
-};
+use crate::lifecycle::Lifecycle;
+
+/// Static settings entry point; its runtime-bound methods are implemented in `crate::api`.
+pub struct SettingsApi;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum SettingsError {
@@ -63,52 +63,6 @@ pub(crate) struct SettingsOwner {
     state: Mutex<State>,
     updates: watch::Sender<Arc<SettingsSnapshot>>,
     save: Notify,
-}
-
-pub struct SettingsApi;
-
-impl SettingsApi {
-    fn owner() -> Result<Arc<SettingsOwner>, SettingsError> {
-        Ok(Arc::clone(
-            &runtime::current().map_err(SettingsError::from)?.settings,
-        ))
-    }
-    pub fn snapshot<T: SettingsSection>() -> Result<SectionSnapshot<T>, SettingsError> {
-        Self::owner()?.snapshot()
-    }
-    pub fn snapshot_all() -> Result<Arc<SettingsSnapshot>, SettingsError> {
-        Self::owner()?.snapshot_all()
-    }
-    pub fn observe() -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
-        Self::owner()?.observe()
-    }
-    pub fn replace<T: SettingsSection>(
-        expected_revision: u64,
-        value: T,
-    ) -> Result<SectionSnapshot<T>, SettingsError> {
-        Self::owner()?.replace(expected_revision, value)
-    }
-    /// The edit must be short and must not block or re-enter SettingsApi.
-    pub fn edit<T: SettingsSection>(
-        edit: impl FnOnce(&mut T),
-    ) -> Result<SectionSnapshot<T>, SettingsError> {
-        Self::owner()?.edit(edit)
-    }
-    pub async fn flush() -> Result<(), SettingsError> {
-        Self::owner()?.flush().await
-    }
-    pub fn retry_save() -> Result<(), SettingsError> {
-        Self::owner()?.request_save()
-    }
-}
-
-impl From<ApiUnavailable> for SettingsError {
-    fn from(error: ApiUnavailable) -> Self {
-        match error {
-            ApiUnavailable::Uninitialized => Self::Uninitialized,
-            ApiUnavailable::Stopped => Self::Stopped,
-        }
-    }
 }
 
 impl SettingsOwner {
@@ -165,7 +119,7 @@ impl SettingsOwner {
             value: T::read(&snapshot.values),
         })
     }
-    async fn flush(&self) -> Result<(), SettingsError> {
+    pub(crate) async fn flush(&self) -> Result<(), SettingsError> {
         let mut updates = self.observe()?;
         let target = updates.borrow().revision;
         self.save.notify_one();
@@ -194,7 +148,7 @@ impl SettingsOwner {
 }
 
 impl SettingsOwner {
-    fn request_save(&self) -> Result<(), SettingsError> {
+    pub(crate) fn request_save(&self) -> Result<(), SettingsError> {
         let mut state = self.state.lock().expect("settings mutex poisoned");
         if state.closed {
             return Err(SettingsError::Stopped);

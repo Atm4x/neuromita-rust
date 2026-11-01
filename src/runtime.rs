@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{api::ChatApiState, character::CharacterRegistry, settings::SettingsOwner};
+use crate::{character::CharacterRegistry, request::ChatApiState, settings::SettingsOwner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplicationStatus {

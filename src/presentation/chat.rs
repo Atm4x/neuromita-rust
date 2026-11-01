@@ -8,12 +8,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    api::ChatApiState,
     character::CharacterId,
     generation::GenerationPreset,
     request::{
-        CancelResult, DiscoveryError, InitiateRequest, InputError, ReactRequest, ReplyRequest,
-        RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestSnapshot,
+        CancelResult, ChatApiState, DiscoveryError, InitiateRequest, InputError, ReactRequest,
+        ReplyRequest, RequestDiscovery, RequestHandle, RequestId, RequestMetadata, RequestSnapshot,
         RequestSource, SubmitError, UserInput,
     },
     settings::{SettingsError, SettingsOwner, VoiceSettings},

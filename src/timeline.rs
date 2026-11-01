@@ -4,23 +4,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    character::CharacterId,
-    request::{RequestId, TurnIntent},
+    identity::{CharacterId, RequestId},
+    interaction::TurnIntent,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EventId(pub Uuid);
-
-impl EventId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-impl Default for EventId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use crate::identity::EventId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextAnchor {
