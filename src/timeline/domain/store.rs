@@ -1,0 +1,500 @@
+use std::collections::{HashMap, HashSet};
+
+use serde_json::{Map, Value};
+
+use crate::identity::{CharacterId, EventId};
+
+use super::{
+    model::{
+        BranchId, BranchInfo, CausalRelation, EventDraft, EventKind, KnownEvent, SessionId,
+        TimelineError, TimelineFact,
+    },
+    projection::{character_view, knows, present_characters},
+};
+
+#[derive(Debug, Clone)]
+struct Receipt {
+    command: Value,
+    drafts: Vec<EventDraft>,
+    result: Vec<TimelineFact>,
+}
+
+#[derive(Debug)]
+struct Branch {
+    info: BranchInfo,
+    events: Vec<TimelineFact>,
+    receipts: HashMap<String, Receipt>,
+}
+
+#[derive(Debug, Default)]
+pub struct TimelineStore {
+    branches: HashMap<BranchId, Branch>,
+}
+
+impl TimelineStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn create_session(
+        &mut self,
+        session_id: SessionId,
+        branch_id: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        if let Some(branch) = self.branches.get(&branch_id) {
+            return if branch.info.session_id == session_id && branch.info.parent.is_none() {
+                Ok(branch.info)
+            } else {
+                Err(TimelineError::Conflict)
+            };
+        }
+        if self
+            .branches
+            .values()
+            .any(|branch| branch.info.session_id == session_id)
+        {
+            return Err(TimelineError::Conflict);
+        }
+        let info = BranchInfo {
+            id: branch_id,
+            session_id,
+            parent: None,
+            fork_sequence: 0,
+            head_sequence: 0,
+            checkpoint: None,
+        };
+        self.branches.insert(
+            branch_id,
+            Branch {
+                info,
+                events: Vec::new(),
+                receipts: HashMap::new(),
+            },
+        );
+        Ok(info)
+    }
+
+    pub fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
+        Ok(self.branches.get(&id).ok_or(TimelineError::NotFound)?.info)
+    }
+
+    pub fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
+        let branch = self.branches.get(&id).ok_or(TimelineError::NotFound)?;
+        let mut facts = if let Some(parent) = branch.info.parent {
+            self.world(parent)?
+                .into_iter()
+                .take_while(|fact| fact.sequence <= branch.info.fork_sequence)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        facts.extend(branch.events.iter().cloned());
+        Ok(facts)
+    }
+
+    pub fn event(&self, branch_id: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
+        self.world(branch_id)?
+            .into_iter()
+            .find(|fact| fact.draft.id == id)
+            .ok_or(TimelineError::NotFound)
+    }
+
+    pub fn view(
+        &self,
+        branch_id: BranchId,
+        character: CharacterId,
+        through: Option<u64>,
+    ) -> Result<Vec<KnownEvent>, TimelineError> {
+        let info = self.branch(branch_id)?;
+        let bound = through.unwrap_or(info.head_sequence);
+        if bound > info.head_sequence {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        let facts = self.world(branch_id)?;
+        Ok(character_view(
+            &facts
+                .into_iter()
+                .filter(|fact| fact.sequence <= bound)
+                .collect::<Vec<_>>(),
+            character,
+        ))
+    }
+
+    pub fn knows(
+        &self,
+        branch_id: BranchId,
+        character: CharacterId,
+        event_id: EventId,
+        through: Option<u64>,
+    ) -> Result<bool, TimelineError> {
+        Ok(self
+            .view(branch_id, character, through)?
+            .iter()
+            .any(|known| known.fact.draft.id == event_id))
+    }
+
+    pub fn present(
+        &self,
+        branch_id: BranchId,
+    ) -> Result<std::collections::BTreeSet<CharacterId>, TimelineError> {
+        Ok(present_characters(&self.world(branch_id)?))
+    }
+
+    pub fn append(
+        &mut self,
+        branch_id: BranchId,
+        expected_head: u64,
+        key: &str,
+        command: Value,
+        drafts: Vec<EventDraft>,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        if key.is_empty() || key.trim() != key {
+            return Err(TimelineError::Invalid(
+                "operation key must be canonical and nonempty",
+            ));
+        }
+        if !command.is_object() {
+            return Err(TimelineError::Invalid(
+                "operation command must be an object",
+            ));
+        }
+        let branch = self
+            .branches
+            .get(&branch_id)
+            .ok_or(TimelineError::NotFound)?;
+        if let Some(receipt) = branch.receipts.get(key) {
+            return if receipt.command == command
+                && receipt.drafts.len() == drafts.len()
+                && receipt
+                    .drafts
+                    .iter()
+                    .zip(&drafts)
+                    .all(|(left, right)| left.same_intent(right))
+            {
+                Ok(receipt.result.clone())
+            } else {
+                Err(TimelineError::Conflict)
+            };
+        }
+        if expected_head != branch.info.head_sequence {
+            return Err(TimelineError::ConcurrentWrite);
+        }
+        let mut prefix = self.world(branch_id)?;
+        let mut result = Vec::with_capacity(drafts.len());
+        let mut sequence = expected_head;
+        for draft in &drafts {
+            self.validate(&prefix, draft)?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(TimelineError::Invalid("sequence overflow"))?;
+            let fact = TimelineFact {
+                session_id: branch.info.session_id,
+                branch_id,
+                sequence,
+                draft: draft.clone(),
+            };
+            prefix.push(fact.clone());
+            result.push(fact);
+        }
+        let branch = self
+            .branches
+            .get_mut(&branch_id)
+            .ok_or(TimelineError::NotFound)?;
+        branch.info.head_sequence = sequence;
+        branch.events.extend(result.iter().cloned());
+        branch.receipts.insert(
+            key.to_string(),
+            Receipt {
+                command,
+                drafts,
+                result: result.clone(),
+            },
+        );
+        Ok(result)
+    }
+
+    pub fn fork(
+        &mut self,
+        branch_id: BranchId,
+        checkpoint_id: EventId,
+        child_id: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        if let Some(existing) = self.branches.get(&child_id) {
+            return if existing.info.parent == Some(branch_id)
+                && existing.info.checkpoint == Some(checkpoint_id)
+            {
+                Ok(existing.info)
+            } else {
+                Err(TimelineError::Conflict)
+            };
+        }
+        let parent = self.branch(branch_id)?;
+        let checkpoint = self.event(branch_id, checkpoint_id)?;
+        if checkpoint.draft.kind != EventKind::Checkpoint {
+            return Err(TimelineError::Invalid("fork requires a checkpoint"));
+        }
+        let marker_sequence = checkpoint
+            .sequence
+            .checked_add(1)
+            .ok_or(TimelineError::Invalid("sequence overflow"))?;
+        let mut payload = Map::new();
+        payload.insert(
+            "parent_branch_id".into(),
+            Value::String(branch_id.0.to_string()),
+        );
+        payload.insert(
+            "checkpoint_id".into(),
+            Value::String(checkpoint_id.0.to_string()),
+        );
+        let mut marker = EventDraft::new(EventKind::BranchCreated);
+        marker.payload = payload;
+        let info = BranchInfo {
+            id: child_id,
+            session_id: parent.session_id,
+            parent: Some(branch_id),
+            fork_sequence: checkpoint.sequence,
+            head_sequence: marker_sequence,
+            checkpoint: Some(checkpoint_id),
+        };
+        let fact = TimelineFact {
+            session_id: parent.session_id,
+            branch_id: child_id,
+            sequence: marker_sequence,
+            draft: marker,
+        };
+        self.branches.insert(
+            child_id,
+            Branch {
+                info,
+                events: vec![fact],
+                receipts: HashMap::new(),
+            },
+        );
+        Ok(info)
+    }
+
+    fn validate(&self, prefix: &[TimelineFact], draft: &EventDraft) -> Result<(), TimelineError> {
+        if draft
+            .actor
+            .as_deref()
+            .is_some_and(|actor| actor.trim() != actor || actor.is_empty())
+        {
+            return Err(TimelineError::Invalid("invalid actor identity"));
+        }
+        if draft.schema_version != 1 {
+            return Err(TimelineError::Invalid("unsupported event schema version"));
+        }
+        if prefix.iter().any(|fact| fact.draft.id == draft.id) {
+            return Err(TimelineError::Conflict);
+        }
+        if let Some(ref external) = draft.external_message_id {
+            if external.is_empty() || external.trim() != external {
+                return Err(TimelineError::Invalid("invalid external message identity"));
+            }
+            if prefix
+                .iter()
+                .any(|fact| fact.draft.external_message_id.as_ref() == Some(external))
+            {
+                return Err(TimelineError::Conflict);
+            }
+        }
+        if matches!(
+            draft.kind,
+            EventKind::PlayerMessage
+                | EventKind::CharacterMessage
+                | EventKind::CharacterObservation
+        ) && draft.actor.is_none()
+        {
+            return Err(TimelineError::Invalid("message requires an author"));
+        }
+        if matches!(
+            draft.kind,
+            EventKind::CharacterMessage | EventKind::CharacterObservation
+        ) && !draft
+            .actor
+            .as_deref()
+            .and_then(CharacterId::parse)
+            .is_some_and(|actor| draft.observers.contains(&actor))
+        {
+            return Err(TimelineError::Invalid(
+                "character must know its own message",
+            ));
+        }
+        if matches!(
+            draft.kind,
+            EventKind::CharacterJoined | EventKind::CharacterLeft
+        ) && !draft
+            .actor
+            .as_deref()
+            .and_then(CharacterId::parse)
+            .is_some_and(|actor| draft.observers.contains(&actor))
+        {
+            return Err(TimelineError::Invalid("presence change requires witness"));
+        }
+        if matches!(draft.kind, EventKind::CharacterContextReset) && draft.observers.is_empty() {
+            return Err(TimelineError::Invalid("context reset requires an observer"));
+        }
+        if draft.kind == EventKind::Checkpoint
+            && !draft.payload.get("snapshot").is_some_and(Value::is_object)
+        {
+            return Err(TimelineError::Invalid(
+                "checkpoint requires a snapshot object",
+            ));
+        }
+        if draft.kind == EventKind::BranchCreated {
+            return Err(TimelineError::Invalid("branch markers are created by fork"));
+        }
+        if matches!(
+            draft.kind,
+            EventKind::MessageHidden | EventKind::MessageRevised | EventKind::MessageRestored
+        ) {
+            if draft.observers.is_empty() {
+                return Err(TimelineError::Invalid(
+                    "presentation change requires recipients",
+                ));
+            }
+            let ids: Vec<EventId> = if draft.kind == EventKind::MessageHidden {
+                draft
+                    .payload
+                    .get("event_ids")
+                    .and_then(Value::as_array)
+                    .filter(|ids| !ids.is_empty())
+                    .ok_or(TimelineError::Invalid("hidden messages require targets"))?
+                    .iter()
+                    .map(parse_event_id)
+                    .collect::<Result<_, _>>()?
+            } else {
+                vec![parse_event_id(draft.payload.get("event_id").ok_or(
+                    TimelineError::Invalid("presentation change requires event_id"),
+                )?)?]
+            };
+            for id in ids {
+                let target = prefix
+                    .iter()
+                    .find(|fact| fact.draft.id == id)
+                    .ok_or(TimelineError::NotFound)?;
+                if !matches!(
+                    target.draft.kind,
+                    EventKind::PlayerMessage
+                        | EventKind::CharacterMessage
+                        | EventKind::CharacterObservation
+                        | EventKind::SessionNote
+                ) || draft
+                    .observers
+                    .iter()
+                    .any(|&observer| !knows(prefix, observer, id))
+                {
+                    return Err(TimelineError::Invalid("cannot modify unknown message"));
+                }
+                if draft.kind == EventKind::MessageRevised {
+                    let replacement = draft
+                        .payload
+                        .get("message")
+                        .and_then(Value::as_object)
+                        .filter(|message| message.get("content").is_some_and(Value::is_string))
+                        .ok_or(TimelineError::Invalid(
+                            "revision requires replacement content",
+                        ))?;
+                    for forbidden in [
+                        "role",
+                        "speaker",
+                        "sender",
+                        "timeline_event_id",
+                        "timeline_sequence",
+                        "timeline_learned_at",
+                        "_history_row_id",
+                        "time",
+                        "message_id",
+                    ] {
+                        if replacement.contains_key(forbidden) {
+                            return Err(TimelineError::Invalid(
+                                "revision cannot replace message identity",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut relations = HashSet::new();
+        let mut reply = false;
+        let mut react = false;
+        let mut observed = 0;
+        for link in &draft.links {
+            if !relations.insert((link.relation, link.event_id)) {
+                return Err(TimelineError::Invalid("duplicate causal link"));
+            }
+            let target = prefix
+                .iter()
+                .find(|fact| fact.draft.id == link.event_id)
+                .ok_or(TimelineError::NotFound)?;
+            match link.relation {
+                CausalRelation::ReplyTo | CausalRelation::ReactTo => {
+                    if draft.kind != EventKind::CharacterMessage
+                        || !draft
+                            .actor
+                            .as_deref()
+                            .and_then(CharacterId::parse)
+                            .is_some_and(|actor| knows(prefix, actor, link.event_id))
+                    {
+                        return Err(TimelineError::Invalid(
+                            "response target is not known to actor",
+                        ));
+                    }
+                    if link.relation == CausalRelation::ReplyTo {
+                        if !target.draft.kind.is_message() {
+                            return Err(TimelineError::Invalid("reply target must be a message"));
+                        }
+                        reply = true;
+                    } else {
+                        react = true;
+                    }
+                }
+                CausalRelation::Observes => observed += 1,
+                CausalRelation::CausedBy => {}
+            }
+        }
+        if reply && react {
+            return Err(TimelineError::Invalid(
+                "turn cannot reply and react together",
+            ));
+        }
+        for relation in [
+            CausalRelation::ReplyTo,
+            CausalRelation::ReactTo,
+            CausalRelation::Observes,
+        ] {
+            if draft
+                .links
+                .iter()
+                .filter(|link| link.relation == relation)
+                .count()
+                > 1
+            {
+                return Err(TimelineError::Invalid("multiple causal targets"));
+            }
+        }
+        if draft.kind == EventKind::EventObserved {
+            if observed != 1 || draft.observers.is_empty() {
+                return Err(TimelineError::Invalid(
+                    "disclosure needs one target and recipients",
+                ));
+            }
+        } else if observed > 0 {
+            return Err(TimelineError::Invalid(
+                "only disclosure may use observes link",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn parse_event_id(value: &Value) -> Result<EventId, TimelineError> {
+    let value = value
+        .as_str()
+        .ok_or(TimelineError::Invalid("event identity must be a string"))?;
+    let id = uuid::Uuid::parse_str(value)
+        .map_err(|_| TimelineError::Invalid("invalid event identity"))?;
+    Ok(EventId(id))
+}
