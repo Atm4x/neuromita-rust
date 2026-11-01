@@ -362,3 +362,130 @@ fn workspace_pins_validate_against_sqlite_without_a_timeline_store_dependency() 
         Err(TimelineError::ConcurrentWrite)
     );
 }
+
+#[test]
+fn cached_append_detects_external_writers_and_rebuilds_authoritative_state() {
+    let db = DatabaseFile::new();
+    let branch = BranchId::new();
+    let mut first = db.open();
+    first.create_session(SessionId::new(), branch).unwrap();
+    append(&mut first, branch, "first", mk(EventKind::UnityEvent, &[]));
+    append(&mut first, branch, "second", mk(EventKind::UnityEvent, &[]));
+    let mut second = db.open();
+    append(
+        &mut second,
+        branch,
+        "external",
+        mk(EventKind::UnityEvent, &[]),
+    );
+    assert_eq!(
+        first.append(
+            branch,
+            2,
+            "stale",
+            json!({}),
+            vec![mk(EventKind::UnityEvent, &[])]
+        ),
+        Err(TimelineError::ConcurrentWrite)
+    );
+    append(
+        &mut first,
+        branch,
+        "current",
+        mk(EventKind::UnityEvent, &[]),
+    );
+    assert_eq!(db.open().branch(branch).unwrap().head_sequence, 4);
+    assert_eq!(first.world(branch).unwrap(), second.world(branch).unwrap());
+}
+
+#[test]
+fn cached_receipts_survive_reopen_and_stale_retry_returns_original_result() {
+    let db = DatabaseFile::new();
+    let branch = BranchId::new();
+    let mut repo = db.open();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let original = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let first = repo
+        .append(
+            branch,
+            0,
+            "idempotent",
+            json!({"id":1}),
+            vec![original.clone()],
+        )
+        .unwrap();
+    append(
+        &mut repo,
+        branch,
+        "advanced",
+        mk(EventKind::UnityEvent, &[]),
+    );
+    assert_eq!(
+        repo.append(
+            branch,
+            0,
+            "idempotent",
+            json!({"id":1}),
+            vec![original.clone()]
+        ),
+        Ok(first.clone())
+    );
+    drop(repo);
+    let mut reopened = db.open();
+    assert_eq!(
+        reopened.append(branch, 0, "idempotent", json!({"id":1}), vec![original]),
+        Ok(first)
+    );
+    assert_eq!(reopened.branch(branch).unwrap().head_sequence, 2);
+}
+
+#[test]
+fn branch_scoped_append_cache_keeps_sibling_worlds_and_receipts_independent() {
+    let db = DatabaseFile::new();
+    let root = BranchId::new();
+    let child = BranchId::new();
+    let mut repo = db.open();
+    repo.create_session(SessionId::new(), root).unwrap();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    repo.append(root, 0, "checkpoint", json!({}), vec![checkpoint])
+        .unwrap();
+    repo.fork(root, checkpoint_id, child).unwrap();
+    let mut root_event = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    root_event.external_message_id = Some("same-external".into());
+    append(&mut repo, root, "parent-future", root_event.clone());
+    let mut child_event = mk(EventKind::UnityEvent, &[CharacterId::KindMita]);
+    child_event.external_message_id = Some("same-external".into());
+    let child_events = repo
+        .append(
+            child,
+            2,
+            "child-future",
+            json!({}),
+            vec![child_event.clone()],
+        )
+        .unwrap();
+    assert_eq!(child_events[0].sequence, 3);
+    assert!(
+        repo.world(child)
+            .unwrap()
+            .iter()
+            .all(|fact| fact.draft.id != root_event.id)
+    );
+    assert_eq!(
+        repo.append(child, 2, "child-future", json!({}), vec![child_event]),
+        Ok(child_events)
+    );
+    let fresh = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let root_result = repo
+        .append(root, 2, "root-new", json!({}), vec![fresh.clone()])
+        .unwrap();
+    assert_eq!(root_result[0].sequence, 3);
+    assert_eq!(db.open().world(root).unwrap().len(), 3);
+    assert_eq!(db.open().world(child).unwrap().len(), 3);
+    assert_eq!(
+        repo.append(root, 2, "root-new", json!({}), vec![fresh]),
+        Ok(root_result)
+    );
+}

@@ -14,6 +14,11 @@ pub mod domain;
 pub mod selection;
 pub mod storage;
 
+use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
+
+#[cfg(feature = "sqlite-system")]
+use selection::TimelineSelectionRepository;
+
 use domain::{
     BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId, TimelineFact,
     TimelineRepository, TimelineStore,
@@ -81,6 +86,9 @@ pub enum TimelineConfig {
 pub(crate) struct SessionTimeline {
     branch: BranchId,
     store: Box<dyn TimelineRepository + Send>,
+    workspace: SessionWorkspace,
+    #[cfg(feature = "sqlite-system")]
+    selection_repository: Option<storage::SqliteTimelineRepository>,
 }
 
 impl SessionTimeline {
@@ -90,9 +98,16 @@ impl SessionTimeline {
         store
             .create_session(SessionId::new(), branch)
             .expect("fresh session must create its branch");
+        let mut workspace = SessionWorkspace::default();
+        workspace
+            .select(&store, branch, None)
+            .expect("fresh branch exists");
         Self {
             branch,
             store: Box::new(store),
+            workspace,
+            #[cfg(feature = "sqlite-system")]
+            selection_repository: None,
         }
     }
 
@@ -106,14 +121,89 @@ impl SessionTimeline {
                 root,
             } => {
                 use storage::SqliteTimelineRepository;
-                let mut store = SqliteTimelineRepository::open(database)?;
+                let mut store = SqliteTimelineRepository::open(&database)?;
                 store.create_session(session, root)?;
+                let mut selection_repository = SqliteTimelineRepository::open(database)?;
+                let selection = match selection_repository.selection()? {
+                    Some(selection) => selection,
+                    None => selection_repository.select_branch(root, None)?,
+                };
+                if store.branch(selection.branch_id)?.session_id != session {
+                    return Err(domain::TimelineError::Conflict);
+                }
                 Ok(Self {
-                    branch: root,
+                    branch: selection.branch_id,
                     store: Box::new(store),
+                    workspace: SessionWorkspace::from_selection(selection),
+                    selection_repository: Some(selection_repository),
                 })
             }
         }
+    }
+
+    pub(crate) fn capture_turn(
+        &self,
+        character: CharacterId,
+        trigger: EventId,
+    ) -> Result<TimelineTurn, domain::TimelineError> {
+        self.workspace
+            .capture(self.store.as_ref(), character, Some(trigger))
+    }
+
+    pub(crate) fn assert_turn(&self, turn: TimelineTurn) -> Result<(), domain::TimelineError> {
+        self.workspace.assert_current(self.store.as_ref(), turn)?;
+        #[cfg(feature = "sqlite-system")]
+        if let Some(repository) = &self.selection_repository
+            && repository.selection()? != Some(turn.selection)
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn selection(&self) -> TimelineSelection {
+        self.workspace
+            .selected()
+            .expect("active timeline selection exists")
+    }
+
+    pub(crate) fn select_branch(
+        &mut self,
+        branch: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, domain::TimelineError> {
+        if self.store.branch(branch)?.session_id != self.store.branch(self.branch)?.session_id {
+            return Err(domain::TimelineError::Conflict);
+        }
+        if self.workspace.selected() != Some(expected) {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        #[cfg(feature = "sqlite-system")]
+        let new_selection = if let Some(repository) = &mut self.selection_repository {
+            repository.select_branch(branch, Some(expected))?
+        } else {
+            self.workspace
+                .select(self.store.as_ref(), branch, Some(expected))?
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        let new_selection = self
+            .workspace
+            .select(self.store.as_ref(), branch, Some(expected))?;
+        self.workspace.install_selection(new_selection);
+        self.branch = branch;
+        Ok(new_selection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_test_fact(
+        &mut self,
+        key: &str,
+        draft: EventDraft,
+    ) -> Result<(), domain::TimelineError> {
+        let head = self.anchor().through;
+        self.store
+            .append(self.branch, head, key, json!({}), vec![draft])?;
+        Ok(())
     }
 
     pub(crate) fn anchor(&self) -> ContextAnchor {
@@ -223,8 +313,10 @@ impl SessionTimeline {
         request: RequestId,
         trigger: EventId,
         context: ContextAnchor,
+        turn: TimelineTurn,
         text: Arc<str>,
     ) -> Result<EventId, String> {
+        self.assert_turn(turn).map_err(|error| error.to_string())?;
         if context.branch_id != self.branch.0 || context.through > self.anchor().through {
             return Err("context does not belong to the active timeline".into());
         }
@@ -400,6 +492,7 @@ mod tests {
                 TurnIntent::Reply,
             )
             .unwrap();
+        let turn = timeline.capture_turn(CharacterId::Mita, trigger).unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
         reset.observers.insert(CharacterId::Mita);
         timeline
@@ -408,7 +501,14 @@ mod tests {
             .unwrap();
         assert!(
             timeline
-                .append_reply(CharacterId::Mita, request, trigger, at, Arc::from("answer"))
+                .append_reply(
+                    CharacterId::Mita,
+                    request,
+                    trigger,
+                    at,
+                    turn,
+                    Arc::from("answer")
+                )
                 .is_err()
         );
         assert_eq!(timeline.anchor().through, 2);

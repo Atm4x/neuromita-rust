@@ -26,6 +26,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug)]
 struct Call {
     path: String,
@@ -227,9 +229,10 @@ fn user_texts(body: &Value) -> Vec<&str> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn presenter_to_provider_observation_cancellation_and_commit() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     assert!(matches!(
         ChatApi::observe_requests(),
-        Err(SubmitError::Uninitialized)
+        Err(SubmitError::Uninitialized | SubmitError::Stopped)
     ));
     let mut server = GeminiServer::start().await;
     let preset = preset(&server.endpoint);
@@ -441,5 +444,67 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         ChatApi::observe_requests(),
         Err(SubmitError::Stopped)
     ));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let config = ApplicationConfig::minimal(
+        preset,
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let pending = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "pinned".into())
+        .unwrap();
+    let active = server.next().await;
+    let selected = app.timeline_selection();
+    let changed = app
+        .select_timeline_branch(selected.branch_id, selected)
+        .unwrap();
+    assert!(changed.generation > selected.generation);
+    active.respond.send(Reply::Text("stale result")).unwrap();
+    assert!(matches!(
+        finished(&pending).await.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    assert!(
+        !app.timeline()
+            .iter()
+            .any(|event| { matches!(event.content, EventContent::CharacterReply { .. }) })
+    );
+    let fresh = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "new selection".into())
+        .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Text("current result"))
+        .unwrap();
+    assert!(matches!(
+        finished(&fresh).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
     server.shutdown().await;
 }

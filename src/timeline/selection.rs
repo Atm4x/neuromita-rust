@@ -34,6 +34,16 @@ pub struct SessionWorkspace {
 }
 
 impl SessionWorkspace {
+    pub fn from_selection(selection: TimelineSelection) -> Self {
+        Self {
+            selected: Some(selection),
+        }
+    }
+
+    pub fn install_selection(&mut self, selection: TimelineSelection) {
+        self.selected = Some(selection);
+    }
+
     pub fn selected(&self) -> Option<TimelineSelection> {
         self.selected
     }

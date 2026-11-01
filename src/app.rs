@@ -26,7 +26,11 @@ use crate::{
         AppSettings, MemorySettingsRepository, SettingsConfig, SettingsError, SettingsLifecycle,
         SettingsSource,
     },
-    timeline::{SessionTimeline, TimelineConfig, TimelineEvent, domain::TimelineError},
+    timeline::{
+        SessionTimeline, TimelineConfig, TimelineEvent,
+        domain::{BranchId, TimelineError},
+        selection::TimelineSelection,
+    },
     voice::{UnavailableVoiceProvider, VoiceProvider},
 };
 
@@ -236,6 +240,24 @@ impl ApplicationLifecycle {
     pub fn character(&self, id: CharacterId) -> Option<CharacterHandle> {
         self.bindings.characters.get(id)
     }
+    pub fn timeline_selection(&self) -> TimelineSelection {
+        self.timeline
+            .lock()
+            .expect("timeline lock poisoned")
+            .selection()
+    }
+
+    pub fn select_timeline_branch(
+        &self,
+        branch: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.timeline
+            .lock()
+            .expect("timeline lock poisoned")
+            .select_branch(branch, expected)
+    }
+
     pub fn timeline(&self) -> Vec<TimelineEvent> {
         self.timeline
             .lock()

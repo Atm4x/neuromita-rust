@@ -71,6 +71,11 @@ const SQLITE_READWRITE_CREATE: c_int = 0x0000_0006;
 const SQLITE_FULLMUTEX: c_int = 0x0001_0000;
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS timeline_schema(version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS timeline_revision(
+    slot INTEGER PRIMARY KEY CHECK(slot=1),
+    revision INTEGER NOT NULL CHECK(revision>=0)
+);
+INSERT OR IGNORE INTO timeline_revision(slot,revision) VALUES(1,0);
 CREATE TABLE IF NOT EXISTS timeline_branches(
     branch_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -278,6 +283,7 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<String, TimelineError> {
 /// SQLite 3 development libraries are required when the `sqlite-system` feature is enabled.
 pub struct SqliteTimelineRepository {
     path: PathBuf,
+    cache: Option<(BranchId, u64, TimelineStore)>,
 }
 
 impl SqliteTimelineRepository {
@@ -288,6 +294,7 @@ impl SqliteTimelineRepository {
         }
         let repo = Self {
             path: path.to_path_buf(),
+            cache: None,
         };
         let conn = repo.connection()?;
         conn.exec("PRAGMA journal_mode = WAL")?;
@@ -315,14 +322,17 @@ impl SqliteTimelineRepository {
     }
 
     fn with_write<T>(
-        &self,
+        &mut self,
         apply: impl FnOnce(&Connection, &mut TimelineStore) -> Result<T, TimelineError>,
     ) -> Result<T, TimelineError> {
+        self.cache = None;
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
         let result = (|| {
             let mut store = load(&connection)?;
-            apply(&connection, &mut store)
+            let value = apply(&connection, &mut store)?;
+            advance_revision(&connection, revision(&connection)?)?;
+            Ok(value)
         })();
         if result.is_ok() {
             connection.exec("COMMIT")?;
@@ -331,17 +341,55 @@ impl SqliteTimelineRepository {
         }
         result
     }
+}
 
-    fn with_read<T>(
-        &self,
-        read: impl FnOnce(&TimelineStore) -> Result<T, TimelineError>,
-    ) -> Result<T, TimelineError> {
-        let connection = self.connection()?;
-        connection.exec("BEGIN")?;
-        let result = (|| read(&load(&connection)?))();
-        connection.exec("ROLLBACK")?;
-        result
+fn revision(connection: &Connection) -> Result<u64, TimelineError> {
+    let rows = connection.query("SELECT revision FROM timeline_revision WHERE slot=1", &[])?;
+    let [row] = rows.as_slice() else {
+        return Err(storage("timeline revision metadata missing"));
+    };
+    parse_u64(&row[0])
+}
+
+fn advance_revision(connection: &Connection, current: u64) -> Result<u64, TimelineError> {
+    let next = current
+        .checked_add(1)
+        .filter(|next| *next <= i64::MAX as u64)
+        .ok_or(TimelineError::Invalid("timeline revision overflow"))?;
+    connection.write(
+        "UPDATE timeline_revision SET revision=? WHERE slot=1 AND revision=?",
+        &[&next.to_string(), &current.to_string()],
+    )?;
+    if revision(connection)? != next {
+        return Err(TimelineError::ConcurrentWrite);
     }
+    Ok(next)
+}
+
+fn branch_info(connection: &Connection, branch: BranchId) -> Result<BranchInfo, TimelineError> {
+    let rows = connection.query(
+        "SELECT session_id,ifnull(parent_id,''),fork_sequence,head_sequence,ifnull(checkpoint_id,'') FROM timeline_branches WHERE branch_id=?",
+        &[&branch.0.to_string()],
+    )?;
+    let [row] = rows.as_slice() else {
+        return Err(TimelineError::NotFound);
+    };
+    Ok(BranchInfo {
+        id: branch,
+        session_id: SessionId(parse_uuid(&row[0])?),
+        parent: if row[1].is_empty() {
+            None
+        } else {
+            Some(BranchId(parse_uuid(&row[1])?))
+        },
+        fork_sequence: parse_u64(&row[2])?,
+        head_sequence: parse_u64(&row[3])?,
+        checkpoint: if row[4].is_empty() {
+            None
+        } else {
+            Some(EventId(parse_uuid(&row[4])?))
+        },
+    })
 }
 
 fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
@@ -365,6 +413,46 @@ fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
             receipts.insert(receipt[0].clone(), decode::<Receipt>(&receipt[1])?);
         }
         branches.push(Branch { info, events, receipts });
+    }
+    TimelineStore::load_persisted(branches)
+}
+
+fn load_lineage(connection: &Connection, leaf: BranchId) -> Result<TimelineStore, TimelineError> {
+    let mut infos = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut next = Some(leaf);
+    while let Some(id) = next {
+        if !visited.insert(id) {
+            return Err(storage("cyclic branch lineage"));
+        }
+        let info = branch_info(connection, id)?;
+        next = info.parent;
+        infos.push(info);
+    }
+    let mut branches = Vec::with_capacity(infos.len());
+    for info in infos.into_iter().rev() {
+        let branch_id = info.id.0.to_string();
+        let mut events = Vec::new();
+        for row in connection.query(
+            "SELECT fact_json FROM timeline_events WHERE branch_id=? ORDER BY sequence",
+            &[&branch_id],
+        )? {
+            events.push(decode(&row[0])?);
+        }
+        let mut receipts = std::collections::HashMap::new();
+        if info.id == leaf {
+            for row in connection.query(
+                "SELECT operation_key, receipt_json FROM timeline_receipts WHERE branch_id=?",
+                &[&branch_id],
+            )? {
+                receipts.insert(row[0].clone(), decode::<Receipt>(&row[1])?);
+            }
+        }
+        branches.push(Branch {
+            info,
+            events,
+            receipts,
+        });
     }
     TimelineStore::load_persisted(branches)
 }
@@ -544,13 +632,20 @@ impl TimelineRepository for SqliteTimelineRepository {
         })
     }
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
-        self.with_read(|store| store.branch(id))
+        branch_info(&self.connection()?, id)
     }
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
-        self.with_read(|store| store.world(id))
+        let connection = self.connection()?;
+        connection.exec("BEGIN")?;
+        let result = read_page(&connection, id, 0, None, i64::MAX as usize, None);
+        connection.exec("ROLLBACK")?;
+        result
     }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
-        self.with_read(|store| store.event(branch, id))
+        self.world(branch)?
+            .into_iter()
+            .find(|fact| fact.draft.id == id)
+            .ok_or(TimelineError::NotFound)
     }
     fn read(
         &self,
@@ -574,15 +669,44 @@ impl TimelineRepository for SqliteTimelineRepository {
         command: Value,
         drafts: Vec<EventDraft>,
     ) -> Result<Vec<TimelineFact>, TimelineError> {
-        self.with_write(|connection, store| {
+        let connection = self.connection()?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let current_revision = revision(&connection)?;
+            let mut store = match self.cache.take() {
+                Some((cached_branch, cached_revision, cached))
+                    if cached_branch == branch && cached_revision == current_revision =>
+                {
+                    cached
+                }
+                _ => load_lineage(&connection, branch)?,
+            };
             let previous_head = store.branch(branch)?.head_sequence;
             let already_committed = store.persisted_receipt(branch, key).is_some();
-            let result = store.append(branch, expected_head, key, command, drafts)?;
-            if !already_committed {
-                save_append(connection, store, branch, previous_head, key, &result)?;
+            let facts = store.append(branch, expected_head, key, command, drafts)?;
+            let new_revision = if already_committed {
+                current_revision
+            } else {
+                save_append(&connection, &store, branch, previous_head, key, &facts)?;
+                advance_revision(&connection, current_revision)?
+            };
+            Ok((facts, new_revision, store))
+        })();
+        match result {
+            Ok((facts, cached_revision, store)) => {
+                if let Err(error) = connection.exec("COMMIT") {
+                    self.cache = None;
+                    return Err(error);
+                }
+                self.cache = Some((branch, cached_revision, store));
+                Ok(facts)
             }
-            Ok(result)
-        })
+            Err(error) => {
+                self.cache = None;
+                connection.exec("ROLLBACK")?;
+                Err(error)
+            }
+        }
     }
     fn fork(
         &mut self,
@@ -605,7 +729,12 @@ impl TimelineRepository for SqliteTimelineRepository {
         character: CharacterId,
         through: Option<u64>,
     ) -> Result<Vec<KnownEvent>, TimelineError> {
-        self.with_read(|store| store.view(branch, character, through))
+        let connection = self.connection()?;
+        connection.exec("BEGIN")?;
+        let result = read_page(&connection, branch, 0, through, i64::MAX as usize, None)
+            .map(|facts| crate::timeline::domain::character_view(&facts, character));
+        connection.exec("ROLLBACK")?;
+        result
     }
     fn knows(
         &self,
@@ -614,7 +743,10 @@ impl TimelineRepository for SqliteTimelineRepository {
         event: EventId,
         through: Option<u64>,
     ) -> Result<bool, TimelineError> {
-        self.with_read(|store| store.knows(branch, character, event, through))
+        Ok(self
+            .view(branch, character, through)?
+            .iter()
+            .any(|known| known.fact.draft.id == event))
     }
 }
 
@@ -640,8 +772,10 @@ impl TimelineSelectionRepository for SqliteTimelineRepository {
         branch: BranchId,
         expected: Option<TimelineSelection>,
     ) -> Result<TimelineSelection, TimelineError> {
-        self.with_write(|connection, store| {
-            store.branch(branch)?;
+        let connection = self.connection()?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            branch_info(&connection, branch)?;
             let rows = connection.query(
                 "SELECT branch_id, generation FROM timeline_active_selection WHERE slot='core'",
                 &[],
@@ -654,16 +788,28 @@ impl TimelineSelectionRepository for SqliteTimelineRepository {
                 }),
                 _ => return Err(storage("duplicate active selection")),
             };
-            if current != expected { return Err(TimelineError::ConcurrentWrite); }
-            let generation = current.map_or(Some(1), |value| value.generation.checked_add(1))
+            if current != expected {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            let generation = current
+                .map_or(Some(1), |value| value.generation.checked_add(1))
+                .filter(|value| *value <= i64::MAX as u64)
                 .ok_or(TimelineError::Invalid("selection generation overflow"))?;
-            let selection = TimelineSelection { branch_id: branch, generation };
             connection.write(
                 "INSERT INTO timeline_active_selection(slot,branch_id,generation) VALUES('core', ?, ?) ON CONFLICT(slot) DO UPDATE SET branch_id=excluded.branch_id,generation=excluded.generation",
                 &[&branch.0.to_string(), &generation.to_string()],
             )?;
-            Ok(selection)
-        })
+            Ok(TimelineSelection {
+                branch_id: branch,
+                generation,
+            })
+        })();
+        if result.is_ok() {
+            connection.exec("COMMIT")?;
+        } else {
+            connection.exec("ROLLBACK")?;
+        }
+        result
     }
 }
 
@@ -687,6 +833,53 @@ mod tests {
                 let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
             }
         }
+    }
+
+    #[test]
+    fn warmed_cache_is_discarded_after_sqlite_failure() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        repo.append(
+            branch,
+            0,
+            "first",
+            json!({}),
+            vec![EventDraft::new(
+                crate::timeline::domain::EventKind::UnityEvent,
+            )],
+        )
+        .unwrap();
+        assert!(repo.cache.is_some());
+        let conn = Connection::open(&db.0).unwrap();
+        conn.exec("CREATE TRIGGER timeline_test_warm_fail BEFORE INSERT ON timeline_events BEGIN SELECT RAISE(ABORT, 'injected warmed failure'); END").unwrap();
+        assert!(matches!(
+            repo.append(
+                branch,
+                1,
+                "retry",
+                json!({}),
+                vec![EventDraft::new(
+                    crate::timeline::domain::EventKind::UnityEvent
+                )]
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert!(repo.cache.is_none());
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
+        conn.exec("DROP TRIGGER timeline_test_warm_fail").unwrap();
+        repo.append(
+            branch,
+            1,
+            "retry",
+            json!({}),
+            vec![EventDraft::new(
+                crate::timeline::domain::EventKind::UnityEvent,
+            )],
+        )
+        .unwrap();
+        assert_eq!(repo.world(branch).unwrap().len(), 2);
     }
 
     #[test]

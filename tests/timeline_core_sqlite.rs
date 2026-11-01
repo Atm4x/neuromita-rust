@@ -17,6 +17,8 @@ use neuromita::{
 };
 use uuid::Uuid;
 
+static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn config(database: std::path::PathBuf, session: SessionId, root: BranchId) -> ApplicationConfig {
     let template = GeminiTemplate::google(
         "unused-model",
@@ -49,6 +51,7 @@ fn config(database: std::path::PathBuf, session: SessionId, root: BranchId) -> A
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_core_uses_durable_canonical_timeline_after_shutdown_restart() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let path = std::env::temp_dir().join(format!("neuromita-core-timeline-{}.db", Uuid::new_v4()));
     let session = SessionId::new();
     let branch = BranchId::new();
@@ -85,6 +88,62 @@ async fn actual_core_uses_durable_canonical_timeline_after_shutdown_restart() {
             .is_empty()
     );
     second.shutdown().await.unwrap();
+    for suffix in ["", "-shm", "-wal"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core_restores_durable_active_branch_and_character_state() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    use neuromita::timeline::{
+        domain::{EventDraft, EventKind, TimelineRepository},
+        storage::SqliteTimelineRepository,
+    };
+    use serde_json::json;
+    let path = std::env::temp_dir().join(format!("neuromita-branch-state-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let child = BranchId::new();
+    let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+    repo.create_session(session, root).unwrap();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint
+        .payload
+        .insert("snapshot".into(), json!({"state": "before"}));
+    let checkpoint_id = checkpoint.id;
+    repo.append(root, 0, "checkpoint", json!({}), vec![checkpoint])
+        .unwrap();
+    repo.fork(root, checkpoint_id, child).unwrap();
+    drop(repo);
+
+    let app = ApplicationLifecycle::start(config(path.clone(), session, root))
+        .await
+        .unwrap();
+    let old_selection = app.timeline_selection();
+    assert_eq!(old_selection.branch_id, root);
+    let selected = app.select_timeline_branch(child, old_selection).unwrap();
+    assert_eq!(app.at().branch_id, child.0);
+    assert_eq!(app.timeline_selection(), selected);
+    assert!(app.select_timeline_branch(root, old_selection).is_err());
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    app.shutdown().await.unwrap();
+
+    let reopened = ApplicationLifecycle::start(config(path.clone(), session, root))
+        .await
+        .unwrap();
+    assert_eq!(reopened.timeline_selection(), selected);
+    assert_eq!(reopened.at().branch_id, child.0);
+    assert_eq!(reopened.at().through, 2);
+    reopened.shutdown().await.unwrap();
     for suffix in ["", "-shm", "-wal"] {
         let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
     }

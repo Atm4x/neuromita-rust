@@ -1,6 +1,6 @@
 # Session Timeline: границы хранения (SQLite → CFMD)
 
-Статус 2026-11-01: SQLite-адаптер реализован в feature branch; эта заметка отделяет **реальные гарантии** от плана оптимизации и будущих миграций.
+Статус 2026-11-01: SQLite-адаптер и тёплый revision-aware cache реализованы в feature branch; эта заметка отделяет **реальные гарантии** от плана оптимизации и будущих миграций.
 
 ## Архитектура
 
@@ -28,7 +28,7 @@ SettingsLifecycle -> SettingsRepository -> [Memory / JSON / future SQLite / futu
 
 Для `timeline` собственная структура таблиц `timeline_branches`, `timeline_events`, `timeline_observers`, `timeline_receipts`, `timeline_active_selection`, `timeline_schema`. Выбор ветки по поколениям **не** кодируется посредством SQLite rowid / data_version / транзакционного revision — это отдельная семантика Core.
 
-При явной `TimelineConfig::Sqlite { database, session, root }` рабочий Core пишет непосредственно в единственный SQLite repository; при повторном запуске с теми же IDs история сохраняется. `TimelineConfig::Transient` соответствует старому режиму и **не** подменяет собой SQLite при ошибках. `ApplicationLifecycle::start` возвращает ошибку, если база недоступна или имеет неподдерживаемую версию схемы. По умолчанию `ApplicationConfig::minimal()` задаёт Transient для старых тестовых сценариев.
+При явной `TimelineConfig::Sqlite { database, session, root }` рабочий Core пишет непосредственно в единственный SQLite repository; при повторном запуске с теми же IDs история и durable active selection сохраняются. `TimelineConfig::Transient` соответствует старому режиму и **не** подменяет собой SQLite при ошибках. `ApplicationLifecycle::start` возвращает ошибку, если база недоступна или имеет неподдерживаемую версию схемы. По умолчанию `ApplicationConfig::minimal()` задаёт Transient для старых тестовых сценариев.
 
 ## Settings и общая физическая БД
 
@@ -42,11 +42,11 @@ CFMD-адаптер реализует **те же** предметные кон
 
 - `sqlite-system` **opt-in**. Он использует системную SQLite 3 C-библиотеку через изолированный FFI в `storage/sqlite.rs`, без добавления случайных сетевых зависимостей в offline-vendor. Для Windows-release потребуется поддерживаемый способ поставки SQLite DLL или замена FFI на аудированный vendored binding. Сборка здесь подтверждена только на Linux с системной SQLite; сборка Windows не проверена.
 - Путь файла и IDs root/session задаются явно. Вложенные директории не создаются скрыто.
-- `read` для прямых фактов SQL-индексированный и постраничный, но `view`/`knows` пока реконструируют состояние целиком. `append` при каждом вызове загружает доменное состояние хранилища, чтобы **не дублировать** семантические правила в SQLite. Накладные расходы растут с историей; для production этот путь следует заменить на доказанную локальную валидацию/инкрементальную materialization, сохраняя один семантический контракт.
+- `read` для прямых фактов SQL-индексированный и постраничный, но `view`/`knows` пока реконструируют состояние целиком. `append` восстанавливает только родовую цепочку целевой ветки на холодном пути и после записи из другого соединения; соседние ветки и другие сессии не загружаются. На последовательном **тёплом** пути он использует кеш `TimelineStore` текущей ветки, валидированный SQL-ревизией `timeline_revision`, обновляемой в той же `BEGIN IMMEDIATE` транзакции; на ошибке SQL кеш сбрасывается. Правила `TimelineStore::append` остались единственными. **Это частичное ускорение:** валидация доменного prefix всё ещё O(история ветки), холодный append читает всю родовую цепочку, а прямой `event()` ещё использует сканирование мира. При обычном чтении `world`/`view` используются индексированные выборки локальных событий веток, без реконструкции всех сессий. Потребуются предметные инкрементальные индексы и бенчмарки, прежде чем называть путь production-ready.
 - Сохраняются timeline-события и receipts, **не** mutable Character state / эффектов LLM, не assets, не SessionArchive, не внешнее состояние Unity. Общая атомарность Timeline + Character state и crash recovery пока открыты.
-- Порт `TimelineSelectionRepository` есть, но живые `MessageHandler` ещё не получают pin. Ручное переключение ветки во время запроса пока не должно считаться поддержанным runtime-сценарием.
+- `TimelineTurn` теперь передаётся через `MessageHandler` и проверяется в `CharacterHandler.accept` при смене selection, reset и утрате знания trigger. `ApplicationLifecycle::select_timeline_branch` публикует выбор через durable CAS, а активный выбранный branch восстанавливается после restart. **Оставшаяся граница:** generation-токены пока не отменяются в момент switch; при конкурентном внешнем SQLite-писателе проверка selection и append ответа выполняются разными транзакциями, поэтому атомарный CAS+append ещё предстоит определить для multi-process использования.
 - Включение SQLite не означает миграции пользовательской Python `Histories/world.db`: схемы Python и Rust различаются. Нужен отдельный проверяемый импорт или transfer archive.
 
 ## Проверки
 
-`cargo test --locked --offline --features sqlite-system` и `cargo clippy --locked --offline --all-targets --features sqlite-system -- -D warnings` на Rust 1.98.1. Плюс базовый тест без feature. Проверяются воспроизводимость семантики на in-memory и SQLite, SQL rollback в середине записи, два независимых writer-соединения, долговременный selection CAS, постраничные чтения через ветки и фактический shutdown/restart Core с сохранённой историей.
+`cargo test --locked --offline --features sqlite-system` и `cargo clippy --locked --offline --all-targets --features sqlite-system -- -D warnings` на Rust 1.98.1. Плюс базовый тест без feature. Проверяются воспроизводимость семантики на in-memory и SQLite, SQL rollback в середине записи и после прогрева кеша, инвалидация кеша другим писателем, два независимых writer-соединения, долговременный selection CAS, live pin и отмена приёмки устаревшего результата, постраничные чтения через ветки и shutdown/restart Core с сохранённой историей и selection.

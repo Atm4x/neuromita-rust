@@ -32,7 +32,10 @@
 - [x] Отдельный порт `TimelineSelectionRepository`: durable CAS выбора ветки; повторный выбор инкрементирует generation.
 - [x] SQL-индексированное ограниченное чтение прямых фактов по ветке, позиции, количеству, непосредственному наблюдателю и inherited prefix; это ещё не готовый кеш MitaView.
 - [x] Тесты одного контракта на in-memory / SQLite: receipt после reopen, атомарный batch и SQL fault injection после обновления head, конкурентные отдельные соединения, совпадение страниц через ветвление.
-- [ ] Быстрая операция append без полного восстановления доменного store из SQLite на каждую запись. Сейчас семантика единая и корректная, но холодная запись O(вся история); обязателен бенчмарк/профилирование перед производством.
+- [x] Тёплый `append`: кеш подтверждённого доменного store по транзакционной `timeline_revision`, без повторного SQL-чтения всей истории при последовательных записях; при другом писателе, неуспехе SQL или изменениях через `create_session`/`fork` кеш инвалидируется. Холодная загрузка ограничена **родовой цепочкой ветки** (без сестринских веток и других сессий), а кеш привязан к BranchId. Все правила остаются в одном доменном `TimelineStore`.
+- [x] SQLite `branch()` и durable selection CAS выполняются без восстановления всех событий из БД.
+- [x] SQLite `world`, `view` и `knows` читают только мир запрашиваемой ветки (с унаследованными префиксами) и используют **ту же** доменную функцию проекции знания; другие сессии не загружаются.
+- [ ] **Настоящий инкрементальный append независимо от размера истории**: холодный append ещё реконструирует полную родовую цепочку; тёплый `TimelineStore::append` строит и проверяет полный prefix (CPU O(история)). Требуются предметные инкрементальные индексы и бенчмарки, а не дублирование валидатора в SQL.
 - [ ] Перенести вложения `TimelineAssetStore` и контентно-адресуемые ссылки с верификацией.
 - [ ] Версионированный `SessionArchive`: export/import, строгая проверка дерева, ссылок, receipts и assets.
 - [ ] Полный crash recovery для сквозных операций Python state participants / Unity / Character — SQLite транзакция только для timeline не решает распределённое восстановление.
@@ -49,10 +52,11 @@
 
 - [x] Подключить in-memory доменный `TimelineStore` как единственный источник фактов в действующем `SessionTimeline` (`timeline/mod.rs`); старые `HistoryView`/`EventContent` стали вычисляемыми compatibility-проекциями.
 - [x] В `ApplicationConfig.timeline` можно **явно** выбрать SQLite repository по пути/SessionId/BranchId (опциональная Cargo feature `sqlite-system`), единственное хранилище событий для работающего Core. Старый transient-режим сохранён как явно выбранная конфигурация.
-- [ ] Подключить live `MessageHandler` к durable selection / turn pins: порт выбора и локальная validation есть, но смена ветки не влияет на текущий обработчик запросов.
-- [ ] Завершить согласованный `CharacterHandler.prepare`/`accept` и транзакционную приёмку state/effects.
+- [x] Живой `MessageHandler` переносит `TimelineTurn` из `CharacterHandler.prepare` через генерацию в `CharacterHandler.accept`; выбор другой ветки/повторный выбор, сброс знаний и исчезновение права знать trigger отклоняют устаревшее принятие.
+- [ ] При переключении ветки **заранее отменять** токены выполняющихся генераций, не затрагивая запросы, поступившие после переключения; сейчас окончательное принятие блокируется, но генерация может продолжать расходовать ресурсы до получения результата.
+- [ ] Завершить **сквозную транзакционную приёмку** состояния персонажа и Timeline. Сейчас приёмка проверяет актуальность selection/epoch и согласует собственный `CharacterState` в памяти с проекцией истории, но durable commit mutable state/effects не реализован.
 - [x] Локальный контракт `SessionWorkspace`: selection CAS, generation, pin и validation для reset/смены ветки; **пока не подключён** к работающему Request/CharacterHandler.
-- [ ] `SessionTimelineRuntime`: уже есть SQLite durable selection CAS, но ещё нет pin в реальном MessageHandler, отмены токенов и восстановления владельцев состояния перед активацией.
+- [ ] `SessionTimelineRuntime` целиком: есть durable selection CAS, pin в реальном MessageHandler и проверка перед accept, но ещё нет целевой отмены активных токенов, восстановления владельцев состояния до активации или сквозной атомарности.
 - [ ] `ConversationTimeline`: message identities, reply/react/initiate; отдельные факты речи и наблюдений.
 - [ ] Unity ingress: сведения о мире, видимость, приватность, игровые события, idempotent receipts.
 - [ ] Launcher Sandbox: самостоятельный messenger context (удалённое общение), без симуляции Unity.
@@ -72,9 +76,10 @@
 - [x] `cargo clippy --offline --all-targets -- -D warnings`.
 - [x] `cargo fmt --check`.
 - [x] Domain parity tests на ветвление, receipts, causal, знание, reset, presentation edits (18 integration (including deterministic stress and concurrency) + 3 workspace unit + 2 compatibility unit).
-- [x] SQLite integration (feature `sqlite-system`): domain parity, SQL fault injection, reopen, конкурентные записи, индексированные страницы, durable selection и реальный Core restart.
+- [x] SQLite integration (feature `sqlite-system`): domain parity, SQL fault injection на холодном и тёплом кеше, reopen, конкурентные записи, инвалидация кеша другим писателем, индексированные страницы, durable selection и реальный Core restart с сохранением выбранной ветки.
+- [x] End-to-end тест: смена selection между `MessageHandler.prepare` и ответом провайдера блокирует сохранение устаревшего ответа; свежий запрос успешно завершается.
 - [x] Проверено, что новые timeline/domain и selection импортируют только identity/interaction и собственные низовые компоненты; инверсии `timeline -> character/request` не добавлены. Это ручная проверка направленности, не автоматическое доказательство компилятором.
 
 ## Следующий пакет изменений
 
-Ускорить SQLite append без полного чтения хранилища и подключить durable selection/turn pins и restore через реальный `CharacterHandler`. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует новый in-memory store через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.
+Ускорить **холодный и CPU-path** SQLite append до инкрементального, выполнить бенчмарки, добавить выборочную отмену in-flight генераций после смены selection и согласованное восстановление владельцев состояния. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует единый TimelineRepository (transient либо SQLite) через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.

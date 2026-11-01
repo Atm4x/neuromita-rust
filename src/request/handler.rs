@@ -72,6 +72,7 @@ impl MessageHandler {
             anchor: context.anchor,
             trigger: context.trigger,
             state_revision: context.state.revision,
+            turn: context.turn,
         };
         record.prepared(context.clone());
         let request = GenerationRequest {
