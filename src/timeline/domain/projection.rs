@@ -6,8 +6,10 @@ use super::model::{CausalRelation, EventKind, KnownEvent, TimelineFact};
 
 pub fn character_view(facts: &[TimelineFact], character: CharacterId) -> Vec<KnownEvent> {
     let mut known = HashMap::<EventId, KnownEvent>::new();
+    let mut previous = HashMap::<EventId, &TimelineFact>::new();
     for fact in facts {
         if !fact.draft.observers.contains(&character) {
+            previous.insert(fact.draft.id, fact);
             continue;
         }
         if fact.draft.kind == EventKind::CharacterContextReset {
@@ -23,15 +25,14 @@ pub fn character_view(facts: &[TimelineFact], character: CharacterId) -> Vec<Kno
                 .links
                 .iter()
                 .find(|link| link.relation == CausalRelation::Observes)
-            && let Some(original) = facts
-                .iter()
-                .find(|previous| previous.draft.id == link.event_id)
+            && let Some(original) = previous.get(&link.event_id)
         {
             known.entry(link.event_id).or_insert_with(|| KnownEvent {
-                fact: original.clone(),
+                fact: (*original).clone(),
                 learned_at: fact.sequence,
             });
         }
+        previous.insert(fact.draft.id, fact);
     }
     let mut output: Vec<_> = known.into_values().collect();
     output.sort_by_key(|known| (known.learned_at, known.fact.sequence));
