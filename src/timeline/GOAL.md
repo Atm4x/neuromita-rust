@@ -60,6 +60,7 @@
 - [x] Локальный контракт `SessionWorkspace`: selection CAS, generation, pin и validation для reset/смены ветки; подключён к `MessageHandler` и `CharacterHandler`. SQLite принимает pinned-ответ только через `TimelineRepository::append_guarded`, включая generation, reset epoch и право знать trigger в той же транзакции, что и события.
 - [ ] `SessionTimelineRuntime` целиком: есть durable selection CAS, pin в реальном MessageHandler и проверка перед accept, но ещё нет целевой отмены активных токенов, восстановления владельцев состояния до активации или сквозной атомарности.
 - [ ] `ConversationTimeline`: message identities, reply/react/initiate; отдельные факты речи и наблюдений.
+  - [x] Адресные `Hide / Revise / Restore` доступны через публичный Rust Core API, с проверкой знаний и сохранением оригинальных фактов.
 - [ ] Unity ingress: сведения о мире, видимость, приватность, игровые события, idempotent receipts.
 - [ ] Launcher Sandbox: самостоятельный messenger context (удалённое общение), без симуляции Unity.
 - [ ] `SessionRestoration`: state participants, journal, компенсирующие переходы и возобновление после сбоя.

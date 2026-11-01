@@ -50,6 +50,14 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 
 Проверяются reset и relearn, приватность, поздняя disclosure, edit/hide/restore и metadata, мультимодальный content, несколько страниц источника, fork cutoff и исторические снимки на обоих backends.
 
+## Редактирование и видимость сообщений через Core API (2026-11-01)
+
+- `ApplicationLifecycle::change_message(selection, character, operation_id, action)` предоставляет проверяемые операции `Hide`, `Revise` и `Restore` без обращения к SQLite напрямую. Один вызов записывает один `MessageHidden` / `MessageRevised` / `MessageRestored` с конкретным свидетелем.
+- Доменная валидация требует, чтобы целевое сообщение **было известно указанному персонажу**; нельзя менять чужие приватные сообщения или защищённые поля идентичности. Редакция поддерживает любой JSON `content`, включая массивы provider parts.
+- Событие изменения неизменно, исходное сообщение остаётся в Timeline. Для Python parity `Revise` скрытого сообщения вновь делает его видимым; `Hide → Restore` возвращает последнюю допустимую редакцию.
+- Повтор операции с тем же `EventId` и тем же содержимым получает сохранённый receipt; конфликтующее повторение отклоняется. Неверная selection не производит запись. Старые MitaView не мутируют, чужие персонажи не получают чужие изменения.
+- Это закрывает публичный путь **операций представления сообщений**; не объявляет завершённой всю `ConversationTimeline` (#10) и полную provider schema parity (#2).
+
 ## Runtime ContextCapture (следующий функциональный пакет)
 
 - `SessionTimeline::capture_context(character, position)` фиксирует единый `ContextAnchor` до публикации нового входа. `MitaView` и временная legacy `HistoryView` вычисляются над одним и тем же immutable prefix. Снимки не смещаются автоматически при будущих append.

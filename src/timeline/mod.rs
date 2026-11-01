@@ -15,11 +15,13 @@ pub use crate::identity::EventId;
 pub mod domain;
 pub mod ingress;
 mod legacy;
+pub mod message_actions;
 pub mod selection;
 pub mod storage;
 pub mod view;
 
 use legacy::{legacy_event, make_draft};
+use message_actions::MessageAction;
 use selection::{SessionWorkspace, TimelineAdmission, TimelineSelection, TimelineTurn};
 use view::{MitaView, TimelineMessageQueries};
 
@@ -616,6 +618,37 @@ impl SessionTimeline {
         )
     }
 
+    /// Edit, hide, or restore the current character's visible conversation view.
+    /// Changes are immutable facts and never modify another character's history.
+    pub(crate) fn change_message(
+        &mut self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        operation: EventId,
+        action: MessageAction,
+    ) -> Result<domain::TimelineFact, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let draft = action.into_draft(operation, character);
+        let facts = self.store.append_guarded(
+            self.branch,
+            self.anchor().through,
+            &format!("message-action:{}", operation.0),
+            json!({"character": character.to_string()}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        facts
+            .into_iter()
+            .next()
+            .ok_or(domain::TimelineError::Invalid(
+                "message action must commit one fact",
+            ))
+    }
+
     pub(crate) fn append_player_message(
         &mut self,
         character: CharacterId,
@@ -830,6 +863,8 @@ impl SessionTimeline {
 
 #[cfg(test)]
 mod inspection_tests;
+#[cfg(test)]
+mod message_action_tests;
 
 #[cfg(test)]
 mod tests {

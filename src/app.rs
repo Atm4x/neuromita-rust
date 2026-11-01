@@ -34,6 +34,7 @@ use crate::{
         SessionTimeline, TimelineConfig, TimelineEvent,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
+        message_actions::MessageAction,
         selection::{TimelineAdmission, TimelineSelection},
     },
     voice::{UnavailableVoiceProvider, VoiceProvider},
@@ -341,6 +342,21 @@ impl ApplicationLifecycle {
             .lock()
             .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
             .ingest_semantic_events(expected, batch)
+    }
+
+    /// Change the presentation of already known conversation messages for one character.
+    /// The operation EventId must be preserved when retrying an uncertain write.
+    pub fn change_message(
+        &self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        operation: EventId,
+        action: MessageAction,
+    ) -> Result<TimelineFact, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .change_message(expected, character, operation, action)
     }
 
     /// Forget current knowledge of one character without deleting canonical events.

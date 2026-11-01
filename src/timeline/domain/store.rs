@@ -542,7 +542,7 @@ impl TimelineStore {
                         .payload
                         .get("message")
                         .and_then(Value::as_object)
-                        .filter(|message| message.get("content").is_some_and(Value::is_string))
+                        .filter(|message| message.contains_key("content"))
                         .ok_or(TimelineError::Invalid(
                             "revision requires replacement content",
                         ))?;
