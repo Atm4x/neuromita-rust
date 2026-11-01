@@ -32,7 +32,7 @@ use crate::{
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
-        conversation::ConversationMessage,
+        conversation::{ConversationAudience, ConversationMessage},
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
         message_actions::MessageAction,
@@ -134,6 +134,7 @@ impl RequestIngress for TimelineRequestIngress {
         character: CharacterId,
         input: &UserInput,
         intent: TurnIntent,
+        input_audience: Option<&ConversationAudience>,
     ) -> Result<TimelineAdmission, SubmitError> {
         let mut timeline = self
             .timeline
@@ -144,12 +145,14 @@ impl RequestIngress for TimelineRequestIngress {
             .assert_selection(selection)
             .map_err(|_| SubmitError::TimelineUnavailable)?;
         if intent == TurnIntent::Reply {
+            let input_audience = input_audience.ok_or(SubmitError::TimelineUnavailable)?;
             timeline
                 .append_player_message(
                     character,
                     request,
                     input.event_id(),
                     Arc::clone(input.text()),
+                    input_audience.clone(),
                 )
                 .map_err(|_| SubmitError::TimelineUnavailable)?;
         }

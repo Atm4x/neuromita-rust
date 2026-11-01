@@ -43,8 +43,15 @@ fn contract(
         json!([{"type":"text", "text":"Private question"}]),
         [CharacterId::Mita],
     );
-    incoming.target = Some(CharacterId::Mita);
-    incoming.participants.extend(CharacterId::ALL);
+    incoming
+        .audience
+        .targets
+        .insert(ConversationSpeaker::Character(CharacterId::Mita));
+    incoming.audience.participants.extend([
+        ConversationSpeaker::Player,
+        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::KindMita),
+    ]);
     let first = publish(repo, branch, incoming.clone()).unwrap();
     assert_eq!(first.sequence, 1);
     assert_eq!(first.draft.observers.len(), 1);
@@ -55,8 +62,11 @@ fn contract(
     assert_eq!(initial[0]["role"], "user");
     assert_eq!(initial[0]["speaker"], "player");
     assert_eq!(initial[0]["message_id"], "dialogue:player:1");
-    assert_eq!(initial[0]["target"], "mita");
-    assert_eq!(initial[0]["participants"], json!(["mita", "kind-mita"]));
+    assert_eq!(initial[0]["targets"], json!(["mita"]));
+    assert_eq!(
+        initial[0]["participants"],
+        json!(["player", "mita", "kind-mita"])
+    );
     assert_eq!(initial[0]["content"], incoming.content);
     assert_eq!(
         TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None)
@@ -68,7 +78,11 @@ fn contract(
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
 
     let mut different = incoming.clone();
-    different.target = Some(CharacterId::KindMita);
+    different.audience.targets.clear();
+    different
+        .audience
+        .targets
+        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
     assert_eq!(
         publish(repo, branch, different),
         Err(TimelineError::Conflict)
@@ -93,8 +107,14 @@ fn contract(
         json!("Answer"),
         [CharacterId::KindMita],
     );
-    assistant.target = Some(CharacterId::KindMita);
-    assistant.participants.extend(CharacterId::ALL);
+    assistant
+        .audience
+        .targets
+        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+    assistant.audience.participants.extend([
+        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::KindMita),
+    ]);
     assistant.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
         event_id: incoming.id,

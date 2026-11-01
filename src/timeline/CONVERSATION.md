@@ -1,27 +1,60 @@
-# Shared conversation facts
+# One canonical conversation message
 
-The canonical Timeline stores one `PlayerMessage` or `CharacterMessage` for a
-conversation utterance, not one copy per character. The public
-`ApplicationLifecycle::publish_conversation_message` accepts a stable event ID,
-external message ID, typed speaker, content, target, dialogue participants,
-actual witnesses and optional causal links. It does **not** initiate generation.
+A conversation utterance is one `ConversationMessage`, regardless of its producer:
+player, character, or an accepted generated reply. Its `speaker` is a typed
+`ConversationSpeaker::Player | Character(CharacterId)`; the Timeline event kind
+(`PlayerMessage` or `CharacterMessage`) is derived from that identity, never
+chosen by a separate writer. Both explicit publication and accepted replies
+use `ConversationMessage::into_draft` to produce the same canonical fields.
 
-- `participants` is semantic dialogue metadata and is not proof of observation.
-- `witnesses` is the knowledge audience. A character speaker always knows its
-  own message. Each character's `MitaView` derives its own `assistant` / `user`
-  role from the speaker, retaining the same canonical EventId and sequence.
-- `ApplicationLifecycle::disclose_conversation_message` adds an `EventObserved`
-  fact when another character learns an existing utterance later; it never
-  duplicates or rewrites the original message. The learned time is the
-  disclosure's sequence, rather than the original utterance's sequence.
-- Replay of a message or disclosure with unchanged identity and content is
-  idempotent. Conflicting identity reuse fails. The original witness set is
-  immutable; later audience changes are disclosures, not message replacements.
-- Reset only changes the recipient's current knowledge. Historical snapshots,
-  other listeners' views and the canonical utterance remain intact.
+`ConversationAudience` carries three separate concepts:
 
-The transport-specific dialogue roster, `can_hear_speaker` interpretation,
-identity mapping from Unity actors and real LLM reply fan-out are **not**
-implemented by these functions. Existing single-character `ChatApi.reply` remains
-unchanged. Provider/UI timestamp and complete Python metadata parity remain in
-Issue #2; full conversation turn integration remains in Issue #10.
+- `targets: BTreeSet<ConversationSpeaker>`: the intended recipients, including
+  the player or multiple characters. Targets are metadata, **not** knowledge.
+- `participants: BTreeSet<ConversationSpeaker>`: the semantic dialogue roster.
+  Merely participating does not imply hearing a particular utterance.
+- `seen_by: BTreeSet<CharacterId>`: the characters who actually acquired the
+  utterance. This alone determines knowledge for the MitaView. A character
+  speaker is always included in its own witnesses, even when omitted by the
+  caller. Player knowledge is not modeled as a separate MitaView.
+
+The canonical fact has a single EventId, sequence, author, JSON content and
+optional causal links. Per-character views derive `assistant` for the author
+and `user` for other listeners from that same fact. A character can speak to
+another character, several characters, or the player; the audience does not
+need to contain the player. Only `seen_by` characters see the utterance. To
+share it later, `disclose_conversation_message` records `EventObserved` without
+changing or copying the original message.
+
+## Producers
+
+- `ApplicationLifecycle::publish_conversation_message` publishes a complete
+  `ConversationMessage` without scheduling a generator.
+- `ChatApi::publish_message` is a compatibility convenience for private player
+  input; it also builds a `ConversationMessage` with the same conversion.
+- `ChatApi::reply` admits its player message through that conversion **before**
+  generation and records its generated `CharacterMessage` using the same
+  conversion. `ReplyRequest::with_input_audience` controls who heard the player
+  input, while `with_audience` independently controls the generated answer.
+  They are two distinct utterances, not two Timeline storage mechanisms.
+- `ReactRequest::with_audience` and `InitiateRequest::with_audience` control
+  the generated answer. Their instructions are `ProactiveOpportunity` control
+  events, not invented player messages.
+- Without explicit audience configuration, existing private one-character
+  behavior is preserved. A reply cannot be admitted if its requested character
+  is absent from the input's `seen_by`.
+
+Generated replies still pass the existing selection/context-epoch/revision
+checks in the same guarded append. All fields required by the legacy
+`CharacterReply` read model remain attached to the one canonical fact.
+
+## Current boundaries
+
+This is **not** automatic broadcast. The sender's dialogue roster and real
+witnesses must be supplied by the caller. Unity's live dialogue participant
+rules and network IPC are not implemented here. `React` can currently respond
+to a known character message, but `ReplyRequest` does not yet directly bind its
+trigger to an already-existing character message: ordinary `reply` still
+admits a new player utterance. That dedicated existing-message reply workflow
+remains open in Issue #10. Full Python UI/provider time/metadata parity is
+tracked in Issue #2. Crash recovery is explicitly deferred in Issue #54.

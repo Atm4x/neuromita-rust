@@ -21,6 +21,7 @@ pub mod selection;
 pub mod storage;
 pub mod view;
 
+use conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker};
 use legacy::{legacy_event, make_draft};
 use message_actions::MessageAction;
 use selection::{SessionWorkspace, TimelineAdmission, TimelineSelection, TimelineTurn};
@@ -93,6 +94,15 @@ pub struct HistoryView {
 
 /// Two read models bound to the same immutable timeline prefix.
 /// The legacy view is retained for clients that have not migrated yet.
+pub(crate) struct GeneratedReply {
+    pub request: RequestId,
+    pub trigger: EventId,
+    pub turn: TimelineTurn,
+    pub expected_revision: u64,
+    pub text: Arc<str>,
+    pub audience: ConversationAudience,
+}
+
 pub(crate) struct TimelineContextSnapshot {
     pub(crate) history: HistoryView,
     pub(crate) view: MitaView,
@@ -703,8 +713,12 @@ impl SessionTimeline {
         request: RequestId,
         id: EventId,
         text: Arc<str>,
+        audience: ConversationAudience,
     ) -> Result<(), String> {
-        self.write_player_message(character, id, text, Some(request))
+        if !audience.seen_by.contains(&character) {
+            return Err("request character must know the admitted input".to_owned());
+        }
+        self.write_player_message(character, id, text, Some(request), audience)
     }
 
     pub(crate) fn publish_player_message(
@@ -713,7 +727,13 @@ impl SessionTimeline {
         id: EventId,
         text: Arc<str>,
     ) -> Result<(), String> {
-        self.write_player_message(character, id, text, None)
+        self.write_player_message(
+            character,
+            id,
+            text,
+            None,
+            ConversationAudience::player_to(character),
+        )
     }
 
     fn write_player_message(
@@ -722,9 +742,18 @@ impl SessionTimeline {
         id: EventId,
         text: Arc<str>,
         request: Option<RequestId>,
+        audience: ConversationAudience,
     ) -> Result<(), String> {
-        let mut draft = make_draft(id, EventKind::PlayerMessage, character, text, request);
-        draft.actor = Some("player".to_string());
+        let mut message = ConversationMessage::new(
+            id.0.to_string(),
+            ConversationSpeaker::Player,
+            json!(text.as_ref()),
+            [character],
+        );
+        message.id = id;
+        message.request_id = request;
+        message.audience = audience;
+        let draft = message.into_draft().map_err(|error| error.to_string())?;
         let operation_key = request.map_or_else(
             || format!("message:{}", id.0),
             |request| format!("input:{}", request.0),
@@ -790,13 +819,17 @@ impl SessionTimeline {
 
     pub(crate) fn append_reply(
         &mut self,
-        character: CharacterId,
-        request: RequestId,
-        trigger: EventId,
-        turn: TimelineTurn,
-        expected_revision: u64,
-        text: Arc<str>,
+        reply: GeneratedReply,
     ) -> Result<EventId, domain::TimelineError> {
+        let GeneratedReply {
+            request,
+            trigger,
+            turn,
+            expected_revision,
+            text,
+            audience,
+        } = reply;
+        let character = turn.character;
         self.assert_turn(turn)?;
         let context = ContextAnchor {
             branch_id: turn.selection.branch_id.0,
@@ -818,20 +851,19 @@ impl SessionTimeline {
         // Operation-key uniqueness is enforced atomically by the repository receipt.
         // Reading the complete world here would be both racy and O(history).
         let id = EventId::new();
-        let mut draft = make_draft(
-            id,
-            EventKind::CharacterMessage,
-            character,
-            text,
-            Some(request),
+        let mut message = ConversationMessage::new(
+            id.0.to_string(),
+            ConversationSpeaker::Character(character),
+            json!(text.as_ref()),
+            [],
         );
-        draft.actor = Some(character.to_string());
-        draft.payload.insert("context".into(), json!(context));
-        draft
-            .payload
-            .insert("reply_to".into(), json!(trigger.0.to_string()));
+        message.id = id;
+        message.audience = audience;
+        message.request_id = Some(request);
+        message.context = Some(context);
+        message.reply_to = Some(trigger);
         if trigger_fact.draft.kind == EventKind::PlayerMessage {
-            draft.links.push(CausalLink {
+            message.links.push(CausalLink {
                 relation: CausalRelation::ReplyTo,
                 event_id: trigger,
             });
@@ -842,20 +874,21 @@ impl SessionTimeline {
             .and_then(Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
         {
-            draft.links.push(CausalLink {
+            message.links.push(CausalLink {
                 relation: CausalRelation::ReactTo,
                 event_id: EventId(target),
             });
-            draft.links.push(CausalLink {
+            message.links.push(CausalLink {
                 relation: CausalRelation::CausedBy,
                 event_id: trigger,
             });
         } else {
-            draft.links.push(CausalLink {
+            message.links.push(CausalLink {
                 relation: CausalRelation::CausedBy,
                 event_id: trigger,
             });
         }
+        let draft = message.into_draft()?;
         self.commit(
             format!("reply:{}", request.0),
             draft,
@@ -928,7 +961,13 @@ mod tests {
         let request = RequestId::new();
         let trigger = EventId::new();
         timeline
-            .append_player_message(CharacterId::Mita, request, trigger, Arc::from("hello"))
+            .append_player_message(
+                CharacterId::Mita,
+                request,
+                trigger,
+                Arc::from("hello"),
+                ConversationAudience::player_to(CharacterId::Mita),
+            )
             .unwrap();
         let turn = timeline
             .capture_turn(CharacterId::Mita, trigger, timeline.anchor())
@@ -941,14 +980,14 @@ mod tests {
             .unwrap();
         assert!(
             timeline
-                .append_reply(
-                    CharacterId::Mita,
+                .append_reply(GeneratedReply {
                     request,
                     trigger,
                     turn,
-                    0,
-                    Arc::from("answer")
-                )
+                    expected_revision: 0,
+                    text: Arc::from("answer"),
+                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                })
                 .is_err()
         );
         assert_eq!(timeline.anchor().through, 2);
@@ -1147,7 +1186,13 @@ mod tests {
         let request = RequestId::new();
         let event = EventId::new();
         timeline
-            .append_player_message(CharacterId::Mita, request, event, Arc::from("hello"))
+            .append_player_message(
+                CharacterId::Mita,
+                request,
+                event,
+                Arc::from("hello"),
+                ConversationAudience::player_to(CharacterId::Mita),
+            )
             .unwrap();
         assert_eq!(timeline.store.world(timeline.branch).unwrap().len(), 1);
         assert_eq!(timeline.events().len(), 1);

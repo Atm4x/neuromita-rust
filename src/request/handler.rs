@@ -151,7 +151,14 @@ impl MessageHandler {
         }
         let outcome = match self
             .character
-            .accept(id, acceptance, text, audio, proposed.effects)
+            .accept(
+                id,
+                acceptance,
+                text,
+                audio,
+                proposed.effects,
+                message.audience().clone(),
+            )
             .await
         {
             Ok(response) => match voice_error {

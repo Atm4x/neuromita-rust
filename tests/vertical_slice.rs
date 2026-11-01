@@ -1102,3 +1102,227 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_character_messages_use_shared_conversation_audience() {
+    use neuromita::timeline::conversation::{ConversationAudience, ConversationSpeaker};
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let generator = ResponseGenerator::new([
+        Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+    ])
+    .unwrap();
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset.clone(),
+        generator,
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let mut audience = ConversationAudience::private_to(CharacterId::Mita);
+    audience.seen_by.insert(CharacterId::KindMita);
+    audience.targets.extend([
+        ConversationSpeaker::Player,
+        ConversationSpeaker::Character(CharacterId::KindMita),
+    ]);
+    audience.participants.extend([
+        ConversationSpeaker::Player,
+        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::KindMita),
+    ]);
+
+    let mut shared_input = ConversationAudience::player_to(CharacterId::Mita);
+    shared_input.seen_by.insert(CharacterId::KindMita);
+    shared_input
+        .participants
+        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+
+    let reply = ChatApi::reply(
+        ReplyRequest::new(
+            CharacterId::Mita,
+            preset.clone(),
+            UserInput::new("Say hello to Kind Mita".into()).unwrap(),
+            RequestSource::Client(Uuid::new_v4()),
+        )
+        .with_input_audience(shared_input)
+        .with_audience(audience.clone()),
+    )
+    .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Text("Hello, Kind Mita!")).unwrap();
+    assert!(matches!(
+        finished(&reply).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let mita = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let kind = app
+        .character(CharacterId::KindMita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let source = mita.view.provider_messages();
+    let listener = kind.view.provider_messages();
+    assert_eq!(source.len(), 2);
+    assert_eq!(listener.len(), 2);
+    assert_eq!(listener[0]["speaker"], "player");
+    assert_eq!(listener[0]["targets"], json!(["mita"]));
+    assert_eq!(
+        listener[0]["timeline_event_id"],
+        source[0]["timeline_event_id"]
+    );
+    assert_eq!(source[1]["role"], "assistant");
+    assert_eq!(listener[1]["role"], "user");
+    assert_eq!(listener[1]["speaker"], "mita");
+    assert_eq!(
+        source[1]["timeline_event_id"],
+        listener[1]["timeline_event_id"]
+    );
+    assert_eq!(source[1]["targets"], json!(["player", "kind-mita"]));
+    assert_eq!(
+        listener[1]["participants"],
+        json!(["player", "mita", "kind-mita"])
+    );
+    assert_eq!(listener[1]["content"], "Hello, Kind Mita!");
+
+    let mut private = ConversationAudience::private_to(CharacterId::KindMita);
+    private
+        .targets
+        .insert(ConversationSpeaker::Character(CharacterId::Mita));
+    private.participants.extend([
+        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Mita),
+    ]);
+    let private_reply = ChatApi::reply(
+        ReplyRequest::new(
+            CharacterId::KindMita,
+            preset.clone(),
+            UserInput::new("A private reply".into()).unwrap(),
+            RequestSource::Client(Uuid::new_v4()),
+        )
+        .with_audience(private.clone()),
+    )
+    .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Text("Secret response")).unwrap();
+    assert!(matches!(
+        finished(&private_reply).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let mita_now = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let kind_now = app
+        .character(CharacterId::KindMita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(mita_now.view.count(), 2);
+    assert_eq!(kind_now.view.count(), 4);
+    assert_eq!(
+        kind_now.view.provider_messages()[3]["targets"],
+        json!(["mita"])
+    );
+    assert_eq!(kind_now.view.provider_messages()[3]["role"], "assistant");
+
+    let react = ChatApi::react(
+        ReactRequest::new(
+            CharacterId::KindMita,
+            preset.clone(),
+            neuromita::timeline::EventId(
+                Uuid::parse_str(source[1]["timeline_event_id"].as_str().unwrap()).unwrap(),
+            ),
+            UserInput::new("React to Mita".into()).unwrap(),
+            RequestSource::Client(Uuid::new_v4()),
+        )
+        .with_audience(audience.clone()),
+    )
+    .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Text("I heard you!")).unwrap();
+    assert!(matches!(
+        finished(&react).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let now_mita = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let now_kind = app
+        .character(CharacterId::KindMita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(now_mita.view.count(), 3);
+    assert_eq!(now_kind.view.count(), 5);
+    assert_eq!(now_mita.view.provider_messages()[2]["speaker"], "kind-mita");
+    assert_eq!(now_kind.view.provider_messages()[4]["role"], "assistant");
+    let initiate = ChatApi::initiate(
+        neuromita::request::InitiateRequest::new(
+            CharacterId::Mita,
+            preset.clone(),
+            UserInput::new("Say something to both".into()).unwrap(),
+            RequestSource::Client(Uuid::new_v4()),
+        )
+        .with_audience(audience),
+    )
+    .unwrap();
+    let call = server.next().await;
+    call.respond
+        .send(Reply::Text("Everyone can hear me"))
+        .unwrap();
+    assert!(matches!(
+        finished(&initiate).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let mita_final = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let kind_final = app
+        .character(CharacterId::KindMita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(mita_final.view.count(), 4);
+    assert_eq!(kind_final.view.count(), 6);
+    assert_eq!(mita_final.view.provider_messages()[3]["role"], "assistant");
+    assert_eq!(kind_final.view.provider_messages()[5]["role"], "user");
+
+    let missing_speaker = ConversationAudience::private_to(CharacterId::KindMita);
+    let previous_head = app.at().through;
+    assert!(matches!(
+        ChatApi::reply(
+            ReplyRequest::new(
+                CharacterId::Mita,
+                preset.clone(),
+                UserInput::new("Mita cannot hear this".into()).unwrap(),
+                RequestSource::Client(Uuid::new_v4()),
+            )
+            .with_input_audience(missing_speaker)
+        ),
+        Err(SubmitError::TimelineUnavailable)
+    ));
+    assert_eq!(app.at().through, previous_head);
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}

@@ -8,7 +8,7 @@ use crate::{
     generation::{GenerationError, GenerationPreset},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
-    timeline::{ContextPosition, EventId},
+    timeline::{ContextPosition, EventId, conversation::ConversationAudience},
     voice::{VoiceError, VoicePlan},
 };
 
@@ -26,6 +26,10 @@ pub trait Message: Send + Sync + fmt::Debug {
     fn intent(&self) -> TurnIntent;
     fn voice(&self) -> &VoicePlan;
     fn at(&self) -> ContextPosition;
+    fn audience(&self) -> &ConversationAudience;
+    fn input_audience(&self) -> Option<&ConversationAudience> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -36,6 +40,8 @@ pub struct ReplyRequest {
     source: RequestSource,
     voice: VoicePlan,
     at: ContextPosition,
+    audience: ConversationAudience,
+    input_audience: ConversationAudience,
 }
 
 impl ReplyRequest {
@@ -52,6 +58,8 @@ impl ReplyRequest {
             source,
             voice: VoicePlan::Disabled,
             at: ContextPosition::Latest,
+            audience: ConversationAudience::private_to(character_id),
+            input_audience: ConversationAudience::player_to(character_id),
         }
     }
     pub fn with_voice(mut self, voice: VoicePlan) -> Self {
@@ -60,6 +68,14 @@ impl ReplyRequest {
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.at = at;
+        self
+    }
+    pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
+        self.audience = audience;
+        self
+    }
+    pub fn with_input_audience(mut self, audience: ConversationAudience) -> Self {
+        self.input_audience = audience;
         self
     }
 }
@@ -85,6 +101,12 @@ impl Message for ReplyRequest {
     }
     fn at(&self) -> ContextPosition {
         self.at
+    }
+    fn audience(&self) -> &ConversationAudience {
+        &self.audience
+    }
+    fn input_audience(&self) -> Option<&ConversationAudience> {
+        Some(&self.input_audience)
     }
 }
 
@@ -114,6 +136,10 @@ impl ReactRequest {
         self.message = self.message.at(at);
         self
     }
+    pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
+        self.message = self.message.with_audience(audience);
+        self
+    }
 }
 impl Message for ReactRequest {
     fn character_id(&self) -> CharacterId {
@@ -136,6 +162,9 @@ impl Message for ReactRequest {
     }
     fn at(&self) -> ContextPosition {
         Message::at(&self.message)
+    }
+    fn audience(&self) -> &ConversationAudience {
+        self.message.audience()
     }
 }
 
@@ -162,6 +191,10 @@ impl InitiateRequest {
         self.message = self.message.at(at);
         self
     }
+    pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
+        self.message = self.message.with_audience(audience);
+        self
+    }
 }
 impl Message for InitiateRequest {
     fn character_id(&self) -> CharacterId {
@@ -184,6 +217,9 @@ impl Message for InitiateRequest {
     }
     fn at(&self) -> ContextPosition {
         Message::at(&self.message)
+    }
+    fn audience(&self) -> &ConversationAudience {
+        self.message.audience()
     }
 }
 

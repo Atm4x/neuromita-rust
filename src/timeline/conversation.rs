@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use crate::identity::{CharacterId, EventId};
+use crate::{
+    identity::{CharacterId, EventId, RequestId},
+    timeline::ContextAnchor,
+};
 
 use super::domain::{
     AppendGuard, BranchId, CausalLink, CausalRelation, EventDraft, EventKind, TimelineError,
@@ -10,25 +13,63 @@ use super::domain::{
 };
 
 /// A speaker's stable identity, independent of how each listener renders its role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConversationSpeaker {
     Player,
     Character(CharacterId),
 }
 
-/// One conversation message, recorded once for all characters who heard it.
-/// Participants describe the dialogue roster; witnesses describe actual knowledge.
+impl ConversationSpeaker {
+    fn identity(self) -> String {
+        match self {
+            Self::Player => "player".to_owned(),
+            Self::Character(id) => id.to_string(),
+        }
+    }
+}
+
+/// Routing metadata is distinct from knowledge. Only seen_by controls MitaView.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationAudience {
+    pub targets: BTreeSet<ConversationSpeaker>,
+    pub participants: BTreeSet<ConversationSpeaker>,
+    pub seen_by: BTreeSet<CharacterId>,
+}
+
+impl ConversationAudience {
+    pub fn private_to(character: CharacterId) -> Self {
+        Self {
+            seen_by: [character].into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn player_to(character: CharacterId) -> Self {
+        Self {
+            targets: [ConversationSpeaker::Character(character)].into(),
+            participants: [
+                ConversationSpeaker::Player,
+                ConversationSpeaker::Character(character),
+            ]
+            .into(),
+            seen_by: [character].into(),
+        }
+    }
+}
+
+/// One conversation message, regardless of whether player, character or generation produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
     pub id: EventId,
     pub message_id: String,
     pub speaker: ConversationSpeaker,
-    pub target: Option<CharacterId>,
-    pub participants: BTreeSet<CharacterId>,
-    pub witnesses: BTreeSet<CharacterId>,
+    pub audience: ConversationAudience,
     pub content: Value,
     pub links: Vec<CausalLink>,
     pub occurred_at_unix_ms: u64,
+    pub request_id: Option<RequestId>,
+    pub reply_to: Option<EventId>,
+    pub context: Option<ContextAnchor>,
 }
 
 impl ConversationMessage {
@@ -36,7 +77,7 @@ impl ConversationMessage {
         message_id: impl Into<String>,
         speaker: ConversationSpeaker,
         content: Value,
-        witnesses: impl IntoIterator<Item = CharacterId>,
+        seen_by: impl IntoIterator<Item = CharacterId>,
     ) -> Self {
         let kind = match speaker {
             ConversationSpeaker::Player => EventKind::PlayerMessage,
@@ -47,16 +88,20 @@ impl ConversationMessage {
             id: draft.id,
             message_id: message_id.into(),
             speaker,
-            target: None,
-            participants: BTreeSet::new(),
-            witnesses: witnesses.into_iter().collect(),
+            audience: ConversationAudience {
+                seen_by: seen_by.into_iter().collect(),
+                ..ConversationAudience::default()
+            },
             content,
             links: Vec::new(),
             occurred_at_unix_ms: draft.occurred_at_unix_ms,
+            request_id: None,
+            reply_to: None,
+            context: None,
         }
     }
 
-    fn into_draft(self) -> Result<EventDraft, TimelineError> {
+    pub(crate) fn into_draft(self) -> Result<EventDraft, TimelineError> {
         if self.message_id.is_empty()
             || self.message_id.trim() != self.message_id
             || self.message_id.len() > 256
@@ -70,13 +115,11 @@ impl ConversationMessage {
                 "conversation message requires content",
             ));
         }
-        let (kind, actor) = match self.speaker {
-            ConversationSpeaker::Player => (EventKind::PlayerMessage, "player".to_owned()),
-            ConversationSpeaker::Character(character) => {
-                (EventKind::CharacterMessage, character.to_string())
-            }
+        let kind = match self.speaker {
+            ConversationSpeaker::Player => EventKind::PlayerMessage,
+            ConversationSpeaker::Character(_) => EventKind::CharacterMessage,
         };
-        let mut witnesses = self.witnesses;
+        let mut witnesses = self.audience.seen_by;
         if let ConversationSpeaker::Character(character) = self.speaker {
             witnesses.insert(character);
         }
@@ -87,7 +130,7 @@ impl ConversationMessage {
         }
         let mut draft = EventDraft::new(kind);
         draft.id = self.id;
-        draft.actor = Some(actor);
+        draft.actor = Some(self.speaker.identity());
         draft.observers = witnesses;
         draft.external_message_id = Some(self.message_id.clone());
         draft.links = self.links;
@@ -96,14 +139,24 @@ impl ConversationMessage {
             .payload
             .insert("message_id".into(), json!(self.message_id));
         draft.payload.insert("content".into(), self.content.clone());
-        draft.payload.insert(
-            "message".into(),
-            json!({
-                "content": self.content,
-                "target": self.target.map(|id| id.to_string()),
-                "participants": self.participants.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            }),
-        );
+        draft.payload.insert("message".into(), json!({
+            "content": self.content,
+            "targets": self.audience.targets.into_iter().map(ConversationSpeaker::identity).collect::<Vec<_>>(),
+            "participants": self.audience.participants.into_iter().map(ConversationSpeaker::identity).collect::<Vec<_>>(),
+        }));
+        if let Some(request_id) = self.request_id {
+            draft
+                .payload
+                .insert("request_id".into(), json!(request_id.to_string()));
+        }
+        if let Some(reply_to) = self.reply_to {
+            draft
+                .payload
+                .insert("reply_to".into(), json!(reply_to.0.to_string()));
+        }
+        if let Some(context) = self.context {
+            draft.payload.insert("context".into(), json!(context));
+        }
         Ok(draft)
     }
 }

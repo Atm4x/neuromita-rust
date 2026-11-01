@@ -207,3 +207,25 @@
 
 - [x] Read-only `ApplicationLifecycle::accepted_reply_at(character, request, anchor)` возвращает канонический `CharacterMessage` для указанного RequestId, актёра и исторического префикса той же сессии. Проверены fork cutoff, reset, SQLite reopen, отсутствие request registry и отсутствие повторного выполнения операции. [Семантика и ограничения](RECOVERY.md).
 - [ ] Полный crash recovery request lifecycle, инварианты внешних effects и восстановление технических статусов — **не закрыто**. `None` от lookup не означает отмену или ошибку; source facts не содержат достаточно информации для такого вывода.
+
+## Unified conversation message contract (2026-11-01)
+
+- [x] One `ConversationMessage` canonical draft conversion for explicit publication,
+  `ChatApi` player input and generated `reply/react/initiate` character answers.
+  Speaker is a typed Player/Character; no separate message-shape writer.
+- [x] `ConversationAudience` carries independent typed `targets`, `participants`
+  and actual character `seen_by`. A character sender always knows its own
+  utterance; target/participation never imply observation or broadcast.
+- [x] Per-message routing from request to admission and accepted answer:
+  `ReplyRequest::with_input_audience` and all generated-request
+  `.with_audience`. The two audiences are independent because the input and
+  answer are different utterances. Old single-character defaults remain.
+- [x] One canonical fact appears with relative role in each witness's MitaView;
+  private character-to-character messages, group replies, `react` to a known
+  character utterance, `initiate`, historical access and late disclosure are
+  exercised by tests. SQLite and in-memory implementations use the same schema.
+
+**Still open:** direct generated `reply_to` referring to an existing
+character message without synthesizing a player input; actual Unity dialogue
+roster/witness resolution; full provider/UI parity. No new recovery path or
+second authoritative message store was introduced.

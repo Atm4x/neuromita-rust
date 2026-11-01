@@ -18,7 +18,9 @@ use crate::{
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     timeline::{
-        ContextAnchor, ContextCaptureError, ContextPosition, EventId, SessionTimeline,
+        ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
+        SessionTimeline,
+        conversation::ConversationAudience,
         selection::{TimelineAdmission, TimelineTurn},
     },
     voice::AudioArtifact,
@@ -65,6 +67,7 @@ enum Command {
         text: Arc<str>,
         audio: Option<AudioArtifact>,
         effects: Vec<ResponseEffect>,
+        audience: ConversationAudience,
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
     },
     State(oneshot::Sender<Result<CharacterState, CharacterError>>),
@@ -139,6 +142,7 @@ impl CharacterHandle {
         text: Arc<str>,
         audio: Option<AudioArtifact>,
         effects: Vec<ResponseEffect>,
+        audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -148,6 +152,7 @@ impl CharacterHandle {
                 text,
                 audio,
                 effects,
+                audience,
                 reply,
             })
             .await
@@ -222,9 +227,11 @@ impl CharacterHandler {
                     text,
                     audio,
                     effects,
+                    audience,
                     reply,
                 } => {
-                    let _ = reply.send(self.accept(request, context, text, audio, effects));
+                    let _ =
+                        reply.send(self.accept(request, context, text, audio, effects, audience));
                 }
                 Command::State(reply) => {
                     let state = self
@@ -285,6 +292,7 @@ impl CharacterHandler {
                     request,
                     input.event_id(),
                     Arc::clone(input.text()),
+                    ConversationAudience::player_to(self.character.id),
                 )
                 .map_err(CharacterError::Internal)?;
         }
@@ -379,6 +387,7 @@ impl CharacterHandler {
         text: Arc<str>,
         audio: Option<AudioArtifact>,
         effects: Vec<ResponseEffect>,
+        audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
         if !matches!(effects.as_slice(), [ResponseEffect::RecordAcceptedReply]) {
             return Err(CharacterError::Internal(
@@ -409,14 +418,14 @@ impl CharacterHandler {
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
         let event_id = timeline
-            .append_reply(
-                self.character.id,
+            .append_reply(GeneratedReply {
                 request,
-                context.trigger,
-                context.turn,
-                context.state_revision,
-                Arc::clone(&text),
-            )
+                trigger: context.trigger,
+                turn: context.turn,
+                expected_revision: context.state_revision,
+                text: Arc::clone(&text),
+                audience,
+            })
             .map_err(|error| match error {
                 crate::timeline::domain::TimelineError::ConcurrentWrite => {
                     CharacterError::StaleState
@@ -512,6 +521,7 @@ mod turn_tests {
             Arc::from("answer"),
             None,
             vec![ResponseEffect::RecordAcceptedReply],
+            ConversationAudience::private_to(CharacterId::Mita),
         )
     }
 
@@ -634,6 +644,7 @@ mod turn_tests {
                     RequestId::new(),
                     EventId::new(),
                     Arc::from("later, unrelated user input"),
+                    ConversationAudience::player_to(CharacterId::Mita),
                 )
                 .unwrap();
             let mut note = EventDraft::new(EventKind::SessionNote);
