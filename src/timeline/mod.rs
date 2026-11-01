@@ -3,12 +3,12 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::watch;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     identity::{CharacterId, RequestId},
-    interaction::{ReplyTarget, TurnIntent},
+    interaction::TurnIntent,
 };
 
 pub use crate::identity::EventId;
@@ -96,7 +96,7 @@ pub struct HistoryView {
 /// The legacy view is retained for clients that have not migrated yet.
 pub(crate) struct GeneratedReply {
     pub request: RequestId,
-    pub trigger: EventId,
+    pub intent: TurnIntent,
     pub turn: TimelineTurn,
     pub expected_revision: u64,
     pub text: Arc<str>,
@@ -188,7 +188,7 @@ impl SessionTimeline {
     pub(crate) fn capture_turn(
         &self,
         character: CharacterId,
-        trigger: EventId,
+        trigger: Option<EventId>,
         context: ContextAnchor,
     ) -> Result<TimelineTurn, domain::TimelineError> {
         if context.branch_id != self.branch.0 {
@@ -196,12 +196,8 @@ impl SessionTimeline {
                 "generation context belongs to another timeline branch",
             ));
         }
-        self.workspace.capture_at(
-            self.store.as_ref(),
-            character,
-            Some(trigger),
-            context.through,
-        )
+        self.workspace
+            .capture_at(self.store.as_ref(), character, trigger, context.through)
     }
 
     pub(crate) fn assert_selection(
@@ -239,28 +235,6 @@ impl SessionTimeline {
     ) -> Result<(), domain::TimelineError> {
         self.assert_selection(admission.selection)?;
         if self.store.context_epoch(self.branch, character)? != admission.context_epoch {
-            return Err(domain::TimelineError::ConcurrentWrite);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn verify_admitted_input(
-        &self,
-        character: CharacterId,
-        request: RequestId,
-        input: &crate::interaction::UserInput,
-    ) -> Result<(), domain::TimelineError> {
-        let fact = self.store.event(self.branch, input.event_id())?;
-        if fact.draft.kind != EventKind::PlayerMessage
-            || fact.draft.actor.as_deref() != Some("player")
-            || fact.draft.payload.get("request_id").and_then(Value::as_str)
-                != Some(request.0.to_string().as_str())
-            || fact.draft.payload.get("content").and_then(Value::as_str)
-                != Some(input.text().as_ref())
-            || !self
-                .store
-                .knows(self.branch, character, input.event_id(), None)?
-        {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         Ok(())
@@ -529,8 +503,8 @@ impl SessionTimeline {
         at: ContextAnchor,
     ) -> Result<Option<domain::TimelineFact>, domain::TimelineError> {
         let target = match intent {
-            TurnIntent::React(target) | TurnIntent::Reply(ReplyTarget::Event(target)) => target,
-            TurnIntent::Reply(ReplyTarget::Input) | TurnIntent::Initiate => return Ok(None),
+            TurnIntent::React(target) | TurnIntent::Reply(target) => target,
+            TurnIntent::Initiate => return Ok(None),
         };
         if at.branch_id != self.branch.0 {
             return Err(domain::TimelineError::Invalid(
@@ -538,9 +512,7 @@ impl SessionTimeline {
             ));
         }
         let fact = self.store.event(self.branch, target)?;
-        if matches!(intent, TurnIntent::Reply(ReplyTarget::Event(_)))
-            && !fact.draft.kind.is_message()
-        {
+        if matches!(intent, TurnIntent::Reply(_)) && !fact.draft.kind.is_message() {
             return Err(domain::TimelineError::Invalid(
                 "reply target must be a conversation message",
             ));
@@ -690,20 +662,6 @@ impl SessionTimeline {
             ))
     }
 
-    pub(crate) fn append_player_message(
-        &mut self,
-        character: CharacterId,
-        request: RequestId,
-        id: EventId,
-        text: Arc<str>,
-        audience: ConversationAudience,
-    ) -> Result<(), String> {
-        if !audience.seen_by.contains(&character) {
-            return Err("request character must know the admitted input".to_owned());
-        }
-        self.write_player_message(character, id, text, Some(request), audience)
-    }
-
     pub(crate) fn publish_player_message(
         &mut self,
         character: CharacterId,
@@ -745,88 +703,13 @@ impl SessionTimeline {
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn append_proactive_trigger(
-        &mut self,
-        character: CharacterId,
-        request: RequestId,
-        id: EventId,
-        text: Arc<str>,
-        intent: TurnIntent,
-        context: ContextAnchor,
-    ) -> Result<(), domain::TimelineError> {
-        if context.branch_id != self.branch.0 {
-            return Err(domain::TimelineError::Invalid(
-                "generation context belongs to another timeline branch",
-            ));
-        }
-        let pinned =
-            self.workspace
-                .capture_at(self.store.as_ref(), character, None, context.through)?;
-        self.assert_turn(pinned)?;
-        let mut draft = make_draft(
-            id,
-            EventKind::ProactiveOpportunity,
-            character,
-            text,
-            Some(request),
-        );
-        match intent {
-            TurnIntent::Reply(ReplyTarget::Input) => {
-                return Err(domain::TimelineError::Invalid(
-                    "reply to player input requires an admitted player message",
-                ));
-            }
-            TurnIntent::Initiate => {
-                draft
-                    .payload
-                    .insert("legacy_intent".into(), json!("initiate"));
-            }
-            TurnIntent::Reply(ReplyTarget::Event(target)) => {
-                let reply_target = self.store.event(self.branch, target)?;
-                if !reply_target.draft.kind.is_message()
-                    || !self
-                        .store
-                        .knows(self.branch, character, target, Some(context.through))?
-                {
-                    return Err(domain::TimelineError::Invalid(
-                        "reply target must be a known event",
-                    ));
-                }
-                draft.payload.insert("legacy_intent".into(), json!("reply"));
-                draft
-                    .payload
-                    .insert("target".into(), json!(target.0.to_string()));
-                draft.links.push(CausalLink {
-                    relation: CausalRelation::CausedBy,
-                    event_id: target,
-                });
-            }
-            TurnIntent::React(target) => {
-                if !self.store.knows(self.branch, character, target, None)? {
-                    return Err(domain::TimelineError::Invalid(
-                        "reaction target is unknown to the character",
-                    ));
-                }
-                draft.payload.insert("legacy_intent".into(), json!("react"));
-                draft
-                    .payload
-                    .insert("target".into(), json!(target.0.to_string()));
-                draft.links.push(CausalLink {
-                    relation: CausalRelation::CausedBy,
-                    event_id: target,
-                });
-            }
-        }
-        self.commit(format!("input:{}", request.0), draft, Some(pinned), None)
-    }
-
     pub(crate) fn append_reply(
         &mut self,
         reply: GeneratedReply,
     ) -> Result<EventId, domain::TimelineError> {
         let GeneratedReply {
             request,
-            trigger,
+            intent,
             turn,
             expected_revision,
             text,
@@ -843,16 +726,35 @@ impl SessionTimeline {
                 "context does not belong to the active timeline",
             ));
         }
-        let trigger_fact = self.store.event(self.branch, trigger)?;
-        if !self.store.knows(self.branch, character, trigger, None)?
-            || trigger_fact.draft.kind == EventKind::CharacterMessage
-        {
-            return Err(domain::TimelineError::Invalid(
-                "reply target is not known to this character",
-            ));
-        }
-        // Operation-key uniqueness is enforced atomically by the repository receipt.
-        // Reading the complete world here would be both racy and O(history).
+        let cause = match intent {
+            TurnIntent::Reply(id) | TurnIntent::React(id) => {
+                if turn.trigger != Some(id) {
+                    return Err(domain::TimelineError::Invalid(
+                        "generation cause does not match the captured turn",
+                    ));
+                }
+                let fact = self.store.event(self.branch, id)?;
+                if matches!(intent, TurnIntent::Reply(_)) && !fact.draft.kind.is_message() {
+                    return Err(domain::TimelineError::Invalid(
+                        "reply target must be a message",
+                    ));
+                }
+                if fact.sequence > context.through
+                    || !self.store.knows(self.branch, character, id, None)?
+                {
+                    return Err(domain::TimelineError::ConcurrentWrite);
+                }
+                Some(id)
+            }
+            TurnIntent::Initiate => {
+                if turn.trigger.is_some() {
+                    return Err(domain::TimelineError::Invalid(
+                        "initiate must not have an event trigger",
+                    ));
+                }
+                None
+            }
+        };
         let id = EventId::new();
         let mut message = ConversationMessage::new(
             id.0.to_string(),
@@ -864,71 +766,18 @@ impl SessionTimeline {
         message.audience = audience;
         message.request_id = Some(request);
         message.context = Some(context);
-        let directed_reply = if trigger_fact.draft.kind == EventKind::ProactiveOpportunity
-            && trigger_fact
-                .draft
-                .payload
-                .get("legacy_intent")
-                .and_then(Value::as_str)
-                == Some("reply")
-        {
-            trigger_fact
-                .draft
-                .payload
-                .get("target")
-                .and_then(Value::as_str)
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .map(EventId)
-        } else {
-            None
-        };
-        if let Some(target) = directed_reply {
-            let fact = self.store.event(self.branch, target)?;
-            if !self.store.knows(self.branch, character, target, None)? {
-                return Err(domain::TimelineError::Invalid(
-                    "reply target must remain known to the character",
-                ));
-            }
-            message.reply_to = Some(target);
-            message.links.push(CausalLink {
-                relation: if fact.draft.kind.is_message() {
+        if let Some(cause) = cause {
+            let relation = match intent {
+                TurnIntent::Reply(_) => {
+                    message.reply_to = Some(cause);
                     CausalRelation::ReplyTo
-                } else {
-                    CausalRelation::CausedBy
-                },
-                event_id: target,
-            });
+                }
+                TurnIntent::React(_) => CausalRelation::ReactTo,
+                TurnIntent::Initiate => unreachable!(),
+            };
             message.links.push(CausalLink {
-                relation: CausalRelation::CausedBy,
-                event_id: trigger,
-            });
-        } else if trigger_fact.draft.kind == EventKind::PlayerMessage {
-            message.reply_to = Some(trigger);
-            message.links.push(CausalLink {
-                relation: CausalRelation::ReplyTo,
-                event_id: trigger,
-            });
-        } else if let Some(target) = trigger_fact
-            .draft
-            .payload
-            .get("target")
-            .and_then(Value::as_str)
-            .and_then(|value| Uuid::parse_str(value).ok())
-        {
-            message.reply_to = Some(trigger);
-            message.links.push(CausalLink {
-                relation: CausalRelation::ReactTo,
-                event_id: EventId(target),
-            });
-            message.links.push(CausalLink {
-                relation: CausalRelation::CausedBy,
-                event_id: trigger,
-            });
-        } else {
-            message.reply_to = Some(trigger);
-            message.links.push(CausalLink {
-                relation: CausalRelation::CausedBy,
-                event_id: trigger,
+                relation,
+                event_id: cause,
             });
         }
         let draft = message.into_draft()?;
@@ -1004,16 +853,10 @@ mod tests {
         let request = RequestId::new();
         let trigger = EventId::new();
         timeline
-            .append_player_message(
-                CharacterId::Mita,
-                request,
-                trigger,
-                Arc::from("hello"),
-                ConversationAudience::player_to(CharacterId::Mita),
-            )
+            .publish_player_message(CharacterId::Mita, trigger, Arc::from("hello"))
             .unwrap();
         let turn = timeline
-            .capture_turn(CharacterId::Mita, trigger, timeline.anchor())
+            .capture_turn(CharacterId::Mita, Some(trigger), timeline.anchor())
             .unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
         reset.observers.insert(CharacterId::Mita);
@@ -1025,7 +868,7 @@ mod tests {
             timeline
                 .append_reply(GeneratedReply {
                     request,
-                    trigger,
+                    intent: TurnIntent::Reply(trigger),
                     turn,
                     expected_revision: 0,
                     text: Arc::from("answer"),
@@ -1076,7 +919,7 @@ mod tests {
     ) {
         assert!(
             timeline
-                .capture_turn(CharacterId::Mita, original, at)
+                .capture_turn(CharacterId::Mita, Some(original), at)
                 .is_err()
         );
         assert_eq!(pin.context_head, at.through);
@@ -1108,7 +951,7 @@ mod tests {
         assert_eq!(captured.view.messages()[0].content, "original");
 
         let pin = timeline
-            .capture_turn(CharacterId::Mita, original, at)
+            .capture_turn(CharacterId::Mita, Some(original), at)
             .unwrap();
         let branch = timeline.branch;
         reset_and_retell(
@@ -1122,14 +965,14 @@ mod tests {
 
         let before = timeline.anchor().through;
         assert_eq!(
-            timeline.append_proactive_trigger(
-                CharacterId::Mita,
-                RequestId::new(),
-                EventId::new(),
-                Arc::from("react to original"),
-                TurnIntent::React(original),
-                at,
-            ),
+            timeline.append_reply(GeneratedReply {
+                request: RequestId::new(),
+                intent: TurnIntent::React(original),
+                turn: pin,
+                expected_revision: 0,
+                text: Arc::from("reaction"),
+                audience: ConversationAudience::private_to(CharacterId::Mita),
+            }),
             Err(domain::TimelineError::ConcurrentWrite)
         );
         assert_eq!(timeline.anchor().through, before);
@@ -1151,7 +994,7 @@ mod tests {
             .publish_player_message(CharacterId::Mita, EventId::new(), Arc::from("later"))
             .unwrap();
         let pin = timeline
-            .capture_turn(CharacterId::Mita, original, at)
+            .capture_turn(CharacterId::Mita, Some(original), at)
             .unwrap();
         assert_eq!(pin.context_head, at.through);
         assert_eq!(pin.context_epoch, 0);
@@ -1181,7 +1024,7 @@ mod tests {
             .history
             .at;
         let pin = timeline
-            .capture_turn(CharacterId::Mita, original, at)
+            .capture_turn(CharacterId::Mita, Some(original), at)
             .unwrap();
         let mut external = storage::SqliteTimelineRepository::open(&path).unwrap();
         reset_and_retell(&mut external, branch, original, "remote-reset-and-retell");
@@ -1189,14 +1032,14 @@ mod tests {
 
         let before = timeline.anchor().through;
         assert_eq!(
-            timeline.append_proactive_trigger(
-                CharacterId::Mita,
-                RequestId::new(),
-                EventId::new(),
-                Arc::from("late reaction"),
-                TurnIntent::React(original),
-                at,
-            ),
+            timeline.append_reply(GeneratedReply {
+                request: RequestId::new(),
+                intent: TurnIntent::React(original),
+                turn: pin,
+                expected_revision: 0,
+                text: Arc::from("reaction"),
+                audience: ConversationAudience::private_to(CharacterId::Mita),
+            }),
             Err(domain::TimelineError::ConcurrentWrite)
         );
         assert_eq!(timeline.anchor().through, before);
@@ -1246,16 +1089,9 @@ mod tests {
     #[test]
     fn legacy_api_is_backed_by_the_only_canonical_event_store() {
         let mut timeline = SessionTimeline::new();
-        let request = RequestId::new();
         let event = EventId::new();
         timeline
-            .append_player_message(
-                CharacterId::Mita,
-                request,
-                event,
-                Arc::from("hello"),
-                ConversationAudience::player_to(CharacterId::Mita),
-            )
+            .publish_player_message(CharacterId::Mita, event, Arc::from("hello"))
             .unwrap();
         assert_eq!(timeline.store.world(timeline.branch).unwrap().len(), 1);
         assert_eq!(timeline.events().len(), 1);

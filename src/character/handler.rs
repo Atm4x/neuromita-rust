@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     identity::RequestId,
-    interaction::{ReplyTarget, TurnIntent, UserInput},
+    interaction::{TurnIntent, UserInput},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
         SessionTimeline,
@@ -47,7 +47,7 @@ pub struct AcceptedResponse {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AcceptanceContext {
     pub anchor: ContextAnchor,
-    pub trigger: EventId,
+    pub intent: TurnIntent,
     pub state_revision: u64,
     pub turn: TimelineTurn,
 }
@@ -55,7 +55,7 @@ pub(crate) struct AcceptanceContext {
 enum Command {
     Context {
         request: RequestId,
-        input: UserInput,
+        guidance: Arc<str>,
         intent: TurnIntent,
         at: ContextPosition,
         admission: TimelineAdmission,
@@ -115,7 +115,7 @@ impl CharacterHandle {
     pub(crate) async fn prepare(
         &self,
         request: RequestId,
-        input: UserInput,
+        guidance: Arc<str>,
         intent: TurnIntent,
         at: ContextPosition,
         admission: TimelineAdmission,
@@ -124,7 +124,7 @@ impl CharacterHandle {
         self.commands
             .send(Command::Context {
                 request,
-                input,
+                guidance,
                 intent,
                 at,
                 admission,
@@ -212,14 +212,14 @@ impl CharacterHandler {
             match command {
                 Command::Context {
                     request,
-                    input,
+                    guidance,
                     intent,
                     at,
                     admission,
                     reply,
                 } => {
                     let _ =
-                        reply.send(self.context_admitted(request, input, intent, at, admission));
+                        reply.send(self.context_admitted(request, guidance, intent, at, admission));
                 }
                 Command::Accept {
                     request,
@@ -273,7 +273,7 @@ impl CharacterHandler {
     fn context(
         &mut self,
         request: RequestId,
-        input: UserInput,
+        guidance: Arc<str>,
         intent: TurnIntent,
         at: ContextPosition,
     ) -> Result<CharacterContext, CharacterError> {
@@ -283,42 +283,24 @@ impl CharacterHandler {
                 .admission(self.character.id, timeline.selection())
                 .unwrap()
         };
-        if intent == TurnIntent::Reply(ReplyTarget::Input) {
-            self.timeline
-                .lock()
-                .expect("timeline mutex poisoned")
-                .append_player_message(
-                    self.character.id,
-                    request,
-                    input.event_id(),
-                    Arc::clone(input.text()),
-                    ConversationAudience::player_to(self.character.id),
-                )
-                .map_err(CharacterError::Internal)?;
-        }
-        self.context_admitted(request, input, intent, at, admission)
+        self.context_admitted(request, guidance, intent, at, admission)
     }
 
     fn context_admitted(
         &mut self,
-        request: RequestId,
-        input: UserInput,
+        _request: RequestId,
+        guidance: Arc<str>,
         intent: TurnIntent,
         at: ContextPosition,
         admission: TimelineAdmission,
     ) -> Result<CharacterContext, CharacterError> {
-        let mut timeline = self
+        let timeline = self
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         timeline
             .assert_admission(self.character.id, admission)
             .map_err(|_| CharacterError::StaleState)?;
-        if intent == TurnIntent::Reply(ReplyTarget::Input) {
-            timeline
-                .verify_admitted_input(self.character.id, request, &input)
-                .map_err(|_| CharacterError::StaleState)?;
-        }
         let captured =
             timeline
                 .capture_context(self.character.id, at)
@@ -342,25 +324,15 @@ impl CharacterHandler {
                     .map(Arc::from),
             });
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
-        if intent != TurnIntent::Reply(ReplyTarget::Input) {
-            timeline
-                .append_proactive_trigger(
-                    self.character.id,
-                    request,
-                    input.event_id(),
-                    Arc::clone(input.text()),
-                    intent,
-                    anchor,
-                )
-                .map_err(|error| match error {
-                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
-                        CharacterError::StaleState
-                    }
-                    other => CharacterError::Internal(other.to_string()),
-                })?;
-        }
         let turn = timeline
-            .capture_turn(self.character.id, input.event_id(), anchor)
+            .capture_turn(
+                self.character.id,
+                match intent {
+                    TurnIntent::Reply(id) | TurnIntent::React(id) => Some(id),
+                    TurnIntent::Initiate => None,
+                },
+                anchor,
+            )
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
         timeline
             .assert_turn(turn)
@@ -372,8 +344,7 @@ impl CharacterHandler {
             state,
             history: captured.history,
             view: captured.view,
-            current_input: Arc::clone(input.text()),
-            trigger: input.event_id(),
+            current_input: guidance,
             focus: GenerationFocus { intent, reaction },
             anchor,
             turn,
@@ -420,7 +391,7 @@ impl CharacterHandler {
         let event_id = timeline
             .append_reply(GeneratedReply {
                 request,
-                trigger: context.trigger,
+                intent: context.intent,
                 turn: context.turn,
                 expected_revision: context.state_revision,
                 text: Arc::clone(&text),
@@ -490,11 +461,18 @@ mod turn_tests {
 
     fn prepare(handler: &mut CharacterHandler) -> (RequestId, CharacterContext) {
         let request = RequestId::new();
+        let event = EventId::new();
+        handler
+            .timeline
+            .lock()
+            .unwrap()
+            .publish_player_message(CharacterId::Mita, event, Arc::from("hello"))
+            .unwrap();
         let context = handler
             .context(
                 request,
-                UserInput::new("hello".into()).unwrap(),
-                TurnIntent::Reply(ReplyTarget::Input),
+                Arc::from(""),
+                TurnIntent::Reply(event),
                 ContextPosition::Latest,
             )
             .unwrap();
@@ -504,7 +482,7 @@ mod turn_tests {
     fn acceptance(context: &CharacterContext) -> AcceptanceContext {
         AcceptanceContext {
             anchor: context.anchor,
-            trigger: context.trigger,
+            intent: context.focus.intent,
             state_revision: context.state.revision,
             turn: context.turn,
         }
@@ -639,12 +617,10 @@ mod turn_tests {
                 .observe(CharacterId::Mita, cause, Arc::from("door opened"))
                 .unwrap();
             timeline
-                .append_player_message(
+                .publish_player_message(
                     CharacterId::Mita,
-                    RequestId::new(),
                     EventId::new(),
                     Arc::from("later, unrelated user input"),
-                    ConversationAudience::player_to(CharacterId::Mita),
                 )
                 .unwrap();
             let mut note = EventDraft::new(EventKind::SessionNote);
@@ -657,7 +633,7 @@ mod turn_tests {
         let context = handler
             .context(
                 request,
-                UserInput::new("react to the door".into()).unwrap(),
+                Arc::from("react to the door"),
                 TurnIntent::React(cause),
                 ContextPosition::Latest,
             )
@@ -701,7 +677,7 @@ mod turn_tests {
             .unwrap();
         let result = handler.context(
             RequestId::new(),
-            UserInput::new("react".into()).unwrap(),
+            Arc::from("react"),
             TurnIntent::React(cause),
             ContextPosition::At(old),
         );
@@ -767,13 +743,18 @@ mod turn_tests {
                 .observe(CharacterId::Mita, original, Arc::from("seen by Mita"))
                 .unwrap();
         }
-        let input = UserInput::new("new request".into()).unwrap();
-        let input_id = input.event_id();
+        let input_id = EventId::new();
+        handler
+            .timeline
+            .lock()
+            .unwrap()
+            .publish_player_message(CharacterId::Mita, input_id, Arc::from("new request"))
+            .unwrap();
         let snapshot = handler
             .context(
                 RequestId::new(),
-                input,
-                TurnIntent::Reply(ReplyTarget::Input),
+                Arc::from(""),
+                TurnIntent::Reply(input_id),
                 ContextPosition::Latest,
             )
             .unwrap();
@@ -783,7 +764,7 @@ mod turn_tests {
         assert_eq!(snapshot.view.count(), 2);
         assert!(snapshot.view.contains(&original.0.to_string()));
         assert!(snapshot.view.contains(&input_id.0.to_string()));
-        assert_eq!(snapshot.current_input.as_ref(), "new request");
+        assert!(snapshot.current_input.is_empty());
         assert_eq!(handler.timeline.lock().unwrap().anchor().through, 2);
 
         let old = handler.view(snapshot.anchor).unwrap();

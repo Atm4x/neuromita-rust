@@ -7,7 +7,7 @@ use crate::{
     character::{AcceptedResponse, CharacterId},
     generation::{GenerationError, GenerationPreset},
     identity::RequestId,
-    interaction::{ReplyTarget, TurnIntent, UserInput},
+    interaction::TurnIntent,
     timeline::{ContextPosition, EventId, conversation::ConversationAudience},
     voice::VoiceError,
 };
@@ -21,44 +21,37 @@ pub enum RequestSource {
 pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn character_id(&self) -> CharacterId;
     fn preset(&self) -> &GenerationPreset;
-    fn input(&self) -> &UserInput;
+    fn guidance(&self) -> &str;
     fn source(&self) -> RequestSource;
     fn intent(&self) -> TurnIntent;
     fn at(&self) -> ContextPosition;
     fn audience(&self) -> &ConversationAudience;
-    fn input_audience(&self) -> Option<&ConversationAudience> {
-        None
-    }
 }
 
 #[derive(Debug)]
 pub struct ReplyRequest {
     character_id: CharacterId,
     preset: GenerationPreset,
-    input: UserInput,
+    message: EventId,
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
-    input_audience: ConversationAudience,
-    target: ReplyTarget,
 }
 
 impl ReplyRequest {
     pub fn new(
         character_id: CharacterId,
         preset: GenerationPreset,
-        input: UserInput,
+        message: EventId,
         source: RequestSource,
     ) -> Self {
         Self {
             character_id,
             preset,
-            input,
+            message,
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
-            input_audience: ConversationAudience::player_to(character_id),
-            target: ReplyTarget::Input,
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
@@ -67,17 +60,6 @@ impl ReplyRequest {
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
         self.audience = audience;
-        self
-    }
-    pub fn with_input_audience(mut self, audience: ConversationAudience) -> Self {
-        self.input_audience = audience;
-        self
-    }
-
-    /// Reply to an existing event observed by this character, without adding player speech.
-    /// The input text becomes generation guidance rather than a conversation message.
-    pub fn to_event(mut self, event: EventId) -> Self {
-        self.target = ReplyTarget::Event(event);
         self
     }
 }
@@ -89,14 +71,14 @@ impl GenerationCommand for ReplyRequest {
     fn preset(&self) -> &GenerationPreset {
         &self.preset
     }
-    fn input(&self) -> &UserInput {
-        &self.input
+    fn guidance(&self) -> &str {
+        ""
     }
     fn source(&self) -> RequestSource {
         self.source
     }
     fn intent(&self) -> TurnIntent {
-        TurnIntent::Reply(self.target)
+        TurnIntent::Reply(self.message)
     }
     fn at(&self) -> ContextPosition {
         self.at
@@ -104,110 +86,124 @@ impl GenerationCommand for ReplyRequest {
     fn audience(&self) -> &ConversationAudience {
         &self.audience
     }
-    fn input_audience(&self) -> Option<&ConversationAudience> {
-        match self.target {
-            ReplyTarget::Input => Some(&self.input_audience),
-            ReplyTarget::Event(_) => None,
-        }
-    }
 }
 
 #[derive(Debug)]
 pub struct ReactRequest {
-    message: ReplyRequest,
+    character_id: CharacterId,
+    preset: GenerationPreset,
     event: EventId,
+    guidance: Arc<str>,
+    source: RequestSource,
+    at: ContextPosition,
+    audience: ConversationAudience,
 }
 impl ReactRequest {
     pub fn new(
         character: CharacterId,
         preset: GenerationPreset,
         event: EventId,
-        instruction: UserInput,
+        instruction: impl Into<Arc<str>>,
         source: RequestSource,
     ) -> Self {
         Self {
-            message: ReplyRequest::new(character, preset, instruction, source),
+            character_id: character,
+            preset,
             event,
+            guidance: instruction.into(),
+            source,
+            at: ContextPosition::Latest,
+            audience: ConversationAudience::private_to(character),
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
-        self.message = self.message.at(at);
+        self.at = at;
         self
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
-        self.message = self.message.with_audience(audience);
+        self.audience = audience;
         self
     }
 }
 impl GenerationCommand for ReactRequest {
     fn character_id(&self) -> CharacterId {
-        self.message.character_id()
+        self.character_id
     }
     fn preset(&self) -> &GenerationPreset {
-        self.message.preset()
+        &self.preset
     }
-    fn input(&self) -> &UserInput {
-        self.message.input()
+    fn guidance(&self) -> &str {
+        &self.guidance
     }
     fn source(&self) -> RequestSource {
-        self.message.source()
+        self.source
     }
     fn intent(&self) -> TurnIntent {
         TurnIntent::React(self.event)
     }
     fn at(&self) -> ContextPosition {
-        GenerationCommand::at(&self.message)
+        self.at
     }
     fn audience(&self) -> &ConversationAudience {
-        self.message.audience()
+        &self.audience
     }
 }
 
 #[derive(Debug)]
 pub struct InitiateRequest {
-    message: ReplyRequest,
+    character_id: CharacterId,
+    preset: GenerationPreset,
+    guidance: Arc<str>,
+    source: RequestSource,
+    at: ContextPosition,
+    audience: ConversationAudience,
 }
 impl InitiateRequest {
     pub fn new(
         character: CharacterId,
         preset: GenerationPreset,
-        instruction: UserInput,
+        instruction: impl Into<Arc<str>>,
         source: RequestSource,
     ) -> Self {
         Self {
-            message: ReplyRequest::new(character, preset, instruction, source),
+            character_id: character,
+            preset,
+            guidance: instruction.into(),
+            source,
+            at: ContextPosition::Latest,
+            audience: ConversationAudience::private_to(character),
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
-        self.message = self.message.at(at);
+        self.at = at;
         self
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
-        self.message = self.message.with_audience(audience);
+        self.audience = audience;
         self
     }
 }
 impl GenerationCommand for InitiateRequest {
     fn character_id(&self) -> CharacterId {
-        self.message.character_id()
+        self.character_id
     }
     fn preset(&self) -> &GenerationPreset {
-        self.message.preset()
+        &self.preset
     }
-    fn input(&self) -> &UserInput {
-        self.message.input()
+    fn guidance(&self) -> &str {
+        &self.guidance
     }
     fn source(&self) -> RequestSource {
-        self.message.source()
+        self.source
     }
     fn intent(&self) -> TurnIntent {
         TurnIntent::Initiate
     }
     fn at(&self) -> ContextPosition {
-        GenerationCommand::at(&self.message)
+        self.at
     }
     fn audience(&self) -> &ConversationAudience {
-        self.message.audience()
+        &self.audience
     }
 }
 
@@ -306,8 +302,8 @@ pub enum SubmitError {
     CharacterUnavailable,
     #[error("timeline could not accept the request input")]
     TimelineUnavailable,
-    #[error("reply target is not an observed conversation message")]
-    InvalidReplyTarget,
+    #[error("target event is not observable or not a message when replying")]
+    InvalidTargetEvent,
 }
 
 #[derive(Debug, Error)]

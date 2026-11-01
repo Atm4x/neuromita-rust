@@ -64,7 +64,7 @@ impl MessageHandler {
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
             context = self.character.prepare(
                 id,
-                message.input().clone(),
+                Arc::from(message.guidance()),
                 message.intent(),
                 message.at(),
                 record.admission(),
@@ -103,7 +103,7 @@ impl MessageHandler {
         });
         let acceptance = AcceptanceContext {
             anchor: context.anchor,
-            trigger: context.trigger,
+            intent: context.focus.intent,
             state_revision: context.state.revision,
             turn: context.turn,
         };

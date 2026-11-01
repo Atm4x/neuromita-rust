@@ -183,7 +183,13 @@ impl GenerationProvider for CheckedProvider {
     ) -> neuromita::generation::ProviderFuture<'_> {
         Box::pin(async move {
             assert_ne!(
-                &*context.current_input, "panic provider",
+                context
+                    .view
+                    .messages()
+                    .last()
+                    .map(|message| message.content.as_str())
+                    .unwrap_or(""),
+                "panic provider",
                 "injected provider panic"
             );
             self.0.generate(context, template).await
@@ -293,7 +299,11 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     let external = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
         preset.clone(),
-        UserInput::new("external client".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::KindMita,
+            UserInput::new("external client".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Client(Uuid::new_v4()),
     ))
     .unwrap();
@@ -337,14 +347,15 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
 
     let cancelled_call = server.next().await;
     let cancelled_user = user_texts(&cancelled_call.body);
-    assert_eq!(cancelled_user.len(), 3);
+    assert_eq!(cancelled_user.len(), 4);
     assert_eq!(cancelled_user[0], "first");
     assert_eq!(cancelled_user[1], "never starts");
     assert!(cancelled_user[2].contains("cancel during generation"));
-    assert!(cancelled_user[2].contains("Сообщение, на которое готовится текущий ответ"));
-    assert_eq!(cancelled_call.body["contents"][3]["role"], "model");
+    assert!(cancelled_user[2].contains("на которое готовится текущий ответ"));
+    assert_eq!(cancelled_user[3], "queue overflow");
+    assert_eq!(cancelled_call.body["contents"][4]["role"], "model");
     assert_eq!(
-        cancelled_call.body["contents"][3]["parts"][0]["text"],
+        cancelled_call.body["contents"][4]["parts"][0]["text"],
         "first reply"
     );
     assert_eq!(running_cancel.cancel(), CancelResult::Requested);
@@ -393,7 +404,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     let next_call = server.next().await;
     assert!(!next_call.body.to_string().contains("must not be accepted"));
     assert!(next_call.body.to_string().contains("never starts"));
-    assert!(!next_call.body.to_string().contains("queue overflow"));
+    assert!(next_call.body.to_string().contains("queue overflow"));
     next_call.respond.send(Reply::Text("second reply")).unwrap();
     assert!(matches!(
         finished(&next).await.state,
@@ -421,8 +432,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
             .any(|event| event.request_id == Some(first.id()))
     );
     assert!(events.iter().any(|event| {
-        event.request_id == Some(queued.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        matches!(&event.content, EventContent::PlayerMessage { text } if text.as_ref() == "never starts")
     }));
     assert!(!events.iter().any(|event| {
         event.request_id == Some(queued.id())
@@ -529,7 +539,11 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset.clone(),
-        UserInput::new("first message".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("first message".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -544,20 +558,23 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
         CharacterId::Mita,
         preset.clone(),
         cause,
-        UserInput::new("React to the door".into()).unwrap(),
+        Arc::clone(UserInput::new("React to the door".into()).unwrap().text()),
         RequestSource::Presenter,
     ))
     .unwrap();
     let question = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("Why did you open the door?".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Why did you open the door?".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
     assert!(app.timeline().iter().any(|event| {
-        event.request_id == Some(question.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        matches!(&event.content, EventContent::PlayerMessage { text } if text.as_ref() == "Why did you open the door?")
     }));
 
     first_call
@@ -628,7 +645,11 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset.clone(),
-        UserInput::new("active request".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("active request".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -636,7 +657,11 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     let waiting = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("queued and already spoken".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("queued and already spoken".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -654,8 +679,7 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     assert!(server.calls.try_recv().is_err());
     let events = app.timeline();
     assert!(events.iter().any(|event| {
-        event.request_id == Some(waiting.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        matches!(&event.content, EventContent::PlayerMessage { text } if text.as_ref() == "queued and already spoken")
     }));
     assert!(!events.iter().any(|event| {
         event.request_id == Some(waiting.id())
@@ -704,7 +728,11 @@ async fn independent_player_message_is_visible_without_scheduling_generation() {
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("New question".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("New question".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -746,7 +774,11 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     let mita = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset.clone(),
-        UserInput::new("Question before reset".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Question before reset".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -754,7 +786,11 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     let kind = ChatApi::reply(ReplyRequest::new(
         CharacterId::KindMita,
         preset.clone(),
-        UserInput::new("KindMita stays active".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::KindMita,
+            UserInput::new("KindMita stays active".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -797,8 +833,7 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     ));
     let old = app.timeline();
     assert!(old.iter().any(|event| {
-        event.request_id == Some(mita.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        matches!(&event.content, EventContent::PlayerMessage { text } if text.as_ref() == "Question before reset")
     }));
     assert!(!old.iter().any(|event| {
         event.request_id == Some(mita.id())
@@ -808,7 +843,11 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     let next = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("After reset".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("After reset".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -845,7 +884,11 @@ async fn stale_reset_is_rejected_without_cancelling_current_request() {
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("Valid after reselection".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Valid after reselection".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -929,7 +972,11 @@ async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
     let reply = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset,
-        UserInput::new("Question requiring voice".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Question requiring voice".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -989,7 +1036,11 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     let first = ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset.clone(),
-        UserInput::new("First blocking request".into()).unwrap(),
+        neuromita::api::ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("First blocking request".into()).unwrap(),
+        )
+        .unwrap(),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -998,7 +1049,7 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
         CharacterId::Mita,
         preset,
         cause,
-        UserInput::new("React to door".into()).unwrap(),
+        Arc::clone(UserInput::new("React to door".into()).unwrap().text()),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -1061,7 +1112,11 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
         ReplyRequest::new(
             CharacterId::Mita,
             preset.clone(),
-            UserInput::new("Try old context".into()).unwrap(),
+            neuromita::api::ChatApi::publish_message(
+                CharacterId::Mita,
+                UserInput::new("Try old context".into()).unwrap(),
+            )
+            .unwrap(),
             RequestSource::Presenter,
         )
         .at(neuromita::timeline::ContextPosition::At(old)),
@@ -1084,15 +1139,16 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
         "Private knowledge before reset"
     );
 
-    let independent = ChatApi::reply(
-        ReplyRequest::new(
+    let independent = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        preset,
+        neuromita::api::ChatApi::publish_message(
             CharacterId::KindMita,
-            preset,
             UserInput::new("Your own earlier view".into()).unwrap(),
-            RequestSource::Presenter,
         )
-        .at(neuromita::timeline::ContextPosition::At(old)),
-    )
+        .unwrap(),
+        RequestSource::Presenter,
+    ))
     .unwrap();
     let call = server.next().await;
     assert_eq!(user_texts(&call.body), ["Your own earlier view"]);
@@ -1115,7 +1171,9 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn generated_character_messages_use_shared_conversation_audience() {
-    use neuromita::timeline::conversation::{ConversationAudience, ConversationSpeaker};
+    use neuromita::timeline::conversation::{
+        ConversationAudience, ConversationMessage, ConversationSpeaker,
+    };
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
     let preset = preset(&server.endpoint);
@@ -1150,14 +1208,23 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         .participants
         .insert(ConversationSpeaker::Character(CharacterId::KindMita));
 
+    let mut incoming = ConversationMessage::new(
+        "shared-player-input",
+        ConversationSpeaker::Player,
+        json!("Say hello to Kind Mita"),
+        [],
+    );
+    incoming.audience = shared_input;
+    let message_id = incoming.id;
+    app.publish_conversation_message(app.timeline_selection(), incoming)
+        .unwrap();
     let reply = ChatApi::reply(
         ReplyRequest::new(
             CharacterId::Mita,
             preset.clone(),
-            UserInput::new("Say hello to Kind Mita".into()).unwrap(),
+            message_id,
             RequestSource::Client(Uuid::new_v4()),
         )
-        .with_input_audience(shared_input)
         .with_audience(audience.clone()),
     )
     .unwrap();
@@ -1215,7 +1282,11 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         ReplyRequest::new(
             CharacterId::KindMita,
             preset.clone(),
-            UserInput::new("A private reply".into()).unwrap(),
+            neuromita::api::ChatApi::publish_message(
+                CharacterId::KindMita,
+                UserInput::new("A private reply".into()).unwrap(),
+            )
+            .unwrap(),
             RequestSource::Client(Uuid::new_v4()),
         )
         .with_audience(private.clone()),
@@ -1254,7 +1325,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
             neuromita::timeline::EventId(
                 Uuid::parse_str(source[1]["timeline_event_id"].as_str().unwrap()).unwrap(),
             ),
-            UserInput::new("React to Mita".into()).unwrap(),
+            Arc::clone(UserInput::new("React to Mita".into()).unwrap().text()),
             RequestSource::Client(Uuid::new_v4()),
         )
         .with_audience(audience.clone()),
@@ -1286,7 +1357,11 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         neuromita::request::InitiateRequest::new(
             CharacterId::Mita,
             preset.clone(),
-            UserInput::new("Say something to both".into()).unwrap(),
+            Arc::clone(
+                UserInput::new("Say something to both".into())
+                    .unwrap()
+                    .text(),
+            ),
             RequestSource::Client(Uuid::new_v4()),
         )
         .with_audience(audience),
@@ -1319,19 +1394,26 @@ async fn generated_character_messages_use_shared_conversation_audience() {
 
     let missing_speaker = ConversationAudience::private_to(CharacterId::KindMita);
     let previous_head = app.at().through;
+    let mut message = ConversationMessage::new(
+        "player-unseen-by-mita",
+        ConversationSpeaker::Player,
+        json!("Mita cannot hear this"),
+        [],
+    );
+    message.audience = missing_speaker;
+    let message_id = message.id;
+    app.publish_conversation_message(app.timeline_selection(), message)
+        .unwrap();
     assert!(matches!(
-        ChatApi::reply(
-            ReplyRequest::new(
-                CharacterId::Mita,
-                preset.clone(),
-                UserInput::new("Mita cannot hear this".into()).unwrap(),
-                RequestSource::Client(Uuid::new_v4()),
-            )
-            .with_input_audience(missing_speaker)
-        ),
-        Err(SubmitError::TimelineUnavailable)
+        ChatApi::reply(ReplyRequest::new(
+            CharacterId::Mita,
+            preset.clone(),
+            message_id,
+            RequestSource::Client(Uuid::new_v4())
+        )),
+        Err(SubmitError::InvalidTargetEvent)
     ));
-    assert_eq!(app.at().through, previous_head);
+    assert_eq!(app.at().through, previous_head + 1);
 
     app.shutdown().await.unwrap();
     server.shutdown().await;

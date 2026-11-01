@@ -60,10 +60,11 @@ impl ChatPresenter {
         text: String,
     ) -> Result<RequestHandle, PresenterError> {
         let input = UserInput::new(text)?;
+        let event = self.api.publish_message(character, input)?;
         let request = ReplyRequest::new(
             character,
             self.preset.clone(),
-            input,
+            event,
             RequestSource::Presenter,
         );
         Ok(self.api.send(request)?)
@@ -74,12 +75,11 @@ impl ChatPresenter {
         target: EventId,
         instruction: String,
     ) -> Result<RequestHandle, PresenterError> {
-        let input = UserInput::new(instruction)?;
         let request = ReactRequest::new(
             character,
             self.preset.clone(),
             target,
-            input,
+            instruction,
             RequestSource::Presenter,
         );
         Ok(self.api.send(request)?)
@@ -89,11 +89,10 @@ impl ChatPresenter {
         character: CharacterId,
         instruction: String,
     ) -> Result<RequestHandle, PresenterError> {
-        let input = UserInput::new(instruction)?;
         let request = InitiateRequest::new(
             character,
             self.preset.clone(),
-            input,
+            instruction,
             RequestSource::Presenter,
         );
         Ok(self.api.send(request)?)
@@ -104,10 +103,11 @@ impl ChatPresenter {
         text: String,
         at: ContextPosition,
     ) -> Result<RequestHandle, PresenterError> {
+        let event = self.api.publish_message(character, UserInput::new(text)?)?;
         let request = ReplyRequest::new(
             character,
             self.preset.clone(),
-            UserInput::new(text)?,
+            event,
             RequestSource::Presenter,
         )
         .at(at);

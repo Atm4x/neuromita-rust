@@ -109,7 +109,7 @@ impl RequestRecord {
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         let trace = RequestTrace {
             metadata: snapshot.metadata.clone(),
-            input: message.input().clone(),
+            guidance: Arc::from(message.guidance()),
             preset_description: format!("{:?}", message.preset()),
             context: None,
             generated_text: None,
@@ -324,6 +324,7 @@ mod tests {
             GenerationPreset, ProviderTemplate,
             gemini::{GeminiTemplate, GenerationSettings},
         },
+        identity::EventId,
     };
 
     fn request() -> ReplyRequest {
@@ -334,7 +335,7 @@ mod tests {
         ReplyRequest::new(
             CharacterId::Mita,
             preset,
-            UserInput::new("test".into()).unwrap(),
+            EventId::new(),
             RequestSource::Presenter,
         )
     }

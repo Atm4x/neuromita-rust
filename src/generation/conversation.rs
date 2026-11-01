@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::{
     character::CharacterContext,
     identity::{CharacterId, EventId},
-    interaction::{ReplyTarget, TurnIntent},
+    interaction::TurnIntent,
     timeline::{
         domain::MessageRole,
         view::{ContextEntry, MitaView},
@@ -137,12 +137,8 @@ pub(crate) fn project_history(
         ContextEntry::World(event) => Some(event.event_id) == target_id,
     });
     let focus_needs_marker = position.is_some_and(|index| {
-        target.is_some_and(|(_, intent)| {
-            matches!(
-                intent,
-                TurnIntent::React(_) | TurnIntent::Reply(ReplyTarget::Event(_))
-            )
-        }) || index + 1 < entries.len()
+        target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_)))
+            || index + 1 < entries.len()
     });
     let mut messages = Vec::with_capacity(entries.len());
     let mut target_present = false;
@@ -197,7 +193,7 @@ pub(crate) fn project_history(
             if focus_needs_marker {
                 let label = match target.map(|(_, intent)| intent) {
                     Some(TurnIntent::React(_)) => "Событие, вызвавшее текущую реакцию",
-                    Some(TurnIntent::Reply(ReplyTarget::Event(_))) => {
+                    Some(TurnIntent::Reply(_)) => {
                         "Сообщение или событие, на которое готовится текущий ответ"
                     }
                     _ => "Сообщение, на которое готовится текущий ответ",
@@ -213,46 +209,32 @@ pub(crate) fn project_history(
 impl LlmConversation {
     pub(crate) fn from_context(context: &CharacterContext) -> Self {
         let focus = match context.focus.intent {
-            TurnIntent::Reply(ReplyTarget::Input) => Some((context.trigger, context.focus.intent)),
-            TurnIntent::Reply(ReplyTarget::Event(id)) | TurnIntent::React(id) => {
-                Some((id, context.focus.intent))
-            }
+            TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
             TurnIntent::Initiate => None,
         };
         let (mut messages, target_present) =
             project_history(&context.view, context.character_id, focus);
         let task = match context.focus.intent {
-            TurnIntent::Reply(ReplyTarget::Input) if !target_present => {
-                Some(context.current_input.to_string())
+            TurnIntent::Reply(_) if target_present => None,
+            TurnIntent::Reply(_) => {
+                Some("Текущая задача — ответить на указанное известное сообщение.".to_owned())
             }
-            TurnIntent::Reply(ReplyTarget::Event(_)) if target_present => Some(format!(
-                "Текущая задача — ответить на отмеченное событие по инициативе внешнего диалогового контроллера. Учитывай и более поздние известные сведения.\n{}",
-                context.current_input
-            )),
-            TurnIntent::Reply(ReplyTarget::Event(_)) => Some(format!(
-                "Текущая задача — ответить на указанное известное событие.\n{}",
-                context.current_input
-            )),
-            TurnIntent::React(_) if target_present => Some(format!(
-                "Текущая задача — отреагировать на отмеченное событие. Учитывай и более поздние известные сведения.\n{}",
-                context.current_input
-            )),
-            TurnIntent::React(_) => Some(if let Some(cause) = &context.focus.reaction {
-                match &cause.description {
-                    Some(description) => format!(
-                        "Текущая задача — реакция на известное событие ({:?}): {}. Учитывай весь последующий известный контекст.\n{}",
-                        cause.kind, description, context.current_input
-                    ),
-                    None => format!(
-                        "Текущая задача — реакция на известное событие ({:?}). Учитывай весь последующий известный контекст.\n{}",
-                        cause.kind, context.current_input
-                    ),
-                }
+            TurnIntent::React(_) => Some(if target_present {
+                format!(
+                    "Текущая задача — отреагировать на отмеченное событие. Учитывай более поздние известные сведения.\n{}",
+                    context.current_input
+                )
+            } else if let Some(cause) = &context.focus.reaction {
+                format!(
+                    "Текущая задача — реакция на известное событие ({:?}): {}.\n{}",
+                    cause.kind,
+                    cause.description.as_deref().unwrap_or(""),
+                    context.current_input
+                )
             } else {
                 context.current_input.to_string()
             }),
             TurnIntent::Initiate => Some(context.current_input.to_string()),
-            TurnIntent::Reply(ReplyTarget::Input) => None,
         };
         if let Some(text) = task {
             messages.push(LlmMessage {

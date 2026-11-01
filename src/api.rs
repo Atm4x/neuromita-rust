@@ -30,6 +30,15 @@ impl CharacterApi {
 pub struct ChatApi;
 
 impl ChatApi {
+    pub fn publish_conversation_message(
+        message: crate::timeline::conversation::ConversationMessage,
+    ) -> Result<crate::identity::EventId, SubmitError> {
+        runtime::current()
+            .map_err(SubmitError::from)?
+            .chat
+            .publish_conversation_message(message)
+    }
+
     pub fn publish_message(
         character: CharacterId,
         input: UserInput,

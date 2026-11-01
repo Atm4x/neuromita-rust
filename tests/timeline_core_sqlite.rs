@@ -166,16 +166,20 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
         GenerationSettings::new(0.0, 64, Duration::from_secs(2)).unwrap(),
     )
     .unwrap();
+    let source_event = ChatApi::publish_message(
+        character,
+        UserInput::new("persisted before generation".into()).unwrap(),
+    )
+    .unwrap();
     let handle = ChatApi::reply(ReplyRequest::new(
         character,
         GenerationPreset::new(ProviderTemplate::Gemini(template)),
-        UserInput::new("persisted before generation".into()).unwrap(),
+        source_event,
         RequestSource::Presenter,
     ))
     .unwrap();
     assert!(app.timeline().iter().any(|event| {
-        event.request_id == Some(handle.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        event.id == source_event && matches!(event.content, EventContent::PlayerMessage { .. })
     }));
     handle.cancel();
     app.shutdown().await.unwrap();
@@ -183,8 +187,7 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
         .await
         .unwrap();
     assert!(reopened.timeline().iter().any(|event| {
-        event.request_id == Some(handle.id())
-            && matches!(event.content, EventContent::PlayerMessage { .. })
+        event.id == source_event && matches!(event.content, EventContent::PlayerMessage { .. })
     }));
     assert!(
         reopened

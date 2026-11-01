@@ -232,7 +232,8 @@ second authoritative message store was introduced.
 
 ## Unity-directed conversation replies (2026-11-01)
 
-- [x] `ChatApi::reply(ReplyRequest::new(...).to_event(event))` handles an existing event via the same Reply contract as an input-originated reply; no separate ReplyToRequest or turn intent exists.
-- [x] Unity/Sandbox selects the responder and initiates each reply explicitly; Rust does not select dialogue turns or infer scene witnesses.
-- [x] Known message replies preserve `reply_to` and `ReplyTo` causal links. Known non-message events use `CausedBy` alongside the same `reply_to` target identity; no synthetic player message is appended.
-- [ ] Unity transport adapter and scene witness resolution require review of the current Unity wire schema.
+- [x] `ChatApi::reply` takes the `EventId` of an already published visible Message. Player and character messages follow the same path; no nested `ReplyTarget` or `.to_event` and no synthetic `UserInput` are needed.
+- [x] `ChatApi::react` accepts any observed Event. `ChatApi::initiate` has no event target. Both write one generated Message, not a `ProactiveOpportunity` control event.
+- [x] Unity chooses the responder and sends each turn explicitly via TCP `ServerLifecycle` (`publish_message`, `reply`, `react`, `initiate`). Rust never auto-initiates further turns.
+- [x] Generated replies use `ReplyTo` links; reactions use `ReactTo`; no transfer of knowledge follows either link.
+- [ ] Validate and update Unity C# transport and dynamic scene witness mapping against this Rust contract; Python structured-output provider parity remains separate.

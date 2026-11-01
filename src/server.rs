@@ -20,13 +20,15 @@ use uuid::Uuid;
 use crate::{
     character::CharacterId,
     generation::GenerationPreset,
+    identity::EventId,
     lifecycle::Lifecycle,
     request::{
-        ProcessingStage, ReplyRequest, RequestHandle, RequestId, RequestOutcome, RequestSnapshot,
-        RequestSource, RequestState, UserInput,
+        InitiateRequest, ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId,
+        RequestOutcome, RequestSnapshot, RequestSource, RequestState, UserInput,
     },
     runtime::{self, ApiBindings},
     settings::{VoiceSettings, Volume},
+    timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
 };
 
 pub struct ServerConfig {
@@ -196,9 +198,34 @@ impl Drop for Connected {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Test,
+    PublishMessage {
+        event_id: Uuid,
+        occurred_at_unix_ms: u64,
+        speaker: ConversationSpeaker,
+        content: Value,
+        #[serde(flatten)]
+        audience: WireAudience,
+    },
     Reply {
         character: CharacterId,
-        text: String,
+        message_id: Uuid,
+        #[serde(flatten)]
+        audience: WireAudience,
+    },
+    React {
+        character: CharacterId,
+        event_id: Uuid,
+        #[serde(default)]
+        instruction: String,
+        #[serde(flatten)]
+        audience: WireAudience,
+    },
+    Initiate {
+        character: CharacterId,
+        #[serde(default)]
+        instruction: String,
+        #[serde(flatten)]
+        audience: WireAudience,
     },
     Cancel {
         request_id: Uuid,
@@ -207,6 +234,29 @@ enum Command {
     SetVolume {
         value: Volume,
     },
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WireAudience {
+    #[serde(default)]
+    targets: Vec<ConversationSpeaker>,
+    #[serde(default)]
+    participants: Vec<ConversationSpeaker>,
+    #[serde(default)]
+    seen_by: Vec<CharacterId>,
+}
+
+impl WireAudience {
+    fn into_audience(self, sender: Option<CharacterId>) -> ConversationAudience {
+        let mut audience = ConversationAudience::default();
+        audience.targets.extend(self.targets);
+        audience.participants.extend(self.participants);
+        audience.seen_by.extend(self.seen_by);
+        if let Some(character) = sender {
+            audience.seen_by.insert(character);
+        }
+        audience
+    }
 }
 
 #[derive(Deserialize)]
@@ -219,7 +269,12 @@ struct Envelope {
 struct Receipt {
     command_id: Uuid,
     fingerprint: String,
-    handle: RequestHandle,
+    result: ReceiptResult,
+}
+
+enum ReceiptResult {
+    Generation(RequestHandle),
+    Published(EventId),
 }
 
 async fn send(
@@ -325,29 +380,70 @@ async fn client(
                 if receipt.fingerprint != fingerprint {
                     send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":"command ID reused for different intent"}), &stop).await?;
                 } else {
-                    send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,"request_id":receipt.handle.id().0,"replayed":true}), &stop).await?;
-                    send(&outbound, status(&receipt.handle.snapshot()), &stop).await?;
+                    match &receipt.result {
+                        ReceiptResult::Generation(handle) => {
+                            send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,"request_id":handle.id().0,"replayed":true}), &stop).await?;
+                            send(&outbound, status(&handle.snapshot()), &stop).await?;
+                        }
+                        ReceiptResult::Published(event) => {
+                            send(&outbound, json!({"type":"published","command_id":envelope.command_id,"event_id":event.0,"replayed":true}), &stop).await?;
+                        }
+                    }
                 }
                 continue;
             }
+            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Test | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
+            if track && receipts.len() >= config.receipt_capacity.get() {
+                if receipts.front().is_some_and(|receipt| match &receipt.result {
+                    ReceiptResult::Published(_) => true,
+                    ReceiptResult::Generation(handle) => handle.snapshot().state.is_terminal(),
+                }) {
+                    receipts.pop_front();
+                } else {
+                    send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":"too many tracked requests"}), &stop).await?;
+                    continue;
+                }
+            }
             match envelope.command {
-                Command::Test | Command::Reply { .. } => {
-                    if receipts.len() >= config.receipt_capacity.get() {
-                        if receipts.front().is_some_and(|receipt| receipt.handle.snapshot().state.is_terminal()) { receipts.pop_front(); }
-                        else { send(&outbound, json!({"type":"error","error":"too many tracked requests"}), &stop).await?; continue; }
+                Command::PublishMessage { event_id, occurred_at_unix_ms, speaker, content, audience } => {
+                    let mut message = ConversationMessage::new(event_id.to_string(), speaker, content, []);
+                    message.id = EventId(event_id);
+                    message.occurred_at_unix_ms = occurred_at_unix_ms;
+                    message.audience = audience.into_audience(None);
+                    match api.chat.publish_conversation_message(message) {
+                        Ok(event) => {
+                            send(&outbound, json!({"type":"published","command_id":envelope.command_id,"event_id":event.0,"replayed":false}), &stop).await?;
+                            receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, result: ReceiptResult::Published(event) });
+                        }
+                        Err(error) => send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error.to_string()}), &stop).await?,
                     }
-                    let (character, text) = match envelope.command {
-                        Command::Test => (config.test_character, "test".to_owned()),
-                        Command::Reply { character, text } => (character, text),
+                }
+                Command::Test | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. } => {
+                    let source = RequestSource::Client(client_id);
+                    let handle = match envelope.command {
+                        Command::Test => {
+                            UserInput::new("test".to_owned())
+                                .map_err(|error| error.to_string())
+                                .and_then(|input| api.chat.publish_message(config.test_character, input).map_err(|error| error.to_string()))
+                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, config.preset.clone(), message, source)).map_err(|error| error.to_string()))
+                        }
+                        Command::Reply { character, message_id, audience } => {
+                            api.chat.send(ReplyRequest::new(character, config.preset.clone(), EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                        }
+                        Command::React { character, event_id, instruction, audience } => {
+                            api.chat.send(ReactRequest::new(character, config.preset.clone(), EventId(event_id), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                        }
+                        Command::Initiate { character, instruction, audience } => {
+                            api.chat.send(InitiateRequest::new(character, config.preset.clone(), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                        }
                         _ => unreachable!(),
                     };
-                    let request = UserInput::new(text).map(|input| ReplyRequest::new(character, config.preset.clone(), input, RequestSource::Client(client_id)));
-                    let handle = match request.map_err(|error| error.to_string()).and_then(|request| api.chat.send(request).map_err(|error| error.to_string())) {
+                    let handle = match handle {
                         Ok(handle) => handle,
                         Err(error) => { send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error}), &stop).await?; continue; }
                     };
                     send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,"request_id":handle.id().0,"replayed":false}), &stop).await?;
-                    receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, handle: handle.clone() });
+                    receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, result: ReceiptResult::Generation(handle.clone()) });
                     let outbound = outbound.clone();
                     let stop = stop.clone();
                     observers.spawn(async move {
@@ -359,8 +455,8 @@ async fn client(
                     });
                 }
                 Command::Cancel { request_id } => {
-                    let response = match receipts.iter().find(|receipt| receipt.handle.id() == RequestId(request_id)) {
-                        Some(receipt) => json!({"type":"cancel","request_id":request_id,"result":format!("{:?}", receipt.handle.cancel())}),
+                    let response = match receipts.iter().find_map(|receipt| match &receipt.result { ReceiptResult::Generation(handle) if handle.id() == RequestId(request_id) => Some(handle), _ => None }) {
+                        Some(handle) => json!({"type":"cancel","request_id":request_id,"result":format!("{:?}", handle.cancel())}),
                         None => json!({"type":"error","error":"request does not belong to this connection"}),
                     };
                     send(&outbound, response, &stop).await?;

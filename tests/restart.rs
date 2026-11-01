@@ -160,10 +160,11 @@ fn initial() -> SettingsSource {
 }
 
 fn reply(model: &str, text: &str) -> Result<RequestHandle, SubmitError> {
+    let event = ChatApi::publish_message(CharacterId::Mita, UserInput::new(text.into()).unwrap())?;
     ChatApi::reply(ReplyRequest::new(
         CharacterId::Mita,
         preset(model),
-        UserInput::new(text.into()).unwrap(),
+        event,
         RequestSource::Presenter,
     ))
 }
@@ -531,7 +532,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     write.write_all(b"test\n").await.unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.model, "after-save-failure");
-    assert_eq!(call.context.current_input.as_ref(), "test");
+    assert!(call.context.current_input.is_empty());
     call.reply.send(Arc::from("network after restart")).unwrap();
     timeout(Duration::from_secs(5), async {
         loop {

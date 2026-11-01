@@ -9,10 +9,14 @@ use super::{GenerationCommand, RequestDiscovery, RequestHandle, RequestRegistry,
 use crate::{
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
-    timeline::{conversation::ConversationAudience, selection::TimelineAdmission},
+    timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
 };
 
 pub(crate) trait RequestIngress: Send + Sync {
+    fn publish_conversation_message(
+        &self,
+        message: ConversationMessage,
+    ) -> Result<EventId, SubmitError>;
     fn publish_message(
         &self,
         character: CharacterId,
@@ -21,11 +25,8 @@ pub(crate) trait RequestIngress: Send + Sync {
 
     fn admit(
         &self,
-        request: RequestId,
         character: CharacterId,
-        input: &UserInput,
         intent: TurnIntent,
-        input_audience: Option<&ConversationAudience>,
     ) -> Result<TimelineAdmission, SubmitError>;
 }
 
@@ -70,17 +71,23 @@ impl ChatApiState {
             mpsc::error::TrySendError::Full(_) => SubmitError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
         })?;
+        let admission = self
+            .ingress
+            .admit(request.character_id(), request.intent())?;
         let id = RequestId::new();
-        let admission = self.ingress.admit(
-            id,
-            request.character_id(),
-            request.input(),
-            request.intent(),
-            request.input_audience(),
-        )?;
         let handle = self.registry.register(Box::new(request), id, admission);
         permit.send(id);
         Ok(handle)
+    }
+
+    pub(crate) fn publish_conversation_message(
+        &self,
+        message: ConversationMessage,
+    ) -> Result<EventId, SubmitError> {
+        if !*self.accepting.lock().expect("admission mutex poisoned") {
+            return Err(SubmitError::Stopped);
+        }
+        self.ingress.publish_conversation_message(message)
     }
 
     pub(crate) fn publish_message(

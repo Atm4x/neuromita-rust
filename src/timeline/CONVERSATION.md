@@ -34,21 +34,11 @@ retroactively disclose the original. The former `disclose_conversation_message` 
 
 ## Producers
 
-- `ApplicationLifecycle::publish_conversation_message` publishes a complete
-  `ConversationMessage` without scheduling a generator.
-- `ChatApi::publish_message` is a compatibility convenience for private player
-  input; it also builds a `ConversationMessage` with the same conversion.
-- `ChatApi::reply` admits its player message through that conversion **before**
-  generation and records its generated `CharacterMessage` using the same
-  conversion. `ReplyRequest::with_input_audience` controls who heard the player
-  input, while `with_audience` independently controls the generated answer.
-  They are two distinct utterances, not two Timeline storage mechanisms.
-- `ReactRequest::with_audience` and `InitiateRequest::with_audience` control
-  the generated answer. Their instructions are `ProactiveOpportunity` control
-  events, not invented player messages.
-- Without explicit audience configuration, existing private one-character
-  behavior is preserved. A reply cannot be admitted if its requested character
-  is absent from the input's `seen_by`.
+- `ApplicationLifecycle::publish_conversation_message` and `ChatApi::publish_conversation_message` publish an explicit `ConversationMessage` without automatically admitting a generation request.
+- `ChatApi::publish_message` remains a narrow convenience for ordinary private player input, using the same canonical conversion.
+- `ReplyRequest` requires an existing visible Message ID. `ReactRequest` accepts a visible Event ID, and `InitiateRequest` has no event target. No operation synthesizes player input or a `ProactiveOpportunity`.
+- The generated response always becomes one `CharacterMessage`, using the same canonical conversion, with `ReplyTo` or `ReactTo` as appropriate. Target, participant, and witness audiences remain independent.
+- TCP `ServerLifecycle` exposes publication and the three generation commands so Unity can orchestrate dialogue explicitly; see `CHAT_API.md`.
 
 Generated replies still pass the existing selection/context-epoch/revision
 checks in the same guarded append. All fields required by the legacy

@@ -343,13 +343,13 @@ async fn complete_minimal_contracts() {
             .is_empty()
     );
 
-    let unknown = presenter
-        .chat
-        .react(CharacterId::KindMita, observation, "unknown".into())
-        .unwrap();
     assert!(matches!(
-        done(&unknown).await.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        presenter
+            .chat
+            .react(CharacterId::KindMita, observation, "unknown".into()),
+        Err(neuromita::presentation::PresenterError::Submit(
+            neuromita::request::SubmitError::InvalidTargetEvent
+        ))
     ));
     assert!(generations.try_recv().is_err());
 
@@ -387,13 +387,11 @@ async fn complete_minimal_contracts() {
             ContextPosition::At(origin),
         )
         .unwrap();
-    let call = next(&mut generations).await;
-    assert!(call.context.history.events.is_empty());
-    assert_eq!(call.context.state.accepted_replies, 0);
-    call.reply.send(Ok(Arc::from("historical answer"))).unwrap();
-    assert!(
-        matches!(&done(&historical).await.state, RequestState::Finished(RequestOutcome::InternalError(failure)) if failure.partial_text.as_deref() == Some("historical answer"))
-    );
+    assert!(matches!(
+        &done(&historical).await.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert!(generations.try_recv().is_err());
     assert_eq!(
         presenter
             .characters
@@ -562,7 +560,7 @@ async fn complete_minimal_contracts() {
     let accepted = frame(&mut reader, |value| value["type"] == "accepted").await;
     let id = RequestId(Uuid::parse_str(accepted["request_id"].as_str().unwrap()).unwrap());
     let call = next(&mut generations).await;
-    assert_eq!(&*call.context.current_input, "test");
+    assert!(call.context.current_input.is_empty());
     shown(&presenter.chat, id, false).await;
     call.reply.send(Ok(Arc::from("network answer"))).unwrap();
     let completed = frame(&mut reader, |value| {

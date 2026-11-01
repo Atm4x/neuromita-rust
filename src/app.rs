@@ -18,7 +18,7 @@ use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
     identity::EventId,
-    interaction::{ReplyTarget, TurnIntent, UserInput},
+    interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
     request::{
@@ -32,7 +32,7 @@ use crate::{
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
-        conversation::{ConversationAudience, ConversationMessage},
+        conversation::ConversationMessage,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
         message_actions::MessageAction,
@@ -110,6 +110,22 @@ struct TimelineRequestIngress {
 }
 
 impl RequestIngress for TimelineRequestIngress {
+    fn publish_conversation_message(
+        &self,
+        message: ConversationMessage,
+    ) -> Result<EventId, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        let selection = timeline.selection();
+        let event_id = message.id;
+        timeline
+            .publish_conversation_message(selection, message)
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        Ok(event_id)
+    }
+
     fn publish_message(
         &self,
         character: CharacterId,
@@ -130,13 +146,10 @@ impl RequestIngress for TimelineRequestIngress {
 
     fn admit(
         &self,
-        request: RequestId,
         character: CharacterId,
-        input: &UserInput,
         intent: TurnIntent,
-        input_audience: Option<&ConversationAudience>,
     ) -> Result<TimelineAdmission, SubmitError> {
-        let mut timeline = self
+        let timeline = self
             .timeline
             .lock()
             .map_err(|_| SubmitError::TimelineUnavailable)?;
@@ -144,25 +157,10 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .assert_selection(selection)
             .map_err(|_| SubmitError::TimelineUnavailable)?;
-        match intent {
-            TurnIntent::Reply(ReplyTarget::Event(_)) => {
-                timeline
-                    .reaction_cause_at(character, intent, timeline.anchor())
-                    .map_err(|_| SubmitError::InvalidReplyTarget)?;
-            }
-            TurnIntent::Reply(ReplyTarget::Input) => {
-                let audience = input_audience.ok_or(SubmitError::TimelineUnavailable)?;
-                timeline
-                    .append_player_message(
-                        character,
-                        request,
-                        input.event_id(),
-                        Arc::clone(input.text()),
-                        audience.clone(),
-                    )
-                    .map_err(|_| SubmitError::TimelineUnavailable)?;
-            }
-            _ => {}
+        if let TurnIntent::Reply(_) | TurnIntent::React(_) = intent {
+            timeline
+                .reaction_cause_at(character, intent, timeline.anchor())
+                .map_err(|_| SubmitError::InvalidTargetEvent)?;
         }
         timeline
             .admission(character, selection)

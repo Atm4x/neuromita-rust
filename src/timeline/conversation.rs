@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -13,7 +14,8 @@ use super::domain::{
 };
 
 /// A speaker's stable identity, independent of how each listener renders its role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversationSpeaker {
     Player,
     Character(CharacterId),

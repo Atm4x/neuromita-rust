@@ -14,7 +14,6 @@ use crate::{
 #[cfg(test)]
 use crate::{
     generation::conversation::{message_text, project_history},
-    interaction::ReplyTarget,
     timeline::view::MitaView,
 };
 
@@ -166,7 +165,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Arc<str>, GenerationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{identity::EventId, interaction::TurnIntent};
+    use crate::interaction::TurnIntent;
     use serde_json::json;
 
     #[test]
@@ -350,9 +349,8 @@ mod tests {
             },
             view,
             current_input: Arc::from("old question"),
-            trigger: ids[0],
             focus: GenerationFocus {
-                intent: TurnIntent::Reply(ReplyTarget::Input),
+                intent: TurnIntent::Reply(ids[0]),
                 reaction: None,
             },
             anchor: ContextAnchor {
@@ -456,7 +454,6 @@ mod tests {
             },
             view,
             current_input: Arc::from("Comment on the event"),
-            trigger: EventId::new(),
             focus: GenerationFocus {
                 intent: TurnIntent::React(cause_id),
                 reaction: Some(ReactionCause {

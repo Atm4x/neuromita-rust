@@ -133,10 +133,9 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
         ReplyRequest::new(
             CharacterId::KindMita,
             preset(),
-            UserInput::new("Answer the last line, following Unity's turn decision".into()).unwrap(),
+            source_id,
             RequestSource::Presenter,
         )
-        .to_event(source_id)
         .with_audience(audience),
     )
     .unwrap();
@@ -147,10 +146,7 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
         .unwrap();
     assert_eq!(generated.context.view.count(), 1);
     assert_eq!(generated.context.view.messages()[0].event_id, source_id);
-    assert_eq!(
-        generated.context.current_input.as_ref(),
-        "Answer the last line, following Unity's turn decision"
-    );
+    assert!(generated.context.current_input.is_empty());
     generated.reply.send(Arc::from("Ready, Mita!")).unwrap();
 
     let completed = timeout(Duration::from_secs(5), handle.wait())
@@ -180,7 +176,7 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
     assert_eq!(view_kind.view.provider_messages()[1]["role"], "assistant");
 
     let events = app.timeline();
-    assert_eq!(app.at().through, 3);
+    assert_eq!(app.at().through, 2);
     assert_eq!(events.len(), 1);
     assert!(!events.iter().any(|event| matches!(
         event.content,
@@ -208,16 +204,13 @@ async fn reply_requires_a_target_known_to_the_selected_character() {
     let source_id = source.id;
     app.publish_conversation_message(app.timeline_selection(), source)
         .unwrap();
-    let result = ChatApi::reply(
-        ReplyRequest::new(
-            CharacterId::KindMita,
-            preset(),
-            UserInput::new("reply".into()).unwrap(),
-            RequestSource::Presenter,
-        )
-        .to_event(source_id),
-    );
-    assert!(matches!(result, Err(SubmitError::InvalidReplyTarget)));
+    let result = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        preset(),
+        source_id,
+        RequestSource::Presenter,
+    ));
+    assert!(matches!(result, Err(SubmitError::InvalidTargetEvent)));
     assert_eq!(app.at().through, 1);
     assert!(
         timeout(Duration::from_millis(50), calls.recv())
@@ -246,22 +239,23 @@ async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
             .is_err()
     );
 
-    let rejected = ChatApi::reply(
-        ReplyRequest::new(
-            CharacterId::KindMita,
-            preset(),
-            UserInput::new("An event is not a message".into()).unwrap(),
-            RequestSource::Presenter,
-        )
-        .to_event(source_id),
-    );
-    assert!(matches!(rejected, Err(SubmitError::InvalidReplyTarget)));
+    let rejected = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        preset(),
+        source_id,
+        RequestSource::Presenter,
+    ));
+    assert!(matches!(rejected, Err(SubmitError::InvalidTargetEvent)));
     assert_eq!(app.at().through, 1);
     let handle = ChatApi::react(ReactRequest::new(
         CharacterId::KindMita,
         preset(),
         source_id,
-        UserInput::new("React verbally to the observed door opening".into()).unwrap(),
+        Arc::clone(
+            UserInput::new("React verbally to the observed door opening".into())
+                .unwrap()
+                .text(),
+        ),
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -321,15 +315,12 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
         let app = ApplicationLifecycle::start(configuration).await.unwrap();
         app.publish_conversation_message(app.timeline_selection(), source)
             .unwrap();
-        let handle = ChatApi::reply(
-            ReplyRequest::new(
-                CharacterId::KindMita,
-                preset(),
-                UserInput::new("Unity requests a reply to Mita".into()).unwrap(),
-                RequestSource::Presenter,
-            )
-            .to_event(source_id),
-        )
+        let handle = ChatApi::reply(ReplyRequest::new(
+            CharacterId::KindMita,
+            preset(),
+            source_id,
+            RequestSource::Presenter,
+        ))
         .unwrap();
         let call = timeout(Duration::from_secs(5), calls.recv())
             .await
@@ -378,4 +369,175 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
     for suffix in ["", "-shm", "-wal"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let _lock = TEST_LOCK.lock().await;
+    let (sent, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(sent)).await.unwrap();
+    let stream = TcpStream::connect(app.server().address()).await.unwrap();
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+
+    async fn receive(
+        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        wanted: &str,
+    ) -> serde_json::Value {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if value["type"] == wanted {
+                    return value;
+                }
+            }
+        })
+        .await
+        .expect("TCP response timed out")
+    }
+
+    async fn submit(write: &mut tokio::net::tcp::OwnedWriteHalf, value: serde_json::Value) {
+        let line = serde_json::to_string(&value).unwrap();
+        write.write_all(line.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+    }
+
+    receive(&mut reader, "connected").await;
+    receive(&mut reader, "settings").await;
+
+    let unseen = Uuid::new_v4();
+    submit(
+        &mut write,
+        json!({
+            "command":"publish_message", "command_id":Uuid::new_v4(),
+            "event_id":unseen, "occurred_at_unix_ms":1762020000000u64, "speaker":{"character":"mita"},
+            "content":"Only Mita saw this", "seen_by":["mita"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut reader, "published").await["event_id"],
+        unseen.to_string()
+    );
+    assert!(calls.try_recv().is_err());
+
+    submit(
+        &mut write,
+        json!({
+            "command":"react", "command_id":Uuid::new_v4(),
+            "event_id":unseen, "character":"kind-mita", "instruction":"React to what you heard"
+        }),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut reader, "error").await["error"],
+        "target event is not observable or not a message when replying"
+    );
+    assert!(calls.try_recv().is_err());
+
+    let message = Uuid::new_v4();
+    let command_id = Uuid::new_v4();
+    let publish = json!({
+        "command":"publish_message", "command_id":command_id,
+        "event_id":message, "occurred_at_unix_ms":1762020000001u64, "speaker":{"character":"mita"},
+        "content":"KindMita, let's talk",
+        "targets":[{"character":"kind-mita"}],
+        "participants":[{"character":"mita"},{"character":"kind-mita"}],
+        "seen_by":["mita","kind-mita"]
+    });
+    submit(&mut write, publish.clone()).await;
+    assert_eq!(
+        receive(&mut reader, "published").await["event_id"],
+        message.to_string()
+    );
+    submit(&mut write, publish).await;
+    assert_eq!(receive(&mut reader, "published").await["replayed"], true);
+    assert!(calls.try_recv().is_err());
+
+    let second = TcpStream::connect(app.server().address()).await.unwrap();
+    let (second_read, mut second_write) = second.into_split();
+    let mut second_reader = BufReader::new(second_read);
+    receive(&mut second_reader, "connected").await;
+    receive(&mut second_reader, "settings").await;
+    let mut retry = json!({
+        "command":"publish_message", "command_id":Uuid::new_v4(),
+        "event_id":message, "occurred_at_unix_ms":1762020000001u64,
+        "speaker":{"character":"mita"}, "content":"KindMita, let's talk",
+        "targets":[{"character":"kind-mita"}],
+        "participants":[{"character":"mita"},{"character":"kind-mita"}],
+        "seen_by":["mita","kind-mita"]
+    });
+    submit(&mut second_write, retry.take()).await;
+    let deduplicated = receive(&mut second_reader, "published").await;
+    assert_eq!(deduplicated["event_id"], message.to_string());
+    assert_eq!(app.at().through, 2);
+    drop(second_write);
+    drop(second_reader);
+
+    submit(
+        &mut write,
+        json!({
+            "command":"reply", "command_id":Uuid::new_v4(),
+            "message_id":message, "character":"kind-mita", "seen_by":["mita"]
+        }),
+    )
+    .await;
+    receive(&mut reader, "accepted").await;
+    let generated = timeout(Duration::from_secs(5), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(generated.context.view.count(), 1);
+    assert_eq!(generated.context.view.messages()[0].event_id.0, message);
+    generated.reply.send(Arc::from("Yes, Mita")).unwrap();
+    let mut completed = receive(&mut reader, "request_status").await;
+    while completed["state"] != "finished" {
+        completed = receive(&mut reader, "request_status").await;
+    }
+
+    submit(
+        &mut write,
+        json!({
+            "command":"react", "command_id":Uuid::new_v4(),
+            "event_id":message, "character":"kind-mita", "instruction":"React briefly"
+        }),
+    )
+    .await;
+    receive(&mut reader, "accepted").await;
+    let reaction = timeout(Duration::from_secs(5), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    reaction.reply.send(Arc::from("Interesting")).unwrap();
+    let mut status = receive(&mut reader, "request_status").await;
+    while status["state"] != "finished" {
+        status = receive(&mut reader, "request_status").await;
+    }
+
+    submit(
+        &mut write,
+        json!({
+            "command":"initiate", "command_id":Uuid::new_v4(),
+            "character":"kind-mita", "instruction":"Start a fresh topic"
+        }),
+    )
+    .await;
+    receive(&mut reader, "accepted").await;
+    let initiation = timeout(Duration::from_secs(5), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    initiation.reply.send(Arc::from("New topic")).unwrap();
+    let mut status = receive(&mut reader, "request_status").await;
+    while status["state"] != "finished" {
+        status = receive(&mut reader, "request_status").await;
+    }
+
+    assert_eq!(app.at().through, 5);
+    app.shutdown().await.unwrap();
 }

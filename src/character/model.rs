@@ -68,7 +68,6 @@ pub struct CharacterContext {
     pub history: HistoryView,
     pub view: MitaView,
     pub current_input: Arc<str>,
-    pub trigger: EventId,
     pub focus: GenerationFocus,
     pub anchor: ContextAnchor,
     pub(crate) turn: TimelineTurn,
