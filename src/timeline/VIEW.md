@@ -50,9 +50,18 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 
 Проверяются reset и relearn, приватность, поздняя disclosure, edit/hide/restore и metadata, мультимодальный content, несколько страниц источника, fork cutoff и исторические снимки на обоих backends.
 
+## Runtime ContextCapture (следующий функциональный пакет)
+
+- `SessionTimeline::capture_context(character, position)` фиксирует единый `ContextAnchor` до публикации нового входа. `MitaView` и временная legacy `HistoryView` вычисляются над одним и тем же immutable prefix. Снимки не смещаются автоматически при будущих append.
+- `CharacterHandler::context` берёт снимок под собственным mailbox и локальным Timeline mutex, вычисляет `CharacterState` для того же prefix, после чего публикует вход и получает `TimelineTurn`. Текущий вход подаётся в генерацию отдельно и не дублируется в истории.
+- `CharacterContext.view` — предметная read-model для провайдера; `history` временно оставлена для существующих API/тестов и вычисления исторического счётчика. `CharacterView.view` предоставляет такую же проекцию при чтении исторического состояния через API.
+- Gemini формирует контекст из `view.messages()`, а не из `HistoryView`. `User/Assistant` соответствуют `user/model`; `SessionNote` отправляется как **user-level** сведение, а не повышается до привилегированной `systemInstruction`. Лишь доверенные description/prompt и счётчик формируют системную инструкцию.
+- В Gemini поддерживаются текстовые сегменты массива `content`; изображения и иные медиа-поля пока не кодируются в provider parts. Схема мультимодальности и правила включения событий после `cause` требуют отдельной политики.
+- Защита от внешней смены selection/reset на приёмке остаётся за `append_guarded`; локальная блокировка **не** является транзакцией между SQLite, внешними писателями и mutable CharacterState. Durable CharacterState и межпроцессная ранняя отмена остаются открытыми.
+
 ## Следующие изменения
 
-1. Согласованный `ContextCapture`: read-side snapshot + immutable CharacterState revision, explicit context policy по request cause и наблюдаемым событиям.
+1. Завершить `ContextCapture`: durable revision mutable CharacterState и explicit context policy по request cause/очереди; локальный prefix-capture уже подключён к `CharacterHandler` и Gemini.
 2. Версионная инвалидация и ограниченный кеш для live MitaView, без второго источника истины.
 3. Python/UI schema parity, время, page/resizing и адаптеры потребителей (ChatAPI, Unity, Launcher); отделить UI history от provider context.
 4. Отдельная ранняя адресная отмена при reset/внешней смене мира; это не обязанность read-проекции.

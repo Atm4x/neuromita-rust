@@ -20,6 +20,7 @@ pub mod view;
 
 use legacy::{legacy_event, make_draft};
 use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
+use view::{MitaView, TimelineMessageQueries};
 
 #[cfg(feature = "sqlite-system")]
 use selection::TimelineSelectionRepository;
@@ -76,6 +77,13 @@ pub struct TimelineEvent {
 pub struct HistoryView {
     pub at: ContextAnchor,
     pub events: Vec<TimelineEvent>,
+}
+
+/// Two read models bound to the same immutable timeline prefix.
+/// The legacy view is retained for clients that have not migrated yet.
+pub(crate) struct TimelineContextSnapshot {
+    pub(crate) history: HistoryView,
+    pub(crate) view: MitaView,
 }
 
 pub enum TimelineConfig {
@@ -228,6 +236,26 @@ impl SessionTimeline {
                 .expect("owned branch exists")
                 .head_sequence,
         }
+    }
+
+    pub(crate) fn capture_context(
+        &self,
+        character: CharacterId,
+        position: ContextPosition,
+    ) -> Result<TimelineContextSnapshot, String> {
+        let anchor = match position {
+            ContextPosition::Latest => self.anchor(),
+            ContextPosition::At(at) => at,
+        };
+        let history = self.history_at(character, anchor)?;
+        let view = TimelineMessageQueries::capture(
+            self.store.as_ref(),
+            self.branch,
+            character,
+            Some(anchor.through),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(TimelineContextSnapshot { history, view })
     }
 
     pub(crate) fn history(&self, character: CharacterId) -> HistoryView {

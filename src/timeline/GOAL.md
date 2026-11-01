@@ -96,6 +96,14 @@
 
 **Это не закрывает** оставшиеся чекбоксы Stage A/C: нет кеша MitaView, полного Python format/time/resize parity, отдельной атомарной CharacterState snapshot и wiring всех ChatAPI/Unity consumers. Bounded read pages не означают bounded total work на каждый capture.
 
+## ContextCapture и интеграция MitaView (2026-11-01)
+
+- [x] Один immutable prefix через `SessionTimeline::capture_context` для MitaView и compatibility HistoryView; `CharacterHandler::prepare` берёт их до append входного сообщения, state с тем же anchor; `CharacterView` экспортирует domain view вместе с legacy history.
+- [x] Gemini использует предметные сообщения MitaView вместо разбора legacy EventContent, сохраняет роли user/model, не включает скрытые события или знания другого персонажа; SessionNote остаётся user-level контентом, без повышения привилегий provider system instruction.
+- [x] Регрессионные тесты на отсутствие дублирования текущего input, исторический prefix, private/hidden/reset и мультимодальные текстовые фрагменты; базовые и SQLite тесты, Clippy.
+
+**Не закрыто:** межпроцессная атомарность mutable CharacterState и Timeline, политика подготовки контекста после cause, прочие providers и мультимодальные `image/audio` части, оптимизация кеша MitaView и legacy consumer migration. `CharacterContext.history` пока остаётся compatibility-проекцией и продолжает materialize полный известный мир — это не утверждение об O(page size) подготовке запросов.
+
 ## Следующий пакет изменений
 
-Холодный SQLite append и инструмент замера добавлены; дальше — бенчмарки **release** при 50k+ событиях и глубокой lineage, ограниченные read-side MitaView/контекстные summary, ранняя адресная отмена при reset и внешнем переключении, затем согласованное восстановление владельцев состояния. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует единый TimelineRepository (transient либо SQLite) через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.
+Холодный SQLite append и инструмент замера добавлены. В текущем цикле большие бенчмарки отложены: приоритет — политика контекста и snapshot-consistent MitaView, полная provider/UI schema, ранняя адресная отмена при reset/внешнем переключении и затем согласованное восстановление владельцев состояния. Release-бенчмарки 50k+ событий остаются отложенной проверкой, не блокирующей предметную разработку. См. [STORAGE.md](STORAGE.md) — границы возможного общего файла SQLite для Settings и условия будущей миграции на CFMD. **CharacterHandler уже использует единый TimelineRepository (transient либо SQLite) через совместимый фасад, но не обладает всем контрактом Python TimelineRuntime.** До завершения SQLite, восстановления, архивов и Unity/Sandbox adapters **нельзя** считать Python SessionTimeline полностью перенесённым.

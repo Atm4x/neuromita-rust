@@ -3,7 +3,12 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::GeminiTemplate;
-use crate::{character::CharacterContext, generation::GenerationError, timeline::EventContent};
+use crate::{
+    character::CharacterContext,
+    generation::GenerationError,
+    timeline::{domain::MessageRole, view::MitaView},
+};
+use serde_json::Value;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,18 +51,43 @@ fn content(role: Option<&str>, text: &str) -> Content {
     }
 }
 
-pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let mut contents = Vec::new();
-    for event in context.history.events {
-        let (role, text) = match event.content {
-            EventContent::PlayerMessage { text } => ("user", text),
-            EventContent::CharacterReply { text, .. } => ("model", text),
-            EventContent::Observation { text }
-            | EventContent::Reaction { text, .. }
-            | EventContent::Initiation { text } => ("user", text),
-        };
-        contents.push(content(Some(role), &text));
+fn message_text(fields: &serde_json::Map<String, Value>) -> Option<String> {
+    match fields.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => {
+            let texts: Vec<&str> = parts
+                .iter()
+                .filter_map(|part| part.as_object())
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect();
+            Some(texts.join("\n"))
+        }
+        _ => None,
     }
+}
+
+fn history_contents(view: &MitaView) -> Vec<Content> {
+    let mut contents = Vec::new();
+    for message in view.messages() {
+        let Some(text) = message_text(&message.fields) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        match message.role {
+            MessageRole::User => contents.push(content(Some("user"), &text)),
+            MessageRole::Assistant => contents.push(content(Some("model"), &text)),
+            MessageRole::System => {
+                contents.push(content(Some("user"), &format!("Сведения сессии:\n{text}")));
+            }
+        }
+    }
+    contents
+}
+
+pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
+    let mut contents = history_contents(&context.view);
     contents.push(content(Some("user"), &context.current_input));
     GenerateContent {
         system_instruction: content(
@@ -146,6 +176,100 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Arc<str>, GenerationError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn provider_history_follows_character_visibility_and_message_semantics() {
+        use crate::{
+            identity::CharacterId,
+            timeline::{
+                domain::{BranchId, EventDraft, EventKind, SessionId, TimelineStore},
+                view::TimelineMessageQueries,
+            },
+        };
+        let mut repository = TimelineStore::new();
+        let branch = BranchId::new();
+        repository.create_session(SessionId::new(), branch).unwrap();
+        fn add(repository: &mut TimelineStore, branch: BranchId, key: &str, draft: EventDraft) {
+            let head = repository.branch(branch).unwrap().head_sequence;
+            repository
+                .append(branch, head, key, json!({}), vec![draft])
+                .unwrap();
+        }
+        let mut private = EventDraft::new(EventKind::PlayerMessage);
+        private.observers.insert(CharacterId::Mita);
+        private.actor = Some("player".into());
+        private.payload.insert("content".into(), json!("secret"));
+        let secret_id = private.id;
+        add(&mut repository, branch, "private", private);
+        let mut other = EventDraft::new(EventKind::PlayerMessage);
+        other.observers.insert(CharacterId::KindMita);
+        other.actor = Some("player".into());
+        other
+            .payload
+            .insert("content".into(), json!("other secret"));
+        add(&mut repository, branch, "other", other);
+        let mut assistant = EventDraft::new(EventKind::CharacterMessage);
+        assistant.observers.insert(CharacterId::Mita);
+        assistant.actor = Some(CharacterId::Mita.to_string());
+        assistant.payload.insert("content".into(), json!("I know"));
+        add(&mut repository, branch, "assistant", assistant);
+        let mut note = EventDraft::new(EventKind::SessionNote);
+        note.observers.insert(CharacterId::Mita);
+        note.payload
+            .insert("content".into(), json!("private world note"));
+        add(&mut repository, branch, "note", note);
+        let visible =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+        let contents = history_contents(&visible);
+        let encoded: Vec<_> = contents
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+        assert_eq!(encoded.len(), 3);
+        assert_eq!(encoded[0]["role"], "user");
+        assert_eq!(encoded[0]["parts"][0]["text"], "secret");
+        assert_eq!(encoded[1]["role"], "model");
+        assert_eq!(encoded[1]["parts"][0]["text"], "I know");
+        assert_eq!(encoded[2]["role"], "user");
+        assert_eq!(
+            encoded[2]["parts"][0]["text"],
+            "Сведения сессии:\nprivate world note"
+        );
+        assert!(!format!("{encoded:?}").contains("other secret"));
+
+        let mut hidden = EventDraft::new(EventKind::MessageHidden);
+        hidden.observers.insert(CharacterId::Mita);
+        hidden
+            .payload
+            .insert("event_ids".into(), json!([secret_id.0.to_string()]));
+        add(&mut repository, branch, "hide", hidden);
+        let after_hide =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+        let contents = history_contents(&after_hide);
+        assert_eq!(contents.len(), 2);
+        assert_eq!(serde_json::to_value(&contents[0]).unwrap()["role"], "model");
+
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Mita);
+        add(&mut repository, branch, "reset", reset);
+        let after_reset =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+        let contents = history_contents(&after_reset);
+        assert!(contents.is_empty());
+    }
+
+    #[test]
+    fn array_content_is_reduced_to_text_without_serializing_unsupported_media() {
+        let fields = json!({"content": [
+            {"type":"text", "text":"hello"},
+            {"type":"image", "data":"private-image-bytes"},
+            {"type":"text", "text":"world"}
+        ]});
+        assert_eq!(
+            message_text(fields.as_object().unwrap()),
+            Some("hello\nworld".into())
+        );
+    }
 
     #[test]
     fn reasoning_is_not_returned_as_answer() {

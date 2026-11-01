@@ -263,14 +263,11 @@ impl CharacterHandler {
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
-        let history = match at {
-            ContextPosition::Latest => timeline.history(self.character.id),
-            ContextPosition::At(at) => timeline
-                .history_at(self.character.id, at)
-                .map_err(CharacterError::Internal)?,
-        };
-        let anchor = history.at;
-        let state = historical_state(&history);
+        let captured = timeline
+            .capture_context(self.character.id, at)
+            .map_err(CharacterError::Internal)?;
+        let anchor = captured.history.at;
+        let state = historical_state(&captured.history);
         self.character.state = historical_state(&timeline.history(self.character.id));
         timeline
             .append_input(
@@ -289,7 +286,8 @@ impl CharacterHandler {
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
             state,
-            history,
+            history: captured.history,
+            view: captured.view,
             current_input: Arc::clone(input.text()),
             trigger: input.event_id(),
             anchor,
@@ -363,15 +361,16 @@ impl CharacterHandler {
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
-        let history = timeline
-            .history_at(self.character.id, at)
+        let captured = timeline
+            .capture_context(self.character.id, ContextPosition::At(at))
             .map_err(CharacterError::Internal)?;
         Ok(CharacterView {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
-            state: historical_state(&history),
-            history,
+            state: historical_state(&captured.history),
+            history: captured.history,
+            view: captured.view,
         })
     }
 }
@@ -480,6 +479,50 @@ mod turn_tests {
             accept(&mut handler, request, token),
             Err(CharacterError::StaleState)
         ));
+    }
+
+    #[test]
+    fn prepared_context_uses_single_prefix_and_does_not_repeat_new_input() {
+        let mut handler = handler();
+        let original = EventId::new();
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            timeline
+                .observe(CharacterId::Mita, original, Arc::from("seen by Mita"))
+                .unwrap();
+        }
+        let input = UserInput::new("new request".into()).unwrap();
+        let input_id = input.event_id();
+        let snapshot = handler
+            .context(
+                RequestId::new(),
+                input,
+                TurnIntent::Reply,
+                ContextPosition::Latest,
+            )
+            .unwrap();
+        assert_eq!(snapshot.anchor.through, 1);
+        assert_eq!(snapshot.view.through, snapshot.anchor.through);
+        assert_eq!(snapshot.history.at, snapshot.anchor);
+        assert_eq!(snapshot.view.count(), 1);
+        assert!(snapshot.view.contains(&original.0.to_string()));
+        assert!(!snapshot.view.contains(&input_id.0.to_string()));
+        assert_eq!(snapshot.current_input.as_ref(), "new request");
+        assert_eq!(handler.timeline.lock().unwrap().anchor().through, 2);
+
+        let old = handler.view(snapshot.anchor).unwrap();
+        assert_eq!(old.view.count(), 1);
+        assert_eq!(old.view.through, snapshot.anchor.through);
+        assert_eq!(old.history.at, snapshot.anchor);
+        let first = handler.timeline.lock().unwrap().anchor();
+        let empty = handler
+            .view(ContextAnchor {
+                through: 0,
+                ..first
+            })
+            .unwrap();
+        assert_eq!(empty.view.count(), 0);
+        assert_eq!(empty.state.accepted_replies, 0);
     }
 
     #[cfg(feature = "sqlite-system")]
