@@ -20,7 +20,7 @@ pub mod view;
 
 use legacy::{legacy_event, make_draft};
 use selection::{SessionWorkspace, TimelineSelection, TimelineTurn};
-use view::{MitaView, TimelineMessageQueries};
+use view::{MitaView, PromptHistoryPolicy, TimelineMessageQueries};
 
 #[cfg(feature = "sqlite-system")]
 use selection::TimelineSelectionRepository;
@@ -258,6 +258,79 @@ impl SessionTimeline {
         Ok(TimelineContextSnapshot { history, view })
     }
 
+    /// Count accepted replies in canonical history, independent of what the
+    /// character currently remembers or what the UI projection hides.
+    /// The value is branch-prefix scoped and survives context resets and reopen.
+    pub(crate) fn accepted_replies_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<u64, domain::TimelineError> {
+        if at.branch_id != self.branch.0 {
+            return Err(domain::TimelineError::Invalid(
+                "context belongs to another timeline branch",
+            ));
+        }
+        if at.through > self.store.branch(self.branch)?.head_sequence {
+            return Err(domain::TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        let mut count = 0_u64;
+        let actor = character.to_string();
+        for fact in self.store.world(self.branch)? {
+            if fact.sequence > at.through {
+                break;
+            }
+            if fact.draft.kind == EventKind::CharacterMessage
+                && fact.draft.actor.as_deref() == Some(actor.as_str())
+                && fact
+                    .draft
+                    .payload
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
+            {
+                count = count
+                    .checked_add(1)
+                    .ok_or(domain::TimelineError::Invalid("reply count overflow"))?;
+            }
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn prompt_history_policy(
+        &self,
+        character: CharacterId,
+        intent: TurnIntent,
+        at: ContextAnchor,
+    ) -> Result<PromptHistoryPolicy, domain::TimelineError> {
+        match intent {
+            TurnIntent::Reply | TurnIntent::Initiate => Ok(PromptHistoryPolicy::AllVisible),
+            TurnIntent::React(target) => {
+                if at.branch_id != self.branch.0 {
+                    return Err(domain::TimelineError::Invalid(
+                        "reaction context branch mismatch",
+                    ));
+                }
+                let fact = self.store.event(self.branch, target)?;
+                if fact.sequence > at.through
+                    || !self
+                        .store
+                        .knows(self.branch, character, target, Some(at.through))?
+                {
+                    return Err(domain::TimelineError::Invalid(
+                        "reaction cause was not known at captured context",
+                    ));
+                }
+                Ok(PromptHistoryPolicy::CauseScoped {
+                    cause_sequence: fact.sequence,
+                })
+            }
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn history(&self, character: CharacterId) -> HistoryView {
         self.history_at(character, self.anchor())
             .expect("current branch anchor is valid")

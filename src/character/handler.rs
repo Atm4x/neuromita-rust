@@ -16,10 +16,7 @@ use super::{
 use crate::{
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
-    timeline::{
-        ContextAnchor, ContextPosition, EventContent, EventId, SessionTimeline,
-        selection::TimelineTurn,
-    },
+    timeline::{ContextAnchor, ContextPosition, EventId, SessionTimeline, selection::TimelineTurn},
     voice::AudioArtifact,
 };
 
@@ -168,8 +165,10 @@ impl CharacterRegistry {
         for id in CharacterId::ALL {
             let (send, receive) = mpsc::channel(capacity);
             let mut character = Character::create(id);
-            character.state =
-                historical_state(&timeline.lock().expect("timeline lock poisoned").history(id));
+            character.state = {
+                let timeline = timeline.lock().expect("timeline lock poisoned");
+                state_at(&timeline, id, timeline.anchor()).expect("owned timeline is readable")
+            };
             let handler = CharacterHandler {
                 character,
                 timeline: Arc::clone(&timeline),
@@ -223,7 +222,9 @@ impl CharacterHandler {
                         .timeline
                         .lock()
                         .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
-                        .map(|timeline| historical_state(&timeline.history(self.character.id)));
+                        .and_then(|timeline| {
+                            state_at(&timeline, self.character.id, timeline.anchor())
+                        });
                     if let Ok(ref state) = state {
                         self.character.state = state.clone();
                     }
@@ -267,8 +268,11 @@ impl CharacterHandler {
             .capture_context(self.character.id, at)
             .map_err(CharacterError::Internal)?;
         let anchor = captured.history.at;
-        let state = historical_state(&captured.history);
-        self.character.state = historical_state(&timeline.history(self.character.id));
+        let state = state_at(&timeline, self.character.id, anchor)?;
+        let prompt_policy = timeline
+            .prompt_history_policy(self.character.id, intent, anchor)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         timeline
             .append_input(
                 self.character.id,
@@ -288,6 +292,7 @@ impl CharacterHandler {
             state,
             history: captured.history,
             view: captured.view,
+            prompt_policy,
             current_input: Arc::clone(input.text()),
             trigger: input.event_id(),
             anchor,
@@ -303,13 +308,18 @@ impl CharacterHandler {
         audio: Option<AudioArtifact>,
         effects: Vec<ResponseEffect>,
     ) -> Result<AcceptedResponse, CharacterError> {
-        if context.state_revision != self.character.state.revision {
-            return Err(CharacterError::StaleState);
-        }
         if !matches!(effects.as_slice(), [ResponseEffect::RecordAcceptedReply]) {
             return Err(CharacterError::Internal(
                 "invalid reply effect batch".into(),
             ));
+        }
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
+        if context.state_revision != self.character.state.revision {
+            return Err(CharacterError::StaleState);
         }
         let accepted_replies = self
             .character
@@ -323,10 +333,6 @@ impl CharacterHandler {
             .revision
             .checked_add(1)
             .ok_or_else(|| CharacterError::Internal("state revision overflow".into()))?;
-        let mut timeline = self
-            .timeline
-            .lock()
-            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
@@ -368,23 +374,25 @@ impl CharacterHandler {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
-            state: historical_state(&captured.history),
+            state: state_at(&timeline, self.character.id, at)?,
             history: captured.history,
             view: captured.view,
         })
     }
 }
 
-fn historical_state(history: &crate::timeline::HistoryView) -> CharacterState {
-    let count = history
-        .events
-        .iter()
-        .filter(|event| matches!(event.content, EventContent::CharacterReply { .. }))
-        .count() as u64;
-    CharacterState {
-        accepted_replies: count,
-        revision: count,
-    }
+fn state_at(
+    timeline: &SessionTimeline,
+    character: CharacterId,
+    at: ContextAnchor,
+) -> Result<CharacterState, CharacterError> {
+    let replies = timeline
+        .accepted_replies_at(character, at)
+        .map_err(|error| CharacterError::Internal(error.to_string()))?;
+    Ok(CharacterState {
+        accepted_replies: replies,
+        revision: replies,
+    })
 }
 
 #[cfg(test)]
@@ -479,6 +487,182 @@ mod turn_tests {
             accept(&mut handler, request, token),
             Err(CharacterError::StaleState)
         ));
+    }
+
+    #[test]
+    fn accepted_state_survives_reset_and_hidden_history() {
+        let mut handler = handler();
+        let (request, context) = prepare(&mut handler);
+        let reply = accept(&mut handler, request, acceptance(&context)).unwrap();
+        let before_reset = handler.timeline.lock().unwrap().anchor();
+        assert_eq!(
+            state_at(
+                &handler.timeline.lock().unwrap(),
+                CharacterId::Mita,
+                before_reset
+            )
+            .unwrap()
+            .accepted_replies,
+            1
+        );
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            let mut hidden = EventDraft::new(EventKind::MessageHidden);
+            hidden.observers.insert(CharacterId::Mita);
+            hidden.payload.insert(
+                "event_ids".into(),
+                serde_json::json!([reply.event_id.0.to_string()]),
+            );
+            timeline.append_test_fact("hide-accepted", hidden).unwrap();
+            let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+            reset.observers.insert(CharacterId::Mita);
+            timeline
+                .append_test_fact("reset-after-accepted", reset)
+                .unwrap();
+            let now = timeline.anchor();
+            assert_eq!(
+                timeline
+                    .accepted_replies_at(CharacterId::Mita, now)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                timeline
+                    .accepted_replies_at(CharacterId::KindMita, now)
+                    .unwrap(),
+                0
+            );
+        }
+        let (next_request, next_context) = prepare(&mut handler);
+        assert_eq!(next_context.state.accepted_replies, 1);
+        assert_eq!(next_context.state.revision, 1);
+        assert!(next_context.view.messages().is_empty());
+        accept(&mut handler, next_request, acceptance(&next_context)).unwrap();
+        assert_eq!(handler.character.state.accepted_replies, 2);
+        assert_eq!(
+            handler.view(before_reset).unwrap().state.accepted_replies,
+            1
+        );
+    }
+
+    #[test]
+    fn reactive_context_filters_later_dialogue_but_keeps_world_knowledge() {
+        use crate::timeline::{domain::MessageRole, view::PromptHistoryPolicy};
+        let mut handler = handler();
+        let cause = EventId::new();
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            timeline
+                .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+                .unwrap();
+            timeline
+                .append_input(
+                    CharacterId::Mita,
+                    RequestId::new(),
+                    EventId::new(),
+                    Arc::from("later, unrelated user input"),
+                    TurnIntent::Reply,
+                )
+                .unwrap();
+            let mut note = EventDraft::new(EventKind::SessionNote);
+            note.observers.insert(CharacterId::Mita);
+            note.payload
+                .insert("content".into(), serde_json::json!("weather became rainy"));
+            timeline.append_test_fact("world-note", note).unwrap();
+        }
+        let request = RequestId::new();
+        let context = handler
+            .context(
+                request,
+                UserInput::new("react to the door".into()).unwrap(),
+                TurnIntent::React(cause),
+                ContextPosition::Latest,
+            )
+            .unwrap();
+        assert_eq!(
+            context.prompt_policy,
+            PromptHistoryPolicy::CauseScoped { cause_sequence: 1 }
+        );
+        assert_eq!(context.view.count(), 3);
+        let messages = context.view.prompt_messages(context.prompt_policy);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "door opened");
+        assert_eq!(messages[1].role, MessageRole::System);
+        assert_eq!(messages[1].content, "weather became rainy");
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.content.contains("unrelated"))
+        );
+    }
+
+    #[test]
+    fn reacting_to_cause_not_known_at_snapshot_has_no_side_effect() {
+        let mut handler = handler();
+        let cause = EventId::new();
+        let old = handler.timeline.lock().unwrap().anchor();
+        handler
+            .timeline
+            .lock()
+            .unwrap()
+            .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+            .unwrap();
+        let result = handler.context(
+            RequestId::new(),
+            UserInput::new("react".into()).unwrap(),
+            TurnIntent::React(cause),
+            ContextPosition::At(old),
+        );
+        assert!(matches!(result, Err(CharacterError::Internal(_))));
+        assert_eq!(handler.timeline.lock().unwrap().anchor().through, 1);
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn persisted_accepted_state_survives_reopen_and_reset() {
+        use crate::timeline::{TimelineConfig, domain::SessionId};
+        let path =
+            std::env::temp_dir().join(format!("neuromita-state-{}.db", uuid::Uuid::new_v4()));
+        let root = BranchId::new();
+        let session = SessionId::new();
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let mut handler = CharacterHandler {
+                character: Character::create(CharacterId::Mita),
+                timeline: Arc::new(Mutex::new(timeline)),
+            };
+            let (request, context) = prepare(&mut handler);
+            accept(&mut handler, request, acceptance(&context)).unwrap();
+            let mut timeline = handler.timeline.lock().unwrap();
+            let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+            reset.observers.insert(CharacterId::Mita);
+            timeline.append_test_fact("persisted-reset", reset).unwrap();
+        }
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let mut handler = CharacterHandler {
+                character: Character::create(CharacterId::Mita),
+                timeline: Arc::new(Mutex::new(timeline)),
+            };
+            let (request, context) = prepare(&mut handler);
+            assert_eq!(context.state.accepted_replies, 1);
+            assert_eq!(context.view.count(), 0);
+            accept(&mut handler, request, acceptance(&context)).unwrap();
+            assert_eq!(handler.character.state.accepted_replies, 2);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

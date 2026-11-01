@@ -54,9 +54,9 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 
 - `SessionTimeline::capture_context(character, position)` фиксирует единый `ContextAnchor` до публикации нового входа. `MitaView` и временная legacy `HistoryView` вычисляются над одним и тем же immutable prefix. Снимки не смещаются автоматически при будущих append.
 - `CharacterHandler::context` берёт снимок под собственным mailbox и локальным Timeline mutex, вычисляет `CharacterState` для того же prefix, после чего публикует вход и получает `TimelineTurn`. Текущий вход подаётся в генерацию отдельно и не дублируется в истории.
-- `CharacterContext.view` — предметная read-model для провайдера; `history` временно оставлена для существующих API/тестов и вычисления исторического счётчика. `CharacterView.view` предоставляет такую же проекцию при чтении исторического состояния через API.
-- Gemini формирует контекст из `view.messages()`, а не из `HistoryView`. `User/Assistant` соответствуют `user/model`; `SessionNote` отправляется как **user-level** сведение, а не повышается до привилегированной `systemInstruction`. Лишь доверенные description/prompt и счётчик формируют системную инструкцию.
-- В Gemini поддерживаются текстовые сегменты массива `content`; изображения и иные медиа-поля пока не кодируются в provider parts. Схема мультимодальности и правила включения событий после `cause` требуют отдельной политики.
+- `CharacterContext.view` — предметная read-model для провайдера; `history` временно оставлена только для существующих API/тестов. Счётчик принятых ответов теперь читается из канонических CharacterMessage с валидным request_id независимо от reset, hide или потери персонажем знания; это ветвевой snapshot, а не отдельный изменяемый источник истины. `CharacterView.view` предоставляет такую же проекцию при чтении исторического состояния через API.
+- Gemini формирует контекст из `view.prompt_messages(policy)`, а не из `HistoryView`. `User/Assistant` соответствуют `user/model`; `SessionNote` отправляется как **user-level** сведение, а не повышается до привилегированной `systemInstruction`. Лишь доверенные description/prompt и счётчик формируют системную инструкцию.
+- В Gemini поддерживаются текстовые сегменты массива `content`; изображения и иные медиа-поля пока не кодируются в provider parts. Схема мультимодальности всё ещё требует отдельного контракта.
 - Защита от внешней смены selection/reset на приёмке остаётся за `append_guarded`; локальная блокировка **не** является транзакцией между SQLite, внешними писателями и mutable CharacterState. Durable CharacterState и межпроцессная ранняя отмена остаются открытыми.
 
 ## Следующие изменения
@@ -65,3 +65,11 @@ Unity / Sandbox / Games ──(typed semantic inputs)──> application operati
 2. Версионная инвалидация и ограниченный кеш для live MitaView, без второго источника истины.
 3. Python/UI schema parity, время, page/resizing и адаптеры потребителей (ChatAPI, Unity, Launcher); отделить UI history от provider context.
 4. Отдельная ранняя адресная отмена при reset/внешней смене мира; это не обязанность read-проекции.
+
+## Контекст реакции и производное состояние (2026-11-01)
+
+- `PromptHistoryPolicy` отделена от `MitaView`: неизменяемое представление знаний **не фильтруется** ради prompt. `AllVisible` оставляет всё, что персонаж действительно знает к anchor; `CauseScoped { cause_sequence }` исключает реплики `PlayerMessage` и `CharacterMessage`, появившиеся после причины реакции, но оставляет последующие сведения `SessionNote` и `CharacterObservation`. Эта политика не переопределяет `read_at` и не меняет хранилище.
+- `SessionTimeline::prompt_history_policy` проверяет, что причина `react(event_id)` реально существовала и была известна персонажу на **захваченном** prefix. При несовпадении подготовка отклоняется **до** публикации нового входа. `Reply` и `Initiate` пока используют `AllVisible`.
+- `CharacterState.accepted_replies/revision` для текущей узкой модели являются производными от канонических принятых `CharacterMessage` (actor совпадает, request_id валиден), а не от `HistoryView`. Reset, hide и чужие персонажи не изменяют счётчик. Значение сохраняется при SQLite reopen и относится к конкретной ветви/позиции; перед accept локальный владелец повторно читает его.
+- Счётчик по-прежнему вычисляется проходом по каноническим событиям, а не индексированной агрегатной проекцией. **Не** реализован durable mutable `CharacterState`, межпроцессный единый read transaction MitaView+state и атомарность изменений внешних participants. Эти пункты остаются открытыми.
+- Тесты проверяют обе реализации хранилища, приватные знания, реакцию на старую причину, будущие реплики, мировые сведения, отказ неизвестной в указанной позиции причины, reset/reopen и раздельность состояний персонажей.

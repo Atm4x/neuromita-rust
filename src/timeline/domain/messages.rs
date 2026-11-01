@@ -21,6 +21,7 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectedMessage {
     pub event_id: EventId,
+    pub kind: EventKind,
     pub message_id: String,
     pub external_message_id: Option<String>,
     pub sequence: u64,
@@ -78,6 +79,7 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
         .to_string();
     Some(ProjectedMessage {
         event_id: draft.id,
+        kind: draft.kind,
         message_id,
         external_message_id: draft.external_message_id.clone(),
         sequence: fact.sequence,

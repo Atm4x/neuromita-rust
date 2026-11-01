@@ -1,4 +1,4 @@
-use neuromita::timeline::view::TimelineMessageQueries;
+use neuromita::timeline::view::{PromptHistoryPolicy, TimelineMessageQueries};
 use neuromita::{
     character::CharacterId,
     timeline::domain::{
@@ -239,6 +239,64 @@ fn sqlite_projection_reads_multiple_pages_and_freezes_branch_prefix() {
     {
         let mut repository = SqliteTimelineRepository::open(&path).unwrap();
         run_paging_contract(&mut repository);
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+fn run_prompt_cause_policy_contract(repo: &mut dyn TimelineRepository) {
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    push(repo, branch, vec![player("cause", &[CharacterId::Mita])]);
+    push(
+        repo,
+        branch,
+        vec![player("later unrelated request", &[CharacterId::Mita])],
+    );
+    let mut note = EventDraft::new(EventKind::SessionNote);
+    note.observers.insert(CharacterId::Mita);
+    note.payload.insert("content".into(), json!("new weather"));
+    push(repo, branch, vec![note]);
+    let full = TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None).unwrap();
+    assert_eq!(full.count(), 3);
+    let policy = PromptHistoryPolicy::CauseScoped { cause_sequence: 1 };
+    let prompt = full.prompt_messages(policy);
+    assert_eq!(prompt.len(), 2);
+    assert_eq!(prompt[0].content, "");
+    assert_eq!(
+        prompt[0].fields["content"],
+        json!([{"type":"text", "text":"cause"}])
+    );
+    assert_eq!(prompt[1].fields["content"], json!("new weather"));
+    assert_eq!(
+        full.prompt_messages(PromptHistoryPolicy::AllVisible).len(),
+        3
+    );
+    assert_eq!(full.count(), 3);
+    assert_eq!(
+        TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None)
+            .unwrap()
+            .prompt_messages(policy)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn prompt_cause_policy_is_independent_of_in_memory_read_model() {
+    let mut repository = TimelineStore::new();
+    run_prompt_cause_policy_contract(&mut repository);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn prompt_cause_policy_is_identical_with_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path = std::env::temp_dir().join(format!("mitaview-policy-{}.db", uuid::Uuid::new_v4()));
+    {
+        let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+        run_prompt_cause_policy_contract(&mut repository);
     }
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

@@ -6,7 +6,10 @@ use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::GenerationError,
-    timeline::{domain::MessageRole, view::MitaView},
+    timeline::{
+        domain::MessageRole,
+        view::{MitaView, PromptHistoryPolicy},
+    },
 };
 use serde_json::Value;
 
@@ -66,9 +69,9 @@ fn message_text(fields: &serde_json::Map<String, Value>) -> Option<String> {
     }
 }
 
-fn history_contents(view: &MitaView) -> Vec<Content> {
+fn history_contents(view: &MitaView, policy: PromptHistoryPolicy) -> Vec<Content> {
     let mut contents = Vec::new();
-    for message in view.messages() {
+    for message in view.prompt_messages(policy) {
         let Some(text) = message_text(&message.fields) else {
             continue;
         };
@@ -87,7 +90,7 @@ fn history_contents(view: &MitaView) -> Vec<Content> {
 }
 
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let mut contents = history_contents(&context.view);
+    let mut contents = history_contents(&context.view, context.prompt_policy);
     contents.push(content(Some("user"), &context.current_input));
     GenerateContent {
         system_instruction: content(
@@ -220,7 +223,7 @@ mod tests {
         add(&mut repository, branch, "note", note);
         let visible =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&visible);
+        let contents = history_contents(&visible, PromptHistoryPolicy::AllVisible);
         let encoded: Vec<_> = contents
             .iter()
             .map(|item| serde_json::to_value(item).unwrap())
@@ -245,7 +248,7 @@ mod tests {
         add(&mut repository, branch, "hide", hidden);
         let after_hide =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&after_hide);
+        let contents = history_contents(&after_hide, PromptHistoryPolicy::AllVisible);
         assert_eq!(contents.len(), 2);
         assert_eq!(serde_json::to_value(&contents[0]).unwrap()["role"], "model");
 
@@ -254,7 +257,7 @@ mod tests {
         add(&mut repository, branch, "reset", reset);
         let after_reset =
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
-        let contents = history_contents(&after_reset);
+        let contents = history_contents(&after_reset, PromptHistoryPolicy::AllVisible);
         assert!(contents.is_empty());
     }
 

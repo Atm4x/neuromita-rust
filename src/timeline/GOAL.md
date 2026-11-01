@@ -102,7 +102,15 @@
 - [x] Gemini использует предметные сообщения MitaView вместо разбора legacy EventContent, сохраняет роли user/model, не включает скрытые события или знания другого персонажа; SessionNote остаётся user-level контентом, без повышения привилегий provider system instruction.
 - [x] Регрессионные тесты на отсутствие дублирования текущего input, исторический prefix, private/hidden/reset и мультимодальные текстовые фрагменты; базовые и SQLite тесты, Clippy.
 
-**Не закрыто:** межпроцессная атомарность mutable CharacterState и Timeline, политика подготовки контекста после cause, прочие providers и мультимодальные `image/audio` части, оптимизация кеша MitaView и legacy consumer migration. `CharacterContext.history` пока остаётся compatibility-проекцией и продолжает materialize полный известный мир — это не утверждение об O(page size) подготовке запросов.
+**Не закрыто:** межпроцессная атомарность mutable CharacterState и Timeline, прочие providers и мультимодальные `image/audio` части, оптимизация кеша MitaView и legacy consumer migration. `CharacterContext.history` пока остаётся compatibility-проекцией и продолжает materialize полный известный мир — это не утверждение об O(page size) подготовке запросов.
+
+## Cause-scoped prompt и восстановление счётчика ответов (2026-11-01)
+
+- [x] `react(event_id)` проверяет знание причины на том же `ContextAnchor`; доменный MitaView остаётся полным, отдельная `PromptHistoryPolicy` исключает более поздние посторонние реплики из provider context, но сохраняет новые мировые наблюдения и SessionNote.
+- [x] Узкий `CharacterState` (accepted replies/revision) восстанавливается по фактам принятых ответов конкретной ветви, не по субъективной HistoryView. Reset/hide не обнуляют счётчик, SQLite reopen сохраняет его. На приёмке счётчик перечитывается для выявления сторонних изменений.
+- [x] Контрактная проверка In-memory/SQLite, включая cause snapshot и provider rules; локальные и SQLite-тесты Rust 1.98.1.
+
+**Граница:** полный mutable CharacterState не сделан durable/atomic с Timeline; подсчёт принятых ответов по канонической истории сейчас O(история). Live `reply` пока включает весь видимый диалог на выбранном anchor, а `react` — только диалог до причины; будущая политика группировки queued-входов остаётся отдельной предметной задачей.
 
 ## Следующий пакет изменений
 
