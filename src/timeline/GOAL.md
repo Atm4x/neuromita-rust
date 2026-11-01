@@ -175,3 +175,10 @@
 - [x] Индексированный SQLite и in-memory обеспечивают один контракт `context_epoch_at`, включая унаследованные префиксы fork и повторный запуск.
 - [x] End-to-end проверка через `ChatApi::reply(...).at(...)`: один персонаж не может восстановить забытые сведения, независимый адресат сохраняет доступ к своему историческому контексту; текущий выбор ветки не меняется.
 - [ ] Это не реализация выбора активного персонажа Sandbox, расширяемого реестра персонажей или полной атомарности mutable `CharacterState`.
+
+## Captured-prefix turn pinning (2026-11-01)
+
+- [x] `TimelineTurn.context_head/context_epoch` refer to the actual captured MitaView prefix, not the SQLite head observed later when creating the turn.
+- [x] React/initiate trigger creation has a guarded context epoch; a concurrent reset (including reset followed by reacquisition of the cause) rejects the stale work without recording an orphan proactive trigger.
+- [x] Deterministic in-memory and two-connection SQLite regressions for reset/relearn between capture and turn pin, plus non-reset concurrent append, ensure generation cancellation without erasing immutable history.
+- [ ] External SQLite writers still do not push immediate cancellation notifications; no full multi-component snapshot or durable CharacterState transaction is claimed.

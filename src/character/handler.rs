@@ -342,12 +342,21 @@ impl CharacterHandler {
                     input.event_id(),
                     Arc::clone(input.text()),
                     intent,
+                    anchor,
                 )
-                .map_err(CharacterError::Internal)?;
+                .map_err(|error| match error {
+                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                        CharacterError::StaleState
+                    }
+                    other => CharacterError::Internal(other.to_string()),
+                })?;
         }
         let turn = timeline
-            .capture_turn(self.character.id, input.event_id())
+            .capture_turn(self.character.id, input.event_id(), anchor)
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        timeline
+            .assert_turn(turn)
+            .map_err(|_| CharacterError::StaleState)?;
         Ok(CharacterContext {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),

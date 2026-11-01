@@ -176,9 +176,19 @@ impl SessionTimeline {
         &self,
         character: CharacterId,
         trigger: EventId,
+        context: ContextAnchor,
     ) -> Result<TimelineTurn, domain::TimelineError> {
-        self.workspace
-            .capture(self.store.as_ref(), character, Some(trigger))
+        if context.branch_id != self.branch.0 {
+            return Err(domain::TimelineError::Invalid(
+                "generation context belongs to another timeline branch",
+            ));
+        }
+        self.workspace.capture_at(
+            self.store.as_ref(),
+            character,
+            Some(trigger),
+            context.through,
+        )
     }
 
     pub(crate) fn assert_selection(
@@ -623,7 +633,17 @@ impl SessionTimeline {
         id: EventId,
         text: Arc<str>,
         intent: TurnIntent,
-    ) -> Result<(), String> {
+        context: ContextAnchor,
+    ) -> Result<(), domain::TimelineError> {
+        if context.branch_id != self.branch.0 {
+            return Err(domain::TimelineError::Invalid(
+                "generation context belongs to another timeline branch",
+            ));
+        }
+        let pinned =
+            self.workspace
+                .capture_at(self.store.as_ref(), character, None, context.through)?;
+        self.assert_turn(pinned)?;
         let mut draft = make_draft(
             id,
             EventKind::ProactiveOpportunity,
@@ -632,19 +652,21 @@ impl SessionTimeline {
             Some(request),
         );
         match intent {
-            TurnIntent::Reply => return Err("reply requires an admitted player message".into()),
+            TurnIntent::Reply => {
+                return Err(domain::TimelineError::Invalid(
+                    "reply requires an admitted player message",
+                ));
+            }
             TurnIntent::Initiate => {
                 draft
                     .payload
                     .insert("legacy_intent".into(), json!("initiate"));
             }
             TurnIntent::React(target) => {
-                if !self
-                    .store
-                    .knows(self.branch, character, target, None)
-                    .map_err(|error| error.to_string())?
-                {
-                    return Err("reaction target is unknown to the character".into());
+                if !self.store.knows(self.branch, character, target, None)? {
+                    return Err(domain::TimelineError::Invalid(
+                        "reaction target is unknown to the character",
+                    ));
                 }
                 draft.payload.insert("legacy_intent".into(), json!("react"));
                 draft
@@ -656,8 +678,7 @@ impl SessionTimeline {
                 });
             }
         }
-        self.commit(format!("input:{}", request.0), draft, None)
-            .map_err(|error| error.to_string())
+        self.commit(format!("input:{}", request.0), draft, Some(pinned))
     }
 
     pub(crate) fn append_reply(
@@ -790,7 +811,9 @@ mod tests {
         timeline
             .append_player_message(CharacterId::Mita, request, trigger, Arc::from("hello"))
             .unwrap();
-        let turn = timeline.capture_turn(CharacterId::Mita, trigger).unwrap();
+        let turn = timeline
+            .capture_turn(CharacterId::Mita, trigger, timeline.anchor())
+            .unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
         reset.observers.insert(CharacterId::Mita);
         timeline
@@ -810,6 +833,157 @@ mod tests {
                 .is_err()
         );
         assert_eq!(timeline.anchor().through, 2);
+    }
+
+    fn reset_and_relearn(
+        store: &mut dyn TimelineRepository,
+        branch: BranchId,
+        original: EventId,
+        key: &str,
+    ) {
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Mita);
+        let mut disclosure = EventDraft::new(EventKind::EventObserved);
+        disclosure.observers.insert(CharacterId::Mita);
+        disclosure.links.push(CausalLink {
+            relation: CausalRelation::Observes,
+            event_id: original,
+        });
+        let head = store.branch(branch).unwrap().head_sequence;
+        store
+            .append(branch, head, key, json!({}), vec![reset, disclosure])
+            .unwrap();
+        assert!(
+            store
+                .knows(branch, CharacterId::Mita, original, None)
+                .unwrap()
+        );
+    }
+
+    fn assert_stale_pin(timeline: &SessionTimeline, original: EventId, at: ContextAnchor) {
+        let pin = timeline
+            .capture_turn(CharacterId::Mita, original, at)
+            .unwrap();
+        assert_eq!(pin.context_head, at.through);
+        assert_eq!(pin.context_epoch, 0);
+        assert!(
+            timeline
+                .store
+                .context_epoch(timeline.branch, CharacterId::Mita)
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            timeline.assert_turn(pin),
+            Err(domain::TimelineError::ConcurrentWrite)
+        );
+    }
+
+    #[test]
+    fn captured_epoch_cannot_be_replaced_by_later_reset_and_relearning() {
+        let mut timeline = SessionTimeline::new();
+        let original = EventId::new();
+        timeline
+            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .unwrap();
+        let captured = timeline
+            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .unwrap();
+        let at = captured.history.at;
+        assert_eq!(captured.view.messages()[0].content, "original");
+
+        let branch = timeline.branch;
+        reset_and_relearn(
+            timeline.store.as_mut(),
+            branch,
+            original,
+            "reset-and-relearn",
+        );
+        assert_stale_pin(&timeline, original, at);
+        assert_eq!(captured.view.messages()[0].content, "original");
+
+        let before = timeline.anchor().through;
+        assert_eq!(
+            timeline.append_proactive_trigger(
+                CharacterId::Mita,
+                RequestId::new(),
+                EventId::new(),
+                Arc::from("react to original"),
+                TurnIntent::React(original),
+                at,
+            ),
+            Err(domain::TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(timeline.anchor().through, before);
+    }
+
+    #[test]
+    fn newer_unrelated_facts_do_not_invalidate_a_captured_epoch() {
+        let mut timeline = SessionTimeline::new();
+        let original = EventId::new();
+        timeline
+            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .unwrap();
+        let at = timeline
+            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .unwrap()
+            .history
+            .at;
+        timeline
+            .publish_player_message(CharacterId::Mita, EventId::new(), Arc::from("later"))
+            .unwrap();
+        let pin = timeline
+            .capture_turn(CharacterId::Mita, original, at)
+            .unwrap();
+        assert_eq!(pin.context_head, at.through);
+        assert_eq!(pin.context_epoch, 0);
+        timeline.assert_turn(pin).unwrap();
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn external_sqlite_reset_and_relearning_cannot_repin_old_prompt() {
+        let path =
+            std::env::temp_dir().join(format!("neuromita-snapshot-epoch-{}.db", Uuid::new_v4()));
+        let session = SessionId::new();
+        let branch = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root: branch,
+        })
+        .unwrap();
+        let original = EventId::new();
+        timeline
+            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .unwrap();
+        let at = timeline
+            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .unwrap()
+            .history
+            .at;
+        let mut external = storage::SqliteTimelineRepository::open(&path).unwrap();
+        reset_and_relearn(&mut external, branch, original, "remote-reset-and-relearn");
+        assert_stale_pin(&timeline, original, at);
+
+        let before = timeline.anchor().through;
+        assert_eq!(
+            timeline.append_proactive_trigger(
+                CharacterId::Mita,
+                RequestId::new(),
+                EventId::new(),
+                Arc::from("late reaction"),
+                TurnIntent::React(original),
+                at,
+            ),
+            Err(domain::TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(timeline.anchor().through, before);
+        drop(external);
+        drop(timeline);
+        for suffix in ["", "-shm", "-wal"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
     }
 
     #[cfg(feature = "sqlite-system")]

@@ -166,3 +166,10 @@ existing accepted-reply projection. No Unity transport or polling service added.
 - `ContextPosition::Latest` continues to capture current knowledge when the worker starts. One character's reset does not invalidate another character's historical position unless that character also crossed a reset boundary.
 - `TimelineRepository::context_epoch_at` evaluates the last reset at the requested branch position, including inherited fork prefixes. SQLite uses its existing reset indexes; in-memory and SQLite follow the same contract. No separate mutable knowledge state is introduced.
 - This rule concerns explicitly addressed `CharacterId`s in the current minimal Rust Core. The Sandbox-selected character and any settings-driven character selection are not implemented here; the rule must not be confused with a client-side active-character resolver.
+
+## Stable generation pin across concurrent writes (2026-11-01)
+
+- A `TimelineTurn` now pins `context_head` and `context_epoch` from the **same immutable prefix** used to build the prompt. It must not re-read a later epoch after `MitaView` has been captured. This matters when an external SQLite writer resets the character and then discloses the old trigger again: knowing the trigger **now** does not validate a prompt from the forgotten epoch.
+- `CharacterHandler` rejects a stale turn before invoking the generator. The final repository `append_guarded` remains the atomic authority if another writer changes the epoch afterward.
+- `react/initiate` also guard creation of their `ProactiveOpportunity` against the captured epoch, so a stale request cannot leave a new trigger fact behind. Ordinary later events without a reset do not invalidate a previously captured turn.
+- In-memory and two-connection SQLite regressions cover reset + re-disclosure between context capture and pin creation, rejection of stale proactive writes, and unchanged historical snapshots. This is **not** a full transaction across mutable character state, external participants, or a push-based notification channel from other processes.

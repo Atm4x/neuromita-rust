@@ -86,8 +86,27 @@ impl SessionWorkspace {
     ) -> Result<TimelineTurn, TimelineError> {
         let selection = self.selected.ok_or(TimelineError::NotFound)?;
         let context_head = store.branch(selection.branch_id)?.head_sequence;
+        self.capture_at(store, character, trigger, context_head)
+    }
+
+    /// The knowledge epoch must describe the prompt snapshot, not a later
+    /// repository head observed while preparing the request.
+    pub fn capture_at(
+        &self,
+        store: &dyn TimelineRepository,
+        character: CharacterId,
+        trigger: Option<EventId>,
+        context_head: u64,
+    ) -> Result<TimelineTurn, TimelineError> {
+        let selection = self.selected.ok_or(TimelineError::NotFound)?;
+        let current_head = store.branch(selection.branch_id)?.head_sequence;
+        if context_head > current_head {
+            return Err(TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
         if let Some(trigger) = trigger
-            && !store.knows(selection.branch_id, character, trigger, Some(context_head))?
+            && !store.knows(selection.branch_id, character, trigger, Some(current_head))?
         {
             return Err(TimelineError::Invalid("character does not know trigger"));
         }
@@ -95,7 +114,11 @@ impl SessionWorkspace {
             selection,
             context_head,
             character,
-            context_epoch: Self::context_epoch(store, selection.branch_id, character)?,
+            context_epoch: store.context_epoch_at(
+                selection.branch_id,
+                character,
+                Some(context_head),
+            )?,
             trigger,
         })
     }
