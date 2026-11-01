@@ -125,3 +125,10 @@ Gemini формирует **user-level** последовательность и
 проверки фактических исходников: [Issue #1](https://github.com/Atm4x/neuromita-rust/issues/1)
 и [Issue #13](https://github.com/Atm4x/neuromita-rust/issues/13). Нельзя
 считать эту read-side работу интеграцией Unity. Нагрузочные проверки отложены.
+
+## Read-only inspection of saved branches (2026-11-01)
+
+- `CharacterHandle::get_context(ContextAnchor)` now reads a saved branch of the **same session** without selecting it. The returned `CharacterView.history`, `CharacterView.view` and derived reply counters use the requested `(branch_id, through)` rather than the active branch.
+- `SessionTimeline::capture_context` remains deliberately **active-branch-only** for generation: `ContextPosition::At` cannot be used to create a response against an unselected branch. Inspecting an alternate branch never changes selection generation, writes facts, or cancels running requests.
+- Historical views are detached. Appending or resetting the alternate branch cannot mutate an earlier returned view. A foreign session and a position beyond the branch head are rejected. Reading after SQLite reopen uses the same saved branch and prefix.
+- This is a read-only functional extension, **not** a completed unified SQLite read transaction with external mutable `CharacterState`, a bounded incremental MitaView cache, a full timeline archive or a generalized time-travel runtime.

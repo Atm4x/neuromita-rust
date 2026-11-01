@@ -426,7 +426,7 @@ impl CharacterHandler {
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         let captured = timeline
-            .capture_context(self.character.id, ContextPosition::At(at))
+            .inspect_context_at(self.character.id, at)
             .map_err(CharacterError::Internal)?;
         Ok(CharacterView {
             character_id: self.character.id,

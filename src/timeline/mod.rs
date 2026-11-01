@@ -286,15 +286,47 @@ impl SessionTimeline {
             ContextPosition::Latest => self.anchor(),
             ContextPosition::At(at) => at,
         };
-        let history = self.history_at(character, anchor)?;
+        if anchor.branch_id != self.branch.0 {
+            return Err("generation context belongs to another timeline branch".into());
+        }
+        self.inspect_context_at(character, anchor)
+    }
+
+    /// Read a saved branch without selecting it or changing pending generations.
+    pub(crate) fn inspect_context_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<TimelineContextSnapshot, String> {
+        let branch = self
+            .inspection_branch(at)
+            .map_err(|error| error.to_string())?;
+        let history = self.history_on_branch(character, branch, at)?;
         let view = TimelineMessageQueries::capture(
             self.store.as_ref(),
-            self.branch,
+            branch,
             character,
-            Some(anchor.through),
+            Some(at.through),
         )
         .map_err(|error| error.to_string())?;
         Ok(TimelineContextSnapshot { history, view })
+    }
+
+    fn inspection_branch(&self, at: ContextAnchor) -> Result<BranchId, domain::TimelineError> {
+        let branch = BranchId(at.branch_id);
+        let active_session = self.store.branch(self.branch)?.session_id;
+        let info = self.store.branch(branch)?;
+        if info.session_id != active_session {
+            return Err(domain::TimelineError::Invalid(
+                "context belongs to another session",
+            ));
+        }
+        if at.through > info.head_sequence {
+            return Err(domain::TimelineError::Invalid(
+                "context position exceeds branch head",
+            ));
+        }
+        Ok(branch)
     }
 
     /// Count accepted replies in canonical history, independent of what the
@@ -305,19 +337,10 @@ impl SessionTimeline {
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<u64, domain::TimelineError> {
-        if at.branch_id != self.branch.0 {
-            return Err(domain::TimelineError::Invalid(
-                "context belongs to another timeline branch",
-            ));
-        }
-        if at.through > self.store.branch(self.branch)?.head_sequence {
-            return Err(domain::TimelineError::Invalid(
-                "context position exceeds branch head",
-            ));
-        }
+        let branch = self.inspection_branch(at)?;
         let mut count = 0_u64;
         let actor = character.to_string();
-        for fact in self.store.world(self.branch)? {
+        for fact in self.store.world(branch)? {
             if fact.sequence > at.through {
                 break;
             }
@@ -371,6 +394,7 @@ impl SessionTimeline {
             .expect("current branch anchor is valid")
     }
 
+    #[cfg(test)]
     pub(crate) fn history_at(
         &self,
         character: CharacterId,
@@ -379,9 +403,18 @@ impl SessionTimeline {
         if at.branch_id != self.branch.0 {
             return Err("invalid timeline position".into());
         }
+        self.history_on_branch(character, self.branch, at)
+    }
+
+    fn history_on_branch(
+        &self,
+        character: CharacterId,
+        branch: BranchId,
+        at: ContextAnchor,
+    ) -> Result<HistoryView, String> {
         let known = self
             .store
-            .view(self.branch, character, Some(at.through))
+            .view(branch, character, Some(at.through))
             .map_err(|error| error.to_string())?;
         Ok(HistoryView {
             at,
@@ -623,6 +656,9 @@ impl SessionTimeline {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod inspection_tests;
 
 #[cfg(test)]
 mod tests {

@@ -155,3 +155,9 @@
 - [ ] Актуальный Unity↔Rust wire/transport, правила назначения свидетелей по Unity snapshot и автоматическая синхронизация presence не реализованы; старая Python `UnityTimelineIngress` изучена как источник функционального поведения, не как окончательная схема текущей Unity.
 
 Подробнее: [INGRESS.md](INGRESS.md). Это частичное закрытие функционального ingress, не завершение Unity integration из этапа D.
+
+## Saved-branch inspection (2026-11-01)
+
+- [x] `CharacterHandle::get_context` can inspect an inactive branch of the selected session without changing the selected branch or starting generation. `HistoryView`, `MitaView` and derived accepted-reply counts use the same requested `ContextAnchor` (branch + prefix).
+- [x] In-memory and SQLite/reopen tests cover inherited fork prefix vs parent continuation, per-character privacy, reset with immutable earlier snapshots, foreign-session rejection and active-generation protection.
+- [ ] Full snapshot-consistent mutable `CharacterState` transaction and bounded incremental read-side remain open; inspecting an immutable prefix does not solve them.
