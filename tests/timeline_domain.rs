@@ -465,3 +465,85 @@ fn invalid_causality_cannot_point_to_new_sibling_future() {
         Err(TimelineError::NotFound)
     );
 }
+
+#[test]
+fn concurrent_writers_are_serialized_by_owner_and_only_one_can_claim_head() {
+    use std::sync::{Arc, Barrier, Mutex};
+    let (timeline, root) = setup();
+    let timeline = Arc::new(Mutex::new(timeline));
+    let barrier = Arc::new(Barrier::new(2));
+    let attempts = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let timeline = Arc::clone(&timeline);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    timeline.lock().unwrap().append(
+                        root,
+                        0,
+                        &format!("concurrent:{index}"),
+                        json!({}),
+                        vec![fact(EventKind::UnityEvent, CharacterId::Mita)],
+                    )
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(attempts.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        attempts
+            .iter()
+            .filter(|result| **result == Err(TimelineError::ConcurrentWrite))
+            .count(),
+        1
+    );
+    assert_eq!(
+        timeline.lock().unwrap().branch(root).unwrap().head_sequence,
+        1
+    );
+}
+
+#[test]
+fn deterministic_branch_world_stress_preserves_contiguous_history_and_private_facts() {
+    let (mut timeline, root) = setup();
+    let mut branches = vec![root];
+    let mut seed = 0x19a4_a931_2984_1111u64;
+    for index in 0..220u64 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let branch = branches[(seed as usize) % branches.len()];
+        if index % 17 == 0 {
+            let mut cp = EventDraft::new(EventKind::Checkpoint);
+            cp.payload.insert("snapshot".into(), json!({}));
+            let cp_id = cp.id;
+            push(&mut timeline, branch, &format!("cp:{index}"), vec![cp]);
+            let child = BranchId::new();
+            timeline.fork(branch, cp_id, child).unwrap();
+            branches.push(child);
+        } else {
+            let actor = if (seed >> 32) & 1 == 0 {
+                CharacterId::Mita
+            } else {
+                CharacterId::KindMita
+            };
+            let draft = fact(EventKind::UnityEvent, actor);
+            push(&mut timeline, branch, &format!("fact:{index}"), vec![draft]);
+        }
+        for branch in &branches {
+            let facts = timeline.world(*branch).unwrap();
+            for (offset, event) in facts.iter().enumerate() {
+                assert_eq!(event.sequence, offset as u64 + 1);
+            }
+            for character in [CharacterId::Mita, CharacterId::KindMita] {
+                for known in timeline.view(*branch, character, None).unwrap() {
+                    assert!(known.fact.draft.observers.contains(&character));
+                    assert!(known.learned_at <= facts.len() as u64);
+                }
+            }
+        }
+    }
+}

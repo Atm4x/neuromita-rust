@@ -198,7 +198,10 @@ impl SessionTimeline {
             .store
             .event(self.branch, trigger)
             .map_err(|error| error.to_string())?;
-        if !trigger_fact.draft.observers.contains(&character)
+        if !self
+            .store
+            .knows(self.branch, character, trigger, None)
+            .map_err(|error| error.to_string())?
             || trigger_fact.draft.kind == EventKind::CharacterMessage
         {
             return Err("reply target is not known to this character".into());
@@ -338,4 +341,62 @@ fn legacy_event(fact: &TimelineFact, observer: CharacterId) -> Option<TimelineEv
             .map(RequestId),
         content,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn legacy_accept_does_not_answer_a_forgotten_trigger() {
+        let mut timeline = SessionTimeline::new();
+        let request = RequestId::new();
+        let trigger = EventId::new();
+        let at = timeline.anchor();
+        timeline
+            .append_input(
+                CharacterId::Mita,
+                request,
+                trigger,
+                Arc::from("hello"),
+                TurnIntent::Reply,
+            )
+            .unwrap();
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Mita);
+        timeline
+            .store
+            .append(timeline.branch, 1, "reset", json!({}), vec![reset])
+            .unwrap();
+        assert!(
+            timeline
+                .append_reply(CharacterId::Mita, request, trigger, at, Arc::from("answer"))
+                .is_err()
+        );
+        assert_eq!(timeline.anchor().through, 2);
+    }
+
+    #[test]
+    fn legacy_api_is_backed_by_the_only_canonical_event_store() {
+        let mut timeline = SessionTimeline::new();
+        let request = RequestId::new();
+        let event = EventId::new();
+        timeline
+            .append_input(
+                CharacterId::Mita,
+                request,
+                event,
+                Arc::from("hello"),
+                TurnIntent::Reply,
+            )
+            .unwrap();
+        assert_eq!(timeline.store.world(timeline.branch).unwrap().len(), 1);
+        assert_eq!(timeline.events().len(), 1);
+        assert_eq!(timeline.history(CharacterId::Mita).events.len(), 1);
+        assert!(timeline.history(CharacterId::KindMita).events.is_empty());
+    }
 }

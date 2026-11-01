@@ -66,8 +66,8 @@
 - [x] `cargo test --offline` Rust 1.98.1 (локально, 2026-11-01; 1 live Gemini intentionally ignored).
 - [x] `cargo clippy --offline --all-targets -- -D warnings`.
 - [x] `cargo fmt --check`.
-- [x] Domain parity tests на ветвление, receipts, causal, знание, reset, presentation edits (16 integration + 3 workspace unit).
-- [ ] Повторно проверить граф импортов без циклов после всех изменений (Cargo сам по себе этого не доказывает).
+- [x] Domain parity tests на ветвление, receipts, causal, знание, reset, presentation edits (18 integration (including deterministic stress and concurrency) + 3 workspace unit + 2 compatibility unit).
+- [x] Проверено, что новые timeline/domain и selection импортируют только identity/interaction и собственные низовые компоненты; инверсии `timeline -> character/request` не добавлены. Это ручная проверка направленности, не автоматическое доказательство компилятором.
 
 ## Следующий пакет изменений
 
