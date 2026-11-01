@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     identity::RequestId,
-    interaction::{TurnIntent, UserInput},
+    interaction::{ReplyTarget, TurnIntent, UserInput},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
         SessionTimeline,
@@ -283,7 +283,7 @@ impl CharacterHandler {
                 .admission(self.character.id, timeline.selection())
                 .unwrap()
         };
-        if intent == TurnIntent::Reply {
+        if intent == TurnIntent::Reply(ReplyTarget::Input) {
             self.timeline
                 .lock()
                 .expect("timeline mutex poisoned")
@@ -314,7 +314,7 @@ impl CharacterHandler {
         timeline
             .assert_admission(self.character.id, admission)
             .map_err(|_| CharacterError::StaleState)?;
-        if intent == TurnIntent::Reply {
+        if intent == TurnIntent::Reply(ReplyTarget::Input) {
             timeline
                 .verify_admitted_input(self.character.id, request, &input)
                 .map_err(|_| CharacterError::StaleState)?;
@@ -342,7 +342,7 @@ impl CharacterHandler {
                     .map(Arc::from),
             });
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
-        if intent != TurnIntent::Reply {
+        if intent != TurnIntent::Reply(ReplyTarget::Input) {
             timeline
                 .append_proactive_trigger(
                     self.character.id,
@@ -494,7 +494,7 @@ mod turn_tests {
             .context(
                 request,
                 UserInput::new("hello".into()).unwrap(),
-                TurnIntent::Reply,
+                TurnIntent::Reply(ReplyTarget::Input),
                 ContextPosition::Latest,
             )
             .unwrap();
@@ -773,7 +773,7 @@ mod turn_tests {
             .context(
                 RequestId::new(),
                 input,
-                TurnIntent::Reply,
+                TurnIntent::Reply(ReplyTarget::Input),
                 ContextPosition::Latest,
             )
             .unwrap();

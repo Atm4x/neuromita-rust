@@ -7,7 +7,7 @@ use crate::{
     character::{AcceptedResponse, CharacterId},
     generation::{GenerationError, GenerationPreset},
     identity::RequestId,
-    interaction::{TurnIntent, UserInput},
+    interaction::{ReplyTarget, TurnIntent, UserInput},
     timeline::{ContextPosition, EventId, conversation::ConversationAudience},
     voice::{VoiceError, VoicePlan},
 };
@@ -42,6 +42,7 @@ pub struct ReplyRequest {
     at: ContextPosition,
     audience: ConversationAudience,
     input_audience: ConversationAudience,
+    target: ReplyTarget,
 }
 
 impl ReplyRequest {
@@ -60,6 +61,7 @@ impl ReplyRequest {
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
             input_audience: ConversationAudience::player_to(character_id),
+            target: ReplyTarget::Input,
         }
     }
     pub fn with_voice(mut self, voice: VoicePlan) -> Self {
@@ -78,6 +80,13 @@ impl ReplyRequest {
         self.input_audience = audience;
         self
     }
+
+    /// Reply to an existing event observed by this character, without adding player speech.
+    /// The input text becomes generation guidance rather than a conversation message.
+    pub fn to_event(mut self, event: EventId) -> Self {
+        self.target = ReplyTarget::Event(event);
+        self
+    }
 }
 
 impl Message for ReplyRequest {
@@ -94,7 +103,7 @@ impl Message for ReplyRequest {
         self.source
     }
     fn intent(&self) -> TurnIntent {
-        TurnIntent::Reply
+        TurnIntent::Reply(self.target)
     }
     fn voice(&self) -> &VoicePlan {
         &self.voice
@@ -106,7 +115,10 @@ impl Message for ReplyRequest {
         &self.audience
     }
     fn input_audience(&self) -> Option<&ConversationAudience> {
-        Some(&self.input_audience)
+        match self.target {
+            ReplyTarget::Input => Some(&self.input_audience),
+            ReplyTarget::Event(_) => None,
+        }
     }
 }
 
@@ -318,6 +330,8 @@ pub enum SubmitError {
     CharacterUnavailable,
     #[error("timeline could not accept the request input")]
     TimelineUnavailable,
+    #[error("reply target is not an observed conversation message")]
+    InvalidReplyTarget,
 }
 
 #[derive(Debug, Error)]

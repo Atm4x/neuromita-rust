@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     identity::{CharacterId, RequestId},
-    interaction::TurnIntent,
+    interaction::{ReplyTarget, TurnIntent},
 };
 
 pub use crate::identity::EventId;
@@ -528,8 +528,9 @@ impl SessionTimeline {
         intent: TurnIntent,
         at: ContextAnchor,
     ) -> Result<Option<domain::TimelineFact>, domain::TimelineError> {
-        let TurnIntent::React(target) = intent else {
-            return Ok(None);
+        let target = match intent {
+            TurnIntent::React(target) | TurnIntent::Reply(ReplyTarget::Event(target)) => target,
+            TurnIntent::Reply(ReplyTarget::Input) | TurnIntent::Initiate => return Ok(None),
         };
         if at.branch_id != self.branch.0 {
             return Err(domain::TimelineError::Invalid(
@@ -788,15 +789,33 @@ impl SessionTimeline {
             Some(request),
         );
         match intent {
-            TurnIntent::Reply => {
+            TurnIntent::Reply(ReplyTarget::Input) => {
                 return Err(domain::TimelineError::Invalid(
-                    "reply requires an admitted player message",
+                    "reply to player input requires an admitted player message",
                 ));
             }
             TurnIntent::Initiate => {
                 draft
                     .payload
                     .insert("legacy_intent".into(), json!("initiate"));
+            }
+            TurnIntent::Reply(ReplyTarget::Event(target)) => {
+                if !self
+                    .store
+                    .knows(self.branch, character, target, Some(context.through))?
+                {
+                    return Err(domain::TimelineError::Invalid(
+                        "reply target must be a known event",
+                    ));
+                }
+                draft.payload.insert("legacy_intent".into(), json!("reply"));
+                draft
+                    .payload
+                    .insert("target".into(), json!(target.0.to_string()));
+                draft.links.push(CausalLink {
+                    relation: CausalRelation::CausedBy,
+                    event_id: target,
+                });
             }
             TurnIntent::React(target) => {
                 if !self.store.knows(self.branch, character, target, None)? {
@@ -861,8 +880,46 @@ impl SessionTimeline {
         message.audience = audience;
         message.request_id = Some(request);
         message.context = Some(context);
-        message.reply_to = Some(trigger);
-        if trigger_fact.draft.kind == EventKind::PlayerMessage {
+        let directed_reply = if trigger_fact.draft.kind == EventKind::ProactiveOpportunity
+            && trigger_fact
+                .draft
+                .payload
+                .get("legacy_intent")
+                .and_then(Value::as_str)
+                == Some("reply")
+        {
+            trigger_fact
+                .draft
+                .payload
+                .get("target")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .map(EventId)
+        } else {
+            None
+        };
+        if let Some(target) = directed_reply {
+            let fact = self.store.event(self.branch, target)?;
+            if !self.store.knows(self.branch, character, target, None)? {
+                return Err(domain::TimelineError::Invalid(
+                    "reply target must remain known to the character",
+                ));
+            }
+            message.reply_to = Some(target);
+            message.links.push(CausalLink {
+                relation: if fact.draft.kind.is_message() {
+                    CausalRelation::ReplyTo
+                } else {
+                    CausalRelation::CausedBy
+                },
+                event_id: target,
+            });
+            message.links.push(CausalLink {
+                relation: CausalRelation::CausedBy,
+                event_id: trigger,
+            });
+        } else if trigger_fact.draft.kind == EventKind::PlayerMessage {
+            message.reply_to = Some(trigger);
             message.links.push(CausalLink {
                 relation: CausalRelation::ReplyTo,
                 event_id: trigger,
@@ -874,6 +931,7 @@ impl SessionTimeline {
             .and_then(Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
         {
+            message.reply_to = Some(trigger);
             message.links.push(CausalLink {
                 relation: CausalRelation::ReactTo,
                 event_id: EventId(target),
@@ -883,6 +941,7 @@ impl SessionTimeline {
                 event_id: trigger,
             });
         } else {
+            message.reply_to = Some(trigger);
             message.links.push(CausalLink {
                 relation: CausalRelation::CausedBy,
                 event_id: trigger,

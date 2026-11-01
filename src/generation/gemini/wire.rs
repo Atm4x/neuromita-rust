@@ -14,6 +14,7 @@ use crate::{
 #[cfg(test)]
 use crate::{
     generation::conversation::{message_text, project_history},
+    interaction::ReplyTarget,
     timeline::view::MitaView,
 };
 
@@ -351,7 +352,7 @@ mod tests {
             current_input: Arc::from("old question"),
             trigger: ids[0],
             focus: GenerationFocus {
-                intent: TurnIntent::Reply,
+                intent: TurnIntent::Reply(ReplyTarget::Input),
                 reaction: None,
             },
             anchor: ContextAnchor {

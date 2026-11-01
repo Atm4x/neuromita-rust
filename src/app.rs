@@ -18,7 +18,7 @@ use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{GenerationPreset, ResponseGenerator},
     identity::EventId,
-    interaction::{TurnIntent, UserInput},
+    interaction::{ReplyTarget, TurnIntent, UserInput},
     lifecycle::Lifecycle,
     presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
     request::{
@@ -144,17 +144,25 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .assert_selection(selection)
             .map_err(|_| SubmitError::TimelineUnavailable)?;
-        if intent == TurnIntent::Reply {
-            let input_audience = input_audience.ok_or(SubmitError::TimelineUnavailable)?;
-            timeline
-                .append_player_message(
-                    character,
-                    request,
-                    input.event_id(),
-                    Arc::clone(input.text()),
-                    input_audience.clone(),
-                )
-                .map_err(|_| SubmitError::TimelineUnavailable)?;
+        match intent {
+            TurnIntent::Reply(ReplyTarget::Event(_)) => {
+                timeline
+                    .reaction_cause_at(character, intent, timeline.anchor())
+                    .map_err(|_| SubmitError::InvalidReplyTarget)?;
+            }
+            TurnIntent::Reply(ReplyTarget::Input) => {
+                let audience = input_audience.ok_or(SubmitError::TimelineUnavailable)?;
+                timeline
+                    .append_player_message(
+                        character,
+                        request,
+                        input.event_id(),
+                        Arc::clone(input.text()),
+                        audience.clone(),
+                    )
+                    .map_err(|_| SubmitError::TimelineUnavailable)?;
+            }
+            _ => {}
         }
         timeline
             .admission(character, selection)

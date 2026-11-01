@@ -46,8 +46,14 @@ impl UserInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyTarget {
+    Input,
+    Event(EventId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnIntent {
-    Reply,
+    Reply(ReplyTarget),
     React(EventId),
     Initiate,
 }

@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::{
     character::CharacterContext,
     identity::{CharacterId, EventId},
-    interaction::TurnIntent,
+    interaction::{ReplyTarget, TurnIntent},
     timeline::{
         domain::MessageRole,
         view::{ContextEntry, MitaView},
@@ -137,8 +137,12 @@ pub(crate) fn project_history(
         ContextEntry::World(event) => Some(event.event_id) == target_id,
     });
     let focus_needs_marker = position.is_some_and(|index| {
-        target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_)))
-            || index + 1 < entries.len()
+        target.is_some_and(|(_, intent)| {
+            matches!(
+                intent,
+                TurnIntent::React(_) | TurnIntent::Reply(ReplyTarget::Event(_))
+            )
+        }) || index + 1 < entries.len()
     });
     let mut messages = Vec::with_capacity(entries.len());
     let mut target_present = false;
@@ -191,12 +195,13 @@ pub(crate) fn project_history(
         if Some(id) == target_id {
             target_present = true;
             if focus_needs_marker {
-                let label =
-                    if target.is_some_and(|(_, intent)| matches!(intent, TurnIntent::React(_))) {
-                        "Событие, вызвавшее текущую реакцию"
-                    } else {
-                        "Сообщение, на которое готовится текущий ответ"
-                    };
+                let label = match target.map(|(_, intent)| intent) {
+                    Some(TurnIntent::React(_)) => "Событие, вызвавшее текущую реакцию",
+                    Some(TurnIntent::Reply(ReplyTarget::Event(_))) => {
+                        "Сообщение или событие, на которое готовится текущий ответ"
+                    }
+                    _ => "Сообщение, на которое готовится текущий ответ",
+                };
                 text = format!("{label}:\n{text}");
             }
         }
@@ -208,14 +213,26 @@ pub(crate) fn project_history(
 impl LlmConversation {
     pub(crate) fn from_context(context: &CharacterContext) -> Self {
         let focus = match context.focus.intent {
-            TurnIntent::Reply => Some((context.trigger, context.focus.intent)),
-            TurnIntent::React(id) => Some((id, context.focus.intent)),
+            TurnIntent::Reply(ReplyTarget::Input) => Some((context.trigger, context.focus.intent)),
+            TurnIntent::Reply(ReplyTarget::Event(id)) | TurnIntent::React(id) => {
+                Some((id, context.focus.intent))
+            }
             TurnIntent::Initiate => None,
         };
         let (mut messages, target_present) =
             project_history(&context.view, context.character_id, focus);
         let task = match context.focus.intent {
-            TurnIntent::Reply if !target_present => Some(context.current_input.to_string()),
+            TurnIntent::Reply(ReplyTarget::Input) if !target_present => {
+                Some(context.current_input.to_string())
+            }
+            TurnIntent::Reply(ReplyTarget::Event(_)) if target_present => Some(format!(
+                "Текущая задача — ответить на отмеченное событие по инициативе внешнего диалогового контроллера. Учитывай и более поздние известные сведения.\n{}",
+                context.current_input
+            )),
+            TurnIntent::Reply(ReplyTarget::Event(_)) => Some(format!(
+                "Текущая задача — ответить на указанное известное событие.\n{}",
+                context.current_input
+            )),
             TurnIntent::React(_) if target_present => Some(format!(
                 "Текущая задача — отреагировать на отмеченное событие. Учитывай и более поздние известные сведения.\n{}",
                 context.current_input
@@ -235,7 +252,7 @@ impl LlmConversation {
                 context.current_input.to_string()
             }),
             TurnIntent::Initiate => Some(context.current_input.to_string()),
-            TurnIntent::Reply => None,
+            TurnIntent::Reply(ReplyTarget::Input) => None,
         };
         if let Some(text) = task {
             messages.push(LlmMessage {

@@ -229,3 +229,10 @@
 character message without synthesizing a player input; actual Unity dialogue
 roster/witness resolution; full provider/UI parity. No new recovery path or
 second authoritative message store was introduced.
+
+## Unity-directed conversation replies (2026-11-01)
+
+- [x] `ChatApi::reply(ReplyRequest::new(...).to_event(event))` handles an existing event via the same Reply contract as an input-originated reply; no separate ReplyToRequest or turn intent exists.
+- [x] Unity/Sandbox selects the responder and initiates each reply explicitly; Rust does not select dialogue turns or infer scene witnesses.
+- [x] Known message replies preserve `reply_to` and `ReplyTo` causal links. Known non-message events use `CausedBy` alongside the same `reply_to` target identity; no synthetic player message is appended.
+- [ ] Unity transport adapter and scene witness resolution require review of the current Unity wire schema.
