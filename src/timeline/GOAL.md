@@ -147,3 +147,11 @@
 - [ ] Проверить актуальный Unity/Python wire-контракт и реализовать настоящий
   ingress от работающих игровых producers. Проекция **не** означает завершение
   Unity ingress из этапа D. См. GitHub Issues #1 и #13.
+
+## Semantic ingress — Rust Core без предположений о Unity wire (2026-11-01)
+
+- [x] Публикация идентифицированного `SemanticBatch` с несколькими смысловыми событиями через `ApplicationLifecycle`, без запуска генерации; одна транзакция, один operation receipt, явные свидетели, исходные payload/ID/time и защита selection generation.
+- [x] Доменная проверка категорий: игровой ingress не выполняет reset, не редактирует сообщения и не подменяет запись диалога. Контракты SQLite и in-memory проверены, включая повторную доставку и crash/reopen.
+- [ ] Актуальный Unity↔Rust wire/transport, правила назначения свидетелей по Unity snapshot и автоматическая синхронизация presence не реализованы; старая Python `UnityTimelineIngress` изучена как источник функционального поведения, не как окончательная схема текущей Unity.
+
+Подробнее: [INGRESS.md](INGRESS.md). Это частичное закрытие функционального ingress, не завершение Unity integration из этапа D.

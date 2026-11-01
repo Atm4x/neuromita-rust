@@ -13,6 +13,7 @@ use crate::{
 
 pub use crate::identity::EventId;
 pub mod domain;
+pub mod ingress;
 mod legacy;
 pub mod selection;
 pub mod storage;
@@ -412,6 +413,25 @@ impl SessionTimeline {
                 branch_id: self.branch.0,
                 through: event.sequence,
             })
+    }
+
+    pub(crate) fn ingest_semantic_events(
+        &mut self,
+        expected: TimelineSelection,
+        batch: ingress::SemanticBatch,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let head = self.anchor().through;
+        ingress::append_semantic_batch(
+            self.store.as_mut(),
+            self.branch,
+            head,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+            },
+            batch,
+        )
     }
 
     pub(crate) fn append_player_message(

@@ -32,7 +32,8 @@ use crate::{
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
-        domain::{BranchId, TimelineError},
+        domain::{BranchId, TimelineError, TimelineFact},
+        ingress::SemanticBatch,
         selection::TimelineSelection,
     },
     voice::{UnavailableVoiceProvider, VoiceProvider},
@@ -320,6 +321,19 @@ impl ApplicationLifecycle {
             .lock()
             .expect("timeline lock poisoned")
             .select_branch(branch, expected)
+    }
+
+    /// Publish an explicitly identified group of semantic world events.
+    /// This does not enqueue a model request or interpret Unity wire messages.
+    pub fn publish_semantic_events(
+        &self,
+        expected: TimelineSelection,
+        batch: SemanticBatch,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?
+            .ingest_semantic_events(expected, batch)
     }
 
     pub fn timeline(&self) -> Vec<TimelineEvent> {
