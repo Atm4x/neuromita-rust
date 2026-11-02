@@ -25,3 +25,9 @@ With two records, semantic cold lookup invokes **2 provider requests / 3 embedde
 - Feature parity for TTL, RAG beyond long-term memories, knowledge graph, manual editor and model discovery is outside this slice. The cache is a small corpus exact cosine search, not an approximate ANN index; the domain cap is currently 256 live memories per character.
 
 An opt-in live evaluation runner and its strict input contract are documented in [SEMANTIC_BENCHMARK.md](SEMANTIC_BENCHMARK.md). It uses the same production lexical shortlist and semantic retriever, but **does not certify live quality** without explicit credentials and labelled representative queries.
+
+## Typed result, provenance and explicit filtering
+
+`SemanticMemoryRetriever::retrieve_filtered` accepts an explicit `SemanticRetrievalFilter { minimum_cosine }` in the inclusive `[-1, 1]` cosine range; `retrieve` retains the original unfiltered behavior. Filtering is performed **after exact snapshot-member embeddings and deterministic semantic ranking**, but before the existing record/character prompt budget. A filter that excludes all candidates does not invoke lexical retrieval. Invalid thresholds are configuration errors before any provider calls.
+
+`RetrievedMemory` now reports `status` (`EmptyCorpus`, `NoMatches`, `Selected`), the exact `EmbeddingSpace` (backend/model/protocol/dimensions), and ordered `matches` with Timeline `MemoryId` and cosine score for **only the records admitted to the final prompt**. This is memory-source provenance, not a claim of graph/history/document provenance, message-level ancestry or full RAG #22 parity. The authoritative membership and content still come solely from the captured Timeline projection; neither scores nor cache entries are durable facts. `EmbeddingError` remains an error rather than an empty successful result, with no hidden fallback. The default generation path does not apply an implicit score threshold.

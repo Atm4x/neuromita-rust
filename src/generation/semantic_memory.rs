@@ -54,10 +54,53 @@ pub struct RetrievalCost {
     pub cache_hits: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SemanticRetrievalFilter {
+    pub minimum_cosine: Option<f64>,
+}
+
+impl SemanticRetrievalFilter {
+    pub const fn all() -> Self {
+        Self {
+            minimum_cosine: None,
+        }
+    }
+
+    fn validate(self) -> Result<Self, EmbeddingError> {
+        if self
+            .minimum_cosine
+            .is_some_and(|score| !score.is_finite() || !(-1.0..=1.0).contains(&score))
+        {
+            return Err(EmbeddingError::Configuration(
+                "minimum cosine must be finite and within [-1, 1]".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalStatus {
+    EmptyCorpus,
+    NoMatches,
+    Selected,
+}
+
+/// One admitted Timeline memory. The ID identifies the source; the embedding
+/// space in RetrievedMemory identifies how its similarity was evaluated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievedMemoryMatch {
+    pub id: MemoryId,
+    pub cosine_similarity: f64,
+}
+
 #[derive(Debug)]
 pub struct RetrievedMemory {
     pub rendered: Option<String>,
     pub selected_ids: Vec<MemoryId>,
+    pub matches: Vec<RetrievedMemoryMatch>,
+    pub space: EmbeddingSpace,
+    pub status: RetrievalStatus,
     pub cost: RetrievalCost,
 }
 
@@ -101,6 +144,21 @@ impl SemanticMemoryRetriever {
         memories: &[MemoryRecord],
         query: &str,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        self.retrieve_filtered(character, memories, query, SemanticRetrievalFilter::all())
+            .await
+    }
+
+    /// Explicitly filter cosine similarity without changing the captured source
+    /// membership, the embedding cache or the provider error policy.
+    pub async fn retrieve_filtered(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        query: &str,
+        filter: SemanticRetrievalFilter,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let filter = filter.validate()?;
+        let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
             embedded_texts: 0,
@@ -111,10 +169,12 @@ impl SemanticMemoryRetriever {
             return Ok(RetrievedMemory {
                 rendered: None,
                 selected_ids: Vec::new(),
+                matches: Vec::new(),
+                space,
+                status: RetrievalStatus::EmptyCorpus,
                 cost,
             });
         }
-        let space = self.provider.space().clone();
         let keys: Vec<_> = memories
             .iter()
             .map(|memory| CacheKey {
@@ -207,11 +267,35 @@ impl SemanticMemoryRetriever {
                 .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
                 .then_with(|| a.id.cmp(&b.id))
         });
+        let candidates = ranked
+            .into_iter()
+            .filter(|(_, score)| filter.minimum_cosine.is_none_or(|min| *score >= min))
+            .collect::<Vec<_>>();
         let (rendered, selected_ids) =
-            render_ranked_memory_context(ranked.into_iter().map(|(m, _)| m));
+            render_ranked_memory_context(candidates.iter().map(|(memory, _)| *memory));
+        let selected_set = selected_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let matches = candidates
+            .into_iter()
+            .filter(|(memory, _)| selected_set.contains(&memory.id))
+            .map(|(memory, cosine_similarity)| RetrievedMemoryMatch {
+                id: memory.id,
+                cosine_similarity,
+            })
+            .collect();
+        let status = if selected_ids.is_empty() {
+            RetrievalStatus::NoMatches
+        } else {
+            RetrievalStatus::Selected
+        };
         Ok(RetrievedMemory {
             rendered,
             selected_ids,
+            matches,
+            space,
+            status,
             cost,
         })
     }

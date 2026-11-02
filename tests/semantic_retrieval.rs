@@ -396,3 +396,115 @@ async fn semantic_ranking_preserves_prompt_budget_and_order_independence() {
     assert_eq!(first.rendered, repeated.rendered);
     assert_eq!(repeated.cost.cache_hits, 256);
 }
+
+#[tokio::test]
+async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_space() {
+    use neuromita::generation::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
+
+    let fixture = Arc::new(SemanticFixture::new("model-a"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+    let memories = vec![
+        memory(3, MemoryPriority::Critical, "картина"),
+        memory(2, MemoryPriority::Low, "ромашковый чай"),
+    ];
+    let result = retrieval
+        .retrieve_filtered(
+            CharacterId::Mita,
+            &memories,
+            "согреться",
+            SemanticRetrievalFilter {
+                minimum_cosine: Some(0.5),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, RetrievalStatus::Selected);
+    assert_eq!(result.space, fixture.space);
+    assert_eq!(result.selected_ids, vec![memories[1].id]);
+    assert_eq!(result.matches.len(), 1);
+    assert_eq!(result.matches[0].id, memories[1].id);
+    assert!((result.matches[0].cosine_similarity - 1.0).abs() < 1e-6);
+    assert_eq!(result.cost.embedding_requests, 2);
+    assert!(result.rendered.unwrap().contains("ромашковый чай"));
+
+    let no_matches = retrieval
+        .retrieve_filtered(
+            CharacterId::Mita,
+            &memories,
+            "другая тема",
+            SemanticRetrievalFilter {
+                minimum_cosine: Some(0.5),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_matches.status, RetrievalStatus::NoMatches);
+    assert!(no_matches.selected_ids.is_empty());
+    assert!(no_matches.matches.is_empty());
+    assert!(no_matches.rendered.is_none());
+    assert_eq!(no_matches.cost.cache_hits, 2);
+    assert_eq!(no_matches.cost.embedding_requests, 1);
+
+    let no_memories = retrieval
+        .retrieve(CharacterId::Mita, &[], "другая тема")
+        .await
+        .unwrap();
+    assert_eq!(no_memories.status, RetrievalStatus::EmptyCorpus);
+    assert!(no_memories.matches.is_empty());
+    assert_eq!(no_memories.cost.embedding_requests, 0);
+}
+
+#[tokio::test]
+async fn invalid_similarity_filter_is_rejected_before_embedding_requests() {
+    use neuromita::generation::semantic_memory::SemanticRetrievalFilter;
+
+    let fixture = Arc::new(SemanticFixture::new("model-a"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+    for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.01, 1.01] {
+        let error = retrieval
+            .retrieve_filtered(
+                CharacterId::Mita,
+                &[memory(1, MemoryPriority::Normal, "чай")],
+                "согреться",
+                SemanticRetrievalFilter {
+                    minimum_cosine: Some(score),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EmbeddingError::Configuration(_)));
+    }
+    assert_eq!(fixture.query_count.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.document_batches.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn semantic_results_remain_distinguishable_from_provider_failure() {
+    use neuromita::generation::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
+
+    let fixture = Arc::new(SemanticFixture {
+        fail: true,
+        ..SemanticFixture::new("model-a")
+    });
+    let retrieval = SemanticMemoryRetriever::new(fixture, 16).unwrap();
+    let memories = [memory(1, MemoryPriority::Normal, "чай")];
+    let failure = retrieval
+        .retrieve_filtered(
+            CharacterId::Mita,
+            &memories,
+            "согреться",
+            SemanticRetrievalFilter {
+                minimum_cosine: Some(0.5),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(failure, EmbeddingError::Transport(_)));
+
+    let empty = retrieval
+        .retrieve(CharacterId::Mita, &[], "согреться")
+        .await
+        .unwrap();
+    assert_eq!(empty.status, RetrievalStatus::EmptyCorpus);
+}
