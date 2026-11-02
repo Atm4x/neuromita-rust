@@ -20,5 +20,5 @@ pub mod settings;
 pub mod timeline;
 pub mod voice;
 
-pub mod memory;
+pub use character::memory;
 pub mod turn;

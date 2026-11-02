@@ -16,8 +16,10 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
+    character::memory_access::{CharacterMemorySnapshot, MemoryEditResult},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
+    memory::MemoryCommand,
     timeline::domain::{AppliedEffect, CharacterBehavior},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
@@ -35,6 +37,8 @@ pub enum CharacterError {
     Unavailable,
     #[error("character state changed since context preparation")]
     StaleState,
+    #[error("invalid character memory operation: {0}")]
+    InvalidMemory(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
 }
@@ -76,6 +80,12 @@ enum Command {
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
     },
     State(oneshot::Sender<Result<CharacterState, CharacterError>>),
+    MemorySnapshot(oneshot::Sender<Result<CharacterMemorySnapshot, CharacterError>>),
+    EditMemory {
+        expected: CharacterMemorySnapshot,
+        commands: Vec<MemoryCommand>,
+        reply: oneshot::Sender<Result<MemoryEditResult, CharacterError>>,
+    },
     View {
         at: ContextAnchor,
         reply: oneshot::Sender<Result<CharacterView, CharacterError>>,
@@ -92,6 +102,32 @@ pub struct CharacterHandle {
 }
 
 impl CharacterHandle {
+    pub async fn memories(&self) -> Result<CharacterMemorySnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::MemorySnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn edit_memories(
+        &self,
+        expected: CharacterMemorySnapshot,
+        commands: Vec<MemoryCommand>,
+    ) -> Result<MemoryEditResult, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::EditMemory {
+                expected,
+                commands,
+                reply,
+            })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
     pub async fn state(&self) -> Result<CharacterState, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -293,6 +329,51 @@ impl CharacterHandler {
                     reply,
                 } => {
                     let _ = reply.send(self.accept(request, context, proposed, audio, audience));
+                }
+                Command::MemorySnapshot(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            timeline
+                                .character_memory_snapshot(self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::EditMemory {
+                    expected,
+                    commands,
+                    reply,
+                } => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|mut timeline| {
+                            if expected.character != self.character.id {
+                                return Err(CharacterError::StaleState);
+                            }
+                            let applied = timeline
+                                .edit_character_memories(
+                                    self.character.id,
+                                    expected.selection,
+                                    expected.anchor,
+                                    &commands,
+                                )
+                                .map_err(|error| match error {
+                                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                        CharacterError::StaleState
+                                    }
+                                    other => CharacterError::Internal(other.to_string()),
+                                })?;
+                            let snapshot = timeline
+                                .character_memory_snapshot(self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                            Ok(MemoryEditResult { applied, snapshot })
+                        });
+                    let _ = reply.send(result);
                 }
                 Command::State(reply) => {
                     let state = self
