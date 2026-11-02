@@ -2,9 +2,11 @@
 
 pub mod backend;
 pub mod bootstrap;
+pub mod composition;
 mod layer;
 pub mod managed;
 pub mod overlay;
+pub mod resolver;
 pub mod uv;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
@@ -123,14 +125,21 @@ struct WorkerProcess {
 }
 
 impl WorkerProcess {
-    async fn launch(config: &PythonHostConfig) -> Result<Self, AiRuntimeError> {
+    async fn launch(config: &PythonHostConfig, layers: &[PathBuf]) -> Result<Self, AiRuntimeError> {
+        let mut imports = vec![config.sdk_root.clone()];
+        imports.extend(layers.iter().cloned());
+        let python_path = std::env::join_paths(&imports)
+            .map_err(|e| AiRuntimeError::Protocol(format!("invalid Python import path: {e}")))?;
         let mut command = Command::new(&config.python_executable);
         command
             .arg("-m")
             .arg("neuromita_ai_sdk.host")
             .arg("--plugins-dir")
             .arg(&config.plugins_directory)
-            .env("PYTHONPATH", &config.sdk_root)
+            .env("PYTHONPATH", python_path)
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env_remove("PYTHONHOME")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -270,7 +279,29 @@ impl AiSupervisor {
         if workers.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config).await?;
+        let worker = WorkerProcess::launch(&self.config, &[]).await?;
+        let generation = worker.generation;
+        workers.insert(key, Arc::new(Mutex::new(worker)));
+        Ok(generation)
+    }
+
+    pub async fn start_composed(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services.contains(&service) {
+            return Err(AiRuntimeError::Protocol("service absent from resolved composition".into()));
+        }
+        if self.topology == ProcessTopology::Split && composition.services != [service] {
+            return Err(AiRuntimeError::Protocol("split worker contains another service".into()));
+        }
+        let key = self.topology.key(service);
+        let mut workers = self.workers.lock().await;
+        if workers.contains_key(&key) {
+            return Err(AiRuntimeError::AlreadyRunning);
+        }
+        let worker = WorkerProcess::launch(&self.config, &composition.paths).await?;
         let generation = worker.generation;
         workers.insert(key, Arc::new(Mutex::new(worker)));
         Ok(generation)
