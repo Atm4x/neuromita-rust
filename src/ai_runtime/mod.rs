@@ -1,5 +1,8 @@
 //! Rust-owned process lifecycle and correlated JSON-lines IPC for Python AI plugins.
 
+pub mod bootstrap;
+pub mod overlay;
+
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use base64::Engine;
