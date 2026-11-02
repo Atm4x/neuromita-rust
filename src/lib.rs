@@ -2,6 +2,7 @@ pub mod api;
 pub mod app;
 pub mod character;
 pub mod generation;
+pub mod launcher;
 pub mod lifecycle;
 pub mod presentation;
 pub mod request;
