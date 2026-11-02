@@ -142,13 +142,20 @@ impl ServerLifecycle {
         api: Arc<ApiBindings>,
     ) -> io::Result<()> {
         let clients_stop = CancellationToken::new();
-        let mut clients = JoinSet::new();
+        let mut clients: JoinSet<io::Result<()>> = JoinSet::new();
         self.state.change(|state| state.running = true);
         let mut failure = None;
         loop {
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
+                result = clients.join_next(), if !clients.is_empty() => {
+                    match result {
+                        Some(Ok(Err(error))) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
+                        Some(Err(error)) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
+                        _ => {}
+                    }
+                }
                 connected = self.listener.accept() => {
                     match connected {
                         Ok((stream, _)) => {
@@ -164,13 +171,6 @@ impl ServerLifecycle {
                             });
                         }
                         Err(error) => { failure = Some(error); break; }
-                    }
-                }
-                result = clients.join_next(), if !clients.is_empty() => {
-                    match result {
-                        Some(Ok(Err(error))) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
-                        Some(Err(error)) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
-                        _ => {}
                     }
                 }
             }
@@ -196,7 +196,7 @@ impl Drop for Connected {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
-    Test,
+    Test {},
     Reply {
         character: CharacterId,
         text: String,
@@ -204,7 +204,7 @@ enum Command {
     Cancel {
         request_id: Uuid,
     },
-    Settings,
+    Settings {},
     SetVolume {
         value: Volume,
     },
@@ -316,7 +316,7 @@ async fn client(
                 _ = stop.cancelled() => break,
                 line = read_command(&mut reader, config.max_command_bytes.get()) => match line? { Some(line) => line, None => break },
             };
-            let envelope = if line == "test" { Ok(Envelope { command_id: Uuid::new_v4(), command: Command::Test }) } else { serde_json::from_str::<Envelope>(&line) };
+            let envelope = if line == "test" { Ok(Envelope { command_id: Uuid::new_v4(), command: Command::Test {} }) } else { serde_json::from_str::<Envelope>(&line) };
             let envelope = match envelope {
                 Ok(envelope) => envelope,
                 Err(error) => { send(&outbound, json!({"type":"error","error":error.to_string()}), &stop).await?; continue; }
@@ -332,13 +332,15 @@ async fn client(
                 continue;
             }
             match envelope.command {
-                Command::Test | Command::Reply { .. } => {
-                    if receipts.len() >= config.receipt_capacity.get() {
-                        if receipts.front().is_some_and(|receipt| receipt.handle.snapshot().state.is_terminal()) { receipts.pop_front(); }
-                        else { send(&outbound, json!({"type":"error","error":"too many tracked requests"}), &stop).await?; continue; }
-                    }
+                Command::Test {} | Command::Reply { .. } => {
+                    let eviction = if receipts.len() >= config.receipt_capacity.get() {
+                        match receipts.iter().position(|receipt| receipt.handle.snapshot().state.is_terminal()) {
+                            Some(index) => Some(index),
+                            None => { send(&outbound, json!({"type":"error","error":"too many tracked requests"}), &stop).await?; continue; }
+                        }
+                    } else { None };
                     let (character, text) = match envelope.command {
-                        Command::Test => (config.test_character, "test".to_owned()),
+                        Command::Test {} => (config.test_character, "test".to_owned()),
                         Command::Reply { character, text } => (character, text),
                         _ => unreachable!(),
                     };
@@ -349,6 +351,7 @@ async fn client(
                         Ok(handle) => handle,
                         Err(error) => { send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error}), &stop).await?; continue; }
                     };
+                    if let Some(index) = eviction { receipts.remove(index); }
                     send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,"request_id":handle.id().0,"replayed":false}), &stop).await?;
                     receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, handle: handle.clone() });
                     let outbound = outbound.clone();
@@ -368,7 +371,7 @@ async fn client(
                     };
                     send(&outbound, response, &stop).await?;
                 }
-                Command::Settings => {
+                Command::Settings {} => {
                     let snapshot = api.settings.snapshot_all().map_err(io::Error::other)?;
                     send(&outbound, json!({"type":"settings","revision":snapshot.revision,"settings":snapshot.values}), &stop).await?;
                 }

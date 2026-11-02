@@ -67,6 +67,8 @@ SettingsPresenter.voice предоставляет bindable volume/in_launcher/i
 
 ## Тестовый сетевой контракт
 
+Подробные границы внешнего клиента, ошибки, повторы и отличия от Python/Unity: [Rust local control](docs/03-runtime/rust-local-control.md).
+
 ServerLifecycle обслуживает TCP с UTF-8 JSON lines. Каждое сообщение завершается newline. Сразу после подключения приходит connected с client_id; далее settings snapshot и обновления.
 
 Для простейшей проверки отправить строку:
