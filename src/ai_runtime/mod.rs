@@ -283,6 +283,7 @@ pub struct AiSupervisor {
     topology: ProcessTopology,
     config: PythonHostConfig,
     workers: Mutex<HashMap<WorkerKey, Arc<Mutex<WorkerProcess>>>>,
+    activation_locks: Mutex<HashMap<WorkerKey, Arc<Mutex<()>>>>,
 }
 
 impl AiSupervisor {
@@ -291,18 +292,32 @@ impl AiSupervisor {
             topology,
             config,
             workers: Mutex::new(HashMap::new()),
+            activation_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn activation_lock(&self, key: WorkerKey) -> Arc<Mutex<()>> {
+        self.activation_locks
+            .lock()
+            .await
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub async fn start(&self, service: AiService) -> Result<Uuid, AiRuntimeError> {
         let key = self.topology.key(service);
-        let mut workers = self.workers.lock().await;
-        if workers.contains_key(&key) {
+        let slot = self.activation_lock(key).await;
+        let _guard = slot.lock().await;
+        if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
         let worker = WorkerProcess::launch(&self.config, &[]).await?;
         let generation = worker.generation;
-        workers.insert(key, Arc::new(Mutex::new(worker)));
+        self.workers
+            .lock()
+            .await
+            .insert(key, Arc::new(Mutex::new(worker)));
         Ok(generation)
     }
 
@@ -318,13 +333,17 @@ impl AiSupervisor {
             return Err(AiRuntimeError::Protocol("split worker contains another service".into()));
         }
         let key = self.topology.key(service);
-        let mut workers = self.workers.lock().await;
-        if workers.contains_key(&key) {
+        let slot = self.activation_lock(key).await;
+        let _guard = slot.lock().await;
+        if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
         let worker = WorkerProcess::launch(&self.config, composition.paths()).await?;
         let generation = worker.generation;
-        workers.insert(key, Arc::new(Mutex::new(worker)));
+        self.workers
+            .lock()
+            .await
+            .insert(key, Arc::new(Mutex::new(worker)));
         Ok(generation)
     }
 
@@ -367,7 +386,9 @@ impl AiSupervisor {
                 "provide exactly one model per selected service".into(),
             ));
         }
-        let mut workers = self.workers.lock().await;
+        let key = self.topology.key(service);
+        let slot = self.activation_lock(key).await;
+        let _guard = slot.lock().await;
         let mut candidate = WorkerProcess::launch(&self.config, layers).await?;
         let prepare = async {
             let available = candidate.request("discover", &json!({})).await?;
@@ -408,8 +429,11 @@ impl AiSupervisor {
             return Err(error);
         }
         let generation = candidate.generation;
-        let old = workers.insert(self.topology.key(service), Arc::new(Mutex::new(candidate)));
-        drop(workers);
+        let old = self
+            .workers
+            .lock()
+            .await
+            .insert(key, Arc::new(Mutex::new(candidate)));
         if let Some(old) = old {
             let mut old = old.lock().await;
             let _ = old.child.start_kill();
@@ -419,11 +443,10 @@ impl AiSupervisor {
     }
 
     pub async fn stop(&self, service: AiService) -> Result<(), AiRuntimeError> {
-        let worker = self
-            .workers
-            .lock()
-            .await
-            .remove(&self.topology.key(service));
+        let key = self.topology.key(service);
+        let slot = self.activation_lock(key).await;
+        let _guard = slot.lock().await;
+        let worker = self.workers.lock().await.remove(&key);
         let Some(worker) = worker else {
             return Err(AiRuntimeError::NotRunning);
         };
@@ -558,6 +581,82 @@ mod tests {
             ProcessTopology::Split.key(AiService::Tts),
             ProcessTopology::Split.key(AiService::Asr)
         );
+    }
+
+    #[tokio::test]
+    async fn split_activation_does_not_block_unrelated_asr_calls() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let temp = std::env::temp_dir().join(format!("nm-split-{}", Uuid::new_v4()));
+        let plugins = temp.join("plugins");
+        for id in ["mock_tts", "mock_asr"] {
+            let src = source.join("plugins/builtin").join(id);
+            let dest = plugins.join(id);
+            tokio::fs::create_dir_all(&dest).await.unwrap();
+            tokio::fs::copy(src.join("plugin.json"), dest.join("plugin.json"))
+                .await
+                .unwrap();
+            let mut code = tokio::fs::read_to_string(src.join("plugin.py"))
+                .await
+                .unwrap();
+            if id == "mock_tts" {
+                let needle = "    def initialize(self, settings):\n";
+                assert!(code.contains(needle));
+                code = code.replace(
+                    needle,
+                    "    def initialize(self, settings):\n        import time\n        time.sleep(0.6)\n",
+                );
+            }
+            tokio::fs::write(dest.join("plugin.py"), code)
+                .await
+                .unwrap();
+        }
+        let python =
+            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let supervisor = Arc::new(AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: python.into(),
+                sdk_root: source.clone(),
+                plugins_directory: plugins,
+                request_timeout: Duration::from_secs(10),
+            },
+        ));
+        supervisor.start(AiService::Asr).await.unwrap();
+        supervisor
+            .initialize(AiService::Asr, "mock_asr", json!({}))
+            .await
+            .unwrap();
+        let next = Arc::clone(&supervisor);
+        let activation = tokio::spawn(async move {
+            next.reconfigure(
+                AiService::Tts,
+                &[AiService::Tts],
+                &[],
+                &[ModelActivation {
+                    service: AiService::Tts,
+                    plugin_id: "mock_tts".into(),
+                    settings: json!({}),
+                }],
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let response = timeout(
+            Duration::from_millis(300),
+            supervisor.call(
+                AiService::Asr,
+                "infer",
+                json!({"kind":"asr", "input":{"mock_transcript":"unblocked"}}),
+            ),
+        )
+        .await
+        .expect("TTS initialization must not block ASR")
+        .unwrap();
+        assert_eq!(response["text"], "unblocked");
+        activation.await.unwrap().unwrap();
+        supervisor.stop(AiService::Tts).await.unwrap();
+        supervisor.stop(AiService::Asr).await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
     }
 
     #[tokio::test]
