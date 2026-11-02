@@ -81,3 +81,20 @@
 - [x] Rust-owned Supervisor Shared/Split, version handshake, correlations, bounded frames и отдельные поколения worker; `PythonVoiceProvider` подключает существующий voice trait.
 - [x] Contract tests в Python и Rust, Rust 1.98.1 full no-default suite + Clippy.
 - [ ] Python bootstrap через uv, установка и активация environments, production discovery, assets, VAD, клиенты и интеграция в ApplicationLifecycle. Архитектурные issues #24/#42/#59/#60/#61 остаются открытыми.
+
+## AI Runtime Implementation — staged bootstrap and overlays (2026-11-03)
+
+**Первая публикация:** Python SDK, mock TTS/ASR, типизированный host IPC и Rust-owned Supervisor — коммиты `c4b5748`, `4458119` (предшествующий этап).
+
+**Текущая публикация:** отдельные `src/ai_runtime/bootstrap.rs` и `src/ai_runtime/overlay.rs`. Это инфраструктурные компоненты, **не** завершённый сквозной installer.
+
+- [x] Managed CPython bootstrap из **уже предоставленного uv binary**: exact major.minor.patch, `uv python install --no-bin --install-dir`, `uv python find --managed-python --no-python-downloads`, отдельные AIData/cache, проверка абсолютного managed path, повторный запуск без повторной установки, explicit errors.
+- [x] Immutable package overlay из **предварительно разрешённого lock**: `uv pip install --target` с `--no-deps`, staging, manifest, idempotence/conflict, очистка staging при ошибке, запрет установки torch/onnxruntime в модельный overlay.
+- [x] Локальные Rust tests: 8 AI Runtime tests PASS, full `--no-default-features` PASS, `cargo clippy --no-default-features -D warnings` PASS; полный default-feature suite PASS при последовательном выполнении (параллельный launcher test один раз дал Linux ETXTBSY и отдельно прошёл).
+- [ ] Получение/верификация самого uv с релиза или доверенного зеркала, SHA-256/архивы и конкретная pin-policy.
+- [ ] Resolver/lock step, verifiable backend layers, asset download/probe/hooks, plugin approval и atomic activation.
+- [ ] Стыковка bootstrap/install с `AiSupervisor` и AI Hub, shared/split environment composition.
+- [ ] Реальный скачанный Python/uv integration test и Windows validation (сейчас mock uv; offline tests).
+- [ ] Контрактная сверка опубликованного Git tree в CI; локальные тесты выполнены на исходниках рабочей копии.
+
+Все статусы readiness различать: discovered / installed / environment-ready / worker-ready / model-ready. Не считать наличие manifest доказательством импортируемости модулей и работоспособности модели.
