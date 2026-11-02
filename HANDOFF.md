@@ -40,6 +40,7 @@ Read [minimal-contracts](future/minimal-contracts.md) and [checklist](future/imp
 | Provider port and Gemini | src/generation/ |
 | Voice port | src/voice.rs |
 | Settings/storage | src/settings/ |
+| Migration/transfer | src/migration.rs, src/settings/migration.rs, src/settings/transfer.rs, src/settings_cli.rs |
 | Presenter/binding | src/presentation/ |
 | Network | src/server.rs |
 | Console | src/main.rs, src/terminal.rs |
@@ -88,3 +89,5 @@ Read future/architecture-fixes-20261102.md. CharacterHandler accepts private-fie
 TTS runs in Working. Cancellation/reset/shutdown before acceptance discards text and effects. Voice failure can produce accepted text with VoiceGenerationFailed. Frontend animations and delivery/execution acknowledgments remain unfinished.
 
 Default sqlite-system uses vendored rusqlite/bundled SQLite; external sqlite3.lib and hand-written FFI are gone. Persistent bootstrap restores Timeline; --no-default-features supports explicit transient configurations and rejects persistent Timeline. Test and run Clippy in both modes.
+
+Settings migration/import/export: read future/settings-migrations.md. Migration<Input> is a minimal conversion port; owners determine startup order and commit. JSON startup and transfer share RustSettingsMigration (v1 -> v2); current-schema fields are mandatory. SettingsApi::prepare_import is pure; import(expected_revision, SettingsTransfer) performs CAS through the current owner, advances its own revision and publishes ordinary bindings. Presenter uses its original owner. Offline settings CLI preserves envelope revision and atomically replaces a file for a stopped app. Python migration explicitly returns NotImplemented; no real Python settings are read or imported. No new dependencies were added.

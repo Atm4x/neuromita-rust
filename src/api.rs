@@ -12,8 +12,8 @@ use crate::{
     },
     runtime::{self, ApiUnavailable},
     settings::{
-        SectionSnapshot, SettingsApi, SettingsError, SettingsOwner, SettingsSection,
-        SettingsSnapshot,
+        SectionSnapshot, SettingsApi, SettingsError, SettingsImportFormat, SettingsOwner,
+        SettingsSection, SettingsSnapshot, SettingsTransfer, SettingsTransferError,
     },
     timeline::EventId,
 };
@@ -135,6 +135,22 @@ impl SettingsApi {
     }
     pub fn observe() -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
         Self::owner()?.observe()
+    }
+    /// Pure preparation, also available before the Core is started.
+    pub fn prepare_import(
+        format: SettingsImportFormat,
+        bytes: &[u8],
+    ) -> Result<SettingsTransfer, SettingsTransferError> {
+        SettingsTransfer::prepare(format, bytes)
+    }
+    pub fn export() -> Result<SettingsTransfer, SettingsError> {
+        Self::owner()?.export()
+    }
+    pub fn import(
+        expected_revision: u64,
+        transfer: SettingsTransfer,
+    ) -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        Self::owner()?.import(expected_revision, transfer)
     }
     pub fn replace<T: SettingsSection>(
         expected_revision: u64,

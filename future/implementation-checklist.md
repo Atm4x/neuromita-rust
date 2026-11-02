@@ -23,6 +23,7 @@
 - [x] Озвучка как порт: GeneratingVoice, результат аудио, ошибка с рабочим текстом, отмена до эффектов.
 - [x] Полезный частичный результат при internal error и диагностическая история сборки запроса.
 - [x] Типизированные настройки разделов, validation, revision/conflict, наблюдение.
+- [x] Общий Migration trait, единая Rust-миграция startup/import, SettingsTransfer, live import/export с CAS и offline CLI; Python stub без переноса. [Контракт](settings-migrations.md).
 - [x] SettingsLifecycle, memory/JSON repository, отдельный исход сохранения и flush/shutdown.
 - [x] SettingsPresenter и типизированные bindable-свойства без циклов обратной записи.
 - [x] CharactersPresenter и полный контракт GuiPresenter.

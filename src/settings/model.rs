@@ -120,7 +120,6 @@ pub struct PresetSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
-    #[serde(default)]
     pub presets: PresetSettings,
     pub characters: CharactersSettings,
     pub voice: VoiceSettings,

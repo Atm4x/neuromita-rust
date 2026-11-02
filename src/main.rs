@@ -1,3 +1,4 @@
+mod settings_cli;
 mod terminal;
 
 use std::{error::Error, num::NonZeroUsize, process::ExitCode, sync::Arc, time::Duration};
@@ -22,6 +23,10 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("settings")) {
+        return settings_cli::run(arguments.collect());
+    }
     let Some(options) = terminal::Options::parse()? else {
         return Ok(());
     };

@@ -6,7 +6,7 @@ use crate::{
     character::CharacterId,
     settings::{
         AppSettings, CharactersSettings, PresetId, PresetSelection, PresetSettings, SettingsError,
-        SettingsOwner, SettingsSnapshot, VoiceSettings, Volume,
+        SettingsOwner, SettingsSnapshot, SettingsTransfer, VoiceSettings, Volume,
     },
 };
 
@@ -237,6 +237,16 @@ impl SettingsPresenter {
     }
     pub fn observe(&self) -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
         self.owner.observe()
+    }
+    pub fn export(&self) -> Result<SettingsTransfer, SettingsError> {
+        self.owner.export()
+    }
+    pub fn import(
+        &self,
+        expected_revision: u64,
+        transfer: SettingsTransfer,
+    ) -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        self.owner.import(expected_revision, transfer)
     }
 }
 

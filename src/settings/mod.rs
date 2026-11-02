@@ -1,9 +1,13 @@
+mod migration;
 mod model;
 mod storage;
+mod transfer;
 
 pub use crate::generation::PresetId;
+pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
 pub use storage::*;
+pub use transfer::{SettingsImportFormat, SettingsTransfer, SettingsTransferError};
 
 use std::sync::{Arc, Mutex};
 
@@ -91,6 +95,25 @@ impl SettingsOwner {
             return Err(SettingsError::Stopped);
         }
         Ok(self.updates.subscribe())
+    }
+
+    pub(crate) fn export(&self) -> Result<SettingsTransfer, SettingsError> {
+        let snapshot = self.snapshot_all()?;
+        Ok(SettingsTransfer::new(StoredSettings {
+            schema_version: SETTINGS_SCHEMA_VERSION,
+            revision: snapshot.revision,
+            settings: snapshot.values.clone(),
+        })?)
+    }
+
+    pub(crate) fn import(
+        &self,
+        expected_revision: u64,
+        transfer: SettingsTransfer,
+    ) -> Result<Arc<SettingsSnapshot>, SettingsError> {
+        self.change(Some(expected_revision), move |settings| {
+            *settings = transfer.into_stored().settings;
+        })
     }
     pub(crate) fn replace<T: SettingsSection>(
         &self,

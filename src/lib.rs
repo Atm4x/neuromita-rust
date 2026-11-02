@@ -5,6 +5,7 @@ pub mod generation;
 mod identity;
 mod interaction;
 pub mod lifecycle;
+pub mod migration;
 pub mod presentation;
 pub mod request;
 mod runtime;
