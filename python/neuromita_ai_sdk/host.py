@@ -78,11 +78,36 @@ class PluginHost:
                 raise ValueError(f"plugin missing {operation} contract")
         return plugin
 
+    def _load_install_contract(self, plugin_id: str) -> Any:
+        if not isinstance(plugin_id, str) or not plugin_id.isascii() or not plugin_id.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("invalid plugin id")
+        directory = self.plugins_dir / plugin_id
+        self._manifest(directory)
+        entrypoint = directory / "installplan.py"
+        if not entrypoint.exists():
+            return self._load(plugin_id)
+        if entrypoint.is_symlink() or not entrypoint.is_file():
+            raise ValueError("install contract must be a regular file")
+        spec = importlib.util.spec_from_file_location("neuromita_install_" + plugin_id, entrypoint)
+        if spec is None or spec.loader is None:
+            raise ValueError("cannot load install contract")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        with contextlib.redirect_stdout(sys.stderr):
+            spec.loader.exec_module(module)
+            contract = module.InstallContract()
+        for method in ("install_plan", "probe_install", "settings_schema"):
+            if not callable(getattr(contract, method, None)):
+                raise ValueError(f"install contract missing {method}")
+        return contract
+
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
         if op == "discover":
             return self.discover()
         if op in ("describe", "install_plan", "probe_install", "settings_schema"):
-            plugin = self._load(args["plugin_id"])
+            plugin = (self._load_install_contract(args["plugin_id"])
+                      if op in ("install_plan", "probe_install", "settings_schema")
+                      else self._load(args["plugin_id"]))
             with contextlib.redirect_stdout(sys.stderr):
                 result = getattr(plugin, op)()
             if op == "install_plan":
