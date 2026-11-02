@@ -6,7 +6,7 @@
 
 2026-11-02 прочитаны `src/services/runtime_ipc_service.py`, `src/core/runtime_ipc.py`, регистрация в `src/controllers/main_controller.py` и `ai.restart_service` в `src/controllers/ai_engine_controller.py` из локального Python checkout `Atm4x_NeuroMita`, commit `9f1c66f4178d900e1a898d38bf5808d2fcd7bb86`. Эти четыре файла не имели локальных изменений. Python endpoint не запускался; это проверка исходников и production-регистрации, не live-проверка пользовательского клиента.
 
-В Python подтверждены `ipc.ping`, `ipc.status`, `ipc.methods`, `hardware.snapshot`, `ai.topology`, `ai.restart_service`. Они зарегистрированы явно; listener включается настройкой и привязывается к loopback. Rust не реализует этот каталог или Python wire format: аппаратный inventory и AI administration ещё отсутствуют. Их перенос, live-переключение порта и UI enable/disable остаются отдельной функциональной работой. Поддержка текущего Unity wire protocol также не заявлена. Сравнение с аудитом: [Python local control](local-control-ipc.md), [Unity transport](unity-transport.md).
+В Python подтверждены `ipc.ping`, `ipc.status`, `ipc.methods`, `hardware.snapshot`, `ai.topology`, `ai.restart_service`. Они зарегистрированы явно; listener включается настройкой и привязывается к loopback. Rust предоставляет собственные `ping`, `methods`, `server_status` для текущего Core, но не реализует Python wire format: аппаратный inventory и AI administration ещё отсутствуют. Их перенос, live-переключение порта и UI enable/disable остаются отдельной функциональной работой. Поддержка текущего Unity wire protocol также не заявлена. Сравнение с аудитом: [Python local control](local-control-ipc.md), [Unity transport](unity-transport.md).
 
 ## Соединение и команды
 
@@ -18,6 +18,9 @@
 
 | Команда | Поля | Результат |
 | --- | --- | --- |
+| `ping` | без аргументов | `pong` с command_id; подтверждает работу endpoint, не готовность inference |
+| `methods` | без аргументов | `methods` с массивом имён восьми поддерживаемых команд |
+| `server_status` | без аргументов | диагностика listener, клиентов и настроенных пределов |
 | `test` | только `command_id`, `command` | запрос `test` заданному в ServerConfig персонажу |
 | `reply` | `character`: `mita` или `kind-mita`; непустой `text` | `accepted` с `request_id` либо `error` |
 | `cancel` | `request_id` | результат отмены своего запроса либо отказ |
@@ -36,7 +39,35 @@
 
 Пределы задаёт ServerConfig: max_clients, outbound_capacity, max_command_bytes и receipt_capacity. Размер кадра считается в байтах вместе с завершающим newline (и CR при CRLF). При заполнении очереди персонажа Core отказывает в приёме. Переполнение учёта запросов также даёт отказ; переполненный listener закрывает лишнее подключение. Ограниченный outbound применяет backpressure, без гарантированного срока доставки медленному клиенту. Idle/read deadline не задан; shutdown должен прерывать в том числе idle и незавершённый ввод.
 
-Некорректная JSON-команда отвергается; следующее корректное сообщение в соединении может быть обработано. Нарушения framing (превышение размера, не-UTF-8, EOF посреди кадра) завершают соединение. Ошибка такого клиента не останавливает listener или Core. Error payload пока строковый: стабильные машинные error codes и общая correlation всех control responses не обещаются.
+Некорректная JSON-команда отвергается; следующее корректное сообщение в соединении может быть обработано. Неизвестные и дублирующиеся поля отвергаются при типизированном чтении исходной строки. Нарушения framing (превышение размера, не-UTF-8, EOF посреди кадра) завершают соединение без гарантированного error-кадра. Ошибка такого клиента не останавливает listener или Core.
+
+### Correlation и машинные ошибки
+
+Все явные ответы `pong`, `methods`, `server_status`, `settings`, `settings_applied`, `cancel`, `accepted` содержат исходный UUID `command_id`. Первоначальный и последующие unsolicited `settings` snapshots не имеют command_id; они могут перемежаться с ответами. `request_status` коррелируется по request_id. Для вновь принятого запроса `accepted` ставится в outbound раньше его статусов; при replay `accepted` предшествует текущему snapshot. Промежуточные revisions не гарантируются. Control-команды не получают дедупликации: повтор `set_volume`/`cancel` исполняется заново, если ID не конфликтует с удерживаемой квитанцией генерации.
+
+Форма отказа: `{"type":"error","code":"invalid_command","error":"описание","command_id":"UUID"}`. Строка error сохранена для человека; клиент должен выбирать поведение по code. ID возвращается, если исходная строка — корректный JSON с единственным валидным UUID command_id; при синтаксической ошибке, отсутствующем/невалидном/дублированном ID correlation опускается. Value-разбор используется лишь для классификации неизвестной команды, а не для приёма: он не может скрыть дублирующиеся поля исходного Envelope.
+
+| code | Значение |
+| --- | --- |
+| `malformed_json` | JSON не разбирается: syntax/EOF/trailing content |
+| `unknown_command` | строковое имя команды отсутствует в текущем каталоге |
+| `invalid_command` | структура, типы, обязательные/лишние/дублирующиеся поля или десериализация значения (включая Volume вне 0..100) |
+| `invalid_value` | типизированная команда отклонена проверкой Core input/settings, например пустой текст |
+| `command_id_conflict` | удерживаемый command_id уже принят с другим намерением |
+| `queue_full` | очередь персонажа не приняла запрос |
+| `receipt_capacity` | все квитанции заняты незавершёнными запросами |
+| `ownership_denied` | request_id не принадлежит удерживаемой квитанции этого соединения |
+| `core_unavailable` | Core/settings остановлены, очередь закрыта или персонаж недоступен |
+| `settings_conflict` | отказ по revision настроек |
+| `settings_storage` | ошибка хранилища настроек |
+
+Последние два кода отображают типизированные ошибки settings; текущие команды не предоставляют CAS/flush и не обещают, что эти ветви достижимы обычным клиентом. Исходы генерации остаются в существующих полях request_status (`outcome`, `error`), а не превращаются в отказ команды.
+
+### Discovery и диагностика
+
+`methods` возвращает `{"type":"methods","command_id":"UUID","methods":["ping","methods","server_status","test","reply","cancel","settings","set_volume"]}`. Каталог и типизированные варианты Command объявлены совместно; dispatch проверяется исчерпывающим match. Это фиксированный контракт endpoint, без reflection и динамического поиска сервисов.
+
+`server_status` возвращает type/command_id и поля `address` (фактически привязанный адрес, включая назначенный ОС порт), `running`, `connected_clients`, `accepted_connections`, `has_error`, `limits`. Limits содержит max_clients, outbound_capacity, max_command_bytes, receipt_capacity. Connected_clients включает запрашивающее соединение; accepted_connections считает только допущенные соединения за жизнь listener, а не отвергнутые сверх лимита. Has_error означает сохранённую ошибку клиентской задачи; флаг не сбрасывается успешной командой. Raw last_error не передаётся по сети, чтобы не раскрывать внутренние сообщения или credentials. Снимок может измениться сразу после чтения; running описывает listener, не готовность модели, провайдера, GPU или Python-сервисов.
 
 ## Воспроизводимая проверка
 
@@ -44,6 +75,9 @@
 
 | Контрактный сценарий в `tests/local_control.rs` | Проверяемый результат |
 | --- | --- |
+| Discovery и correlation | все восемь объявленных команд исполняются; pipeline control-ответов отличается от unsolicited settings; accepted предшествует terminal и replay |
+| Машинные ошибки | стабильные codes, recoverable command_id, strict duplicate fields, отсутствие мутации и восстановление после отказа |
+| Диагностика | фактический порт, допуск/уход клиентов, пределы и sanitised error flag без утверждения inference readiness |
 | Некорректные команды и восстановление соединения | JSON/types/unknown fields/volume bounds отклоняются без изменений, следующая команда работает |
 | Fragmented UTF-8 и несколько строк за один write | символ не повреждается, команды не теряются, settings доставляются во время частичного ввода |
 | Квитанции и terminal replay | нет второй генерации; конфликт намерения отклоняется; вытесняется завершённая запись; отказ не удаляет старую квитанцию |

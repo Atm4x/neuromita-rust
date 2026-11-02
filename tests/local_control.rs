@@ -199,12 +199,17 @@ impl Client {
         .await
     }
 
-    async fn error(&mut self, message: &str) {
+    async fn error(&mut self, message: &str) -> Value {
         let frame = self.until(|v| v["type"] == "error").await;
         assert!(
             frame["error"].as_str().unwrap().contains(message),
             "{frame}"
         );
+        assert!(
+            frame["code"].is_string(),
+            "missing stable error code: {frame}"
+        );
+        frame
     }
 
     async fn closed(&mut self) {
@@ -273,6 +278,225 @@ async fn server_state(server: &ServerHandle, predicate: impl Fn(&ServerSnapshot)
 }
 
 #[tokio::test]
+async fn discovery_matches_executable_commands_and_all_control_replies_are_correlated() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let mut client = fixture.connect().await;
+    assert!(client.initial_settings.get("command_id").is_none());
+    let methods = command("methods");
+    client.send(methods.clone()).await;
+    let catalog = client.next().await;
+    assert_eq!(catalog["type"], "methods");
+    assert_eq!(catalog["command_id"], methods["command_id"]);
+    let expected = [
+        "ping",
+        "methods",
+        "server_status",
+        "test",
+        "reply",
+        "cancel",
+        "settings",
+        "set_volume",
+    ];
+    assert_eq!(catalog["methods"], json!(expected));
+    for name in expected {
+        let mut cmd = command(name);
+        match name {
+            "reply" => {
+                cmd["character"] = json!("mita");
+                cmd["text"] = json!("catalog execution");
+            }
+            "cancel" => {
+                let start = command("test");
+                client.send(start.clone()).await;
+                let accepted = client.accepted(uuid(&start["command_id"])).await;
+                let call = fixture.call().await;
+                cmd["request_id"] = accepted["request_id"].clone();
+                client.send(cmd.clone()).await;
+                let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
+                assert_eq!(response["type"], "cancel");
+                assert_eq!(response["result"], "Requested");
+                client.terminal(uuid(&accepted["request_id"])).await;
+                drop(call);
+                continue;
+            }
+            "set_volume" => cmd["value"] = json!(42),
+            _ => {}
+        }
+        client.send(cmd.clone()).await;
+        let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
+        let response_type = match name {
+            "ping" => "pong",
+            "test" | "reply" => "accepted",
+            "set_volume" => "settings_applied",
+            other => other,
+        };
+        assert_eq!(response["type"], response_type, "{name}: {response}");
+        if name == "test" || name == "reply" {
+            let id = uuid(&response["request_id"]);
+            fixture.call().await.finish("catalog result");
+            assert_eq!(client.terminal(id).await["text"], "catalog result");
+        }
+    }
+    let first = command("settings");
+    let mut change = command("set_volume");
+    change["value"] = json!(43);
+    let last = command("settings");
+    let mut pipeline = line(first.clone());
+    pipeline.extend(line(change.clone()));
+    pipeline.extend(line(last.clone()));
+    client.bytes(&pipeline).await;
+    let mut responses = Vec::new();
+    let mut observed = false;
+    bounded(async {
+        while responses.len() < 3 || !observed {
+            let frame = client.next().await;
+            if frame.get("command_id").is_some() {
+                responses.push(frame);
+            } else if frame["type"] == "settings" && frame["settings"]["voice"]["volume"] == 43 {
+                observed = true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(responses[0]["command_id"], first["command_id"]);
+    assert_eq!(responses[0]["settings"]["voice"]["volume"], 42);
+    assert_eq!(responses[1]["command_id"], change["command_id"]);
+    assert_eq!(responses[1]["type"], "settings_applied");
+    assert_eq!(responses[2]["command_id"], last["command_id"]);
+    assert_eq!(responses[2]["settings"]["voice"]["volume"], 43);
+    let instant = command("test");
+    client.send(instant.clone()).await;
+    fixture.call().await.finish("immediate result");
+    let accepted = client.until(|v| v["type"] != "settings").await;
+    assert_eq!(
+        accepted["type"], "accepted",
+        "status must follow acceptance"
+    );
+    assert_eq!(accepted["command_id"], instant["command_id"]);
+    let finished = client.terminal(uuid(&accepted["request_id"])).await;
+    client.send(instant.clone()).await;
+    let replay = client.until(|v| v["type"] != "settings").await;
+    assert_eq!(replay["type"], "accepted");
+    assert_eq!(replay["command_id"], instant["command_id"]);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["request_id"], accepted["request_id"]);
+    assert_eq!(client.next().await, finished);
+    assert!(fixture.calls.try_recv().is_err());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
+    let mut fixture = Fixture::start(|s| s.receipt_capacity = positive(1)).await;
+    let mut client = fixture.connect().await;
+    let id = Uuid::new_v4();
+    let cases = [
+        (b"{\n".to_vec(), "malformed_json", None),
+        (line(json!({"command_id": id, "command":"unknown"})), "unknown_command", Some(id)),
+        (line(json!({"command_id": id, "command":"set_volume", "value":101})), "invalid_command", Some(id)),
+        (line(json!({"command_id": id, "command":"ping", "extra":1})), "invalid_command", Some(id)),
+        (line(reply(id, "mita", " ")), "invalid_value", Some(id)),
+        (line(json!({"command_id": id, "command":"cancel", "request_id":Uuid::new_v4()})), "ownership_denied", Some(id)),
+        (format!("{{\"command_id\":\"{id}\",\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10}}\n").into_bytes(), "invalid_command", None),
+        (format!("{{\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10,\"value\":11}}\n").into_bytes(), "invalid_command", Some(id)),
+        (format!("{{\"command_id\":\"{id}\",\"command\":\"ping\",\"command\":\"settings\"}}\n").into_bytes(), "invalid_command", Some(id)),
+        (line(json!({"command_id":"bad", "command":"ping"})), "invalid_command", None),
+    ];
+    let before = SettingsApi::snapshot::<VoiceSettings>().unwrap();
+    for (bytes, code, correlation) in cases {
+        client.bytes(&bytes).await;
+        let frame = client.next().await;
+        assert_eq!(frame["type"], "error", "{bytes:?}");
+        assert_eq!(frame["code"], code, "{frame}");
+        assert_eq!(frame.get("command_id").map(uuid), correlation);
+        assert_eq!(
+            SettingsApi::snapshot::<VoiceSettings>().unwrap().revision,
+            before.revision
+        );
+        assert_eq!(
+            SettingsApi::snapshot::<VoiceSettings>().unwrap().value,
+            before.value
+        );
+        assert!(fixture.app.timeline().is_empty());
+        assert!(fixture.calls.try_recv().is_err());
+        let ping = command("ping");
+        client.send(ping.clone()).await;
+        assert_eq!(
+            client.next().await,
+            json!({"type":"pong", "command_id":ping["command_id"]})
+        );
+    }
+    let start = reply(id, "mita", "held");
+    client.send(start).await;
+    let accepted = client.accepted(id).await;
+    let call = fixture.call().await;
+    let conflicting = json!({"command_id":id, "command":"ping"});
+    client.send(conflicting).await;
+    let error = client.error("different intent").await;
+    assert_eq!(error["code"], "command_id_conflict");
+    assert_eq!(error["command_id"], id.to_string());
+    let full = command("test");
+    client.send(full.clone()).await;
+    let error = client.error("too many tracked").await;
+    assert_eq!(error["code"], "receipt_capacity");
+    assert_eq!(error["command_id"], full["command_id"]);
+    call.finish("finished");
+    client.terminal(uuid(&accepted["request_id"])).await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnostics_report_actual_listener_clients_limits_and_sanitized_error_state() {
+    let fixture = Fixture::start(|s| {
+        s.max_clients = positive(3);
+        s.receipt_capacity = positive(2);
+    })
+    .await;
+    let server = fixture.app.server().clone();
+    let mut client = fixture.connect().await;
+    let second = fixture.connect().await;
+    server_state(&server, |s| s.connected_clients == 2).await;
+    {
+        let cmd = command("server_status");
+        client.send(cmd.clone()).await;
+        let frame = client.next().await;
+        assert_eq!(frame["type"], "server_status");
+        assert_eq!(frame["command_id"], cmd["command_id"]);
+        assert_eq!(frame["address"], server.address().to_string());
+        assert_eq!(frame["running"], true);
+        assert_eq!(frame["connected_clients"], 2);
+        assert_eq!(frame["accepted_connections"], 2);
+        assert_eq!(
+            frame["limits"],
+            json!({"max_clients":3,"receipt_capacity":2,"outbound_capacity":64,"max_command_bytes":65536})
+        );
+        assert_eq!(frame["has_error"], false);
+        assert!(frame.get("last_error").is_none());
+    }
+    drop(second);
+    server_state(&server, |s| s.connected_clients == 1).await;
+    client.send(command("server_status")).await;
+    let frame = client.next().await;
+    assert_eq!(frame["connected_clients"], 1);
+    assert_eq!(frame["accepted_connections"], 2);
+    let mut invalid = fixture.connect().await;
+    invalid.bytes(&[0xff, b'\n']).await;
+    invalid.closed().await;
+    server_state(&server, |s| {
+        s.connected_clients == 1 && s.last_error.is_some()
+    })
+    .await;
+    client.send(command("server_status")).await;
+    let frame = client.next().await;
+    assert_eq!(frame["has_error"], true);
+    assert!(frame.get("last_error").is_none());
+    assert_eq!(frame["accepted_connections"], 3);
+    assert!(!frame.to_string().contains("unused-fixture-key"));
+    assert!(frame.get("ready").is_none());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn rejected_commands_are_atomic_and_connection_recovers() {
     let mut fixture = Fixture::start(|_| {}).await;
     let mut client = fixture.connect().await;
@@ -285,7 +509,16 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         line(json!({"command_id":"invalid", "command":"test"})),
         line(command("unknown")),
     ];
-    for name in ["test", "settings", "reply", "cancel", "set_volume"] {
+    for name in [
+        "ping",
+        "methods",
+        "server_status",
+        "test",
+        "settings",
+        "reply",
+        "cancel",
+        "set_volume",
+    ] {
         let mut value = command(name);
         value["extra"] = json!(true);
         match name {
@@ -590,6 +823,7 @@ async fn queue_full_rejection_does_not_reserve_a_command_id() {
     let rejected = client.until(|v| v["type"] == "error").await;
     assert_eq!(rejected["command_id"], third.to_string());
     assert_eq!(rejected["error"], "request queue is full");
+    assert_eq!(rejected["code"], "queue_full");
     assert!(fixture.calls.try_recv().is_err());
     assert_eq!(fixture.app.timeline().len(), timeline);
     first_call.finish("first done");
