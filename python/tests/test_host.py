@@ -71,6 +71,20 @@ class HostTests(unittest.TestCase):
             self.assertEqual(found[0]["discovery_status"], "invalid")
             self.assertFalse(self.request(process, "initialize", {"plugin_id": "../bad"})["ok"])
 
+    def test_installplan_does_not_import_uninstalled_inference_dependencies(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "third_party"
+            directory.mkdir()
+            (directory / "plugin.json").write_text(json.dumps({"id": "third_party", "name": "Third Party", "kind": "tts", "entrypoint": "plugin.py", "api_version": 1}))
+            (directory / "plugin.py").write_text("import missing_neuromita_test_deep_learning_dependency\n")
+            (directory / "installplan.py").write_text("from neuromita_ai_sdk import InstallPlan, PackageRequirement\nclass InstallContract:\n    def install_plan(self): return InstallPlan(packages=(PackageRequirement('transformers','4.45.0'),))\n    def probe_install(self): return {'installed': False}\n    def settings_schema(self): return {'speaker': {'type': 'string'}}\n")
+            host = self.start_host(Path(temp))
+            plan = self.request(host, "install_plan", {"plugin_id": "third_party"})
+            self.assertTrue(plan["ok"])
+            self.assertEqual(plan["result"]["packages"][0]["name"], "transformers")
+            self.assertTrue(self.request(host, "settings_schema", {"plugin_id": "third_party"})["ok"])
+            self.assertFalse(self.request(host, "initialize", {"plugin_id": "third_party"})["ok"])
+
     def test_wrong_settings_not_ready(self):
         process = self.start_host()
         self.assertFalse(self.request(process, "initialize", {"plugin_id": "mock_tts", "settings": {"speaker": "unknown"}})["ok"])
