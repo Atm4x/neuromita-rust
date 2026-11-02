@@ -51,7 +51,8 @@ impl LockedOverlay {
                 && value
                     .bytes()
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
-                && value != "." && value != ".."
+                && value != "."
+                && value != ".."
         };
         if !safe_id(&self.plugin_id) || !safe_id(&self.revision) {
             return Err(OverlayError::Invalid(
@@ -71,16 +72,29 @@ impl LockedOverlay {
         }
         for package in &self.packages {
             if package.name.is_empty()
-                || !package.name.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' || ch == b'-')
+                || !package
+                    .name
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' || ch == b'-')
                 || package.version.is_empty()
-                || !package.version.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'.' || ch == b'+' || ch == b'-' || ch == b'_')
+                || !package.version.bytes().all(|ch| {
+                    ch.is_ascii_alphanumeric()
+                        || ch == b'.'
+                        || ch == b'+'
+                        || ch == b'-'
+                        || ch == b'_'
+                })
                 || !package.version.bytes().next().unwrap().is_ascii_digit()
             {
                 return Err(OverlayError::Invalid("invalid locked distribution".into()));
             }
             if [
-                "torch", "torchaudio", "torchvision", "onnxruntime",
-                "onnxruntime-gpu", "onnxruntime-directml",
+                "torch",
+                "torchaudio",
+                "torchvision",
+                "onnxruntime",
+                "onnxruntime-gpu",
+                "onnxruntime-directml",
             ].contains(&package.name.to_ascii_lowercase().as_str()) {
                 return Err(OverlayError::Invalid(
                     "backend packages belong to a separate layer".into(),
@@ -99,7 +113,10 @@ impl OverlayInstaller {
                 "overlay root must be absolute".into(),
             ));
         }
-        Ok(self.overlays_directory.join(&plan.plugin_id).join(&plan.revision))
+        Ok(self
+            .overlays_directory
+            .join(&plan.plugin_id)
+            .join(&plan.revision))
     }
 
     pub async fn installed(&self, plan: &LockedOverlay) -> Result<bool, OverlayError> {
@@ -148,8 +165,12 @@ impl OverlayInstaller {
             if !plan.packages.is_empty() {
                 let mut cmd = Command::new(&self.uv_executable);
                 cmd.args([
-                    "pip", "install", "--no-config", "--no-deps",
-                    "--no-python-downloads", "--python",
+                    "pip",
+                    "install",
+                    "--no-config",
+                    "--no-deps",
+                    "--no-python-downloads",
+                    "--python",
                 ])
                 .arg(&self.python_executable)
                 .arg("--target")
@@ -166,7 +187,9 @@ impl OverlayInstaller {
                 if !output.status.success() {
                     return Err(OverlayError::Install(
                         String::from_utf8_lossy(&output.stderr)
-                            .chars().take(1200).collect(),
+                            .chars()
+                            .take(1200)
+                            .collect(),
                     ));
                 }
             }
@@ -178,7 +201,8 @@ impl OverlayInstaller {
             }
             tokio::fs::rename(&staging, &destination).await?;
             Ok(destination.clone())
-        }.await;
+        }
+        .await;
         if result.is_err() {
             let _ = tokio::fs::remove_dir_all(staging).await;
         }
