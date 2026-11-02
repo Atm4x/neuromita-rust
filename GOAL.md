@@ -73,3 +73,11 @@
 - [ ] **#37 / #51:** AI Hub отражает discovered/installed/environment-ready/worker-ready/model-ready/failed, показывает plugin-provided settings и причины ошибки; никакой фиктивной готовности.
 
 **Минимальная приёмка:** два добавленных без сборки Rust mock-плагина (плюс невалидный), выбор/смена TTS без переподнятия ASR в split, install failure с rollback, missing/incorrect voice assets, unknown speaker/pitch validation, stale worker result и VAD mock PCM segment tests. До этих проверок не объявлять AI Runtime завершённым. Текущий VoiceProvider и ResponseGenerator не подменяются общим AI service.
+
+
+### Реализация AI Runtime: первый сквозной срез (2026-11-03)
+
+- [x] Базовый Python SDK API v1, обнаружение из plugin.json, mock TTS/ASR, host JSON-lines IPC.
+- [x] Rust-owned Supervisor Shared/Split, version handshake, correlations, bounded frames и отдельные поколения worker; `PythonVoiceProvider` подключает существующий voice trait.
+- [x] Contract tests в Python и Rust, Rust 1.98.1 full no-default suite + Clippy.
+- [ ] Python bootstrap через uv, установка и активация environments, production discovery, assets, VAD, клиенты и интеграция в ApplicationLifecycle. Архитектурные issues #24/#42/#59/#60/#61 остаются открытыми.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
     time::timeout,
@@ -109,7 +109,7 @@ struct RemoteError {
 struct WorkerProcess {
     child: Child,
     input: ChildStdin,
-    output: Lines<BufReader<ChildStdout>>,
+    output: BufReader<ChildStdout>,
     timeout: Duration,
     generation: Uuid,
     failed: bool,
@@ -140,7 +140,7 @@ impl WorkerProcess {
         let mut worker = Self {
             child,
             input,
-            output: BufReader::new(output).lines(),
+            output: BufReader::new(output),
             timeout: config.request_timeout,
             generation: Uuid::new_v4(),
             failed: false,
@@ -157,17 +157,31 @@ impl WorkerProcess {
     }
 
     async fn read_frame(&mut self) -> Result<String, AiRuntimeError> {
-        let line = timeout(self.timeout, self.output.next_line())
+        let read = async {
+            let mut frame = Vec::new();
+            loop {
+                let available = self.output.fill_buf().await.map_err(AiRuntimeError::Io)?;
+                if available.is_empty() {
+                    return Err(AiRuntimeError::Protocol("worker closed stdout".into()));
+                }
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let length = newline.map_or(available.len(), |pos| pos + 1);
+                if frame.len() + length > MAX_RESPONSE_BYTES {
+                    return Err(AiRuntimeError::Protocol(
+                        "worker frame exceeds size limit".into(),
+                    ));
+                }
+                frame.extend_from_slice(&available[..length]);
+                self.output.consume(length);
+                if newline.is_some() {
+                    break;
+                }
+            }
+            String::from_utf8(frame).map_err(|err| AiRuntimeError::Protocol(err.to_string()))
+        };
+        timeout(self.timeout, read)
             .await
             .map_err(|_| AiRuntimeError::Timeout)?
-            .map_err(AiRuntimeError::Io)?
-            .ok_or_else(|| AiRuntimeError::Protocol("worker closed stdout".into()))?;
-        if line.len() > MAX_RESPONSE_BYTES {
-            return Err(AiRuntimeError::Protocol(
-                "worker frame exceeds size limit".into(),
-            ));
-        }
-        Ok(line)
     }
 
     async fn request(&mut self, operation: &str, args: &Value) -> Result<Value, AiRuntimeError> {
@@ -420,5 +434,61 @@ mod tests {
         let second = supervisor.start(AiService::Tts).await.unwrap();
         assert_ne!(first, second);
         supervisor.stop(AiService::Tts).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_host_can_run_tts_and_asr_without_separate_processes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let python = std::env::var("NEUROMITA_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned());
+        let supervisor = Arc::new(AiSupervisor::new(
+            ProcessTopology::Shared,
+            PythonHostConfig {
+                python_executable: python.into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                request_timeout: Duration::from_secs(10),
+            },
+        ));
+        supervisor.start(AiService::Tts).await.unwrap();
+        assert!(matches!(
+            supervisor.start(AiService::Asr).await,
+            Err(AiRuntimeError::AlreadyRunning)
+        ));
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        supervisor
+            .initialize(AiService::Asr, "mock_asr", json!({ "language": "ru" }))
+            .await
+            .unwrap();
+        let transcript = supervisor
+            .call(
+                AiService::Asr,
+                "infer",
+                json!({ "kind": "asr", "input": { "mock_transcript": "Привет" } }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(transcript["text"], "Привет");
+        let voice = PythonVoiceProvider::new(Arc::clone(&supervisor));
+        let audio = voice
+            .synthesize(
+                Arc::<str>::from("Тест"),
+                VoiceOptions {
+                    voice: "default".into(),
+                    volume: crate::settings::Volume::try_from(100).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(audio.format, AudioFormat::Wave);
+        assert!(audio.bytes.starts_with(b"RIFF"));
+        supervisor.stop(AiService::Asr).await.unwrap();
+        assert!(matches!(
+            supervisor.call(AiService::Tts, "discover", json!({})).await,
+            Err(AiRuntimeError::NotRunning)
+        ));
     }
 }

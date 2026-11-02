@@ -62,10 +62,14 @@ class PluginHost:
         entrypoint = directory / "plugin.py"
         if entrypoint.is_symlink() or not entrypoint.is_file():
             raise ValueError("plugin entrypoint must be a regular file")
-        spec = importlib.util.spec_from_file_location("neuromita_plugin_" + plugin_id, entrypoint)
+        spec = importlib.util.spec_from_file_location(
+            "neuromita_plugin_" + plugin_id, entrypoint,
+            submodule_search_locations=[str(directory)],
+        )
         if spec is None or spec.loader is None:
             raise ValueError("cannot load plugin entrypoint")
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         with contextlib.redirect_stdout(sys.stderr):
             spec.loader.exec_module(module)
             plugin = module.Plugin()
