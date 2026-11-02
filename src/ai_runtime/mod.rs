@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod bootstrap;
 mod layer;
+pub mod managed;
 pub mod overlay;
 pub mod uv;
 

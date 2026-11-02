@@ -110,3 +110,9 @@
 - [ ] Добавить resolver/version lock generation и Python runtime import/file probes. Manifest о наличии backend/overlay означает **файловую установку**, не доказательство inference readiness. Разрешить композиции общих backend layers и активных overlays с проверкой cross-layer distribution conflicts.
 
 **Проверка:** `cargo fmt --check`, `cargo clippy --offline --locked --all-targets -- -D warnings` для default и no-default PASS; полный `cargo test --offline --locked --no-default-features -- --test-threads=1` PASS (199 passed, 2 ignored). Полный default-feature `cargo test` не завершился до инструментального таймаута во время компиляции, не помечать PASS.
+
+### Managed Python bootstrap integration — 2026-11-03
+
+- [x] `ai_runtime::managed::ManagedRuntimeBootstrap`: orchestration `UvInstaller.prepare()` → `PythonBootstrap.prepare()`, returns verified uv and managed Python executable paths; no venv, system Python or second Supervisor.
+- [x] End-to-end mock bootstrap contract test on Linux (local pinned tarball with fake uv; install/find/reuse managed Python); 13 AI Runtime Rust tests and 4 Python SDK tests PASS, Clippy `-D warnings` PASS.
+- [ ] ApplicationLifecycle/AI Hub must invoke the bootstrap before worker availability; no actual internet download or Windows integration has been verified.
