@@ -2,10 +2,15 @@ mod conversation;
 pub mod gemini;
 mod presets;
 mod provider;
+mod structured;
 pub use presets::{
     EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
-    PresetCatalogError, PresetCredentials, PresetDefinition, PresetId, PresetRecord,
-    PresetRepository,
+    PresetCatalogError, PresetCatalogSnapshot, PresetCredentials, PresetDefinition, PresetId,
+    PresetRecord, PresetRepository,
+};
+pub use structured::{
+    RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
+    WorkingState,
 };
 
 pub use provider::{

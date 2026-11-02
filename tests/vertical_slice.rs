@@ -38,6 +38,7 @@ struct Call {
 #[derive(Debug)]
 enum Reply {
     Text(&'static str),
+    Structured(&'static str),
     Status(u16),
 }
 
@@ -142,7 +143,8 @@ async fn serve(mut stream: TcpStream, calls: mpsc::UnboundedSender<Call>) {
         return;
     };
     let (status, body) = match response {
-        Reply::Text(text) => (200, json!({"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true},{"text":text}]},"finishReason":"STOP"}]}).to_string()),
+        Reply::Text(text) => (200, json!({"candidates":[{"content":{"role":"model","parts":[{"text":"private reasoning","thought":true},{"text":json!({"segments":[{"text":text}]}).to_string()}]},"finishReason":"STOP"}]}).to_string()),
+        Reply::Structured(text) => (200, json!({"candidates":[{"content":{"role":"model","parts":[{"text":text}]},"finishReason":"STOP"}]}).to_string()),
         Reply::Status(status) => (status, "{}".to_owned()),
     };
     let response = format!(
@@ -262,6 +264,14 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     );
     assert_eq!(user_texts(&first_call.body), ["first"]);
     assert_eq!(first_call.body["generationConfig"]["candidateCount"], 1);
+    assert_eq!(
+        first_call.body["generationConfig"]["responseMimeType"],
+        "application/json"
+    );
+    assert_eq!(
+        first_call.body["generationConfig"]["responseSchema"]["required"],
+        json!(["segments"])
+    );
     assert!(
         first_call.body["systemInstruction"]["parts"][0]["text"]
             .as_str()
@@ -459,6 +469,54 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         ChatApi::observe_requests(),
         Err(SubmitError::Stopped)
     ));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsupported_structured_effect_fails_without_committing_or_synthesizing() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let handle = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "act now".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"I will move","commands":["move"]}]}"#,
+        ))
+        .unwrap();
+
+    assert!(matches!(
+        finished(&handle).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        0
+    );
+    assert!(
+        !app.timeline()
+            .iter()
+            .any(|event| { matches!(event.content, EventContent::CharacterReply { .. }) })
+    );
+    app.shutdown().await.unwrap();
     server.shutdown().await;
 }
 
@@ -1559,4 +1617,87 @@ async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
         PresetApi::list(),
         Err(PresetCatalogError::Unavailable)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
+    use neuromita::{
+        generation::{GeminiPresetDefinition, PresetDefinition, PresetRecord},
+        settings::{PresetSelection, SettingsApi},
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let directory = std::env::temp_dir().join(format!("neuromita-catalog-{}", Uuid::new_v4()));
+    let record = |model: &str| PresetRecord {
+        name: model.to_owned(),
+        definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            endpoint: "http://127.0.0.1:8100/v1beta/".to_owned(),
+            model: model.to_owned(),
+            credential_env: "EXAMPLE_GEMINI_KEY".to_owned(),
+            temperature: 0.7,
+            max_output_tokens: 256,
+            timeout_ms: 5000,
+        }),
+    };
+    let setup = || {
+        let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+        ApplicationConfig::persistent(
+            preset("http://127.0.0.1:8100/v1beta/"),
+            ResponseGenerator::new([provider]).unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &directory,
+        )
+        .unwrap()
+    };
+
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    let presets = &app.presenter().presets;
+    let mut changes = presets.observe();
+    assert_eq!(changes.borrow_and_update().revision, 0);
+    let initial_settings_revision = SettingsApi::snapshot_all().unwrap().revision;
+    let id = presets.create(record("first-model")).unwrap();
+    changes.changed().await.unwrap();
+    assert_eq!(changes.borrow_and_update().entries[&id].name, "first-model");
+    assert_eq!(
+        SettingsApi::snapshot_all().unwrap().revision,
+        initial_settings_revision
+    );
+    presets.update(id, record("second-model")).unwrap();
+    changes.changed().await.unwrap();
+    assert_eq!(
+        changes.borrow_and_update().entries[&id].name,
+        "second-model"
+    );
+    app.presenter()
+        .settings
+        .characters
+        .mita
+        .reply
+        .set(PresetSelection::Specific(id))
+        .unwrap();
+    app.presenter().settings.presets.active.set(id).unwrap();
+    app.shutdown().await.unwrap();
+
+    assert!(directory.join("settings.json").exists());
+    let stored = std::fs::read_to_string(directory.join("presets.json")).unwrap();
+    assert!(stored.contains("second-model"));
+    assert!(stored.contains("EXAMPLE_GEMINI_KEY"));
+    assert!(!stored.contains("test-key"));
+
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert_eq!(app.presenter().presets.list()[0].0, id);
+    assert_eq!(app.presenter().presets.list()[0].1.name, "second-model");
+    assert_eq!(app.presenter().settings.presets.active.get(), id);
+    assert_eq!(
+        app.presenter().settings.characters.mita.reply.get(),
+        PresetSelection::Specific(id)
+    );
+    app.presenter().presets.delete(id).unwrap();
+    app.shutdown().await.unwrap();
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert!(app.presenter().presets.list().is_empty());
+    assert_eq!(app.presenter().settings.presets.active.get(), id);
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
 }

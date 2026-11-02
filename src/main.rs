@@ -43,7 +43,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         presenter_updates: NonZeroUsize::new(128).expect("positive limit"),
         retained_finished: NonZeroUsize::new(100).expect("positive limit"),
     };
-    let config = ApplicationConfig::minimal(preset, generator, limits, options.listen);
+    let config = ApplicationConfig::persistent(
+        preset,
+        generator,
+        limits,
+        options.listen,
+        &options.data_dir,
+    )?;
     let app = ApplicationLifecycle::start(config).await?;
     println!("Server listening on {}", app.server().address());
     let result = terminal::run(&app.presenter().chat, options).await;

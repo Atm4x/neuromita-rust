@@ -2,7 +2,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate};
+use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
 use crate::character::{CharacterContext, ResponseEffect};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -34,10 +34,11 @@ impl GenerationRequest {
 pub struct ProposedResponse {
     pub text: Arc<str>,
     pub effects: Vec<ResponseEffect>,
+    pub structured: Arc<StructuredResponse>,
 }
 
 pub type ProviderFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Arc<str>, GenerationError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<StructuredResponse, GenerationError>> + Send + 'a>>;
 
 pub trait GenerationProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
@@ -75,15 +76,14 @@ impl ResponseGenerator {
             .providers
             .get(&kind)
             .ok_or(GenerationError::Unavailable(kind))?;
-        let text = provider.generate(request.context, template).await?;
-        if text.trim().is_empty() {
-            return Err(GenerationError::Response(
-                "provider returned empty text".into(),
-            ));
-        }
+        let structured = provider.generate(request.context, template).await?;
+        structured.validate()?;
+        structured.ensure_text_only()?;
+        let text = structured.full_text();
         Ok(ProposedResponse {
             text,
             effects: vec![ResponseEffect::RecordAcceptedReply],
+            structured: Arc::new(structured),
         })
     }
 }

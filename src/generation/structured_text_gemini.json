@@ -1,0 +1,26 @@
+{
+  "description": "Top-level structured response from the LLM.",
+  "properties": {
+    "segments": {
+      "description": "Ordered list of response segments with positional commands",
+      "items": {
+        "description": "A single segment of the response tied to a chunk of displayed text.",
+        "properties": {
+          "text": {
+            "description": "Text of this segment (required)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object",
+  "required": [
+    "segments"
+  ]
+}

@@ -60,6 +60,7 @@ impl GenerationProvider for ControlledGeneration {
             receive
                 .await
                 .map_err(|_| GenerationError::Transport("fixture response dropped".into()))?
+                .map(|text| neuromita::generation::StructuredResponse::spoken(text.to_string()))
         })
     }
 }

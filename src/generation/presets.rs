@@ -9,6 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::watch;
 
 use super::{
     GenerationPreset, ProviderTemplate,
@@ -224,15 +225,23 @@ impl PresetRepository for JsonPresetRepository {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PresetCatalogSnapshot {
+    pub revision: u64,
+    pub entries: BTreeMap<PresetId, PresetRecord>,
+}
+
 struct CatalogState {
     runtime: BTreeMap<PresetId, GenerationPreset>,
     stored: StoredPresets,
+    revision: u64,
 }
 
 pub struct PresetCatalog {
     state: RwLock<CatalogState>,
     repository: Option<Arc<dyn PresetRepository>>,
     credentials: Arc<dyn PresetCredentials>,
+    changes: watch::Sender<Arc<PresetCatalogSnapshot>>,
 }
 
 impl fmt::Debug for PresetCatalog {
@@ -248,13 +257,20 @@ impl PresetCatalog {
             .next_back()
             .and_then(|id| id.0.checked_add(1))
             .unwrap_or(1);
+        let stored = StoredPresets::empty(next_id);
+        let (changes, _) = watch::channel(Arc::new(PresetCatalogSnapshot {
+            revision: 0,
+            entries: stored.entries.clone(),
+        }));
         Self {
             state: RwLock::new(CatalogState {
                 runtime: entries,
-                stored: StoredPresets::empty(next_id),
+                stored,
+                revision: 0,
             }),
             repository: None,
             credentials: Arc::new(EnvironmentPresetCredentials),
+            changes,
         }
     }
 
@@ -285,10 +301,19 @@ impl PresetCatalog {
                 "persisted catalog overlaps reserved runtime IDs".into(),
             ));
         }
+        let (changes, _) = watch::channel(Arc::new(PresetCatalogSnapshot {
+            revision: 0,
+            entries: stored.entries.clone(),
+        }));
         Ok(Self {
-            state: RwLock::new(CatalogState { runtime, stored }),
+            state: RwLock::new(CatalogState {
+                runtime,
+                stored,
+                revision: 0,
+            }),
             repository: Some(repository),
             credentials,
+            changes,
         })
     }
 
@@ -302,6 +327,10 @@ impl PresetCatalog {
         record
             .map(|entry| entry.definition.materialize(self.credentials.as_ref()))
             .transpose()
+    }
+
+    pub fn observe(&self) -> watch::Receiver<Arc<PresetCatalogSnapshot>> {
+        self.changes.subscribe()
     }
 
     pub fn list(&self) -> Vec<(PresetId, PresetRecord)> {
@@ -324,7 +353,7 @@ impl PresetCatalog {
         next.next_id = next_id;
         next.entries.insert(id, record);
         self.persist(&next)?;
-        state.stored = next;
+        self.publish(&mut state, next);
         Ok(id)
     }
 
@@ -340,7 +369,7 @@ impl PresetCatalog {
         let mut next = state.stored.clone();
         next.entries.insert(id, record);
         self.persist(&next)?;
-        state.stored = next;
+        self.publish(&mut state, next);
         Ok(())
     }
 
@@ -354,8 +383,17 @@ impl PresetCatalog {
             return Err(PresetCatalogError::NotFound(id));
         }
         self.persist(&next)?;
-        state.stored = next;
+        self.publish(&mut state, next);
         Ok(())
+    }
+
+    fn publish(&self, state: &mut CatalogState, stored: StoredPresets) {
+        state.revision += 1;
+        state.stored = stored;
+        self.changes.send_replace(Arc::new(PresetCatalogSnapshot {
+            revision: state.revision,
+            entries: state.stored.entries.clone(),
+        }));
     }
 
     fn persist(&self, value: &StoredPresets) -> Result<(), PresetCatalogError> {
@@ -446,6 +484,28 @@ mod tests {
         config.credential_env = "BAD-ENV".into();
         assert!(catalog.update(id, invalid).is_err());
         assert_eq!(catalog.list().len(), 1);
+    }
+
+    #[test]
+    fn failed_persistence_does_not_publish_a_preset_or_notify_observers() {
+        let directory = std::env::temp_dir().join(format!(
+            "neuromita-no-preset-directory-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let catalog = PresetCatalog::open(
+            BTreeMap::new(),
+            Arc::new(JsonPresetRepository::new(directory.join("presets.json"))),
+            Arc::new(TestCredentials(Mutex::new(BTreeMap::new()))),
+        )
+        .unwrap();
+        let observer = catalog.observe();
+        assert!(matches!(
+            catalog.create(example("alpha")),
+            Err(PresetCatalogError::Storage(_))
+        ));
+        assert!(catalog.list().is_empty());
+        assert_eq!(observer.borrow().revision, 0);
+        assert!(!observer.has_changed().unwrap());
     }
 
     #[derive(Default)]

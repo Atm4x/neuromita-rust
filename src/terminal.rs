@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -16,6 +17,7 @@ pub struct Options {
     character: CharacterId,
     message: Option<String>,
     pub listen: std::net::SocketAddr,
+    pub data_dir: PathBuf,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -29,13 +31,13 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit"
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit"
                 );
                 return Ok(None);
             }
             if !matches!(
                 argument.as_str(),
-                "--model" | "--character" | "--message" | "--listen"
+                "--model" | "--character" | "--message" | "--listen" | "--data-dir"
             ) {
                 return Err(invalid("unknown argument; use --help"));
             }
@@ -64,8 +66,31 @@ impl Options {
             character,
             message: values.remove("--message"),
             listen,
+            data_dir: match values.remove("--data-dir") {
+                Some(path) if path.is_empty() => return Err(invalid("empty data directory")),
+                Some(path) => PathBuf::from(path),
+                None => default_data_dir()?,
+            },
         }))
     }
+}
+
+fn default_data_dir() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("NEUROMITA_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("APPDATA") {
+        return Ok(PathBuf::from(path).join("NeuroMita"));
+    }
+    #[cfg(not(windows))]
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path).join("neuromita"));
+    }
+    if let Some(path) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(path).join(".config").join("neuromita"));
+    }
+    Err(invalid("data directory unavailable; specify --data-dir"))
 }
 
 fn input() -> mpsc::Receiver<io::Result<String>> {

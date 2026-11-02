@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
 use super::GeminiTemplate;
@@ -8,6 +6,7 @@ use crate::{
     generation::{
         GenerationError,
         conversation::{LlmConversation, LlmRole},
+        structured::{StructuredResponse, gemini_text_schema},
     },
 };
 
@@ -46,6 +45,8 @@ struct Config {
     temperature: f32,
     max_output_tokens: u32,
     candidate_count: u32,
+    response_mime_type: String,
+    response_schema: serde_json::Value,
 }
 
 fn content(role: Option<&str>, text: &str) -> Content {
@@ -92,6 +93,8 @@ pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> Ge
             temperature: template.settings().temperature(),
             max_output_tokens: template.settings().max_output_tokens(),
             candidate_count: 1,
+            response_mime_type: "application/json".into(),
+            response_schema: gemini_text_schema(),
         },
     }
 }
@@ -117,7 +120,7 @@ struct PromptFeedback {
     block_reason: Option<String>,
 }
 
-pub(super) fn decode(bytes: &[u8]) -> Result<Arc<str>, GenerationError> {
+pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError> {
     let response: GenerateResponse = serde_json::from_slice(bytes)
         .map_err(|_| GenerationError::Response("invalid Gemini JSON".into()))?;
     if response
@@ -159,11 +162,13 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Arc<str>, GenerationError> {
             "candidate has no answer text".into(),
         ));
     }
-    Ok(Arc::from(text))
+    StructuredResponse::parse(&text)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::interaction::TurnIntent;
     use serde_json::json;
@@ -515,11 +520,28 @@ mod tests {
 
     #[test]
     fn reasoning_is_not_returned_as_answer() {
-        let body = json!({"candidates":[{"content":{"parts":[{"text":"secret thought","thought":true},{"text":"answer"}]},"finishReason":"STOP"}]});
+        let body = json!({"candidates":[{"content":{"parts":[{"text":"secret thought","thought":true},{"text":"{\"segments\":[{\"text\":\"answer\"}]}"}]},"finishReason":"STOP"}]});
         assert_eq!(
-            &*decode(&serde_json::to_vec(&body).unwrap()).unwrap(),
+            decode(&serde_json::to_vec(&body).unwrap())
+                .unwrap()
+                .full_text()
+                .as_ref(),
             "answer"
         );
+    }
+
+    #[test]
+    fn generated_actions_are_parsed_but_not_accepted_without_executors() {
+        let body = json!({"candidates":[{"content":{"parts":[{"text":
+            r#"{"segments":[{"text":"hello","commands":["move"]}]}"#
+        }]},"finishReason":"STOP"}]});
+        let response = decode(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert_eq!(response.segments[0].commands, ["move"]);
+        assert!(response.ensure_text_only().is_err());
+        let malformed = json!({"candidates":[{"content":{"parts":[{"text":
+            r#"{"segments":[{"text":"hello","unexpected_effect":true}]}"#
+        }]},"finishReason":"STOP"}]});
+        assert!(decode(&serde_json::to_vec(&malformed).unwrap()).is_err());
     }
 
     #[test]

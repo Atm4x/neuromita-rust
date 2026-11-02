@@ -3,8 +3,6 @@ mod wire;
 
 pub use template::{GeminiTemplate, GenerationSettings, PresetError};
 
-use std::sync::Arc;
-
 use super::{GenerationError, GenerationProvider, ProviderFuture, ProviderKind, ProviderTemplate};
 use crate::character::CharacterContext;
 
@@ -25,7 +23,7 @@ impl GeminiProvider {
         &self,
         context: CharacterContext,
         template: GeminiTemplate,
-    ) -> Result<Arc<str>, GenerationError> {
+    ) -> Result<super::StructuredResponse, GenerationError> {
         let body = wire::encode(context, &template);
         let mut response = self
             .client

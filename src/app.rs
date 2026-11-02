@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -16,19 +17,24 @@ pub use crate::runtime::ApplicationStatus;
 
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
-    generation::{GenerationPreset, PresetCatalog, ResponseGenerator},
+    generation::{
+        EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
+        PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
+    },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
-    presentation::{CharactersPresenter, GuiPresenter, PresenterRunner, SettingsPresenter},
+    presentation::{
+        CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SettingsPresenter,
+    },
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
-        AppSettings, MemorySettingsRepository, SettingsConfig, SettingsError, SettingsLifecycle,
-        SettingsSource,
+        AppSettings, JsonSettingsRepository, MemorySettingsRepository, SettingsConfig,
+        SettingsError, SettingsLifecycle, SettingsSource,
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
@@ -79,6 +85,38 @@ impl ApplicationConfig {
             },
         }
     }
+
+    pub fn persistent(
+        preset: GenerationPreset,
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
+        std::fs::create_dir_all(data_directory)?;
+        let settings_path = data_directory.join("settings.json");
+        let source = match std::fs::metadata(&settings_path) {
+            Ok(_) => SettingsSource::Stored,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                SettingsSource::Initial(AppSettings::initial_profile())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut config = Self::minimal(preset.clone(), generator, limits, bind);
+        let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
+            data_directory.join("presets.json"),
+        ));
+        config.presets = PresetCatalog::open(
+            BTreeMap::from([(PresetId(0), preset)]),
+            repository,
+            Arc::new(EnvironmentPresetCredentials),
+        )?;
+        config.settings = SettingsConfig {
+            source,
+            repository: Arc::new(JsonSettingsRepository::new(settings_path)),
+        };
+        Ok(config)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -89,6 +127,8 @@ pub enum ApplicationError {
     Task(String),
     #[error(transparent)]
     Settings(#[from] SettingsError),
+    #[error(transparent)]
+    Presets(#[from] PresetCatalogError),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error("server: {0}")]
@@ -290,6 +330,7 @@ impl ApplicationLifecycle {
             presenter: GuiPresenter {
                 chat,
                 settings: settings_presenter,
+                presets: PresetsPresenter::new(Arc::clone(&presets)),
                 characters: CharactersPresenter::new(bindings.characters.clone()),
             },
             bindings,
