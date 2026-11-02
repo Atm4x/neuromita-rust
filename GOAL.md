@@ -116,3 +116,15 @@
 - [x] `ai_runtime::managed::ManagedRuntimeBootstrap`: orchestration `UvInstaller.prepare()` → `PythonBootstrap.prepare()`, returns verified uv and managed Python executable paths; no venv, system Python or second Supervisor.
 - [x] End-to-end mock bootstrap contract test on Linux (local pinned tarball with fake uv; install/find/reuse managed Python); 13 AI Runtime Rust tests and 4 Python SDK tests PASS, Clippy `-D warnings` PASS.
 - [ ] ApplicationLifecycle/AI Hub must invoke the bootstrap before worker availability; no actual internet download or Windows integration has been verified.
+
+### AI Runtime dependency resolution / selected compositions — 2026-11-03
+
+- [x] Новый `ai_runtime::resolver::DependencyResolver`: `uv pip compile` из точных прямых Python pins, с constraints установленного backend; результат — строгий транзитивный `LockedPackage` список, из которого исключаются authoritative backend packages. Несовместимые версии запрещены явно.
+- [x] Новый `ai_runtime::composition::RuntimeComposition`: одна service selection по слотам; `split` включает только её overlays, `shared` проверяет все одновременно активные overlays/backend layers и отказывает при конфликтующих пакетах/версии Python. Неселектированные модели не попадают в `PYTHONPATH`.
+- [x] `AiSupervisor::start_composed` запускает Python worker с проверенными путями выбранных слоёв; разделение ответственности Rust process/IPC и Python model inference сохранено. Contract test: Python module в одном selected overlay доступен worker без установки в системный Python.
+- [x] Python host поддерживает отдельный `installplan.py: InstallContract` для `install_plan/probe_install/settings_schema`, не импортируя потенциально отсутствующие heavyweight inference packages. Устаревший builtin layout временно сохраняет совместимость (fallback `plugin.py`). Новый test демонстрирует отсутствие требуемого runtime-пакета.
+- [ ] Полноценный resolver для wheels с markers/URLs/extras/hashes и динамических Python/OS platform tags, без запуска непроверенных build scripts; текущий парсер сознательно принимает только plain exact pins и отклоняет неподдерживаемый формат.
+- [ ] Контроль согласованности фактического Python ABI с выбранными locks; verify импортов, версии и целостности файлов в опубликованных слоях; ещё нет production installation-to-activation orchestration.
+- [ ] Реальный managed uv/CPython download, PyTorch/ONNX packages, RVC/Silero/F5 TTS, API и UI settings/live lifecycle остаются открытыми. Test fixtures не доказывают production readiness.
+
+**Локальные проверки:** no-default-features full cargo test PASS, `cargo clippy --no-default-features --all-targets -- -D warnings` PASS, Python SDK 5 tests PASS. Реальный dependency download/inference и default-feature full cargo test этого среза отдельно не подтверждены.
