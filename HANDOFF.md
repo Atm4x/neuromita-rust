@@ -1,5 +1,7 @@
 # Handoff: Rust core contracts
 
+Latest handoff: PR #55–58 are merged into main (integration b862c22), including the newer core and shared migration system. 231 tests default / 180 no-default, 2 ignored each; Clippy/fmt pass. Semantic retrieval is NOT implemented yet. Read future/semantic-retrieval.md for exact pending work; the run stopped at 7% remaining of the user's 5-hour limit. Do not treat provider research or this plan as a working semantic backend.
+
 ## Start here
 
 This repository root is the standalone Cargo project. Enter it before running Cargo so .cargo/config.toml replaces crates.io with vendor/:
