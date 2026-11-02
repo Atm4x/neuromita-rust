@@ -219,15 +219,14 @@ impl RequestRecord {
         {
             return false;
         }
+        let Some(text) = inner.draft_text.clone() else {
+            return false;
+        };
         inner.phase = EffectPhase::Accepting;
-        let snapshot = Arc::clone(&inner.snapshot);
-        if let Some(trace) = &mut inner.trace {
-            trace.transitions.push(RequestTransition {
-                revision: snapshot.revision,
-                phase: EffectPhase::Accepting,
-                state: snapshot.state.clone(),
-            });
-        }
+        self.publish(
+            &mut inner,
+            RequestState::Processing(ProcessingStage::Accepting { text }),
+        );
         true
     }
 
@@ -290,12 +289,26 @@ impl RequestRecord {
             trace.context = Some(context);
         }
     }
-    pub(crate) fn text_ready(&self, text: Arc<str>) {
+    pub(crate) fn text_ready(&self, text: Arc<str>) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if inner.phase != EffectPhase::Working
+            || self.cancellation.is_cancelled()
+            || !matches!(
+                inner.snapshot.state,
+                RequestState::Processing(ProcessingStage::GeneratingText)
+            )
+        {
+            return false;
+        }
         inner.draft_text = Some(Arc::clone(&text));
         if let Some(trace) = &mut inner.trace {
-            trace.generated_text = Some(text);
+            trace.generated_text = Some(Arc::clone(&text));
         }
+        self.publish(
+            &mut inner,
+            RequestState::Processing(ProcessingStage::TextReady { text }),
+        );
+        true
     }
     pub(crate) fn failure(&self, message: String) -> InternalFailure {
         InternalFailure {
@@ -324,14 +337,20 @@ impl RequestRecord {
             .clone()
             .map(Arc::new)
     }
-    pub(crate) fn generating_voice(&self, text: Arc<str>) -> bool {
+    pub(crate) fn generating_voice(&self) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal()
-            || inner.phase != EffectPhase::Working
+        if inner.phase != EffectPhase::Working
             || self.cancellation.is_cancelled()
+            || !matches!(
+                inner.snapshot.state,
+                RequestState::Processing(ProcessingStage::TextReady { .. })
+            )
         {
             return false;
         }
+        let Some(text) = inner.draft_text.clone() else {
+            return false;
+        };
         self.publish(
             &mut inner,
             RequestState::Processing(ProcessingStage::GeneratingVoice { text }),
@@ -372,6 +391,7 @@ mod tests {
             );
             let record = Arc::clone(&handle.record);
             assert!(record.try_start().is_some());
+            assert!(record.text_ready(Arc::from("ready")));
             let barrier = Barrier::new(2);
             let (accepted, cancelled) = std::thread::scope(|scope| {
                 let accepting = scope.spawn(|| {
@@ -413,7 +433,23 @@ mod tests {
         );
         let record = Arc::clone(&handle.record);
         assert!(record.try_start().is_some());
-        assert!(record.generating_voice(Arc::from("provisional text")));
+        assert_eq!(handle.snapshot().provisional_text(), None);
+        assert!(handle.snapshot().can_cancel());
+        assert!(record.text_ready(Arc::from("provisional text")));
+        assert_eq!(
+            handle.snapshot().provisional_text(),
+            Some("provisional text")
+        );
+        assert!(matches!(
+            handle.snapshot().state,
+            RequestState::Processing(ProcessingStage::TextReady { .. })
+        ));
+        assert!(record.generating_voice());
+        assert_eq!(
+            handle.snapshot().provisional_text(),
+            Some("provisional text")
+        );
+        assert!(handle.snapshot().can_cancel());
         let trace = record.trace().unwrap();
         assert_eq!(
             trace.transitions.last().unwrap().phase,
@@ -423,6 +459,60 @@ mod tests {
         assert!(!record.begin_accepting());
         record.finish_cancelled();
         assert!(matches!(handle.snapshot().state, RequestState::Cancelled));
+        assert_eq!(handle.snapshot().provisional_text(), None);
+        assert!(!handle.snapshot().can_cancel());
+    }
+
+    #[test]
+    fn accepting_reuses_provisional_text_and_closes_cancellation_boundary() {
+        let registry = RequestRegistry::new(4);
+        let handle = registry.register(
+            Box::new(request()),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: selection(),
+                context_epoch: 0,
+            },
+        );
+        let record = Arc::clone(&handle.record);
+        assert!(!record.begin_accepting());
+        assert!(record.try_start().is_some());
+        assert!(!record.begin_accepting());
+        assert!(record.text_ready(Arc::from("accepted after voice")));
+        assert!(record.generating_voice());
+        let voice_revision = handle.snapshot().revision;
+        assert!(record.begin_accepting());
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.revision, voice_revision + 1);
+        assert!(matches!(
+            snapshot.state,
+            RequestState::Processing(ProcessingStage::Accepting { .. })
+        ));
+        assert_eq!(snapshot.provisional_text(), Some("accepted after voice"));
+        assert!(!snapshot.can_cancel());
+        assert_eq!(handle.cancel(), CancelResult::TooLate);
+        assert!(!record.cancellation.is_cancelled());
+        let status = crate::server::status(&snapshot);
+        assert_eq!(status["stage"], "accepting");
+        assert_eq!(status["text"], "accepted after voice");
+        assert_eq!(status["provisional"], true);
+        assert_eq!(status["can_cancel"], false);
+        record.finish(RequestOutcome::InternalError(
+            Arc::<str>::from("rejected").into(),
+        ));
+        let finished = handle.snapshot();
+        assert!(finished.state.is_terminal());
+        assert_eq!(finished.provisional_text(), None);
+        assert!(!finished.can_cancel());
+        assert_eq!(
+            crate::server::status(&finished)["provisional"],
+            serde_json::Value::Null
+        );
+        assert_eq!(registry.active_count(), 0);
+        let trace = registry.trace(handle.id()).unwrap();
+        assert!(trace.transitions.iter().any(|transition| {
+            transition.phase == EffectPhase::Accepting && transition.revision == snapshot.revision
+        }));
     }
 
     #[test]

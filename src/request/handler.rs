@@ -186,11 +186,14 @@ impl MessageHandler {
             }
         };
         let text = Arc::clone(proposed.text());
-        record.text_ready(Arc::clone(&text));
+        if !record.text_ready(Arc::clone(&text)) {
+            record.finish_cancelled();
+            return;
+        }
         let voice_result = match voice_options {
             None => Ok(None),
             Some(options) => {
-                if !record.generating_voice(Arc::clone(&text)) {
+                if !record.generating_voice() {
                     record.finish_cancelled();
                     return;
                 }

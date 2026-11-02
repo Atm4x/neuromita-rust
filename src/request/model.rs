@@ -225,7 +225,9 @@ impl From<Arc<str>> for InternalFailure {
 #[derive(Debug, Clone)]
 pub enum ProcessingStage {
     GeneratingText,
+    TextReady { text: Arc<str> },
     GeneratingVoice { text: Arc<str> },
+    Accepting { text: Arc<str> },
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +249,31 @@ pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
     pub revision: u64,
     pub state: RequestState,
+}
+
+impl RequestSnapshot {
+    pub fn provisional_text(&self) -> Option<&str> {
+        match &self.state {
+            RequestState::Processing(
+                ProcessingStage::TextReady { text }
+                | ProcessingStage::GeneratingVoice { text }
+                | ProcessingStage::Accepting { text },
+            ) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn can_cancel(&self) -> bool {
+        matches!(
+            self.state,
+            RequestState::Pending
+                | RequestState::Processing(
+                    ProcessingStage::GeneratingText
+                        | ProcessingStage::TextReady { .. }
+                        | ProcessingStage::GeneratingVoice { .. }
+                )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
