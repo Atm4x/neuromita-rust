@@ -1,6 +1,7 @@
 mod conversation;
 mod effects;
 pub mod gemini;
+mod memory_context;
 mod presets;
 mod provider;
 mod structured;

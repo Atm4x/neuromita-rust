@@ -1,6 +1,6 @@
 # NeuroMita Rust — текущая цель
 
-**Актуальный срез:** 2026-11-02. **Локальная базовая ревизия:** `adb90ce` (`codex/structured-state-effects-20261102`); изменения текущего прохода — typed effects и граница acceptance до TTS. Этот документ — рабочий план, а не утверждение о полной Python parity.
+**Актуальный срез:** 2026-11-02. **Базовая ревизия перед текущим проходом:** `8994f8d` (`codex/typed-long-term-memory-20261102`); текущий проход — ограниченный отбор воспоминаний и точная дедупликация. Этот документ — рабочий план, а не утверждение о полной Python parity.
 
 ## Текущий приоритет: самостоятельный Generation Core (без Unity)
 
@@ -8,7 +8,7 @@
 2. [x] Отдельная публикация Message, единая подготовка LLM-истории, типизированные настройки персонажей и presenter bindings.
 3. [x] `ChatApi` без пресета; назначение `Active | Specific(PresetId)` по персонажу и операции; **единственное разрешение и материализация пресета перед генерацией**.
 4. [x] **#16, базовый persistent catalog**: независимые определения, CRUD, постоянное хранение без API-ключей в JSON, presenter и проверка после restart. Полный пользовательский редактор/авторизация/другие протоколы остаются в #16.
-5. [~] **#19: StructuredResponse v3**: типизированный DTO, Gemini JSON Schema (текст, эмоции, три delta-поля состояния), строгая проверка; сегменты сохраняются как JSON одного Message. Первое применяемое действие оформлено как `ResponseEffect::ChangeCharacterState` → `AppliedEffect::CharacterStateChanged`: validation → `EffectPhase::Accepting` → guarded atomic append Message + CharacterStateChanged → `EffectPhase::Applied` → TTS. `AcceptedResponse` содержит материализованные эффекты и производное состояние. Отмена после начала принятия — TooLate, сбой TTS не откатывает коммит. Инструменты, память, рабочее состояние, игровые действия и полный цикл внешних applied-effects остаются открытыми.
+5. [~] **#19: StructuredResponse v3**: типизированный DTO, Gemini JSON Schema (текст, эмоции, три delta-поля состояния), строгая проверка; сегменты сохраняются как JSON одного Message. Первое применяемое действие оформлено как `ResponseEffect::ChangeCharacterState` → `AppliedEffect::CharacterStateChanged`: validation → `EffectPhase::Accepting` → guarded atomic append Message + CharacterStateChanged → `EffectPhase::Applied` → TTS. `AcceptedResponse` содержит материализованные эффекты и производное состояние. Отмена после начала принятия — TooLate, сбой TTS не откатывает коммит. Рабочее состояние теперь поддерживает `ResponseEffect::ReplaceWorkingState` → `AppliedEffect::CharacterWorkingStateReplaced`: bounded snapshot атомарно пишется с ответом, воспроизводится по Timeline и явно очищается пустым объектом или CharacterContextReset. Базовые долгосрочные воспоминания теперь поддерживаются: `ResponseEffect::MutateMemory` разрешается в атомарные `AppliedEffect::CharacterMemoryChanged`, с устойчивыми UUID, приоритетом, Add/Update/Delete/Merge и исторической проекцией. Выбор для LLM-контекста ограничен 12 записями/6000 Unicode-символами, с детерминированным lexical ranking. Добавлена нормализация точных дубликатов Add без создания новых ID и запрет Update/Merge exact collisions. Полная Python memory parity (RAG/embeddings/islands/TTL/утилиты) и инструменты/игровые действия остаются открытыми.
 6. [ ] #18: prompt sets / переменные / DSL; #16: transforms, альтернативные протоколы; #17: streaming/retry.
 7. [ ] Функциональная проверка end-to-end генерации, настроек, сохранения и восстановления без Unity. Unity C# и выбор игровых свидетелей сейчас вне scope.
 
@@ -30,4 +30,12 @@
 - [x] Включить постоянный каталог в обычный CLI bootstrap и предоставить CRUD/observe через presenter; проверить сохранение назначений и определений при перезапуске.
 - [ ] Настоящий графический редактор пресетов, безопасное хранение/ввод credentials помимо env refs, модельный discovery и другие протоколы. Runtime-only bootstrap ID 0 сохраняется; Timeline CLI по-прежнему transient.
 
-Срез #19: [src/generation/STRUCTURED_RESPONSE.md](src/generation/STRUCTURED_RESPONSE.md).
+Срез #19: [src/generation/STRUCTURED_RESPONSE.md](src/generation/STRUCTURED_RESPONSE.md). Отбор памяти: [src/generation/MEMORY_RETRIEVAL.md](src/generation/MEMORY_RETRIEVAL.md).
+
+### Следующий приоритет после текущего среза
+
+- [x] Типизированная замена рабочего когнитивного контекста (`working_state`) без второго mutable store, с общим acceptance и контекстом следующей генерации.
+- [x] Базовая долгосрочная память: стабильные UUID, приоритет, Add/Update/Delete/Merge, атомарные эффекты, исторический branch-prefix read model и контекст следующей генерации. `CharacterContextReset` очищает knowledge/working state, но оставляет личные длительные воспоминания; полное забывание — явный Delete.
+- [x] Ограниченное лексическое извлечение памяти для контекста (не семантический RAG), приоритеты + устойчивый tie-break, точная дедупликация Add и atomic collision rejection при Update/Merge. Полная проекция Timeline не обрезается.
+- [ ] Долговременная память, расширенная parity: Python numeric IDs, entities/tags, island upserts, RAG/vector lookup, TTL/auto-forget, **semantic** duplicate policies и UI CRUD; сравнить lifecycle/reset с реальными требованиями приложения.
+- [ ] Crash recovery фазы Accepting и подтверждение outcome для уже принятого RequestId; полные executor contracts для внешних действий.

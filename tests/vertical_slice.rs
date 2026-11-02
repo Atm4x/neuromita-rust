@@ -592,6 +592,452 @@ async fn structured_state_deltas_apply_only_with_accepted_reply() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn working_state_is_atomic_private_and_available_only_to_its_character() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "First".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(
+        call.body["generationConfig"]["responseSchema"]["properties"]["working_state"].is_object()
+    );
+    call.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"I understand"}],"attitude_change":2,"working_state":{"focus":"Offer some tea","open_loops":["Ask about the cup"]}}"#
+    )).unwrap();
+    let first_snapshot = finished(&first).await;
+    let accepted = match &first_snapshot.state {
+        RequestState::Finished(RequestOutcome::Success(accepted)) => accepted,
+        state => panic!("unexpected result: {state:?}"),
+    };
+    assert_eq!(accepted.effects.len(), 2);
+    assert_eq!(accepted.state_after.attitude, 62.0);
+    assert_eq!(app.at().through, 4); // User message + reply + two effects in one commit
+    let state = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(state.working_state.focus, "Offer some tea");
+    assert_eq!(state.working_state.open_loops, ["Ask about the cup"]);
+    assert_eq!(state.view.messages().len(), 2);
+    assert!(state.view.world_events().is_empty());
+    assert!(
+        app.character(CharacterId::KindMita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .working_state
+            .is_empty()
+    );
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Continue".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("[WORKING STATE]"));
+    assert!(call.body.to_string().contains("Offer some tea"));
+    call.respond.send(Reply::Text("All right")).unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .working_state
+            .focus,
+        "Offer some tea"
+    );
+
+    let third = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Clear".into())
+        .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"Done"}],"working_state":{}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .working_state
+            .is_empty()
+    );
+
+    let fourth = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "After clear".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(!call.body.to_string().contains("[WORKING STATE]"));
+    call.respond.send(Reply::Text("OK")).unwrap();
+    assert!(matches!(
+        finished(&fourth).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn typed_memories_are_atomic_and_visible_in_followup_context() {
+    use neuromita::timeline::domain::MemoryPriority;
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let add = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Remember this".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(
+        call.body["generationConfig"]["responseSchema"]["properties"]["memory_add"].is_object()
+    );
+    call.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"I remember"}],"memory_add":["high|The player prefers tea", "low|The player mentioned milk"]}"#
+    )).unwrap();
+    let accepted = finished(&add).await;
+    let response = match &accepted.state {
+        RequestState::Finished(RequestOutcome::Success(response)) => response,
+        state => panic!("unexpected result: {state:?}"),
+    };
+    assert_eq!(response.effects.len(), 2);
+    assert_eq!(app.at().through, 4); // user + message + two independent memory facts
+    let original_anchor = app.at();
+    let mem = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(mem.len(), 2);
+    assert!(
+        mem.iter()
+            .any(|item| item.content.contains("tea") && item.priority == MemoryPriority::High)
+    );
+    assert!(
+        app.character(CharacterId::KindMita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .memories
+            .is_empty()
+    );
+    let tea = mem
+        .iter()
+        .find(|item| item.content.contains("tea"))
+        .unwrap()
+        .id;
+    let milk = mem
+        .iter()
+        .find(|item| item.content.contains("milk"))
+        .unwrap()
+        .id;
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Consolidate".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("[LONG-TERM MEMORY]"));
+    assert!(call.body.to_string().contains(&tea.0.to_string()));
+    let merged = serde_json::json!({
+        "segments": [{"text":"Updated"}],
+        "memory_merge": [format!("{},{}:The player prefers tea with milk", tea.0,milk.0)]
+    })
+    .to_string();
+    call.respond
+        .send(Reply::Structured(Box::leak(merged.into_boxed_str())))
+        .unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let now = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(now.len(), 1);
+    assert_eq!(now[0].id, tea);
+    assert_eq!(now[0].content, "The player prefers tea with milk");
+    let at_before_bad = app.at();
+
+    let invalid = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Bad memory command".into())
+        .unwrap();
+    let call = server.next().await;
+    let bad = serde_json::json!({
+        "segments": [{"text":"Must not apply"}],
+        "memory_add": ["critical|This must roll back"],
+        "memory_update": [format!("{}|different",uuid::Uuid::new_v4())]
+    })
+    .to_string();
+    call.respond
+        .send(Reply::Structured(Box::leak(bad.into_boxed_str())))
+        .unwrap();
+    assert!(matches!(
+        finished(&invalid).await.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert_eq!(app.at().through, at_before_bad.through + 1); // only the incoming player message
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .memories,
+        now
+    );
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(original_anchor)
+            .await
+            .unwrap()
+            .memories,
+        mem
+    );
+
+    let delete = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Forget tea".into())
+        .unwrap();
+    let call = server.next().await;
+    let delete_body =
+        serde_json::json!({"segments":[{"text":"Forgotten"}],"memory_delete":[tea.0.to_string()]})
+            .to_string();
+    call.respond
+        .send(Reply::Structured(Box::leak(delete_body.into_boxed_str())))
+        .unwrap();
+    assert!(matches!(
+        finished(&delete).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .memories
+            .is_empty()
+    );
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
+    use neuromita::timeline::domain::MemoryPriority;
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Save memories".into())
+        .unwrap();
+    let call = server.next().await;
+    let mut facts: Vec<String> = (0..15)
+        .map(|i| format!("critical|Unrelated historical artifact number {i}"))
+        .collect();
+    facts.push("low|The player prefers jasmine tea".to_owned());
+    let response = json!({
+        "segments": [{"text": "Saved"}],
+        "memory_add": facts
+    })
+    .to_string();
+    call.respond
+        .send(Reply::Structured(Box::leak(response.into_boxed_str())))
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let all = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(all.len(), 16);
+    let tea = all
+        .iter()
+        .find(|record| record.content.contains("tea"))
+        .unwrap();
+    assert_eq!(tea.priority, MemoryPriority::Low);
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Tell me about jasmine tea".into())
+        .unwrap();
+    let call = server.next().await;
+    let prompt = call.body.to_string();
+    assert!(prompt.contains("[LONG-TERM MEMORY]"));
+    assert!(prompt.contains(&tea.id.0.to_string()));
+    assert!(prompt.contains("The player prefers jasmine tea"));
+    let visible = all
+        .iter()
+        .filter(|record| prompt.contains(&record.id.0.to_string()))
+        .count();
+    assert!(visible <= 12, "only bounded memory context is allowed");
+    assert!(
+        visible < all.len(),
+        "not all memories may be sent to the provider"
+    );
+    let memory_block = call.body["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|part| part["parts"][0]["text"].as_str())
+        .find(|text| text.starts_with("[LONG-TERM MEMORY]"))
+        .unwrap();
+    assert!(memory_block.chars().count() <= 6_000);
+    call.respond.send(Reply::Text("OK")).unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    let third = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Remember jasmine tea again".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"Already remembered"}],"memory_add":["critical|  the  PLAYER prefers jasmine TEA "]}"#
+    )).unwrap();
+    let accepted = finished(&third).await;
+    let applied = match &accepted.state {
+        RequestState::Finished(RequestOutcome::Success(response)) => response,
+        state => panic!("unexpected result: {state:?}"),
+    };
+    assert_eq!(applied.effects.len(), 1);
+    let after = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(after.len(), 16);
+    let same_tea = after.iter().find(|record| record.id == tea.id).unwrap();
+    assert_eq!(same_tea.priority, MemoryPriority::Critical);
+    assert_eq!(same_tea.content, tea.content);
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invalid_working_state_is_rejected_before_acceptance() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let handle = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Try invalid".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"Unsafe"}],"working_state":{"open_loops":["1","2","3","4","5","6","7"]}}"#
+    )).unwrap();
+    assert!(matches!(
+        finished(&handle).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    assert_eq!(app.at().through, 1);
+    assert!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap()
+            .working_state
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_structured_effect_fails_without_committing_or_synthesizing() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;

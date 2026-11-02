@@ -4,7 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use super::{GenerationError, ResponseEffect};
-use crate::timeline::domain::CharacterStateDelta;
+pub use crate::timeline::domain::CharacterWorkingState as WorkingState;
+use crate::timeline::domain::{CharacterStateDelta, MemoryCommand, MemoryId, MemoryPriority};
+use uuid::Uuid;
 
 pub const RESPONSE_PROTOCOL_VERSION: u32 = 3;
 
@@ -108,16 +110,6 @@ impl ResponseSegment {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
-pub struct WorkingState {
-    pub focus: String,
-    pub situation: Vec<String>,
-    pub assumptions: Vec<String>,
-    pub open_loops: Vec<String>,
-    pub next_steps: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default, deny_unknown_fields)]
 pub struct StructuredResponse {
     pub reasoning: Option<String>,
     pub image_description: Option<String>,
@@ -172,6 +164,15 @@ impl StructuredResponse {
                 "structured intent has empty type".into(),
             ));
         }
+        if self
+            .working_state
+            .as_ref()
+            .is_some_and(|state| !state.is_valid())
+        {
+            return Err(GenerationError::Response(
+                "working state exceeds its bounded handoff budget".into(),
+            ));
+        }
         for delta in [
             self.attitude_change,
             self.boredom_change,
@@ -183,20 +184,115 @@ impl StructuredResponse {
                 ));
             }
         }
+        self.memory_commands()?;
         Ok(())
     }
 
-    pub fn proposed_effects(&self) -> Vec<ResponseEffect> {
+    fn memory_commands(&self) -> Result<Vec<MemoryCommand>, GenerationError> {
+        let invalid =
+            |reason: &str| GenerationError::Response(format!("invalid memory operation: {reason}"));
+        let total = [
+            &self.memory_add,
+            &self.memory_update,
+            &self.memory_delete,
+            &self.memory_merge,
+        ]
+        .iter()
+        .map(|items| items.as_ref().map_or(0, Vec::len))
+        .sum::<usize>();
+        if total > 16 {
+            return Err(invalid("too many operations in one response"));
+        }
+        let parse_id = |text: &str| -> Result<MemoryId, GenerationError> {
+            Uuid::parse_str(text.trim())
+                .map(MemoryId)
+                .map_err(|_| invalid("expected stable UUID identity"))
+        };
+        let priority = |text: &str| -> Option<MemoryPriority> {
+            match text.trim().to_ascii_lowercase().as_str() {
+                "low" => Some(MemoryPriority::Low),
+                "normal" => Some(MemoryPriority::Normal),
+                "high" => Some(MemoryPriority::High),
+                "critical" => Some(MemoryPriority::Critical),
+                _ => None,
+            }
+        };
+        let validate_text = |text: &str| -> Result<String, GenerationError> {
+            let content = text.trim();
+            if content.is_empty() || content.chars().count() > 2000 {
+                return Err(invalid("content must contain 1-2000 characters"));
+            }
+            Ok(content.to_owned())
+        };
+        let mut commands = Vec::new();
+        for raw in self.memory_add.iter().flatten() {
+            let (priority, content) = raw
+                .split_once('|')
+                .and_then(|(tag, text)| priority(tag).map(|p| (p, text)))
+                .unwrap_or((MemoryPriority::Normal, raw.as_str()));
+            if raw.trim().starts_with("island:") {
+                return Err(invalid("island upsert not implemented"));
+            }
+            commands.push(MemoryCommand::Add {
+                priority,
+                content: validate_text(content)?,
+            });
+        }
+        for raw in self.memory_update.iter().flatten() {
+            let (id, remainder) = raw
+                .split_once('|')
+                .ok_or_else(|| invalid("update requires UUID|content"))?;
+            let id = parse_id(id)?;
+            let (priority, content) = remainder
+                .split_once('|')
+                .and_then(|(tag, text)| priority(tag).map(|p| (Some(p), text)))
+                .unwrap_or((None, remainder));
+            commands.push(MemoryCommand::Update {
+                id,
+                priority,
+                content: validate_text(content)?,
+            });
+        }
+        for raw in self.memory_delete.iter().flatten() {
+            commands.push(MemoryCommand::Delete { id: parse_id(raw)? });
+        }
+        for raw in self.memory_merge.iter().flatten() {
+            let (ids, content) = raw
+                .split_once(':')
+                .map_or((raw.as_str(), None), |(ids, text)| (ids, Some(text)));
+            let mut parts = ids.split(',');
+            let target = parse_id(parts.next().unwrap_or(""))?;
+            let sources = parts.map(parse_id).collect::<Result<Vec<_>, _>>()?;
+            if sources.is_empty() {
+                return Err(invalid("merge requires at least two IDs"));
+            }
+            commands.push(MemoryCommand::Merge {
+                target,
+                sources,
+                content: content.map(validate_text).transpose()?,
+            });
+        }
+        Ok(commands)
+    }
+
+    pub fn proposed_effects(&self) -> Result<Vec<ResponseEffect>, GenerationError> {
         let change = CharacterStateDelta {
             attitude: self.attitude_change,
             boredom: self.boredom_change,
             stress: self.stress_change,
         };
-        if change.is_empty() {
-            Vec::new()
-        } else {
-            vec![ResponseEffect::ChangeCharacterState(change)]
+        let mut effects = Vec::new();
+        if !change.is_empty() {
+            effects.push(ResponseEffect::ChangeCharacterState(change));
         }
+        if let Some(state) = &self.working_state {
+            effects.push(ResponseEffect::ReplaceWorkingState(state.clone()));
+        }
+        let memory = self.memory_commands()?;
+        if !memory.is_empty() {
+            effects.push(ResponseEffect::MutateMemory(memory));
+        }
+        Ok(effects)
     }
 
     pub fn full_text(&self) -> Arc<str> {
@@ -217,10 +313,6 @@ impl StructuredResponse {
             .any(ResponseSegment::has_unsupported_content)
             || self.image_description.is_some()
             || self.secret_exposed.is_some()
-            || self.memory_add.is_some()
-            || self.memory_update.is_some()
-            || self.memory_delete.is_some()
-            || self.memory_merge.is_some()
             || self.reminder_add.is_some()
             || self.reminder_delete.is_some()
             || self.timer_add.is_some()
@@ -228,7 +320,6 @@ impl StructuredResponse {
             || self.relations.is_some()
             || self.tool_call.is_some()
             || self.custom_fields.is_some()
-            || self.working_state.is_some()
         {
             return Err(GenerationError::Response(
                 "structured response contains fields without an enabled executor".into(),
@@ -306,14 +397,48 @@ mod tests {
         )
         .unwrap();
         response.ensure_supported_effects().unwrap();
-        assert!(matches!(response.proposed_effects().as_slice(),
+        assert!(matches!(response.proposed_effects().unwrap().as_slice(),
             [ResponseEffect::ChangeCharacterState(delta)] if delta.attitude == 1.25 && delta.stress == -2.5
         ));
         let unsupported = StructuredResponse::parse(
             r#"{"segments":[{"text":"hi"}],"attitude_change":1,"memory_add":["remember"]}"#,
         )
         .unwrap();
-        assert!(unsupported.ensure_supported_effects().is_err());
+        unsupported.ensure_supported_effects().unwrap();
+        assert!(matches!(
+            unsupported.proposed_effects().unwrap().last(),
+            Some(ResponseEffect::MutateMemory(_))
+        ));
+    }
+
+    #[test]
+    fn working_state_is_a_typed_replacement_not_a_textual_command() {
+        let response = StructuredResponse::parse(
+            r#"{"segments":[{"text":"hi"}],"working_state":{"focus":"Resolve the question","next_steps":["Ask a follow-up"]}}"#,
+        ).unwrap();
+        response.ensure_supported_effects().unwrap();
+        assert!(
+            matches!(response.proposed_effects().unwrap().as_slice(), [ResponseEffect::ReplaceWorkingState(state)] if state.focus == "Resolve the question")
+        );
+        let clear = StructuredResponse::parse(r#"{"segments":[{"text":"hi"}],"working_state":{}}"#)
+            .unwrap();
+        assert!(
+            matches!(clear.proposed_effects().unwrap().as_slice(), [ResponseEffect::ReplaceWorkingState(state)] if state.is_empty())
+        );
+        assert!(
+            StructuredResponse::parse(
+                &serde_json::json!({
+                    "segments":[{"text":"hi"}],
+                    "working_state":{"focus":"z".repeat(601)}
+                })
+                .to_string()
+            )
+            .is_err()
+        );
+        StructuredResponse::parse(r#"{"segments":[{"text":"hi"}],"memory_add":["normal|later"]}"#)
+            .unwrap()
+            .ensure_supported_effects()
+            .unwrap();
     }
 
     #[test]

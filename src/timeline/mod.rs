@@ -32,7 +32,8 @@ use selection::TimelineSelectionRepository;
 
 use domain::{
     AppendGuard, AppliedEffect, BranchId, CausalLink, CausalRelation, CharacterBehavior,
-    EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
+    CharacterMemories, CharacterWorkingState, EventDraft, EventKind, MemoryChange, SessionId,
+    TimelineRepository, TimelineStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,6 +497,80 @@ impl SessionTimeline {
         Ok(current)
     }
 
+    /// Reconstruct the last accepted cognitive handoff at the selected branch prefix.
+    /// A knowledge reset clears it, without deleting historical facts.
+    pub(crate) fn character_working_state_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<CharacterWorkingState, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        let mut current = CharacterWorkingState::default();
+        for fact in self
+            .store
+            .world(branch)?
+            .iter()
+            .take_while(|fact| fact.sequence <= at.through)
+        {
+            if fact.draft.kind == EventKind::CharacterContextReset
+                && fact.draft.observers.contains(&character)
+            {
+                current = CharacterWorkingState::default();
+            }
+            if fact.draft.kind != EventKind::CharacterWorkingStateReplaced
+                || fact.draft.actor.as_deref() != Some(&character.to_string())
+            {
+                continue;
+            }
+            let next: CharacterWorkingState =
+                serde_json::from_value(fact.draft.payload.get("working_state").cloned().ok_or(
+                    domain::TimelineError::Invalid("working state effect has no payload"),
+                )?)
+                .map_err(|_| domain::TimelineError::Invalid("invalid accepted working state"))?;
+            if !next.is_valid() {
+                return Err(domain::TimelineError::Invalid(
+                    "invalid accepted working state",
+                ));
+            }
+            current = next;
+        }
+        Ok(current)
+    }
+
+    /// Canonical durable memories on one branch prefix. A knowledge reset changes
+    /// the character's observed context, not the underlying long-term memories.
+    pub(crate) fn character_memories_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<CharacterMemories, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        let mut book = CharacterMemories::default();
+        for fact in self
+            .store
+            .world(branch)?
+            .iter()
+            .take_while(|fact| fact.sequence <= at.through)
+        {
+            if fact.draft.kind != EventKind::CharacterMemoryChanged
+                || fact.draft.actor.as_deref() != Some(&character.to_string())
+            {
+                continue;
+            }
+            let change: MemoryChange = serde_json::from_value(
+                fact.draft
+                    .payload
+                    .get("change")
+                    .cloned()
+                    .ok_or(domain::TimelineError::Invalid("missing memory change"))?,
+            )
+            .map_err(|_| domain::TimelineError::Invalid("invalid committed memory change"))?;
+            book.apply_committed(&change)
+                .map_err(domain::TimelineError::Invalid)?;
+        }
+        Ok(book)
+    }
+
     /// Find only a committed character reply in an immutable branch prefix.
     /// Unanswered/cancelled/unfinished requests are intentionally indistinguishable.
     pub(crate) fn accepted_reply_at(
@@ -847,6 +922,39 @@ impl SessionTimeline {
                     );
                     drafts.push(change);
                 }
+                AppliedEffect::CharacterMemoryChanged(memory_change) => {
+                    let mut memory = EventDraft::new(EventKind::CharacterMemoryChanged);
+                    memory.actor = Some(character.to_string());
+                    memory.observers.insert(character);
+                    memory.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    memory.payload.insert(
+                        "change".into(),
+                        serde_json::to_value(memory_change)
+                            .map_err(|_| domain::TimelineError::Invalid("invalid memory change"))?,
+                    );
+                    drafts.push(memory);
+                }
+                AppliedEffect::CharacterWorkingStateReplaced(state) => {
+                    if !state.is_valid() {
+                        return Err(domain::TimelineError::Invalid("invalid working state"));
+                    }
+                    let mut handoff = EventDraft::new(EventKind::CharacterWorkingStateReplaced);
+                    handoff.actor = Some(character.to_string());
+                    handoff.observers.insert(character);
+                    handoff.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    handoff.payload.insert(
+                        "working_state".into(),
+                        serde_json::to_value(state)
+                            .map_err(|_| domain::TimelineError::Invalid("invalid working state"))?,
+                    );
+                    drafts.push(handoff);
+                }
             }
         }
         let selected = self.selection();
@@ -1158,6 +1266,191 @@ mod tests {
                 .capture_context(CharacterId::Mita, ContextPosition::Latest)
                 .unwrap();
             assert_eq!(captured.view.messages()[0].content, "independent input");
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn memory_replays_historical_branch_prefix_and_sqlite_reopen() {
+        use domain::{MemoryId, MemoryPriority, MemoryRecord};
+        let path = std::env::temp_dir().join(format!("neuromita-memory-{}.db", Uuid::new_v4()));
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let memory_id = MemoryId::new();
+        let initial;
+        let updated;
+        {
+            let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let original = MemoryRecord {
+                id: memory_id,
+                priority: MemoryPriority::High,
+                content: "first fact".into(),
+            };
+            let turn = timeline
+                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .unwrap();
+            timeline
+                .append_reply(GeneratedReply {
+                    request: RequestId::new(),
+                    intent: TurnIntent::Initiate,
+                    turn,
+                    expected_revision: 0,
+                    content: json!([{"text":"One"}]),
+                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
+                        original,
+                    ))],
+                })
+                .unwrap();
+            initial = timeline.anchor();
+            let changed = MemoryRecord {
+                id: memory_id,
+                priority: MemoryPriority::Critical,
+                content: "corrected fact".into(),
+            };
+            let turn = timeline
+                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .unwrap();
+            timeline
+                .append_reply(GeneratedReply {
+                    request: RequestId::new(),
+                    intent: TurnIntent::Initiate,
+                    turn,
+                    expected_revision: 1,
+                    content: json!([{"text":"Two"}]),
+                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
+                        changed,
+                    ))],
+                })
+                .unwrap();
+            updated = timeline.anchor();
+            timeline
+                .reset_character_context(timeline.selection(), CharacterId::Mita, EventId::new())
+                .unwrap();
+        }
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let first = timeline
+                .character_memories_at(CharacterId::Mita, initial)
+                .unwrap()
+                .list();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].content, "first fact");
+            let later = timeline
+                .character_memories_at(CharacterId::Mita, updated)
+                .unwrap()
+                .list();
+            assert_eq!(later[0].id, memory_id);
+            assert_eq!(later[0].content, "corrected fact");
+            assert_eq!(
+                timeline
+                    .character_memories_at(CharacterId::Mita, timeline.anchor())
+                    .unwrap()
+                    .list(),
+                later
+            );
+            assert!(
+                timeline
+                    .character_memories_at(CharacterId::KindMita, timeline.anchor())
+                    .unwrap()
+                    .list()
+                    .is_empty()
+            );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn working_state_replays_from_sqlite_and_resets_at_historical_anchor() {
+        let path =
+            std::env::temp_dir().join(format!("neuromita-working-effect-{}.db", Uuid::new_v4()));
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let original_anchor;
+        let reset_anchor;
+        let snapshot = CharacterWorkingState {
+            focus: "Need to clarify the question".into(),
+            open_loops: vec!["Confirm intent".into()],
+            ..CharacterWorkingState::default()
+        };
+        {
+            let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let turn = timeline
+                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .unwrap();
+            timeline
+                .append_reply(GeneratedReply {
+                    request: RequestId::new(),
+                    intent: TurnIntent::Initiate,
+                    turn,
+                    expected_revision: 0,
+                    content: json!([{"text":"Hello"}]),
+                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    effects: vec![AppliedEffect::CharacterWorkingStateReplaced(
+                        snapshot.clone(),
+                    )],
+                })
+                .unwrap();
+            assert_eq!(timeline.anchor().through, 2);
+            original_anchor = timeline.anchor();
+            timeline
+                .reset_character_context(timeline.selection(), CharacterId::Mita, EventId::new())
+                .unwrap();
+            reset_anchor = timeline.anchor();
+        }
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            assert_eq!(
+                timeline
+                    .character_working_state_at(CharacterId::Mita, original_anchor)
+                    .unwrap(),
+                snapshot
+            );
+            assert!(
+                timeline
+                    .character_working_state_at(CharacterId::Mita, reset_anchor)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                timeline
+                    .character_working_state_at(CharacterId::KindMita, original_anchor)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                timeline
+                    .character_behavior_at(CharacterId::Mita, reset_anchor)
+                    .unwrap(),
+                CharacterBehavior::default()
+            );
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

@@ -348,6 +348,8 @@ mod tests {
                 boredom: 10.0,
                 stress: 5.0,
             },
+            working_state: Default::default(),
+            memories: Vec::new(),
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,
@@ -456,6 +458,8 @@ mod tests {
                 boredom: 10.0,
                 stress: 5.0,
             },
+            working_state: Default::default(),
+            memories: Vec::new(),
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,

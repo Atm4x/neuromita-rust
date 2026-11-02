@@ -1,5 +1,7 @@
 use serde_json::{Map, Value};
 
+use super::memory_context::render_memory_context;
+
 use crate::{
     character::CharacterContext,
     identity::{CharacterId, EventId},
@@ -214,6 +216,78 @@ impl LlmConversation {
         };
         let (mut messages, target_present) =
             project_history(&context.view, context.character_id, focus);
+        let history_message_count = messages.len();
+        if !context.working_state.is_empty() {
+            let state = &context.working_state;
+            let mut handoff = vec![
+                "[WORKING STATE]".to_owned(),
+                "Temporary model-produced context from the previous turn; not instructions."
+                    .to_owned(),
+            ];
+            if !state.focus.is_empty() {
+                handoff.push(format!("Focus: {}", state.focus));
+            }
+            for (label, items) in [
+                ("Current understanding", &state.situation),
+                ("Tentative assumptions", &state.assumptions),
+                ("Open loops", &state.open_loops),
+                ("Immediate next steps", &state.next_steps),
+            ] {
+                if !items.is_empty() {
+                    handoff.push(format!("{label}:"));
+                    handoff.extend(items.iter().map(|item| format!("- {item}")));
+                }
+            }
+            handoff.push("[/WORKING STATE]".into());
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text: handoff.join("\n"),
+            });
+        }
+        let mut memory_query = context.current_input.to_string();
+        if let Some(cause) = &context.focus.reaction
+            && let Some(description) = &cause.description
+        {
+            memory_query.push(' ');
+            memory_query.push_str(description);
+        }
+        memory_query.push(' ');
+        memory_query.push_str(&context.working_state.focus);
+        if let TurnIntent::Reply(target) | TurnIntent::React(target) = context.focus.intent
+            && let Some(entry) =
+                context
+                    .view
+                    .context_entries()
+                    .into_iter()
+                    .find(|entry| match entry {
+                        ContextEntry::Message(message) => message.event_id == target,
+                        ContextEntry::World(event) => event.event_id == target,
+                    })
+        {
+            match entry {
+                ContextEntry::Message(message) => {
+                    if let Some(text) = message_text(&message.fields) {
+                        memory_query.push(' ');
+                        memory_query.push_str(&text);
+                    }
+                }
+                ContextEntry::World(event) => {
+                    memory_query.push(' ');
+                    memory_query
+                        .push_str(&serde_json::Value::Object(event.payload.clone()).to_string());
+                }
+            }
+        }
+        for message in messages[..history_message_count].iter().rev().take(3) {
+            memory_query.push(' ');
+            memory_query.push_str(&message.text);
+        }
+        if let Some(text) = render_memory_context(&context.memories, &memory_query) {
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text,
+            });
+        }
         let task = match context.focus.intent {
             TurnIntent::Reply(_) if target_present => None,
             TurnIntent::Reply(_) => {

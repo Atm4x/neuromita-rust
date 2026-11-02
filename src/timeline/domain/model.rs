@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::memory::MemoryChange;
 use crate::identity::{CharacterId, EventId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +48,8 @@ pub enum EventKind {
     CharacterMessage,
     CharacterObservation,
     CharacterStateChanged,
+    CharacterWorkingStateReplaced,
+    CharacterMemoryChanged,
     CharacterJoined,
     CharacterLeft,
     UnityEvent,
@@ -108,11 +111,57 @@ impl Default for CharacterBehavior {
     }
 }
 
+/// Compact, untrusted model-produced handoff for the character's next turn.
+/// Unlike the user's message, this is private cognitive context, not dialogue.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CharacterWorkingState {
+    pub focus: String,
+    pub situation: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub open_loops: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+impl CharacterWorkingState {
+    pub fn is_empty(&self) -> bool {
+        self.focus.is_empty()
+            && self.situation.is_empty()
+            && self.assumptions.is_empty()
+            && self.open_loops.is_empty()
+            && self.next_steps.is_empty()
+    }
+
+    /// Reject out-of-bounds snapshots rather than silently truncating
+    /// accepted data. The limits follow Python's working-state budget.
+    pub fn is_valid(&self) -> bool {
+        let arrays = [
+            &self.situation,
+            &self.assumptions,
+            &self.open_loops,
+            &self.next_steps,
+        ];
+        self.focus.chars().count() <= 600
+            && arrays.iter().all(|items| {
+                items.len() <= 6 && items.iter().all(|item| item.chars().count() <= 400)
+            })
+            && self.focus.chars().count()
+                + arrays
+                    .iter()
+                    .flat_map(|items| items.iter())
+                    .map(|item| item.chars().count())
+                    .sum::<usize>()
+                <= 2000
+    }
+}
+
 /// Materialized, committed effect owned by the canonical Timeline domain.
 /// Other modules produce this value but Timeline never depends on the generator.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AppliedEffect {
     CharacterStateChanged(CharacterBehavior),
+    CharacterWorkingStateReplaced(CharacterWorkingState),
+    CharacterMemoryChanged(MemoryChange),
 }
 
 impl CharacterBehavior {

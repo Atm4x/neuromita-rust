@@ -3,6 +3,7 @@ pub(crate) use knowledge::knowledge_change;
 mod knowledge;
 #[cfg(feature = "sqlite-system")]
 pub(crate) use index::WorldLookup;
+mod memory;
 mod messages;
 mod model;
 mod projection;
@@ -13,11 +14,14 @@ pub(crate) use replies::{accepted_reply_count, accepted_reply_request};
 mod store;
 mod world;
 
+pub use memory::{
+    CharacterMemories, MemoryChange, MemoryCommand, MemoryId, MemoryPriority, MemoryRecord,
+};
 pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};
 pub use model::{
     AppendGuard, AppliedEffect, BranchId, BranchInfo, CausalLink, CausalRelation,
-    CharacterBehavior, CharacterStateDelta, Event, EventDraft, EventKind, KnownEvent, SessionId,
-    TimelineError, TimelineFact,
+    CharacterBehavior, CharacterStateDelta, CharacterWorkingState, Event, EventDraft, EventKind,
+    KnownEvent, SessionId, TimelineError, TimelineFact,
 };
 pub use projection::{character_view, knows, present_characters};
 pub use request_evidence::RequestEvidence;

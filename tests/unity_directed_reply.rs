@@ -1,5 +1,10 @@
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
+#[cfg(feature = "sqlite-system")]
+use neuromita::timeline::{
+    TimelineConfig,
+    domain::{BranchId, SessionId},
+};
 use neuromita::{
     api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
@@ -14,9 +19,9 @@ use neuromita::{
         UserInput,
     },
     timeline::{
-        EventContent, TimelineConfig,
+        EventContent,
         conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
-        domain::{BranchId, EventKind, SessionId},
+        domain::EventKind,
         ingress::{SemanticBatch, SemanticEvent},
     },
 };

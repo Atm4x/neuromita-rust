@@ -37,7 +37,7 @@ pub struct GenerationRequest {
 
 Текст, озвучка и предложенные изменения сначала являются подготовленным результатом. Их получение от исполнителя ещё не означает запись ответа в смысловую историю и изменение Character.
 
-`ResponseEffect` — типизированное предложение изменения после validation (сейчас `ChangeCharacterState(CharacterStateDelta)`); `AppliedEffect` — материализованный результат принятия (сейчас `CharacterStateChanged(CharacterBehavior)`). `ProposedResponse.effects` и `AcceptedResponse.effects` хранят разные стадии данных. Принятое абсолютное состояние записывается атомарно с Message в Timeline; отдельная запись состояния в Character не создаётся. `EffectPhase` управляет одним **пакетом**, а не отдельными вариантами enum.
+`ResponseEffect` — типизированное предложение изменения после validation (сейчас `ChangeCharacterState(CharacterStateDelta)` и `ReplaceWorkingState(CharacterWorkingState)`); `AppliedEffect` — материализованный результат принятия (сейчас `CharacterStateChanged(CharacterBehavior)` и `CharacterWorkingStateReplaced(CharacterWorkingState)`). `ProposedResponse.effects` и `AcceptedResponse.effects` хранят разные стадии данных. Принятое абсолютное состояние записывается атомарно с Message в Timeline; отдельная запись состояния в Character не создаётся. `EffectPhase` управляет одним **пакетом**, а не отдельными вариантами enum.
 
 **Обновлённая граница:** после успешного LLM сразу выполняются `begin_accepting()` → guarded atomic append → `mark_applied()`, и лишь затем начинается необязательный TTS. Голосовой артефакт не участвует в доменном коммите.
 
@@ -111,3 +111,9 @@ EffectPhase защищает от пользовательской отмены,
 Переключение мира/сброс контекста должны согласовываться с правом принятия. Внешняя отмена и смена мира не обязательно имеют одинаковую реализацию; нельзя применять старый пакет к новому миру.
 
 Не все инструменты и внешние действия можно безопасно отложить. Их полный контракт в этой сессии ещё не спроектирован.
+
+## Рабочий контекст как второй типизированный эффект
+
+`working_state` — краткий недоверенный model-produced handoff персонажу на следующий ход, а не долговременная память и не диалоговое сообщение. Поле отсутствует — нет эффекта; `{}` — явная замена пустым состоянием. Оба варианта `ResponseEffect` принимаются одной операцией RequestRecord (`Working → Accepting → Applied/Discarded`), и изменения состояния/текста/working_state попадают в один guarded batch.
+
+Canonical projection `SessionTimeline::character_working_state_at` считывает последнее принятое значение до заданного anchor. Reset очищает актуальный handoff, но позволяет исследовать исходные исторические значения. TTS и внешние команды не участвуют. Реализация намеренно отличается от ephemeral Python working-state cache; long-term memory требует отдельного ID/priority домена.

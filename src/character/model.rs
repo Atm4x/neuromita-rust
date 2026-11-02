@@ -4,7 +4,9 @@ use crate::{
     identity::CharacterId,
     interaction::TurnIntent,
     timeline::{
-        ContextAnchor, EventId, HistoryView, domain::EventKind, selection::TimelineTurn,
+        ContextAnchor, EventId, HistoryView,
+        domain::{CharacterWorkingState, EventKind, MemoryRecord},
+        selection::TimelineTurn,
         view::MitaView,
     },
 };
@@ -71,6 +73,8 @@ pub struct CharacterContext {
     pub description: Arc<str>,
     pub prompt: Arc<str>,
     pub state: CharacterState,
+    pub working_state: CharacterWorkingState,
+    pub memories: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
     pub current_input: Arc<str>,
@@ -85,6 +89,8 @@ pub struct CharacterView {
     pub description: Arc<str>,
     pub prompt: Arc<str>,
     pub state: CharacterState,
+    pub working_state: CharacterWorkingState,
+    pub memories: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
 }

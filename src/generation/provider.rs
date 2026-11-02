@@ -43,7 +43,7 @@ impl ProposedResponse {
         structured.ensure_supported_effects()?;
         Ok(Self {
             text: structured.full_text(),
-            effects: structured.proposed_effects().into(),
+            effects: structured.proposed_effects()?.into(),
             structured: Arc::new(structured),
         })
     }

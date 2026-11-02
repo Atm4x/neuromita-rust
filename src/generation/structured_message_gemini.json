@@ -36,6 +36,67 @@
     "stress_change": {
       "type": "number",
       "description": "Proposed stress change, accepted only with the reply"
+    },
+    "working_state": {
+      "type": "object",
+      "description": "Optional compact private handoff for the next turn; an empty object clears the prior handoff",
+      "properties": {
+        "focus": {
+          "type": "string"
+        },
+        "situation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "assumptions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "open_loops": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "memory_add": {
+      "description": "Add memory: priority|content, priority low/normal/high/critical",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "memory_update": {
+      "description": "Update by stable ID: uuid|priority|content or uuid|content",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "memory_delete": {
+      "description": "Delete by stable UUID",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "memory_merge": {
+      "description": "Merge: target_uuid,source_uuid:optional merged content",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "type": "object",

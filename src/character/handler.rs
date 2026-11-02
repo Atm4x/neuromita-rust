@@ -310,6 +310,13 @@ impl CharacterHandler {
                 })?;
         let anchor = captured.history.at;
         let state = state_at(&timeline, self.character.id, anchor)?;
+        let working_state = timeline
+            .character_working_state_at(self.character.id, anchor)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        let memories = timeline
+            .character_memories_at(self.character.id, anchor)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?
+            .list();
         let reaction = timeline
             .reaction_cause_at(self.character.id, intent, anchor)
             .map_err(|error| CharacterError::Internal(error.to_string()))?
@@ -342,6 +349,8 @@ impl CharacterHandler {
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
             state,
+            working_state,
+            memories,
             history: captured.history,
             view: captured.view,
             current_input: guidance,
@@ -367,7 +376,13 @@ impl CharacterHandler {
             .structured
             .ensure_supported_effects()
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
-        if proposed.effects.as_ref() != proposed.structured.proposed_effects().as_slice() {
+        if proposed.effects.as_ref()
+            != proposed
+                .structured
+                .proposed_effects()
+                .map_err(|e| CharacterError::Internal(e.to_string()))?
+                .as_slice()
+        {
             return Err(CharacterError::Internal(
                 "proposed effects do not match the validated response".into(),
             ));
@@ -389,6 +404,9 @@ impl CharacterHandler {
             stress: self.character.state.stress,
         };
         let mut effects = Vec::with_capacity(proposed.effects.len());
+        let current_memories = timeline
+            .character_memories_at(self.character.id, timeline.anchor())
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
         for effect in proposed.effects.iter() {
             match effect {
                 ResponseEffect::ChangeCharacterState(delta) => {
@@ -396,6 +414,19 @@ impl CharacterHandler {
                         CharacterError::Internal("invalid character state change".into())
                     })?;
                     effects.push(AppliedEffect::CharacterStateChanged(state));
+                }
+                ResponseEffect::ReplaceWorkingState(state) => {
+                    effects.push(AppliedEffect::CharacterWorkingStateReplaced(state.clone()));
+                }
+                ResponseEffect::MutateMemory(commands) => {
+                    let changes = current_memories
+                        .resolve(commands)
+                        .map_err(|reason| CharacterError::Internal(reason.into()))?;
+                    effects.extend(
+                        changes
+                            .into_iter()
+                            .map(AppliedEffect::CharacterMemoryChanged),
+                    );
                 }
             }
         }
@@ -441,6 +472,13 @@ impl CharacterHandler {
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
             state: state_at(&timeline, self.character.id, at)?,
+            working_state: timeline
+                .character_working_state_at(self.character.id, at)
+                .map_err(|error| CharacterError::Internal(error.to_string()))?,
+            memories: timeline
+                .character_memories_at(self.character.id, at)
+                .map_err(|error| CharacterError::Internal(error.to_string()))?
+                .list(),
             history: captured.history,
             view: captured.view,
         })
