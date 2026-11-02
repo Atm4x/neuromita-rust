@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod bootstrap;
 pub mod composition;
+pub mod install;
 mod layer;
 pub mod managed;
 pub mod overlay;
@@ -355,6 +356,26 @@ impl AiSupervisor {
         )
         .await
     }
+}
+
+/// Inspect an uninstalled plugin using an isolated, short-lived Python process.
+/// Installation contracts do not run inside a live inference worker.
+pub async fn fetch_install_plan(
+    config: &PythonHostConfig,
+    plugin_id: &str,
+) -> Result<install::PluginInstallPlan, AiRuntimeError> {
+    if !layer::valid_segment(plugin_id) {
+        return Err(AiRuntimeError::Protocol("invalid plugin identifier".into()));
+    }
+    let mut worker = WorkerProcess::launch(config, &[]).await?;
+    let result = worker
+        .request("install_plan", &json!({ "plugin_id": plugin_id }))
+        .await;
+    let _ = worker.child.start_kill();
+    let _ = worker.child.wait().await;
+    let value = result?;
+    serde_json::from_value(value)
+        .map_err(|error| AiRuntimeError::Protocol(format!("invalid install plan: {error}")))
 }
 
 pub struct PythonVoiceProvider {
