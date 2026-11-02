@@ -75,6 +75,8 @@ pub enum AiRuntimeError {
     NotRunning,
     #[error("worker already started for the requested service")]
     AlreadyRunning,
+    #[error("worker generation changed before request completed")]
+    StaleGeneration,
     #[error("python worker failed to start: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("python worker IPC failed: {0}")]
@@ -259,6 +261,24 @@ impl WorkerProcess {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ModelActivation {
+    pub service: AiService,
+    pub plugin_id: String,
+    pub settings: Value,
+}
+
+impl AiService {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Tts => "tts",
+            Self::Asr => "asr",
+            Self::Embedding => "embedding",
+            Self::Beats => "beats",
+        }
+    }
+}
+
 pub struct AiSupervisor {
     topology: ProcessTopology,
     config: PythonHostConfig,
@@ -308,6 +328,96 @@ impl AiSupervisor {
         Ok(generation)
     }
 
+    /// Prepare a new worker and initialize every selected service before publication.
+    /// Failed candidates never replace a working process.
+    pub async fn activate_composed(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.reconfigure(service, composition.services(), composition.paths(), models)
+            .await
+    }
+
+    async fn reconfigure(
+        &self,
+        service: AiService,
+        services: &[AiService],
+        layers: &[PathBuf],
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        use std::collections::HashSet;
+        let selected: HashSet<_> = services.iter().copied().collect();
+        let configured: HashSet<_> = models.iter().map(|model| model.service).collect();
+        if selected.len() != services.len()
+            || selected != configured
+            || models.len() != configured.len()
+            || !selected.contains(&service)
+            || (self.topology == ProcessTopology::Split && selected != HashSet::from([service]))
+        {
+            return Err(AiRuntimeError::Protocol(
+                "provide exactly one model per selected service".into(),
+            ));
+        }
+        let mut workers = self.workers.lock().await;
+        let mut candidate = WorkerProcess::launch(&self.config, layers).await?;
+        let prepare = async {
+            let available = candidate.request("discover", &json!({})).await?;
+            let plugins = available
+                .as_array()
+                .ok_or_else(|| AiRuntimeError::Protocol("invalid discovery response".into()))?;
+            for model in models {
+                if !plugins.iter().any(|plugin| {
+                    plugin["id"] == model.plugin_id
+                        && plugin["kind"] == model.service.kind()
+                        && plugin["discovery_status"] == "available"
+                }) {
+                    return Err(AiRuntimeError::Protocol(format!(
+                        "selected plugin {} does not support {}",
+                        model.plugin_id,
+                        model.service.kind()
+                    )));
+                }
+                let ready = candidate
+                    .request(
+                        "initialize",
+                        &json!({"plugin_id": model.plugin_id, "settings": model.settings}),
+                    )
+                    .await?;
+                if ready["model_ready"] != true {
+                    return Err(AiRuntimeError::Protocol(format!(
+                        "model {} did not report ready",
+                        model.plugin_id
+                    )));
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = prepare {
+            let _ = candidate.child.start_kill();
+            let _ = candidate.child.wait().await;
+            return Err(error);
+        }
+        let generation = candidate.generation;
+        let old = workers.insert(self.topology.key(service), Arc::new(Mutex::new(candidate)));
+        drop(workers);
+        if let Some(old) = old {
+            let mut old = old.lock().await;
+            let _ = old.child.start_kill();
+            let _ = old.child.wait().await;
+        }
+        Ok(generation)
+    }
+
     pub async fn stop(&self, service: AiService) -> Result<(), AiRuntimeError> {
         let worker = self
             .workers
@@ -336,7 +446,25 @@ impl AiSupervisor {
             .get(&self.topology.key(service))
             .cloned()
             .ok_or(AiRuntimeError::NotRunning)?;
-        worker.lock().await.request(operation, &args).await
+        let guard = worker.lock().await;
+        let generation = guard.generation;
+        drop(guard);
+        let result = worker.lock().await.request(operation, &args).await;
+        let current = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned();
+        let current_generation = if let Some(current) = current {
+            Some(current.lock().await.generation)
+        } else {
+            None
+        };
+        if current_generation != Some(generation) {
+            return Err(AiRuntimeError::StaleGeneration);
+        }
+        result
     }
 
     pub async fn discover(&self, service: AiService) -> Result<Value, AiRuntimeError> {
@@ -430,6 +558,81 @@ mod tests {
             ProcessTopology::Split.key(AiService::Tts),
             ProcessTopology::Split.key(AiService::Asr)
         );
+    }
+
+    #[tokio::test]
+    async fn candidate_activation_rolls_back_on_failure_and_replaces_on_success() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let python =
+            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: python.into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                request_timeout: Duration::from_secs(10),
+            },
+        );
+        let initial = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({"speaker": "default"}))
+            .await
+            .unwrap();
+        let before = supervisor
+            .call(
+                AiService::Tts,
+                "infer",
+                json!({
+                    "kind": "tts", "input": { "text": "Hello" }
+                }),
+            )
+            .await
+            .unwrap();
+        let bad = ModelActivation {
+            service: AiService::Tts,
+            plugin_id: "mock_tts".into(),
+            settings: json!({"speaker": "does-not-exist"}),
+        };
+        assert!(
+            supervisor
+                .reconfigure(AiService::Tts, &[AiService::Tts], &[], &[bad])
+                .await
+                .is_err()
+        );
+        let still = supervisor
+            .call(
+                AiService::Tts,
+                "infer",
+                json!({
+                    "kind": "tts", "input": { "text": "Hello" }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before["audio_base64"], still["audio_base64"]);
+        let good = ModelActivation {
+            service: AiService::Tts,
+            plugin_id: "mock_tts".into(),
+            settings: json!({"speaker": "bright"}),
+        };
+        let next = supervisor
+            .reconfigure(AiService::Tts, &[AiService::Tts], &[], &[good])
+            .await
+            .unwrap();
+        assert_ne!(initial, next);
+        let after = supervisor
+            .call(
+                AiService::Tts,
+                "infer",
+                json!({
+                    "kind": "tts", "input": { "text": "Hello" }
+                }),
+            )
+            .await
+            .unwrap();
+        assert_ne!(before["audio_base64"], after["audio_base64"]);
+        supervisor.stop(AiService::Tts).await.unwrap();
     }
 
     #[tokio::test]
