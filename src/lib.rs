@@ -8,6 +8,9 @@ mod interaction;
 pub mod knowledge;
 pub mod launcher;
 pub mod lifecycle;
+// Administrative workflows are contract-tested; an authenticated control route is not yet wired.
+#[cfg_attr(not(test), allow(dead_code))]
+mod maintenance;
 pub mod migration;
 pub mod presentation;
 pub mod request;

@@ -20,6 +20,11 @@ pub mod ingress;
 mod legacy;
 #[cfg(test)]
 mod memory_maintenance_tests;
+// Administrative purge is not reachable from generation or runtime until an authorized UI exists.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod memory_purge;
+#[cfg(test)]
+mod memory_purge_tests;
 pub mod message_actions;
 pub mod selection;
 pub mod storage;
