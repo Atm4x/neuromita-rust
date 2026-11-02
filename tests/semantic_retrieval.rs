@@ -508,3 +508,69 @@ async fn semantic_results_remain_distinguishable_from_provider_failure() {
         .unwrap();
     assert_eq!(empty.status, RetrievalStatus::EmptyCorpus);
 }
+
+#[tokio::test]
+async fn explicit_fusion_reranks_synthetic_memory_without_changing_vector_default() {
+    use neuromita::generation::{
+        retrieval_fusion::{FusionMode, RetrievalMethod},
+        semantic_memory::SemanticRetrievalFilter,
+    };
+    let fixture = Arc::new(SemanticFixture::new("fixture-fusion"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+    let records = vec![
+        memory(1, MemoryPriority::Critical, "картина в мастерской"),
+        memory(2, MemoryPriority::Low, "ромашковый чай на кухне"),
+    ];
+    let query = "картина согреться";
+    let vector = retrieval
+        .retrieve(CharacterId::Mita, &records, query)
+        .await
+        .unwrap();
+    assert_eq!(vector.selected_ids[0], records[1].id);
+    let two_stage = retrieval
+        .retrieve_with_fusion(
+            CharacterId::Mita,
+            &records,
+            query,
+            SemanticRetrievalFilter::all(),
+            FusionMode::TwoStage,
+        )
+        .await
+        .unwrap();
+    assert_eq!(two_stage.selected_ids[0], records[1].id);
+    let rrf = retrieval
+        .retrieve_with_fusion(
+            CharacterId::Mita,
+            &records,
+            query,
+            SemanticRetrievalFilter::all(),
+            FusionMode::Rrf { k: 60 },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rrf.selected_ids[0], records[0].id);
+    assert_eq!(
+        rrf.matches[0].methods,
+        vec![RetrievalMethod::Vector, RetrievalMethod::Keyword]
+    );
+    assert_eq!(rrf.matches[1].methods, vec![RetrievalMethod::Vector]);
+    assert_eq!(rrf.cost.cache_hits, 2);
+    assert_eq!(rrf.cost.embedded_texts, 1);
+}
+
+#[test]
+fn generation_fusion_opt_in_rejects_invalid_mode_without_provider_calls() {
+    use neuromita::generation::{
+        GenerationProvider, ResponseGenerator, retrieval_fusion::FusionMode,
+    };
+    let fixture = Arc::new(SemanticFixture::new("fixture-fusion-validation"));
+    let retrieval = Arc::new(SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap());
+    let generator = ResponseGenerator::new(Vec::<Arc<dyn GenerationProvider>>::new()).unwrap();
+    assert!(
+        generator
+            .with_semantic_memory_fusion(retrieval, FusionMode::Rrf { k: 0 })
+            .is_err()
+    );
+    assert_eq!(fixture.query_count.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.document_batches.load(Ordering::Relaxed), 0);
+}

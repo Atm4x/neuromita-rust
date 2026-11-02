@@ -6,6 +6,7 @@ pub mod gemini_embedding;
 mod memory_context;
 mod presets;
 mod provider;
+pub mod retrieval_fusion;
 pub mod semantic_memory;
 pub use memory_context::lexical_selected_ids;
 mod structured;

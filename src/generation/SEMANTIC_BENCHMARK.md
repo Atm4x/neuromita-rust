@@ -15,3 +15,5 @@ The tool invokes the **same lexical ranking** used by production generation and 
 This is an opt-in measuring instrument, **not** a claim of completion of #22's full RAG, provenance/query fusion/knowledge graph requirements. No live measurements were run without explicit credentials and a representative corpus.
 
 The underlying semantic result also exposes score provenance and explicit filter status for future evaluated retrieval policies. The existing benchmark deliberately retains unfiltered production behavior so its Hit@K statistics remain directly comparable with the existing lexical baseline. Filtering or fusion must be a separately labelled benchmark protocol, not silently mixed into those results.
+
+Fusion is intentionally **not** included in the existing live benchmark's baseline. Offline composition tests cover fusion independently, avoiding any neural requests, costs or nonreproducible model outputs.

@@ -4,8 +4,10 @@ use thiserror::Error;
 
 use super::{
     GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse,
-    conversation::LlmConversation, memory_context::MemoryHandoff,
-    semantic_memory::SemanticMemoryRetriever,
+    conversation::LlmConversation,
+    memory_context::MemoryHandoff,
+    retrieval_fusion::{FusionConfig, FusionMode, fuse},
+    semantic_memory::{SemanticMemoryRetriever, SemanticRetrievalFilter},
 };
 use crate::character::CharacterContext;
 
@@ -72,6 +74,7 @@ pub trait GenerationProvider: Send + Sync {
 pub struct ResponseGenerator {
     providers: HashMap<ProviderKind, Arc<dyn GenerationProvider>>,
     semantic_memory: Option<Arc<SemanticMemoryRetriever>>,
+    memory_fusion_mode: FusionMode,
 }
 
 impl ResponseGenerator {
@@ -88,12 +91,35 @@ impl ResponseGenerator {
         Ok(Self {
             providers: registered,
             semantic_memory: None,
+            memory_fusion_mode: FusionMode::VectorOnly,
         })
     }
 
     pub fn with_semantic_memory(mut self, retriever: Arc<SemanticMemoryRetriever>) -> Self {
         self.semantic_memory = Some(retriever);
         self
+    }
+
+    /// Explicitly opt into fusion; the default remains exact vector-only retrieval.
+    /// The operation does not install or load any embedding or reranking model.
+    pub fn with_semantic_memory_fusion(
+        mut self,
+        retriever: Arc<SemanticMemoryRetriever>,
+        mode: FusionMode,
+    ) -> Result<Self, GenerationError> {
+        fuse(
+            crate::identity::CharacterId::Mita,
+            &[],
+            FusionConfig {
+                mode,
+                limit: 1024,
+                minimum_graph: 0,
+            },
+        )
+        .map_err(|error| GenerationError::Response(error.to_string()))?;
+        self.semantic_memory = Some(retriever);
+        self.memory_fusion_mode = mode;
+        Ok(self)
     }
 
     pub async fn generate(
@@ -109,10 +135,12 @@ impl ResponseGenerator {
         let memory_handoff = if let Some(retriever) = &self.semantic_memory {
             let query = LlmConversation::memory_query(&request.context);
             let result = retriever
-                .retrieve(
+                .retrieve_with_fusion(
                     request.context.character_id,
                     &request.context.memories,
                     &query,
+                    SemanticRetrievalFilter::all(),
+                    self.memory_fusion_mode,
                 )
                 .await
                 .map_err(|error| {

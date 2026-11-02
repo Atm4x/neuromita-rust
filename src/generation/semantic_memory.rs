@@ -1,11 +1,15 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
 
 use super::{
     embedding::{Embedding, EmbeddingError, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace},
-    memory_context::{priority_rank, render_ranked_memory_context},
+    memory_context::{lexical_ranked, priority_rank, render_ranked_memory_context, tokens},
+    retrieval_fusion::{
+        FusionConfig, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey, RetrievalMethod,
+        RetrievalSource, fuse,
+    },
 };
 use crate::{
     identity::CharacterId,
@@ -92,6 +96,8 @@ pub enum RetrievalStatus {
 pub struct RetrievedMemoryMatch {
     pub id: MemoryId,
     pub cosine_similarity: f64,
+    pub fusion_score: f64,
+    pub methods: Vec<RetrievalMethod>,
 }
 
 #[derive(Debug)]
@@ -157,7 +163,27 @@ impl SemanticMemoryRetriever {
         query: &str,
         filter: SemanticRetrievalFilter,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        self.retrieve_with_fusion(character, memories, query, filter, FusionMode::VectorOnly)
+            .await
+    }
+
+    /// Explicit source fusion over the same captured memory projection. There is
+    /// no second index or provider; the lexical bucket is computed locally.
+    pub async fn retrieve_with_fusion(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
         let filter = filter.validate()?;
+        let config = FusionConfig {
+            mode,
+            limit: 1024,
+            minimum_graph: 0,
+        };
+        fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -267,22 +293,81 @@ impl SemanticMemoryRetriever {
                 .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let candidates = ranked
-            .into_iter()
+        let scores = ranked
+            .iter()
+            .map(|(memory, score)| (memory.id, *score))
+            .collect::<HashMap<_, _>>();
+        let vector_hits = ranked
+            .iter()
             .filter(|(_, score)| filter.minimum_cosine.is_none_or(|min| *score >= min))
+            .map(|(memory, score)| RetrievalHit {
+                key: RetrievalKey {
+                    character,
+                    source: RetrievalSource::Memory,
+                    id: memory.id.0.to_string(),
+                },
+                content: memory.content.clone(),
+                raw_score: Some(*score),
+                metadata: BTreeMap::new(),
+            })
             .collect::<Vec<_>>();
-        let (rendered, selected_ids) =
-            render_ranked_memory_context(candidates.iter().map(|(memory, _)| *memory));
+        let mut buckets = vec![RetrievalBucket {
+            method: RetrievalMethod::Vector,
+            hits: vector_hits,
+        }];
+        if !matches!(mode, FusionMode::VectorOnly) {
+            let query_tokens = tokens(&query);
+            let lexical_hits = lexical_ranked(memories, &query)
+                .into_iter()
+                .filter(|memory| {
+                    tokens(&memory.content)
+                        .intersection(&query_tokens)
+                        .next()
+                        .is_some()
+                })
+                .map(|memory| RetrievalHit {
+                    key: RetrievalKey {
+                        character,
+                        source: RetrievalSource::Memory,
+                        id: memory.id.0.to_string(),
+                    },
+                    content: memory.content.clone(),
+                    raw_score: None,
+                    metadata: BTreeMap::new(),
+                })
+                .collect();
+            buckets.push(RetrievalBucket {
+                method: RetrievalMethod::Keyword,
+                hits: lexical_hits,
+            });
+        }
+        let fused = fuse(character, &buckets, config)
+            .map_err(|error| EmbeddingError::Response(error.to_string()))?;
+        let by_id = memories
+            .iter()
+            .map(|memory| (memory.id.0.to_string(), memory))
+            .collect::<HashMap<_, _>>();
+        let (rendered, selected_ids) = render_ranked_memory_context(
+            fused
+                .iter()
+                .filter_map(|hit| by_id.get(&hit.key.id).copied()),
+        );
         let selected_set = selected_ids
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        let matches = candidates
+        let matches = fused
             .into_iter()
-            .filter(|(memory, _)| selected_set.contains(&memory.id))
-            .map(|(memory, cosine_similarity)| RetrievedMemoryMatch {
-                id: memory.id,
-                cosine_similarity,
+            .filter_map(|hit| {
+                let memory = by_id.get(&hit.key.id)?;
+                selected_set
+                    .contains(&memory.id)
+                    .then(|| RetrievedMemoryMatch {
+                        id: memory.id,
+                        cosine_similarity: scores[&memory.id],
+                        fusion_score: hit.score,
+                        methods: hit.evidence.into_iter().map(|e| e.method).collect(),
+                    })
             })
             .collect();
         let status = if selected_ids.is_empty() {
