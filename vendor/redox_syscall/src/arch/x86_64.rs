@@ -10,9 +10,9 @@ pub const KERNEL_METADATA_SIZE: usize = 4 * PAGE_SIZE;
 
 #[cfg(feature = "userspace")]
 macro_rules! syscall {
-    ($($name:ident($a:ident, $($b:ident, $($c:ident, $($d:ident, $($e:ident, $($f:ident, )?)?)?)?)?);)+) => {
+    ($($name:ident($a:ident, $($b:ident, $($c:ident, $($d:ident, $($e:ident, $($f:ident, $($g:ident, )?)?)?)?)?)?);)+) => {
         $(
-            pub unsafe fn $name(mut $a: usize, $($b: usize, $($c: usize, $($d: usize, $($e: usize, $($f: usize)?)?)?)?)?) -> crate::error::Result<usize> {
+            pub unsafe fn $name(mut $a: usize, $($b: usize, $($c: usize, $($d: usize, $($e: usize, $($f: usize, $($g: usize)?)?)?)?)?)?) -> crate::error::Result<usize> {
                 core::arch::asm!(
                     "syscall",
                     inout("rax") $a,
@@ -26,6 +26,10 @@ macro_rules! syscall {
                                     in("r10") $e,
                                     $(
                                         in("r8") $f,
+                                        // TODO
+                                        //$(
+                                        //  in("r9") $g,
+                                        //)?
                                     )?
                                 )?
                             )?
@@ -33,6 +37,23 @@ macro_rules! syscall {
                     )?
                     out("rcx") _,
                     out("r11") _,
+                    out("r9") _,
+                    out("xmm0") _,
+                    out("xmm1") _,
+                    out("xmm2") _,
+                    out("xmm3") _,
+                    out("xmm4") _,
+                    out("xmm5") _,
+                    out("xmm6") _,
+                    out("xmm7") _,
+                    out("xmm8") _,
+                    out("xmm9") _,
+                    out("xmm10") _,
+                    out("xmm11") _,
+                    out("xmm12") _,
+                    out("xmm13") _,
+                    out("xmm14") _,
+                    out("xmm15") _,
                     options(nostack),
                 );
 
@@ -50,6 +71,9 @@ syscall! {
     syscall3(a, b, c, d,);
     syscall4(a, b, c, d, e,);
     syscall5(a, b, c, d, e, f,);
+    // TODO: Once syscall count is reduced, consider passing syscall number using RFLAGS
+    // (LAHF/SAHF), freeing up rax register. That is necessary to avoid SWAPGS, for performance.
+    //syscall6(a, b, c, d, e, f, g,);
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -166,6 +190,21 @@ pub struct Exception {
     pub code: usize,
     pub address: usize,
 }
+
+impl Exception {
+    pub fn pack(&self) -> (usize, usize) {
+        let code = (self.kind << 32) | (self.code & 0xFFFF_FFFF);
+        (code, self.address)
+    }
+    pub fn unpack(code: usize, address: usize) -> Self {
+        Exception {
+            kind: code >> 32,
+            code: code & 0xFFFF_FFFF,
+            address,
+        }
+    }
+}
+
 impl Deref for Exception {
     type Target = [u8];
     fn deref(&self) -> &[u8] {

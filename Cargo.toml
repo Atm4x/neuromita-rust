@@ -7,6 +7,7 @@ rust-version = "1.89"
 [features]
 default = ["sqlite-system"]
 sqlite-system = ["dep:rusqlite"]
+gui = ["dep:slint", "dep:slint-build"]
 
 [dependencies]
 rusqlite = { version = "0.41", optional = true, default-features = false, features = ["bundled", "libsqlite3-sys"] }
@@ -19,6 +20,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "registry", "std"] }
+slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-software", "accessibility"] }
+
+[build-dependencies]
+slint-build = { version = "=1.18.1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
