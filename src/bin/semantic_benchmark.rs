@@ -136,6 +136,9 @@ async fn benchmark(
                 id: MemoryId(memory.id),
                 content: memory.content,
                 priority: memory.priority.into(),
+                kind: neuromita::memory::MemoryKind::Fact,
+                state: neuromita::memory::MemoryState::Active,
+                expires_at_unix_ms: None,
             })
             .collect();
         let relevant: HashSet<_> = case.relevant_ids.into_iter().map(MemoryId).collect();

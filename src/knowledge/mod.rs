@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::{identity::CharacterId, timeline::domain::MemoryRecord};
 use embedding::EmbeddingError;
-use memory_context::render_memory_context;
+use memory_context::{render_memory_context, render_memory_islands};
 use retrieval_fusion::{FusionConfig, FusionMode, fuse};
 use semantic_memory::{SemanticMemoryRetriever, SemanticRetrievalFilter};
 
@@ -62,16 +62,28 @@ impl KnowledgeRetrieval {
         })
     }
 
-    /// Returns only bounded prompt data from the caller's immutable Timeline projection.
-    /// Errors remain errors; no implicit downgrade from semantic to lexical.
+    /// The existing fact-only selection contract remains available to callers.
     pub async fn select(
         &self,
         character: CharacterId,
         memories: &[MemoryRecord],
         query: &str,
     ) -> Result<Option<String>, EmbeddingError> {
-        match &self.mode {
-            KnowledgeMode::Lexical => Ok(render_memory_context(memories, query)),
+        self.select_with_islands(character, memories, &[], query)
+            .await
+    }
+
+    /// Islands are rendered separately from ranked facts and never embedded.
+    /// Every input is a caller-owned snapshot, not a second memory store.
+    pub async fn select_with_islands(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        query: &str,
+    ) -> Result<Option<String>, EmbeddingError> {
+        let selected = match &self.mode {
+            KnowledgeMode::Lexical => render_memory_context(memories, query),
             KnowledgeMode::Semantic { retriever, fusion } => {
                 let result = retriever
                     .retrieve_with_fusion(
@@ -91,9 +103,15 @@ impl KnowledgeRetrieval {
                     cache_hits = result.cost.cache_hits,
                     "knowledge retrieval finished"
                 );
-                Ok(result.rendered)
+                result.rendered
             }
-        }
+        };
+        let islands = render_memory_islands(islands);
+        Ok(match (islands, selected) {
+            (Some(islands), Some(facts)) => Some(format!("{islands}\n{facts}")),
+            (Some(islands), None) => Some(islands),
+            (None, facts) => facts,
+        })
     }
 }
 
@@ -136,6 +154,9 @@ mod tests {
             id: MemoryId(Uuid::from_u128(14)),
             priority: MemoryPriority::Normal,
             content: "ромашковый чай".into(),
+            kind: crate::memory::MemoryKind::Fact,
+            state: crate::memory::MemoryState::Active,
+            expires_at_unix_ms: None,
         }
     }
 
@@ -176,6 +197,29 @@ mod tests {
             .await
             .unwrap();
         assert!(selected.is_none());
+        assert_eq!(fixture.calls.load(Ordering::Relaxed), 0);
+    }
+    #[tokio::test]
+    async fn islands_have_separate_provenance_and_never_trigger_embedding() {
+        use crate::memory::{MemoryIsland, MemoryKind};
+        let mut island = fact();
+        island.kind = MemoryKind::Island(MemoryIsland::Preferences);
+        island.content = "Player chooses herbal tea".into();
+        let fixture = Arc::new(UnavailableFixture {
+            space: EmbeddingSpace::new("fixture", "unavailable", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retrieval = KnowledgeRetrieval::semantic(Arc::new(
+            SemanticMemoryRetriever::new(fixture.clone(), 10).unwrap(),
+        ));
+        let selected = retrieval
+            .select_with_islands(CharacterId::Mita, &[], &[island], "tea")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(selected.contains("[MEMORY ISLANDS]"));
+        assert!(selected.contains("preferences: Player chooses herbal tea"));
+        assert!(!selected.contains("[LONG-TERM MEMORY]"));
         assert_eq!(fixture.calls.load(Ordering::Relaxed), 0);
     }
 }

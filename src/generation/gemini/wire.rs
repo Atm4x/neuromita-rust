@@ -362,6 +362,7 @@ mod tests {
             },
             working_state: Default::default(),
             memories: Vec::new(),
+            memory_islands: Vec::new(),
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,
@@ -472,6 +473,7 @@ mod tests {
             },
             working_state: Default::default(),
             memories: Vec::new(),
+            memory_islands: Vec::new(),
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,

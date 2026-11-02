@@ -182,7 +182,7 @@ impl MessageHandler {
             response = async {
                 let query = LlmConversation::memory_query(&context);
                 let selected = self.knowledge
-                    .select(context.character_id, &context.memories, &query)
+                    .select_with_islands(context.character_id, &context.memories, &context.memory_islands, &query)
                     .await
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")

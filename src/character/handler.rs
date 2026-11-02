@@ -312,6 +312,7 @@ impl CharacterHandler {
         let state = captured.state;
         let working_state = captured.working_state;
         let memories = captured.memories.list();
+        let memory_islands = captured.memories.islands();
         let reaction = match intent {
             TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
                 captured
@@ -356,6 +357,7 @@ impl CharacterHandler {
             state,
             working_state,
             memories,
+            memory_islands,
             history: captured.history,
             view: captured.view,
             current_input: guidance,
@@ -461,6 +463,7 @@ impl CharacterHandler {
             state: captured.state,
             working_state: captured.working_state,
             memories: captured.memories.list(),
+            memory_islands: captured.memories.islands(),
             history: captured.history,
             view: captured.view,
         })

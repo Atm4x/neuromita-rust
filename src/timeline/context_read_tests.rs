@@ -123,6 +123,9 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
                 id: crate::memory::MemoryId::new(),
                 priority: crate::memory::MemoryPriority::High,
                 content: "known memory".into(),
+                kind: crate::memory::MemoryKind::Fact,
+                state: crate::memory::MemoryState::Active,
+                expires_at_unix_ms: None,
             }
         )),
     );

@@ -1270,6 +1270,9 @@ mod tests {
                 id: memory_id,
                 priority: MemoryPriority::High,
                 content: "first fact".into(),
+                kind: crate::memory::MemoryKind::Fact,
+                state: crate::memory::MemoryState::Active,
+                expires_at_unix_ms: None,
             };
             let turn = timeline
                 .capture_turn(CharacterId::Mita, None, timeline.anchor())
@@ -1292,6 +1295,9 @@ mod tests {
                 id: memory_id,
                 priority: MemoryPriority::Critical,
                 content: "corrected fact".into(),
+                kind: crate::memory::MemoryKind::Fact,
+                state: crate::memory::MemoryState::Active,
+                expires_at_unix_ms: None,
             };
             let turn = timeline
                 .capture_turn(CharacterId::Mita, None, timeline.anchor())

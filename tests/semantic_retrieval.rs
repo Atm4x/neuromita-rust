@@ -22,6 +22,9 @@ fn memory(id: u128, priority: MemoryPriority, content: &str) -> MemoryRecord {
         id: MemoryId(Uuid::from_u128(id)),
         priority,
         content: content.into(),
+        kind: neuromita::memory::MemoryKind::Fact,
+        state: neuromita::memory::MemoryState::Active,
+        expires_at_unix_ms: None,
     }
 }
 
