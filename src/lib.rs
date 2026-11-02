@@ -1,3 +1,4 @@
+pub mod ai_runtime;
 pub mod api;
 pub mod app;
 pub mod character;

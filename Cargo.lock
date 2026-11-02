@@ -705,6 +705,7 @@ dependencies = [
 name = "neuromita"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "reqwest",
  "rusqlite",
  "serde",
