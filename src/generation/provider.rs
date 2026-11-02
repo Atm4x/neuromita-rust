@@ -2,7 +2,11 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
+use super::{
+    GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse,
+    conversation::LlmConversation, memory_context::MemoryHandoff,
+    semantic_memory::SemanticMemoryRetriever,
+};
 use crate::character::CharacterContext;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -32,6 +36,21 @@ impl GenerationRequest {
 
 pub use crate::turn::TurnProposal as ProposedResponse;
 
+/// A generated response sees an immutable character snapshot and an explicit memory handoff.
+/// Lexical and semantic retrieval have distinct, explicit prompt contracts.
+#[derive(Clone)]
+pub struct GenerationInput {
+    pub context: CharacterContext,
+    pub memory_handoff: MemoryHandoff,
+}
+
+impl std::ops::Deref for GenerationInput {
+    type Target = CharacterContext;
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
 impl ProposedResponse {
     pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
         structured.validate()?;
@@ -47,12 +66,12 @@ pub type ProviderFuture<'a> =
 
 pub trait GenerationProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
-    fn generate(&self, context: CharacterContext, template: ProviderTemplate)
-    -> ProviderFuture<'_>;
+    fn generate(&self, context: GenerationInput, template: ProviderTemplate) -> ProviderFuture<'_>;
 }
 
 pub struct ResponseGenerator {
     providers: HashMap<ProviderKind, Arc<dyn GenerationProvider>>,
+    semantic_memory: Option<Arc<SemanticMemoryRetriever>>,
 }
 
 impl ResponseGenerator {
@@ -68,7 +87,13 @@ impl ResponseGenerator {
         }
         Ok(Self {
             providers: registered,
+            semantic_memory: None,
         })
+    }
+
+    pub fn with_semantic_memory(mut self, retriever: Arc<SemanticMemoryRetriever>) -> Self {
+        self.semantic_memory = Some(retriever);
+        self
     }
 
     pub async fn generate(
@@ -81,7 +106,36 @@ impl ResponseGenerator {
             .providers
             .get(&kind)
             .ok_or(GenerationError::Unavailable(kind))?;
-        let structured = provider.generate(request.context, template).await?;
+        let memory_handoff = if let Some(retriever) = &self.semantic_memory {
+            let query = LlmConversation::memory_query(&request.context);
+            let result = retriever
+                .retrieve(
+                    request.context.character_id,
+                    &request.context.memories,
+                    &query,
+                )
+                .await
+                .map_err(|error| {
+                    GenerationError::Response(format!("semantic memory retrieval failed: {error}"))
+                })?;
+            tracing::debug!(
+                character = %request.context.character_id,
+                selected = result.selected_ids.len(),
+                embedding_requests = result.cost.embedding_requests,
+                embedded_texts = result.cost.embedded_texts,
+                embedded_characters = result.cost.embedded_characters,
+                cache_hits = result.cost.cache_hits,
+                "semantic memory retrieval finished"
+            );
+            MemoryHandoff::Semantic(result.rendered)
+        } else {
+            MemoryHandoff::Lexical
+        };
+        let input = GenerationInput {
+            context: request.context,
+            memory_handoff,
+        };
+        let structured = provider.generate(input, template).await?;
         ProposedResponse::from_structured(structured)
     }
 }

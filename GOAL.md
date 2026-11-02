@@ -1,6 +1,6 @@
 # NeuroMita Rust — текущая цель
 
-Обновление после интеграции PR #55–58: все четыре merged в main, вместе с исправлениями ядра и системой миграций. Следующий незавершённый этап — semantic retrieval. Он ещё не реализован; точка продолжения и проверки объединённой базы: [semantic-retrieval](future/semantic-retrieval.md).
+Обновление после интеграции PR #55–58: все четыре merged в main, вместе с исправлениями ядра и системой миграций. Semantic retrieval реализован как отдельный opt-in срез: Gemini 001/2 embedding HTTP, bounded derived cache, точное cosine-ранжирование и синтетические fixture-тесты. Живое качество модели и тарифная стоимость не подтверждены; см. [semantic-retrieval](future/semantic-retrieval.md).
 
 **Актуальный срез:** 2026-11-02. **Базовая ревизия перед текущим проходом:** `8994f8d` (`codex/typed-long-term-memory-20261102`); текущий проход — ограниченный отбор воспоминаний и точная дедупликация. Этот документ — рабочий план, а не утверждение о полной Python parity.
 
@@ -58,3 +58,14 @@
 ## Исправления архитектурного аудита
 
 См. [учёт изменений](future/architecture-fixes-20261102.md): общая валидация фактов/пакетов, закрытый TurnProposal, правила Character/Memory, чтение одного префикса без нового TimelineReadSnapshot, bundled SQLite и восстановление памяти при обычном запуске. Отмена TTS через presenter и TCP реализована; frontend-индикатор и анимация остаются планом.
+
+
+## Semantic retrieval (новый срез)
+
+- [x] Независимый EmbeddingProvider и Gemini 001/2 HTTP adapters; явные модели, task/protocol и cache-key space.
+- [x] Асинхронный retrieval от зафиксированной проекции Timeline без второго canonical store и блокировок во время HTTP.
+- [x] Корректное членство при изменении, удалении, merge, fork/history и пересоздании cache; lexical явно сохраняется.
+- [x] Синтетическое сравнение качества и числа embedding-запросов; HTTP fixture tests в обоих профилях.
+- [ ] Реальный live model benchmark/cost и выбор в GUI/пресетах, расширенные RAG/knowledge graph операции.
+
+Технический контракт: [src/generation/SEMANTIC_RETRIEVAL.md](src/generation/SEMANTIC_RETRIEVAL.md).

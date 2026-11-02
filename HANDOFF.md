@@ -1,3 +1,5 @@
+Semantic retrieval implementation update: the prior "NOT implemented" status below describes the base `SomeTests` snapshot. New separate branch implements provider contracts, Gemini 001/2 mock-verified HTTP, async exact-vector ranking with disposable bounded cache, opt-in CLI setting, and synthetic quality/cost fixtures. See src/generation/SEMANTIC_RETRIEVAL.md. Live Gemini benchmark is NOT verified.
+
 # Handoff: Rust core contracts
 
 Latest handoff: PR #55–58 are merged into main (integration b862c22), including the newer core and shared migration system. 231 tests default / 180 no-default, 2 ignored each; Clippy/fmt pass. Semantic retrieval is NOT implemented yet. Read future/semantic-retrieval.md for exact pending work; the run stopped at 7% remaining of the user's 5-hour limit. Do not treat provider research or this plan as a working semantic backend.

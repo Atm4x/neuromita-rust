@@ -261,6 +261,10 @@ mod platform {
         Ok(result)
     }
 
+    pub(super) fn identity(pid: u32) -> Result<Option<ProcessIdentity>, LauncherError> {
+        query(pid)
+    }
+
     pub(super) fn query(pid: u32) -> Result<Option<ProcessIdentity>, LauncherError> {
         let executable_path = PathBuf::from(format!("/proc/{pid}/exe"));
         let executable = match std::fs::read_link(&executable_path) {

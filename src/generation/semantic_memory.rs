@@ -1,0 +1,218 @@
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
+
+use super::{
+    embedding::{Embedding, EmbeddingError, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace},
+    memory_context::{priority_rank, render_ranked_memory_context},
+};
+use crate::{
+    identity::CharacterId,
+    timeline::domain::{MemoryId, MemoryRecord},
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    character: CharacterId,
+    space: EmbeddingSpace,
+    id: MemoryId,
+    content: String,
+}
+
+struct EmbeddingCache {
+    entries: HashMap<CacheKey, Embedding>,
+    order: VecDeque<CacheKey>,
+}
+
+impl EmbeddingCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+    fn insert(&mut self, key: CacheKey, embedding: Embedding, max: usize) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, embedding);
+        while self.order.len() > max {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalCost {
+    pub embedding_requests: usize,
+    pub embedded_texts: usize,
+    pub embedded_characters: usize,
+    pub cache_hits: usize,
+}
+
+#[derive(Debug)]
+pub struct RetrievedMemory {
+    pub rendered: Option<String>,
+    pub selected_ids: Vec<MemoryId>,
+    pub cost: RetrievalCost,
+}
+
+/// A bounded, derived embedding cache. Membership always comes from the captured Timeline projection.
+/// No network await is performed while holding the cache lock.
+pub struct SemanticMemoryRetriever {
+    provider: Arc<dyn EmbeddingProvider>,
+    cache: Mutex<EmbeddingCache>,
+    max_entries: usize,
+}
+
+impl SemanticMemoryRetriever {
+    pub fn new(
+        provider: Arc<dyn EmbeddingProvider>,
+        max_entries: usize,
+    ) -> Result<Self, EmbeddingError> {
+        if max_entries == 0 {
+            return Err(EmbeddingError::Configuration(
+                "cache capacity must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            provider,
+            cache: Mutex::new(EmbeddingCache::new()),
+            max_entries,
+        })
+    }
+
+    pub fn clear_cache(&self) {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        cache.entries.clear();
+        cache.order.clear();
+    }
+
+    pub async fn retrieve(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        query: &str,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let mut cost = RetrievalCost {
+            embedding_requests: 0,
+            embedded_texts: 0,
+            embedded_characters: 0,
+            cache_hits: 0,
+        };
+        if memories.is_empty() {
+            return Ok(RetrievedMemory {
+                rendered: None,
+                selected_ids: Vec::new(),
+                cost,
+            });
+        }
+        let space = self.provider.space().clone();
+        let keys: Vec<_> = memories
+            .iter()
+            .map(|memory| CacheKey {
+                character,
+                space: space.clone(),
+                id: memory.id,
+                content: memory.content.clone(),
+            })
+            .collect();
+        let mut vectors: Vec<Option<Embedding>> = vec![None; memories.len()];
+        let mut missing = Vec::new();
+        {
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            for (index, key) in keys.iter().enumerate() {
+                if let Some(vector) = cache.entries.get(key) {
+                    cost.cache_hits += 1;
+                    vectors[index] = Some(vector.clone());
+                } else {
+                    missing.push(index);
+                }
+            }
+        }
+        let query = query.chars().take(2048).collect::<String>();
+        if query.trim().is_empty() {
+            return Err(EmbeddingError::Configuration(
+                "semantic query is empty".into(),
+            ));
+        }
+        let query_vector = self
+            .provider
+            .embed(EmbeddingPurpose::Query, query.clone())
+            .await?;
+        cost.embedded_characters += query.chars().count();
+        cost.embedding_requests += 1;
+        cost.embedded_texts += 1;
+        if !missing.is_empty() {
+            let texts = missing
+                .iter()
+                .map(|&i| memories[i].content.clone())
+                .collect::<Vec<_>>();
+            cost.embedded_characters +=
+                texts.iter().map(|text| text.chars().count()).sum::<usize>();
+            let fresh = self.provider.embed_documents(texts).await?;
+            cost.embedding_requests += self.provider.document_request_count(missing.len());
+            cost.embedded_texts += missing.len();
+            if fresh.len() != missing.len() {
+                return Err(EmbeddingError::Response(
+                    "document embedding count mismatch".into(),
+                ));
+            }
+            for (&index, vector) in missing.iter().zip(fresh) {
+                if vector.values.len() != space.dimensions
+                    || vector.values.iter().any(|v| !v.is_finite())
+                {
+                    return Err(EmbeddingError::Response(
+                        "invalid document embedding".into(),
+                    ));
+                }
+                vectors[index] = Some(vector.clone());
+                let mut cache = self
+                    .cache
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                cache.insert(keys[index].clone(), vector, self.max_entries);
+            }
+        }
+        if query_vector.values.len() != space.dimensions
+            || query_vector.values.iter().any(|v| !v.is_finite())
+        {
+            return Err(EmbeddingError::Response("invalid query embedding".into()));
+        }
+        let mut ranked = memories
+            .iter()
+            .zip(vectors.iter())
+            .map(|(m, v)| {
+                (
+                    m,
+                    v.as_ref()
+                        .expect("filled embedding")
+                        .similarity(&query_vector),
+                )
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|(a, ascore), (b, bscore)| {
+            bscore
+                .total_cmp(ascore)
+                .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let (rendered, selected_ids) =
+            render_ranked_memory_context(ranked.into_iter().map(|(m, _)| m));
+        Ok(RetrievedMemory {
+            rendered,
+            selected_ids,
+            cost,
+        })
+    }
+}

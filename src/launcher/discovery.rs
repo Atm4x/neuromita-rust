@@ -139,6 +139,13 @@ fn verify_candidate(root: &Path, candidate: &Path) -> Result<PathBuf, LauncherEr
     {
         return Err(LauncherError::CandidateNotExecutable(candidate));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(LauncherError::CandidateNotExecutable(candidate));
+        }
+    }
     if cfg!(windows) {
         let mut magic = [0_u8; 2];
         File::open(&candidate)

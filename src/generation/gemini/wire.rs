@@ -6,6 +6,7 @@ use crate::{
     generation::{
         GenerationError,
         conversation::{LlmConversation, LlmRole},
+        memory_context::MemoryHandoff,
         structured::{StructuredResponse, gemini_message_schema},
     },
 };
@@ -74,8 +75,17 @@ fn history_contents(view: &MitaView) -> Vec<Content> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> GenerateContent {
-    let conversation = LlmConversation::from_context(&context);
+    encode_with_memory(context, template, &MemoryHandoff::Lexical)
+}
+
+pub(super) fn encode_with_memory(
+    context: CharacterContext,
+    template: &GeminiTemplate,
+    memory: &MemoryHandoff,
+) -> GenerateContent {
+    let conversation = LlmConversation::from_context_with_memory(&context, memory);
     GenerateContent {
         system_instruction: content(None, &conversation.system_instruction),
         contents: conversation

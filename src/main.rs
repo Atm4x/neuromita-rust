@@ -8,7 +8,10 @@ use neuromita::{
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     generation::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
+        embedding::EmbeddingProvider,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
+        gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
+        semantic_memory::SemanticMemoryRetriever,
     },
 };
 
@@ -57,7 +60,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let template = GeminiTemplate::google(&options.model, &key, settings)?;
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(template));
     let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new()?);
-    let generator = ResponseGenerator::new([provider])?;
+    let mut generator = ResponseGenerator::new([provider])?;
+    if let Some(model) = std::env::var_os("NEUROMITA_MEMORY_EMBEDDING_MODEL") {
+        let protocol = match model.to_str() {
+            Some("gemini-embedding-001") => GeminiEmbeddingProtocol::Embedding001,
+            Some("gemini-embedding-2") => GeminiEmbeddingProtocol::Embedding2,
+            _ => return Err("NEUROMITA_MEMORY_EMBEDDING_MODEL must name gemini-embedding-001 or gemini-embedding-2".into()),
+        };
+        let embedding: Arc<dyn EmbeddingProvider> =
+            Arc::new(GeminiEmbeddingProvider::google(protocol, &key, 768)?);
+        generator =
+            generator.with_semantic_memory(Arc::new(SemanticMemoryRetriever::new(embedding, 512)?));
+    }
     let limits = RuntimeLimits {
         request_queue: NonZeroUsize::new(16).expect("positive limit"),
         discovery_buffer: NonZeroUsize::new(128).expect("positive limit"),

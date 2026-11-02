@@ -1,9 +1,12 @@
 mod conversation;
 mod effects;
+pub mod embedding;
 pub mod gemini;
+pub mod gemini_embedding;
 mod memory_context;
 mod presets;
 mod provider;
+pub mod semantic_memory;
 mod structured;
 pub use effects::ResponseEffect;
 pub use presets::{
@@ -17,8 +20,8 @@ pub use structured::{
 };
 
 pub use provider::{
-    GenerationError, GenerationProvider, GenerationRequest, ProposedResponse, ProviderFuture,
-    ResponseGenerator,
+    GenerationError, GenerationInput, GenerationProvider, GenerationRequest, ProposedResponse,
+    ProviderFuture, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

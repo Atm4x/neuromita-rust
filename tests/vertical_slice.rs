@@ -180,7 +180,7 @@ impl GenerationProvider for CheckedProvider {
 
     fn generate(
         &self,
-        context: neuromita::character::CharacterContext,
+        context: neuromita::generation::GenerationInput,
         template: ProviderTemplate,
     ) -> neuromita::generation::ProviderFuture<'_> {
         Box::pin(async move {
