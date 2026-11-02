@@ -120,6 +120,27 @@ impl Message for ConversationMessage {
     }
 }
 
+pub(crate) fn spoken_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(segments) => {
+            let parts = segments
+                .iter()
+                .map(|segment| segment.get("text").and_then(Value::as_str))
+                .collect::<Option<Vec<_>>>()?;
+            Some(
+                parts
+                    .iter()
+                    .map(|text| text.trim())
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+        _ => None,
+    }
+}
+
 impl ConversationMessage {
     pub fn new(
         message_id: impl Into<String>,

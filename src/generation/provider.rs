@@ -78,7 +78,7 @@ impl ResponseGenerator {
             .ok_or(GenerationError::Unavailable(kind))?;
         let structured = provider.generate(request.context, template).await?;
         structured.validate()?;
-        structured.ensure_text_only()?;
+        structured.ensure_message_only()?;
         let text = structured.full_text();
         Ok(ProposedResponse {
             text,

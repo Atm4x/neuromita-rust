@@ -12,7 +12,7 @@ use super::{
 
 pub(super) fn legacy_event(fact: &TimelineFact, observer: CharacterId) -> Option<TimelineEvent> {
     let draft = &fact.draft;
-    let text: Arc<str> = draft.payload.get("content").and_then(Value::as_str)?.into();
+    let text: Arc<str> = super::conversation::spoken_text(draft.payload.get("content")?)?.into();
     let content = match draft.kind {
         EventKind::PlayerMessage => EventContent::PlayerMessage { text },
         EventKind::CharacterObservation => EventContent::Observation { text },

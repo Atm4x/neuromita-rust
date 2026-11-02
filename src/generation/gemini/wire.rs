@@ -6,7 +6,7 @@ use crate::{
     generation::{
         GenerationError,
         conversation::{LlmConversation, LlmRole},
-        structured::{StructuredResponse, gemini_text_schema},
+        structured::{StructuredResponse, gemini_message_schema},
     },
 };
 
@@ -94,7 +94,7 @@ pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> Ge
             max_output_tokens: template.settings().max_output_tokens(),
             candidate_count: 1,
             response_mime_type: "application/json".into(),
-            response_schema: gemini_text_schema(),
+            response_schema: gemini_message_schema(),
         },
     }
 }
@@ -537,7 +537,7 @@ mod tests {
         }]},"finishReason":"STOP"}]});
         let response = decode(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert_eq!(response.segments[0].commands, ["move"]);
-        assert!(response.ensure_text_only().is_err());
+        assert!(response.ensure_message_only().is_err());
         let malformed = json!({"candidates":[{"content":{"parts":[{"text":
             r#"{"segments":[{"text":"hello","unexpected_effect":true}]}"#
         }]},"finishReason":"STOP"}]});

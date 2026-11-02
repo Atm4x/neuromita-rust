@@ -74,9 +74,8 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
     };
     let content = fields
         .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .and_then(crate::timeline::conversation::spoken_text)
+        .unwrap_or_default();
     Some(ProjectedMessage {
         event_id: draft.id,
         kind: draft.kind,

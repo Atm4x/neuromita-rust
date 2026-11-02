@@ -217,6 +217,52 @@ fn one_canonical_conversation_message_for_multiple_listeners_sqlite_reopen() {
     }
 }
 
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn structured_segments_survive_sqlite_reopen_as_one_message() {
+    use neuromita::timeline::{
+        selection::TimelineSelectionRepository, storage::SqliteTimelineRepository,
+    };
+    let path = std::env::temp_dir().join(format!(
+        "structured-message-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let branch = BranchId::new();
+    let segments = json!([
+        {"text":"Hello", "emotions":["happy"]},
+        {"text":"How are you?", "emotions":["curious"]},
+    ]);
+    let original;
+    {
+        let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+        repository.create_session(SessionId::new(), branch).unwrap();
+        repository.select_branch(branch, None).unwrap();
+        original = ConversationMessage::new(
+            "structured:kind-mita:1",
+            ConversationSpeaker::Character(CharacterId::KindMita),
+            segments.clone(),
+            [CharacterId::Mita],
+        );
+        publish(&mut repository, branch, original.clone()).unwrap();
+    }
+    {
+        let mut reopened = SqliteTimelineRepository::open(&path).unwrap();
+        assert_eq!(
+            publish(&mut reopened, branch, original).unwrap().sequence,
+            1
+        );
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, 1);
+        for listener in [CharacterId::Mita, CharacterId::KindMita] {
+            let view = TimelineMessageQueries::capture(&reopened, branch, listener, None).unwrap();
+            assert_eq!(view.provider_messages()[0]["content"], segments);
+            assert_eq!(view.messages()[0].content, "Hello How are you?");
+        }
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
 #[test]
 fn invalid_empty_audience_and_unknown_reply_do_not_write() {
     let mut repo = TimelineStore::new();

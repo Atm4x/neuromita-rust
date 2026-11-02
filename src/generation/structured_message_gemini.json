@@ -9,6 +9,13 @@
           "text": {
             "description": "Text of this segment (required)",
             "type": "string"
+          },
+          "emotions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Declarative emotional tags for this segment, not executable commands"
           }
         },
         "required": [

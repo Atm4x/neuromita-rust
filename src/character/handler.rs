@@ -15,6 +15,7 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
+    generation::{ProposedResponse, ResponseSegment},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     timeline::{
@@ -39,6 +40,7 @@ pub enum CharacterError {
 #[derive(Debug, Clone)]
 pub struct AcceptedResponse {
     pub text: Arc<str>,
+    pub segments: Arc<[ResponseSegment]>,
     pub event_id: EventId,
     pub context: ContextAnchor,
     pub audio: Option<AudioArtifact>,
@@ -64,9 +66,8 @@ enum Command {
     Accept {
         request: RequestId,
         context: AcceptanceContext,
-        text: Arc<str>,
+        proposed: ProposedResponse,
         audio: Option<AudioArtifact>,
-        effects: Vec<ResponseEffect>,
         audience: ConversationAudience,
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
     },
@@ -139,9 +140,8 @@ impl CharacterHandle {
         &self,
         request: RequestId,
         context: AcceptanceContext,
-        text: Arc<str>,
+        proposed: ProposedResponse,
         audio: Option<AudioArtifact>,
-        effects: Vec<ResponseEffect>,
         audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
         let (reply, receive) = oneshot::channel();
@@ -149,9 +149,8 @@ impl CharacterHandle {
             .send(Command::Accept {
                 request,
                 context,
-                text,
+                proposed,
                 audio,
-                effects,
                 audience,
                 reply,
             })
@@ -224,14 +223,12 @@ impl CharacterHandler {
                 Command::Accept {
                     request,
                     context,
-                    text,
+                    proposed,
                     audio,
-                    effects,
                     audience,
                     reply,
                 } => {
-                    let _ =
-                        reply.send(self.accept(request, context, text, audio, effects, audience));
+                    let _ = reply.send(self.accept(request, context, proposed, audio, audience));
                 }
                 Command::State(reply) => {
                     let state = self
@@ -355,12 +352,14 @@ impl CharacterHandler {
         &mut self,
         request: RequestId,
         context: AcceptanceContext,
-        text: Arc<str>,
+        proposed: ProposedResponse,
         audio: Option<AudioArtifact>,
-        effects: Vec<ResponseEffect>,
         audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
-        if !matches!(effects.as_slice(), [ResponseEffect::RecordAcceptedReply]) {
+        if !matches!(
+            proposed.effects.as_slice(),
+            [ResponseEffect::RecordAcceptedReply]
+        ) {
             return Err(CharacterError::Internal(
                 "invalid reply effect batch".into(),
             ));
@@ -394,7 +393,9 @@ impl CharacterHandler {
                 intent: context.intent,
                 turn: context.turn,
                 expected_revision: context.state_revision,
-                text: Arc::clone(&text),
+                content: serde_json::to_value(&proposed.structured.segments).map_err(|error| {
+                    CharacterError::Internal(format!("invalid accepted message segments: {error}"))
+                })?,
                 audience,
             })
             .map_err(|error| match error {
@@ -408,7 +409,8 @@ impl CharacterHandler {
             revision,
         };
         Ok(AcceptedResponse {
-            text,
+            text: proposed.text,
+            segments: Arc::from(proposed.structured.segments.clone()),
             event_id,
             context: context.anchor,
             audio,
@@ -496,9 +498,12 @@ mod turn_tests {
         handler.accept(
             request,
             context,
-            Arc::from("answer"),
+            ProposedResponse {
+                text: Arc::from("answer"),
+                structured: Arc::new(crate::generation::StructuredResponse::spoken("answer")),
+                effects: vec![ResponseEffect::RecordAcceptedReply],
+            },
             None,
-            vec![ResponseEffect::RecordAcceptedReply],
             ConversationAudience::private_to(CharacterId::Mita),
         )
     }

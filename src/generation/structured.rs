@@ -44,37 +44,37 @@ where
 #[serde(deny_unknown_fields)]
 pub struct ResponseSegment {
     pub text: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emotions: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub animations: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub idle_animations: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub movement_modes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visual_effects: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clothes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub music: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interactions: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub face_params: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub intents: Vec<SegmentIntent>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_game: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_game: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_sleep: Option<bool>,
 }
 
@@ -87,8 +87,7 @@ impl ResponseSegment {
     }
 
     fn has_unsupported_content(&self) -> bool {
-        !self.emotions.is_empty()
-            || !self.animations.is_empty()
+        !self.animations.is_empty()
             || !self.idle_animations.is_empty()
             || !self.commands.is_empty()
             || !self.movement_modes.is_empty()
@@ -197,7 +196,7 @@ impl StructuredResponse {
         )
     }
 
-    pub fn ensure_text_only(&self) -> Result<(), GenerationError> {
+    pub fn ensure_message_only(&self) -> Result<(), GenerationError> {
         if self
             .segments
             .iter()
@@ -228,8 +227,8 @@ impl StructuredResponse {
     }
 }
 
-pub(crate) fn gemini_text_schema() -> Value {
-    serde_json::from_str(include_str!("structured_text_gemini.json"))
+pub(crate) fn gemini_message_schema() -> Value {
+    serde_json::from_str(include_str!("structured_message_gemini.json"))
         .expect("checked-in Gemini schema derived from Python v3")
 }
 
@@ -245,7 +244,7 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.full_text().as_ref(), "Привет мир");
         assert_eq!(RESPONSE_PROTOCOL_VERSION, 3);
-        parsed.ensure_text_only().unwrap();
+        parsed.ensure_message_only().unwrap();
     }
 
     #[test]
@@ -260,7 +259,7 @@ mod tests {
         let parsed = StructuredResponse::parse(&data.to_string()).unwrap();
         assert_eq!(parsed.segments[0].intents[0].payload["object"], "apple");
         assert_eq!(parsed.tool_call.as_ref().unwrap().args["query"], "tea");
-        assert!(parsed.ensure_text_only().is_err());
+        assert!(parsed.ensure_message_only().is_err());
         assert_eq!(
             serde_json::to_value(&parsed).unwrap()["segments"][0]["target"],
             "KindMita"
@@ -286,12 +285,16 @@ mod tests {
         let proposed =
             StructuredResponse::parse(r#"{"segments":[{"text":"hello", "commands":["run"]}]}"#)
                 .unwrap();
-        assert!(proposed.ensure_text_only().is_err());
+        assert!(proposed.ensure_message_only().is_err());
     }
 
     #[test]
     fn provider_schema_is_capability_limited() {
-        let schema = gemini_text_schema();
+        let schema = gemini_message_schema();
+        assert_eq!(
+            schema["properties"]["segments"]["items"]["properties"]["emotions"]["type"],
+            "array"
+        );
         assert_eq!(schema["required"], json!(["segments"]));
         assert_eq!(
             schema["properties"]["segments"]["items"]["required"],

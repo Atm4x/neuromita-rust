@@ -473,6 +473,72 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn accepted_structured_segments_keep_emotions_and_order_in_canonical_timeline() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Hi".into())
+        .unwrap();
+    let incoming = server.next().await;
+    assert!(incoming.body["generationConfig"]["responseSchema"]["properties"]
+        ["segments"]["items"]["properties"]["emotions"].is_object());
+    incoming.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"Hello","emotions":["happy"]},{"text":"How are you?","emotions":["curious"]}]}"#,
+    )).unwrap();
+    let snapshot = finished(&first).await;
+    let accepted = match &snapshot.state {
+        RequestState::Finished(RequestOutcome::Success(response)) => response,
+        other => panic!("unexpected state: {other:?}"),
+    };
+    assert_eq!(accepted.text.as_ref(), "Hello How are you?");
+    assert_eq!(accepted.segments.len(), 2);
+    assert_eq!(accepted.segments[0].emotions, ["happy"]);
+    assert_eq!(accepted.segments[1].emotions, ["curious"]);
+
+    let context = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let last = context.view.provider_messages().last().cloned().unwrap();
+    assert_eq!(last["content"][0]["text"], "Hello");
+    assert_eq!(last["content"][0]["emotions"], json!(["happy"]));
+    assert_eq!(last["content"][1]["text"], "How are you?");
+    assert_eq!(last["content"][1]["emotions"], json!(["curious"]));
+    assert_eq!(
+        context.view.messages().last().unwrap().content,
+        "Hello How are you?"
+    );
+    assert_eq!(context.history.events.last().unwrap().id, accepted.event_id);
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Again".into())
+        .unwrap();
+    let followup = server.next().await;
+    assert!(followup.body.to_string().contains("Hello\\nHow are you?"));
+    followup.respond.send(Reply::Text("OK")).unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_structured_effect_fails_without_committing_or_synthesizing() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
@@ -1309,7 +1375,10 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         listener[1]["participants"],
         json!(["player", "mita", "kind-mita"])
     );
-    assert_eq!(listener[1]["content"], "Hello, Kind Mita!");
+    assert_eq!(
+        listener[1]["content"],
+        json!([{"text":"Hello, Kind Mita!"}])
+    );
 
     let mut private = ConversationAudience::private_to(CharacterId::KindMita);
     private

@@ -152,7 +152,7 @@ impl MessageHandler {
                 return;
             }
         };
-        let text = proposed.text;
+        let text = Arc::clone(&proposed.text);
         record.text_ready(Arc::clone(&text));
         let voice = match voice_options {
             None => Ok(None),
@@ -188,14 +188,7 @@ impl MessageHandler {
         }
         let outcome = match self
             .character
-            .accept(
-                id,
-                acceptance,
-                text,
-                audio,
-                proposed.effects,
-                message.audience().clone(),
-            )
+            .accept(id, acceptance, proposed, audio, message.audience().clone())
             .await
         {
             Ok(response) => match voice_error {

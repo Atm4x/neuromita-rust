@@ -265,7 +265,7 @@ fn run_generation_snapshot_contract(repo: &mut dyn TimelineRepository) {
     assert_eq!(full.count(), 3);
     let prompt = full.messages();
     assert_eq!(prompt.len(), 3);
-    assert_eq!(prompt[0].content, "");
+    assert_eq!(prompt[0].content, "cause");
     assert_eq!(
         prompt[0].fields["content"],
         json!([{"type":"text", "text":"cause"}])

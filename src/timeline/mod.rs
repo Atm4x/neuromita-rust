@@ -99,7 +99,7 @@ pub(crate) struct GeneratedReply {
     pub intent: TurnIntent,
     pub turn: TimelineTurn,
     pub expected_revision: u64,
-    pub text: Arc<str>,
+    pub content: serde_json::Value,
     pub audience: ConversationAudience,
 }
 
@@ -712,7 +712,7 @@ impl SessionTimeline {
             intent,
             turn,
             expected_revision,
-            text,
+            content,
             audience,
         } = reply;
         let character = turn.character;
@@ -759,7 +759,7 @@ impl SessionTimeline {
         let mut message = ConversationMessage::new(
             id.0.to_string(),
             ConversationSpeaker::Character(character),
-            json!(text.as_ref()),
+            content,
             [],
         );
         message.id = id;
@@ -871,7 +871,7 @@ mod tests {
                     intent: TurnIntent::Reply(trigger),
                     turn,
                     expected_revision: 0,
-                    text: Arc::from("answer"),
+                    content: json!("answer"),
                     audience: ConversationAudience::private_to(CharacterId::Mita),
                 })
                 .is_err()
@@ -970,7 +970,7 @@ mod tests {
                 intent: TurnIntent::React(original),
                 turn: pin,
                 expected_revision: 0,
-                text: Arc::from("reaction"),
+                content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
@@ -1037,7 +1037,7 @@ mod tests {
                 intent: TurnIntent::React(original),
                 turn: pin,
                 expected_revision: 0,
-                text: Arc::from("reaction"),
+                content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
