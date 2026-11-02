@@ -3,7 +3,6 @@ pub(crate) use knowledge::knowledge_change;
 mod knowledge;
 #[cfg(feature = "sqlite-system")]
 pub(crate) use index::WorldLookup;
-mod memory;
 mod messages;
 mod model;
 mod projection;
@@ -14,7 +13,7 @@ pub(crate) use replies::{accepted_reply_count, accepted_reply_request};
 mod store;
 mod world;
 
-pub use memory::{
+pub use crate::memory::{
     CharacterMemories, MemoryChange, MemoryCommand, MemoryId, MemoryPriority, MemoryRecord,
 };
 pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};

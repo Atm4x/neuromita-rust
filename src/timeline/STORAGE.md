@@ -63,4 +63,10 @@ CFMD-адаптер реализует **те же** предметные кон
 
 `domain::knowledge_change` единожды определяет последствия факта для свидетеля (reset/direct acquisition). `WorldIndex`, `character_view` и SQLite `index_fact` интерпретируют только результат этой операции. `SqliteTimelineRepository::append_guarded` проверяет generation и опциональную пару epoch/trigger под той же блокировкой и транзакцией, где записывает факт. Конфликт selection не может быть обойдён повторным receipt.
 
-`SQLite event()`, `knows()` и `context_epoch()` выполняют индексированные lookup по родовой цепочке, не восстанавливая весь мир. Полные `world()` и `character_view()` остаются дорогими read-side операциями; MitaView paging/summaries — отдельная незакрытая задача. Сырой C-FFI SQLite изолирован в `storage/sqlite/native.rs`; legacy-проекция вынесена в `timeline/legacy.rs`, а данные событий остаются в доменном формате.
+`SQLite event()`, `knows()` и `context_epoch()` выполняют индексированные lookup по родовой цепочке, не восстанавливая весь мир. Полные `world()` и `character_view()` остаются дорогими read-side операциями; MitaView paging/summaries — отдельная незакрытая задача. Адаптер rusqlite/bundled SQLite изолирован в `storage/sqlite/native.rs`; legacy-проекция вынесена в `timeline/legacy.rs`, а данные событий остаются в доменном формате.
+
+## Общая валидация и production bootstrap
+
+validate_batch проверяет специальные факты: payload, actor, приватных witnesses и диапазоны. Изменения памяти последовательно проверяются внутри транзакции; неизвестный ID, переполнение и конечные exact collisions отклоняют весь пакет. Индекс памяти — производная проекция событий; SQLite читает её по родовой цепочке/cutoff в той же транзакции.
+
+TimelineConfig::Persistent восстанавливает существующую сессию или создаёт новую. Несколько сессий без selection дают Conflict. CLI хранит Timeline в data-dir/timeline.sqlite3. SQLite включён по умолчанию и собирается из vendor; --no-default-features не подменяет persistent конфигурацию transient-хранилищем.

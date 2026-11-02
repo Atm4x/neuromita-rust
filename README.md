@@ -63,7 +63,7 @@ SettingsApi предоставляет snapshot/replace/edit/observe/flush/retry
 
 SettingsPresenter.voice предоставляет bindable volume/in_launcher/in_game/voice: get, set и observe. Значение из другого источника обновляет свойство; наблюдение не вызывает повторную запись. Ошибка проверки оставляет подтверждённое значение.
 
-Начальный CLI-профиль явно использует MemorySettingsRepository. JSON-хранение подключается через ApplicationConfig.settings: SettingsSource::Initial или Stored и JsonSettingsRepository. Ошибка сохранения наблюдаема отдельно от принятия значения; явный retry защищён от старой запоздавшей ошибки.
+CLI использует persistent bootstrap: settings.json, presets.json без секретов и timeline.sqlite3 в --data-dir. ApplicationConfig::minimal остаётся явным transient-профилем для тестов. JSON-хранение подключается через ApplicationConfig.settings: SettingsSource::Initial или Stored и JsonSettingsRepository. Ошибка сохранения наблюдаема отдельно от принятия значения; явный retry защищён от старой запоздавшей ошибки.
 
 ## Тестовый сетевой контракт
 
@@ -95,7 +95,7 @@ test
 
 ## Timeline, персонажи и диагностика
 
-Timeline — Vec с EventId, branch ID и through. CharacterHandler предоставляет get_context(at); факты фильтруются по знанию персонажа. Историческое состояние минимального счётчика восстанавливается по префиксу. Старый контекст не применяется к изменившемуся Character молча.
+Timeline — событийное хранилище с in-memory/SQLite, ветками, EventId и through. CharacterHandler предоставляет get_context(at); факты фильтруются по знанию персонажа. Историческое состояние минимального счётчика восстанавливается по префиксу. Старый контекст не применяется к изменившемуся Character молча.
 
 Character владеет description/prompts/state, а живым Character владеет один CharacterHandler. Registry выдаёт handles. Разные персонажи генерируются параллельно, один персонаж — последовательно.
 
@@ -107,6 +107,12 @@ ChatApi::trace(id) возвращает активный или недавно �
 
 Ignored live_gemini.rs запускается только с явными NEUROMITA_LIVE_GEMINI_PRESET_FILE и NEUROMITA_LIVE_GEMINI_PRESET_ID. Проверка 2026-11-01 с пресетом Main / gemini-3.6-flash прошла за 1,99 секунды: ответ «Готово.». Переменные HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY были очищены только в тестовом процессе; использовался системный Windows-прокси. Ранний TCP timeout был вызван отсутствием system-proxy в нашей сборке reqwest. Отдельная проверка без ключа согласовала HTTP/2 с тем же хостом. Ключ не выводился, не сохранялся и не изменялся.
 
-Нет тяжёлой SessionTimeline реализации, БД и crash recovery, Slint/TUI renderer, tools, мультимодальности, стриминга токенов и реального TTS-движка. Сейчас реализованы обсуждённые связи и минимальные исполняемые контракты.
+SQLite, исторические чтения и ветки реализованы; Slint/TUI renderer, полное crash recovery запросов, tools, мультимодальность, стриминг токенов и реальный TTS-движок остаются незавершёнными. Сейчас реализованы обсуждённые связи и минимальные исполняемые контракты.
 
 Проект выделен 2026-11-01 из Atm4x/NeuroMita, commit 7f6b2625d355b1e4e22ed078283df9cfac2468ca. Python/Unity-исходники в этот репозиторий не включены; ссылки на них в документации ведут к исходному снимку на GitHub. Локальный репозиторий использует ветку main; remote пользователь добавит самостоятельно.
+
+## Архитектурные исправления, 2026-11-02
+
+SQLite включён по умолчанию (историческое имя feature: sqlite-system), но собирается из bundled исходников rusqlite/libsqlite3-sys: внешняя sqlite3.lib не требуется. Проверка без SQLite: cargo test --locked --offline --no-default-features; persistent Timeline в таком режиме возвращает явную ошибку.
+
+TTS выполняется до атомарного принятия ответа. Отмена не оставляет сообщения или внутренних эффектов; ошибка TTS допускает VoiceGenerationFailed с принятым рабочим текстом. UI-индикатор/анимация ещё не реализованы. [Границы изменений](future/architecture-fixes-20261102.md).

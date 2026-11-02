@@ -427,9 +427,8 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        2
+        1
     );
-    assert_eq!(speaking.cancel(), CancelResult::TooLate);
     speech
         .reply
         .send(Ok(AudioArtifact {
@@ -479,11 +478,11 @@ async fn complete_minimal_contracts() {
         .send(Ok(Arc::from("already accepted")))
         .unwrap();
     let speech = next(&mut voices).await;
-    assert_eq!(committed.cancel(), CancelResult::TooLate);
-    speech.reply.send(Err(VoiceError::Unavailable)).unwrap();
+    assert_eq!(committed.cancel(), CancelResult::Requested);
+
     assert!(matches!(
         done(&committed).await.state,
-        RequestState::Finished(RequestOutcome::VoiceGenerationFailed { .. })
+        RequestState::Cancelled
     ));
     assert_eq!(
         presenter
@@ -492,20 +491,21 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        4
+        3
     );
     assert!(
-        app.timeline()
+        !app.timeline()
             .iter()
             .any(|event| event.request_id == Some(committed.id())
                 && matches!(event.content, EventContent::CharacterReply { .. }))
     );
+    assert!(speech.reply.is_closed());
     let trace = ChatApi::trace(committed.id()).unwrap().unwrap();
     assert_eq!(trace.generated_text.as_deref(), Some("already accepted"));
     assert!(trace.context.is_some());
     assert!(!trace.preset_description.contains("fixture-secret-key"));
     assert!(
-        !trace
+        trace
             .transitions
             .iter()
             .any(|change| change.phase == EffectPhase::Discarded)
@@ -562,7 +562,7 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        5
+        4
     );
     presenter
         .settings
@@ -649,6 +649,47 @@ async fn complete_minimal_contracts() {
         value["type"] == "request_status" && value["state"] == "finished"
     })
     .await;
+
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+    let before = presenter
+        .characters
+        .state(CharacterId::Mita)
+        .await
+        .unwrap()
+        .accepted_replies;
+    write.write_all(b"test\n").await.unwrap();
+    let accepted = frame(&mut reader, |value| value["type"] == "accepted").await;
+    let id = RequestId(Uuid::parse_str(accepted["request_id"].as_str().unwrap()).unwrap());
+    let network_request = ChatApi::active_request(id).unwrap().unwrap();
+    next(&mut generations)
+        .await
+        .reply
+        .send(Ok(Arc::from("provisional network answer")))
+        .unwrap();
+    let speech = next(&mut voices).await;
+    shown(&presenter.chat, id, false).await;
+    let command = json!({"command_id":Uuid::new_v4(),"command":"cancel","request_id":id.0});
+    write
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
+    let cancellation = frame(&mut reader, |value| value["type"] == "cancel").await;
+    assert_eq!(cancellation["result"], "Requested");
+    assert!(matches!(
+        done(&network_request).await.state,
+        RequestState::Cancelled
+    ));
+    shown(&presenter.chat, id, true).await;
+    assert!(speech.reply.is_closed());
+    assert_eq!(
+        presenter
+            .characters
+            .state(CharacterId::Mita)
+            .await
+            .unwrap()
+            .accepted_replies,
+        before
+    );
 
     let address = app.server().address();
     let state = app.server().observe();

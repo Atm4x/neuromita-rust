@@ -158,15 +158,71 @@ impl MessageHandler {
                 return;
             }
         };
-        let text = Arc::clone(&proposed.text);
+        let text = Arc::clone(proposed.text());
         record.text_ready(Arc::clone(&text));
+        let voice_result = match voice_options {
+            None => Ok(None),
+            Some(options) => {
+                if !record.generating_voice(Arc::clone(&text)) {
+                    record.finish_cancelled();
+                    return;
+                }
+                let voice = Arc::clone(&self.voice);
+                let mut voice_task =
+                    tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                        voice.synthesize(text, options).await
+                    }));
+                let result = tokio::select! {
+                    biased;
+                    _ = record.cancellation.cancelled() => {
+                        voice_task.abort();
+                        let _ = voice_task.await;
+                        record.finish_cancelled();
+                        return;
+                    }
+                    _ = stop.cancelled() => {
+                        voice_task.abort();
+                        let _ = voice_task.await;
+                        record.cancel();
+                        record.finish_cancelled();
+                        return;
+                    }
+                    _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
+                        voice_task.abort();
+                        let _ = voice_task.await;
+                        record.cancel();
+                        record.finish_cancelled();
+                        return;
+                    }
+                    _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
+                        voice_task.abort();
+                        let _ = voice_task.await;
+                        record.cancel();
+                        record.finish_cancelled();
+                        return;
+                    }
+                    result = &mut voice_task => result,
+                };
+                match result {
+                    Ok(Ok(audio)) => Ok(Some(audio)),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(VoiceError::Generation(format!(
+                        "voice worker stopped: {error}"
+                    ))),
+                }
+            }
+        };
         if !record.begin_accepting() {
             record.finish_cancelled();
             return;
         }
-        let mut accepted = match self
+        let (audio, voice_error) = match voice_result {
+            Ok(audio) => (audio, None),
+            Err(error) => (None, Some(error)),
+        };
+        let accepted = match self
             .character
-            .accept(id, acceptance, proposed, None, message.audience().clone())
+            .accept(id, acceptance, proposed, audio, message.audience().clone())
             .await
         {
             Ok(response) => response,
@@ -178,39 +234,12 @@ impl MessageHandler {
             }
         };
         record.mark_applied();
-        let outcome = match voice_options {
+        let outcome = match voice_error {
+            Some(error) => RequestOutcome::VoiceGenerationFailed {
+                response: accepted,
+                error,
+            },
             None => RequestOutcome::Success(accepted),
-            Some(options) => {
-                record.generating_voice(Arc::clone(&text));
-                let voice = Arc::clone(&self.voice);
-                let mut voice_task =
-                    tokio::spawn(async move { voice.synthesize(text, options).await });
-                let result = tokio::select! {
-                    result = &mut voice_task => result,
-                    _ = stop.cancelled() => {
-                        voice_task.abort();
-                        let _ = voice_task.await;
-                        return record.finish(RequestOutcome::VoiceGenerationFailed {
-                            response: accepted,
-                            error: VoiceError::Generation("voice interrupted by shutdown".into()),
-                        });
-                    }
-                };
-                match result {
-                    Ok(Ok(audio)) => {
-                        accepted.audio = Some(audio);
-                        RequestOutcome::Success(accepted)
-                    }
-                    Ok(Err(error)) => RequestOutcome::VoiceGenerationFailed {
-                        response: accepted,
-                        error,
-                    },
-                    Err(error) => RequestOutcome::VoiceGenerationFailed {
-                        response: accepted,
-                        error: VoiceError::Generation(format!("voice worker stopped: {error}")),
-                    },
-                }
-            }
         };
         record.finish(outcome);
     }

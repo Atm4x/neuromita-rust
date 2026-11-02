@@ -103,6 +103,9 @@ impl ApplicationConfig {
             Err(error) => return Err(error.into()),
         };
         let mut config = Self::minimal(preset.clone(), generator, limits, bind);
+        config.timeline = TimelineConfig::Persistent {
+            database: data_directory.join("timeline.sqlite3"),
+        };
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));

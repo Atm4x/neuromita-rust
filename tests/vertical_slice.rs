@@ -1530,6 +1530,95 @@ async fn stale_reset_is_rejected_without_cancelling_current_request() {
 
 struct PausedVoice(mpsc::UnboundedSender<oneshot::Sender<()>>);
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_voice_discards_memory_state_and_working_state_before_the_next_turn() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let (voiced, mut voices) = mpsc::unbounded_channel();
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let mut config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.voice = Arc::new(PausedVoice(voiced));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    app.presenter()
+        .settings
+        .voice
+        .in_launcher
+        .set(true)
+        .unwrap();
+    let request = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "first turn".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(r#"{"segments":[{"text":"unaccepted reply"}],"attitude_change":2.0,"memory_add":["high|hidden-unaccepted-secret"],"working_state":{"focus":"discard this focus"}}"#)).unwrap();
+    let release = timeout(Duration::from_secs(5), voices.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let before = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(before.state.accepted_replies, 0);
+    assert_eq!(before.state.attitude, 60.0);
+    assert!(before.memories.is_empty());
+    assert!(before.working_state.is_empty());
+    assert_eq!(request.cancel(), CancelResult::Requested);
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Cancelled
+    ));
+    assert!(release.is_closed());
+    assert!(
+        !app.timeline()
+            .iter()
+            .any(|event| event.request_id == Some(request.id())
+                && matches!(event.content, EventContent::CharacterReply { .. }))
+    );
+    app.presenter()
+        .settings
+        .voice
+        .in_launcher
+        .set(false)
+        .unwrap();
+    let next = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "next turn".into())
+        .unwrap();
+    let call = server.next().await;
+    let prompt = call.body.to_string();
+    assert!(!prompt.contains("hidden-unaccepted-secret"));
+    assert!(!prompt.contains("unaccepted reply"));
+    assert!(!prompt.contains("discard this focus"));
+    call.respond
+        .send(Reply::Text("accepted next turn"))
+        .unwrap();
+    assert!(matches!(
+        finished(&next).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(after.state.accepted_replies, 1);
+    assert_eq!(after.state.attitude, 60.0);
+    assert!(after.memories.is_empty());
+    assert!(after.working_state.is_empty());
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 impl neuromita::voice::VoiceProvider for PausedVoice {
     fn synthesize(
         &self,
@@ -1549,7 +1638,7 @@ impl neuromita::voice::VoiceProvider for PausedVoice {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reset_during_voice_after_commit_cannot_cancel_accepted_response() {
+async fn reset_during_voice_discards_the_unaccepted_response() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
     let preset = preset(&server.endpoint);
@@ -1600,7 +1689,6 @@ async fn reset_during_voice_after_commit_cannot_cancel_accepted_response() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.cancel(), neuromita::request::CancelResult::TooLate);
     assert_eq!(
         app.character(CharacterId::Mita)
             .unwrap()
@@ -1608,17 +1696,16 @@ async fn reset_during_voice_after_commit_cannot_cancel_accepted_response() {
             .await
             .unwrap()
             .accepted_replies,
-        1
+        0
     );
     let reset_id = neuromita::timeline::EventId::new();
     assert_eq!(
         app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset_id),
         Ok(reset_id)
     );
-    voice_release.send(()).unwrap();
     assert!(matches!(
         finished(&reply).await.state,
-        RequestState::Finished(RequestOutcome::Success(_))
+        RequestState::Cancelled
     ));
     assert_eq!(
         app.character(CharacterId::Mita)
@@ -1627,14 +1714,15 @@ async fn reset_during_voice_after_commit_cannot_cancel_accepted_response() {
             .await
             .unwrap()
             .accepted_replies,
-        1
+        0
     );
+    assert!(voice_release.is_closed());
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_during_post_commit_voice_keeps_accepted_reply() {
+async fn shutdown_during_voice_discards_the_unaccepted_reply() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
     let preset = preset(&server.endpoint);
@@ -1674,13 +1762,9 @@ async fn shutdown_during_post_commit_voice_keeps_accepted_reply() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reply.cancel(), neuromita::request::CancelResult::TooLate);
     let stopping = tokio::spawn(async move { app.shutdown().await });
     let result = finished(&reply).await;
-    assert!(matches!(result.state,
-        RequestState::Finished(RequestOutcome::VoiceGenerationFailed { ref response, .. })
-            if response.text.as_ref() == "accepted text"
-    ));
+    assert!(matches!(result.state, RequestState::Cancelled));
     assert!(release.send(()).is_err());
     timeout(Duration::from_secs(10), stopping)
         .await
@@ -2254,6 +2338,7 @@ async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
     ));
 }
 
+#[cfg(feature = "sqlite-system")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     use neuromita::{
@@ -2262,6 +2347,7 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     };
 
     let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
     let directory = std::env::temp_dir().join(format!("neuromita-catalog-{}", Uuid::new_v4()));
     let record = |model: &str| PresetRecord {
         name: model.to_owned(),
@@ -2274,10 +2360,11 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
             timeout_ms: 5000,
         }),
     };
+    let endpoint = server.endpoint.clone();
     let setup = || {
         let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
         ApplicationConfig::persistent(
-            preset("http://127.0.0.1:8100/v1beta/"),
+            preset(&endpoint),
             ResponseGenerator::new([provider]).unwrap(),
             limits(),
             "127.0.0.1:0".parse().unwrap(),
@@ -2287,6 +2374,17 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     };
 
     let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    let original_branch = app.at().branch_id;
+    let request = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "Remember tea".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(r#"{"segments":[{"text":"Remembered tea"}],"attitude_change":1.0,"memory_add":["high|Player likes green tea"]}"#)).unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
     let presets = &app.presenter().presets;
     let mut changes = presets.observe();
     assert_eq!(changes.borrow_and_update().revision, 0);
@@ -2321,6 +2419,17 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     assert!(!stored.contains("test-key"));
 
     let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert_eq!(app.at().branch_id, original_branch);
+    let restored = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert_eq!(restored.state.accepted_replies, 1);
+    assert_eq!(restored.state.attitude, 61.0);
+    assert_eq!(restored.memories.len(), 1);
+    assert_eq!(restored.memories[0].content, "Player likes green tea");
     assert_eq!(app.presenter().presets.list()[0].0, id);
     assert_eq!(app.presenter().presets.list()[0].1.name, "second-model");
     assert_eq!(app.presenter().settings.presets.active.get(), id);
@@ -2334,5 +2443,6 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     assert!(app.presenter().presets.list().is_empty());
     assert_eq!(app.presenter().settings.presets.active.get(), id);
     app.shutdown().await.unwrap();
+    server.shutdown().await;
     std::fs::remove_dir_all(&directory).unwrap();
 }

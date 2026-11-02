@@ -2,7 +2,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate, ResponseEffect, StructuredResponse};
+use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
 use crate::character::CharacterContext;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -30,22 +30,15 @@ impl GenerationRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ProposedResponse {
-    pub text: Arc<str>,
-    pub structured: Arc<StructuredResponse>,
-    pub effects: Arc<[ResponseEffect]>,
-}
+pub use crate::turn::TurnProposal as ProposedResponse;
 
 impl ProposedResponse {
     pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
         structured.validate()?;
         structured.ensure_supported_effects()?;
-        Ok(Self {
-            text: structured.full_text(),
-            effects: structured.proposed_effects()?.into(),
-            structured: Arc::new(structured),
-        })
+        let text = structured.full_text();
+        let effects = structured.proposed_effects()?;
+        Ok(Self::validated(text, structured.segments, effects))
     }
 }
 

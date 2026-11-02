@@ -12,6 +12,8 @@ use crate::{
 };
 
 pub use crate::identity::EventId;
+#[cfg(test)]
+mod context_read_tests;
 pub mod conversation;
 pub mod domain;
 pub mod ingress;
@@ -22,18 +24,21 @@ pub mod storage;
 pub mod view;
 
 use conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker};
+#[cfg(all(test, feature = "sqlite-system"))]
+use domain::{CharacterBehavior, MemoryChange};
 use legacy::{legacy_event, make_draft};
 use message_actions::MessageAction;
 use selection::{SessionWorkspace, TimelineAdmission, TimelineSelection, TimelineTurn};
-use view::{MitaView, TimelineMessageQueries};
+use view::MitaView;
+#[cfg(test)]
+use view::TimelineMessageQueries;
 
 #[cfg(feature = "sqlite-system")]
 use selection::TimelineSelectionRepository;
 
 use domain::{
-    AppendGuard, AppliedEffect, BranchId, CausalLink, CausalRelation, CharacterBehavior,
-    CharacterMemories, CharacterWorkingState, EventDraft, EventKind, MemoryChange, SessionId,
-    TimelineRepository, TimelineStore,
+    AppendGuard, AppliedEffect, BranchId, CausalLink, CausalRelation, CharacterMemories,
+    CharacterWorkingState, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,12 +111,19 @@ pub(crate) struct GeneratedReply {
 }
 
 pub(crate) struct TimelineContextSnapshot {
+    pub(crate) state: crate::character::CharacterState,
+    pub(crate) working_state: CharacterWorkingState,
+    pub(crate) memories: CharacterMemories,
+    pub(crate) known: Vec<domain::KnownEvent>,
     pub(crate) history: HistoryView,
     pub(crate) view: MitaView,
 }
 
 pub enum TimelineConfig {
     Transient,
+    Persistent {
+        database: std::path::PathBuf,
+    },
     #[cfg(feature = "sqlite-system")]
     Sqlite {
         database: std::path::PathBuf,
@@ -157,6 +169,25 @@ impl SessionTimeline {
     pub(crate) fn from_config(config: TimelineConfig) -> Result<Self, domain::TimelineError> {
         match config {
             TimelineConfig::Transient => Ok(Self::new()),
+            TimelineConfig::Persistent { database } => {
+                #[cfg(feature = "sqlite-system")]
+                {
+                    let mut repository = storage::SqliteTimelineRepository::open(&database)?;
+                    let (session, root) = repository.open_or_create_session()?;
+                    Self::from_config(TimelineConfig::Sqlite {
+                        database,
+                        session,
+                        root,
+                    })
+                }
+                #[cfg(not(feature = "sqlite-system"))]
+                {
+                    let _ = database;
+                    Err(domain::TimelineError::Storage(
+                        "persistent Timeline requires the sqlite-system feature".into(),
+                    ))
+                }
+            }
             #[cfg(feature = "sqlite-system")]
             TimelineConfig::Sqlite {
                 database,
@@ -411,18 +442,48 @@ impl SessionTimeline {
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<TimelineContextSnapshot, String> {
-        let branch = self
-            .inspection_branch(at)
+        let facts = self.read_prefix(at).map_err(|error| error.to_string())?;
+        let known = domain::character_view(&facts, character);
+        let history = HistoryView {
+            at,
+            events: known
+                .iter()
+                .filter_map(|item| legacy_event(&item.fact, character))
+                .collect(),
+        };
+        let view = MitaView::from_facts(BranchId(at.branch_id), at.through, character, &facts);
+        let state = crate::character::projection::character_state(&facts, character)
             .map_err(|error| error.to_string())?;
-        let history = self.history_on_branch(character, branch, at)?;
-        let view = TimelineMessageQueries::capture(
-            self.store.as_ref(),
-            branch,
-            character,
-            Some(at.through),
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(TimelineContextSnapshot { history, view })
+        let working_state =
+            crate::character::projection::character_working_state_at(&facts, character)
+                .map_err(|error| error.to_string())?;
+        let memories = crate::character::projection::character_memories_at(&facts, character)
+            .map_err(|error| error.to_string())?;
+        Ok(TimelineContextSnapshot {
+            history,
+            view,
+            state,
+            working_state,
+            memories,
+            known,
+        })
+    }
+
+    pub(crate) fn character_state_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<crate::character::CharacterState, domain::TimelineError> {
+        crate::character::projection::character_state(&self.read_prefix(at)?, character)
+    }
+
+    fn read_prefix(
+        &self,
+        at: ContextAnchor,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        self.store
+            .read(branch, 0, Some(at.through), i64::MAX as usize, None)
     }
 
     fn inspection_branch(&self, at: ContextAnchor) -> Result<BranchId, domain::TimelineError> {
@@ -445,6 +506,7 @@ impl SessionTimeline {
     /// Count accepted replies in canonical history, independent of what the
     /// character currently remembers or what the UI projection hides.
     /// The value is branch-prefix scoped and survives context resets and reopen.
+    #[cfg(test)]
     pub(crate) fn accepted_replies_at(
         &self,
         character: CharacterId,
@@ -458,117 +520,31 @@ impl SessionTimeline {
         )
     }
 
-    /// Derived behavior for this character at one historical branch prefix.
+    #[cfg(all(test, feature = "sqlite-system"))]
     pub(crate) fn character_behavior_at(
         &self,
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<CharacterBehavior, domain::TimelineError> {
-        let branch = self.inspection_branch(at)?;
-        let mut current = CharacterBehavior::default();
-        for fact in self
-            .store
-            .world(branch)?
-            .iter()
-            .take_while(|fact| fact.sequence <= at.through)
-        {
-            if fact.draft.kind != EventKind::CharacterStateChanged
-                || fact.draft.actor.as_deref() != Some(&character.to_string())
-            {
-                continue;
-            }
-            current = serde_json::from_value(
-                fact.draft
-                    .payload
-                    .get("state")
-                    .cloned()
-                    .ok_or(domain::TimelineError::Invalid("state change has no state"))?,
-            )
-            .map_err(|_| domain::TimelineError::Invalid("invalid state change"))?;
-            if ![current.attitude, current.boredom, current.stress]
-                .iter()
-                .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            {
-                return Err(domain::TimelineError::Invalid(
-                    "invalid accepted character state",
-                ));
-            }
-        }
-        Ok(current)
+        crate::character::projection::character_behavior_at(&self.read_prefix(at)?, character)
     }
 
-    /// Reconstruct the last accepted cognitive handoff at the selected branch prefix.
-    /// A knowledge reset clears it, without deleting historical facts.
+    #[cfg(all(test, feature = "sqlite-system"))]
     pub(crate) fn character_working_state_at(
         &self,
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<CharacterWorkingState, domain::TimelineError> {
-        let branch = self.inspection_branch(at)?;
-        let mut current = CharacterWorkingState::default();
-        for fact in self
-            .store
-            .world(branch)?
-            .iter()
-            .take_while(|fact| fact.sequence <= at.through)
-        {
-            if fact.draft.kind == EventKind::CharacterContextReset
-                && fact.draft.observers.contains(&character)
-            {
-                current = CharacterWorkingState::default();
-            }
-            if fact.draft.kind != EventKind::CharacterWorkingStateReplaced
-                || fact.draft.actor.as_deref() != Some(&character.to_string())
-            {
-                continue;
-            }
-            let next: CharacterWorkingState =
-                serde_json::from_value(fact.draft.payload.get("working_state").cloned().ok_or(
-                    domain::TimelineError::Invalid("working state effect has no payload"),
-                )?)
-                .map_err(|_| domain::TimelineError::Invalid("invalid accepted working state"))?;
-            if !next.is_valid() {
-                return Err(domain::TimelineError::Invalid(
-                    "invalid accepted working state",
-                ));
-            }
-            current = next;
-        }
-        Ok(current)
+        crate::character::projection::character_working_state_at(&self.read_prefix(at)?, character)
     }
 
-    /// Canonical durable memories on one branch prefix. A knowledge reset changes
-    /// the character's observed context, not the underlying long-term memories.
+    #[cfg(all(test, feature = "sqlite-system"))]
     pub(crate) fn character_memories_at(
         &self,
         character: CharacterId,
         at: ContextAnchor,
     ) -> Result<CharacterMemories, domain::TimelineError> {
-        let branch = self.inspection_branch(at)?;
-        let mut book = CharacterMemories::default();
-        for fact in self
-            .store
-            .world(branch)?
-            .iter()
-            .take_while(|fact| fact.sequence <= at.through)
-        {
-            if fact.draft.kind != EventKind::CharacterMemoryChanged
-                || fact.draft.actor.as_deref() != Some(&character.to_string())
-            {
-                continue;
-            }
-            let change: MemoryChange = serde_json::from_value(
-                fact.draft
-                    .payload
-                    .get("change")
-                    .cloned()
-                    .ok_or(domain::TimelineError::Invalid("missing memory change"))?,
-            )
-            .map_err(|_| domain::TimelineError::Invalid("invalid committed memory change"))?;
-            book.apply_committed(&change)
-                .map_err(domain::TimelineError::Invalid)?;
-        }
-        Ok(book)
+        crate::character::projection::character_memories_at(&self.read_prefix(at)?, character)
     }
 
     /// Find only a committed character reply in an immutable branch prefix.
@@ -662,6 +638,7 @@ impl SessionTimeline {
         self.history_on_branch(character, self.branch, at)
     }
 
+    #[cfg(test)]
     fn history_on_branch(
         &self,
         character: CharacterId,

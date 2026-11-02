@@ -1,5 +1,7 @@
 mod handler;
 mod model;
+pub(crate) mod projection;
+pub mod state;
 
 pub use crate::identity::CharacterId;
 pub(crate) use handler::AcceptanceContext;

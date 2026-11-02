@@ -107,12 +107,35 @@ fn encode<T: serde::Serialize>(value: &T) -> Result<String, TimelineError> {
 }
 
 /// SQLite is a replaceable transaction owner, not a second implementation of timeline rules.
-/// SQLite 3 development libraries are required when the `sqlite-system` feature is enabled.
+/// SQLite sources are bundled through rusqlite when the sqlite-system feature is enabled.
 pub struct SqliteTimelineRepository {
     path: PathBuf,
 }
 
 impl SqliteTimelineRepository {
+    pub fn open_or_create_session(&mut self) -> Result<(SessionId, BranchId), TimelineError> {
+        self.with_write(|connection, store| {
+            let selected = read_selection(connection)?;
+            let rows = if let Some(selected) = selected {
+                let session = branch_info(connection, selected.branch_id)?.session_id;
+                connection.query("SELECT session_id,branch_id FROM timeline_branches WHERE parent_id IS NULL AND session_id=?", &[&session.0.to_string()])?
+            } else {
+                connection.query("SELECT session_id,branch_id FROM timeline_branches WHERE parent_id IS NULL", &[])?
+            };
+            match rows.as_slice() {
+                [] => {
+                    let session = SessionId::new();
+                    let root = BranchId::new();
+                    store.create_session(session, root)?;
+                    save_branch(connection, store, root)?;
+                    Ok((session, root))
+                }
+                [row] => Ok((SessionId(parse_uuid(&row[0])?), BranchId(parse_uuid(&row[1])?))),
+                _ => Err(TimelineError::Conflict),
+            }
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, TimelineError> {
         let path = path.as_ref();
         if path.to_string_lossy() == ":memory:" {
@@ -380,6 +403,37 @@ impl<'a> IndexedWorld<'a> {
 }
 
 impl WorldLookup for IndexedWorld<'_> {
+    fn memories(
+        &self,
+        character: CharacterId,
+    ) -> Result<crate::memory::CharacterMemories, TimelineError> {
+        let mut book = crate::memory::CharacterMemories::default();
+        let (branch, through) = self.lineage.first().ok_or(TimelineError::NotFound)?;
+        for fact in read_page(
+            self.connection,
+            *branch,
+            0,
+            Some(*through),
+            i64::MAX as usize,
+            None,
+        )? {
+            if fact.draft.kind == EventKind::CharacterMemoryChanged
+                && fact.draft.actor.as_deref() == Some(&character.to_string())
+            {
+                let change = serde_json::from_value::<crate::memory::MemoryChange>(
+                    fact.draft
+                        .payload
+                        .get("change")
+                        .cloned()
+                        .ok_or(TimelineError::Invalid("missing memory change"))?,
+                )
+                .map_err(|_| TimelineError::Invalid("invalid memory change"))?;
+                book.apply_committed(&change)
+                    .map_err(TimelineError::Invalid)?;
+            }
+        }
+        Ok(book)
+    }
     fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
         for (branch, cutoff) in &self.lineage {
             let rows = self.connection.query("SELECT kind_json FROM timeline_fact_keys WHERE branch_id=? AND event_id=? AND sequence<=? ORDER BY sequence DESC LIMIT 1",

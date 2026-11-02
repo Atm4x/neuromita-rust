@@ -326,7 +326,10 @@ impl RequestRecord {
     }
     pub(crate) fn generating_voice(&self, text: Arc<str>) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() || inner.phase != EffectPhase::Applied {
+        if inner.snapshot.state.is_terminal()
+            || inner.phase != EffectPhase::Working
+            || self.cancellation.is_cancelled()
+        {
             return false;
         }
         self.publish(
@@ -398,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_effects_remain_applied_while_voice_is_pending_or_fails() {
+    fn voice_remains_cancellable_until_acceptance() {
         let registry = RequestRegistry::new(4);
         let handle = registry.register(
             Box::new(request()),
@@ -410,20 +413,16 @@ mod tests {
         );
         let record = Arc::clone(&handle.record);
         assert!(record.try_start().is_some());
-        assert!(record.begin_accepting());
-        record.mark_applied();
-        assert!(record.generating_voice(Arc::from("accepted text")));
-        assert_eq!(handle.cancel(), CancelResult::TooLate);
-        assert!(!record.cancellation.is_cancelled());
+        assert!(record.generating_voice(Arc::from("provisional text")));
         let trace = record.trace().unwrap();
         assert_eq!(
             trace.transitions.last().unwrap().phase,
-            EffectPhase::Applied
+            EffectPhase::Working
         );
-        record.finish(RequestOutcome::InternalError(
-            record.failure("simulated post-commit worker failure".into()),
-        ));
-        assert!(matches!(handle.snapshot().state, RequestState::Finished(_)));
+        assert_eq!(handle.cancel(), CancelResult::Requested);
+        assert!(!record.begin_accepting());
+        record.finish_cancelled();
+        assert!(matches!(handle.snapshot().state, RequestState::Cancelled));
     }
 
     #[test]

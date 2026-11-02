@@ -7,11 +7,16 @@ use super::{
     knowledge::knowledge_change,
     model::{EventKind, TimelineFact},
 };
+use crate::{
+    character::state::{CharacterBehavior, CharacterWorkingState},
+    memory::{CharacterMemories, MemoryChange},
+};
 
 /// Read-only facts needed by the single domain append validator.
 /// A repository can answer these with indexed storage reads without reconstructing
 /// a full world. No storage-specific rule is encoded in this contract.
 pub(crate) trait WorldLookup {
+    fn memories(&self, character: CharacterId) -> Result<CharacterMemories, TimelineError>;
     fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError>;
     fn has_external(&self, external: &str) -> Result<bool, TimelineError>;
     fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError>;
@@ -19,6 +24,7 @@ pub(crate) trait WorldLookup {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorldIndex {
+    memories: HashMap<CharacterId, CharacterMemories>,
     kinds: HashMap<EventId, EventKind>,
     external_ids: HashSet<String>,
     known: HashMap<CharacterId, HashSet<EventId>>,
@@ -31,6 +37,7 @@ struct KnowledgeChange {
 }
 
 pub(super) struct AppendIndex<'a> {
+    memories: HashMap<CharacterId, CharacterMemories>,
     base: &'a dyn WorldLookup,
     kinds: HashMap<EventId, EventKind>,
     external_ids: HashSet<String>,
@@ -38,15 +45,24 @@ pub(super) struct AppendIndex<'a> {
 }
 
 impl WorldIndex {
-    pub(super) fn from_facts(facts: &[TimelineFact]) -> Self {
+    pub(super) fn from_facts(facts: &[TimelineFact]) -> Result<Self, TimelineError> {
         let mut index = Self::default();
         for fact in facts {
-            index.insert(fact);
+            index.insert(fact)?;
         }
-        index
+        Ok(index)
     }
 
-    fn insert(&mut self, fact: &TimelineFact) {
+    fn insert(&mut self, fact: &TimelineFact) -> Result<(), TimelineError> {
+        if fact.draft.kind == EventKind::CharacterMemoryChanged {
+            let character = effect_character(&fact.draft)?;
+            let change = payload::<MemoryChange>(&fact.draft, "change")?;
+            self.memories
+                .entry(character)
+                .or_default()
+                .apply_committed(&change)
+                .map_err(TimelineError::Invalid)?;
+        }
         self.kinds.insert(fact.draft.id, fact.draft.kind);
         if let Some(external) = &fact.draft.external_message_id {
             self.external_ids.insert(external.clone());
@@ -59,16 +75,21 @@ impl WorldIndex {
             }
             known.insert(change.acquired);
         }
+        Ok(())
     }
 
-    pub(super) fn extend(&mut self, facts: &[TimelineFact]) {
+    pub(super) fn extend(&mut self, facts: &[TimelineFact]) -> Result<(), TimelineError> {
         for fact in facts {
-            self.insert(fact);
+            self.insert(fact)?;
         }
+        Ok(())
     }
 }
 
 impl WorldLookup for WorldIndex {
+    fn memories(&self, character: CharacterId) -> Result<CharacterMemories, TimelineError> {
+        Ok(self.memories.get(&character).cloned().unwrap_or_default())
+    }
     fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
         Ok(self.kinds.get(&event).copied())
     }
@@ -86,13 +107,63 @@ impl WorldLookup for WorldIndex {
 }
 
 impl<'a> AppendIndex<'a> {
+    pub(super) fn validate_final_effects(&self) -> Result<(), TimelineError> {
+        for memories in self.memories.values() {
+            memories.ensure_unique().map_err(TimelineError::Invalid)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn new(base: &'a dyn WorldLookup) -> Self {
         Self {
+            memories: HashMap::new(),
             base,
             kinds: HashMap::new(),
             external_ids: HashSet::new(),
             knowledge: HashMap::new(),
         }
+    }
+
+    pub(super) fn validate_effect(
+        &mut self,
+        draft: &super::EventDraft,
+    ) -> Result<(), TimelineError> {
+        if !matches!(
+            draft.kind,
+            EventKind::CharacterMemoryChanged
+                | EventKind::CharacterStateChanged
+                | EventKind::CharacterWorkingStateReplaced
+        ) {
+            return Ok(());
+        }
+        let character = effect_character(draft)?;
+        match draft.kind {
+            EventKind::CharacterStateChanged => {
+                if !payload::<CharacterBehavior>(draft, "state")?.is_valid() {
+                    return Err(TimelineError::Invalid("invalid character behavior"));
+                }
+            }
+            EventKind::CharacterWorkingStateReplaced => {
+                if !payload::<CharacterWorkingState>(draft, "working_state")?.is_valid() {
+                    return Err(TimelineError::Invalid("invalid working state"));
+                }
+            }
+            EventKind::CharacterMemoryChanged => {
+                let change = payload::<MemoryChange>(draft, "change")?;
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.memories.entry(character)
+                {
+                    entry.insert(self.base.memories(character)?);
+                }
+                self.memories
+                    .get_mut(&character)
+                    .expect("loaded memory projection")
+                    .apply_committed(&change)
+                    .map_err(TimelineError::Invalid)?;
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
     }
 
     pub(super) fn kind(&self, event: EventId) -> Result<Option<EventKind>, TimelineError> {
@@ -142,4 +213,35 @@ impl<'a> AppendIndex<'a> {
             change.added.insert(effect.acquired);
         }
     }
+}
+
+fn effect_character(draft: &super::EventDraft) -> Result<CharacterId, TimelineError> {
+    let character = draft
+        .actor
+        .as_deref()
+        .and_then(CharacterId::parse)
+        .ok_or(TimelineError::Invalid("effect requires a character actor"))?;
+    if draft.observers.len() != 1 || !draft.observers.contains(&character) {
+        return Err(TimelineError::Invalid(
+            "character effect must remain private to its actor",
+        ));
+    }
+    Ok(character)
+}
+
+fn payload<T: serde::de::DeserializeOwned>(
+    draft: &super::EventDraft,
+    key: &str,
+) -> Result<T, TimelineError> {
+    if draft.payload.len() != 1 {
+        return Err(TimelineError::Invalid(
+            "effect requires exactly one typed payload",
+        ));
+    }
+    let value = draft
+        .payload
+        .get(key)
+        .ok_or(TimelineError::Invalid("missing typed effect payload"))?;
+    serde_json::from_value(value.clone())
+        .map_err(|_| TimelineError::Invalid("invalid typed effect payload"))
 }

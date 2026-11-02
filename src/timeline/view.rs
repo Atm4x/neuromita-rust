@@ -75,6 +75,36 @@ pub struct MitaView {
 }
 
 impl MitaView {
+    pub(crate) fn from_facts(
+        branch: BranchId,
+        through: u64,
+        character: CharacterId,
+        facts: &[super::domain::TimelineFact],
+    ) -> Self {
+        let mut projection = CharacterMessageProjection::new(character);
+        let mut world = CharacterWorldProjection::new();
+        for fact in facts
+            .iter()
+            .filter(|fact| fact.sequence <= through && fact.draft.observers.contains(&character))
+        {
+            let known = KnownEvent {
+                fact: fact.clone(),
+                learned_at: fact.sequence,
+            };
+            if knowledge_change(fact, character).is_some_and(|change| change.reset) {
+                world.reset();
+            }
+            projection.observe(&known);
+            world.observe(&known);
+        }
+        Self {
+            branch,
+            through,
+            projection,
+            world,
+        }
+    }
+
     pub fn count(&self) -> usize {
         self.projection.count()
     }

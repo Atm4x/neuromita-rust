@@ -64,10 +64,10 @@ The fixture is a legacy test-data source only. Production code uses typed preset
 ## Remaining work / deliberate limits
 
 - Real TTS engine, Slint/TUI frontend, tools and multimodal/streamed token handling are not implemented; ports and settings contracts are present.
-- Timeline is a Vec with one branch and minimal at; no database, forks/checkpoint recovery or durable effect transaction.
+- Timeline supports in-memory and bundled SQLite, branch-prefix reads and atomic message/effect commits. Full request crash recovery remains incomplete.
 - RequestTrace is bounded memory diagnostics. No durable DB trace or cross-restart request recovery.
 - Discovery can lag, and network receipts have a bounded per-connection lifetime. No reconnect-wide deduplication/authentication/compatibility with the old Unity wire protocol.
-- Character state currently has the minimal accepted-reply effect. Extend typed effects and their owner-side validation, not UI mutations.
+- Typed state, working-state and memory effects are committed with the reply. Semantic retrieval and external action executors remain incomplete.
 
 Keep working toward the user's contracts rather than copying Python architecture. Do not fix or refactor Python/Unity files as part of this Rust task.
 
@@ -80,3 +80,11 @@ src/, tests/, Cargo.toml, Cargo.lock, .cargo/ and vendor/ were copied unchanged.
 The source snapshot passed nine local tests, Clippy with -D warnings and rustfmt. Live Gemini passed without proxy environment overrides. Cargo.lock and vendor include 179 packages, including HTTP/2 and Windows/macOS proxy dependencies. No credentials, build archives, old Git metadata or target/ outputs were transferred.
 
 After extraction, a clean offline build in the new directory passed all nine local tests, Clippy with -D warnings and rustfmt. Compared 11,087 code/config/vendor files against the source snapshot: no differences. All 1,743 local Markdown links resolve. Build output is generated only under the ignored target/ directory.
+
+## Architecture audit fixes, 2026-11-02
+
+Read future/architecture-fixes-20261102.md. CharacterHandler accepts private-field TurnProposal from turn.rs, not StructuredResponse. Rules are in character/state.rs, memory in memory.rs, read projections in character/projection.rs. Existing ContextAnchor/MitaView use one prefix read per complete context.
+
+TTS runs in Working. Cancellation/reset/shutdown before acceptance discards text and effects. Voice failure can produce accepted text with VoiceGenerationFailed. Frontend animations and delivery/execution acknowledgments remain unfinished.
+
+Default sqlite-system uses vendored rusqlite/bundled SQLite; external sqlite3.lib and hand-written FFI are gone. Persistent bootstrap restores Timeline; --no-default-features supports explicit transient configurations and rejects persistent Timeline. Test and run Clippy in both modes.

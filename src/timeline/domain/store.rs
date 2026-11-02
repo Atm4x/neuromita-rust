@@ -312,7 +312,7 @@ impl TimelineStore {
         if !self.indexes.contains_key(&branch_id) {
             let world = self.world(branch_id)?;
             self.indexes
-                .insert(branch_id, WorldIndex::from_facts(&world));
+                .insert(branch_id, WorldIndex::from_facts(&world)?);
         }
         let index = self
             .indexes
@@ -333,7 +333,7 @@ impl TimelineStore {
         self.indexes
             .get_mut(&branch_id)
             .expect("branch index initialized")
-            .extend(&result);
+            .extend(&result)?;
         Ok(result)
     }
 
@@ -353,6 +353,7 @@ impl TimelineStore {
         let mut sequence = expected_head;
         for draft in drafts {
             Self::validate(&pending, draft)?;
+            pending.validate_effect(draft)?;
             sequence = sequence
                 .checked_add(1)
                 .ok_or(TimelineError::Invalid("sequence overflow"))?;
@@ -365,6 +366,7 @@ impl TimelineStore {
             pending.record(&fact);
             result.push(fact);
         }
+        pending.validate_final_effects()?;
         Ok(result)
     }
 

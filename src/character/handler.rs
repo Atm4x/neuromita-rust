@@ -15,7 +15,6 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
-    generation::{ProposedResponse, ResponseEffect, ResponseSegment},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     timeline::domain::{AppliedEffect, CharacterBehavior},
@@ -25,6 +24,7 @@ use crate::{
         conversation::ConversationAudience,
         selection::{TimelineAdmission, TimelineTurn},
     },
+    turn::{ResponseEffect, ResponseSegment, TurnProposal},
     voice::AudioArtifact,
 };
 
@@ -69,7 +69,7 @@ enum Command {
     Accept {
         request: RequestId,
         context: AcceptanceContext,
-        proposed: ProposedResponse,
+        proposed: TurnProposal,
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
@@ -143,7 +143,7 @@ impl CharacterHandle {
         &self,
         request: RequestId,
         context: AcceptanceContext,
-        proposed: ProposedResponse,
+        proposed: TurnProposal,
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
@@ -309,28 +309,33 @@ impl CharacterHandler {
                     ContextCaptureError::Invalid(reason) => CharacterError::Internal(reason),
                 })?;
         let anchor = captured.history.at;
-        let state = state_at(&timeline, self.character.id, anchor)?;
-        let working_state = timeline
-            .character_working_state_at(self.character.id, anchor)
-            .map_err(|error| CharacterError::Internal(error.to_string()))?;
-        let memories = timeline
-            .character_memories_at(self.character.id, anchor)
-            .map_err(|error| CharacterError::Internal(error.to_string()))?
-            .list();
-        let reaction = timeline
-            .reaction_cause_at(self.character.id, intent, anchor)
-            .map_err(|error| CharacterError::Internal(error.to_string()))?
-            .map(|fact| ReactionCause {
-                event_id: fact.draft.id,
-                kind: fact.draft.kind,
-                description: fact
-                    .draft
-                    .payload
-                    .get("content")
-                    .and_then(serde_json::Value::as_str)
-                    .map(Arc::from),
-            });
-        self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
+        let state = captured.state;
+        let working_state = captured.working_state;
+        let memories = captured.memories.list();
+        let reaction = match intent {
+            TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
+                captured
+                    .known
+                    .iter()
+                    .find(|item| item.fact.draft.id == event)
+                    .ok_or_else(|| {
+                        CharacterError::Internal("cause not known at captured context".into())
+                    })?
+                    .fact
+                    .clone(),
+            ),
+            TurnIntent::Initiate => None,
+        }
+        .map(|fact| ReactionCause {
+            event_id: fact.draft.id,
+            kind: fact.draft.kind,
+            description: fact
+                .draft
+                .payload
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(Arc::from),
+        });
         let turn = timeline
             .capture_turn(
                 self.character.id,
@@ -364,34 +369,18 @@ impl CharacterHandler {
         &mut self,
         request: RequestId,
         context: AcceptanceContext,
-        proposed: ProposedResponse,
+        proposed: TurnProposal,
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
-        proposed
-            .structured
-            .validate()
-            .map_err(|error| CharacterError::Internal(error.to_string()))?;
-        proposed
-            .structured
-            .ensure_supported_effects()
-            .map_err(|error| CharacterError::Internal(error.to_string()))?;
-        if proposed.effects.as_ref()
-            != proposed
-                .structured
-                .proposed_effects()
-                .map_err(|e| CharacterError::Internal(e.to_string()))?
-                .as_slice()
-        {
-            return Err(CharacterError::Internal(
-                "proposed effects do not match the validated response".into(),
-            ));
-        }
         let mut timeline = self
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
-        self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
+        let current = timeline
+            .inspect_context_at(self.character.id, timeline.anchor())
+            .map_err(CharacterError::Internal)?;
+        self.character.state = current.state;
         if context.state_revision != self.character.state.revision {
             return Err(CharacterError::StaleState);
         }
@@ -403,11 +392,9 @@ impl CharacterHandler {
             boredom: self.character.state.boredom,
             stress: self.character.state.stress,
         };
-        let mut effects = Vec::with_capacity(proposed.effects.len());
-        let current_memories = timeline
-            .character_memories_at(self.character.id, timeline.anchor())
-            .map_err(|error| CharacterError::Internal(error.to_string()))?;
-        for effect in proposed.effects.iter() {
+        let mut effects = Vec::with_capacity(proposed.effects().len());
+        let current_memories = current.memories;
+        for effect in proposed.effects().iter() {
             match effect {
                 ResponseEffect::ChangeCharacterState(delta) => {
                     let state = current_behavior.apply(*delta).ok_or_else(|| {
@@ -436,7 +423,7 @@ impl CharacterHandler {
                 intent: context.intent,
                 turn: context.turn,
                 expected_revision: context.state_revision,
-                content: serde_json::to_value(&proposed.structured.segments).map_err(|error| {
+                content: serde_json::to_value(proposed.segments()).map_err(|error| {
                     CharacterError::Internal(format!("invalid accepted message segments: {error}"))
                 })?,
                 audience,
@@ -451,8 +438,8 @@ impl CharacterHandler {
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         Ok(AcceptedResponse {
             state_after: self.character.state.clone(),
-            text: proposed.text,
-            segments: Arc::from(proposed.structured.segments.clone()),
+            text: Arc::clone(proposed.text()),
+            segments: Arc::from(proposed.segments()),
             effects: effects.into(),
             event_id,
             context: context.anchor,
@@ -471,14 +458,9 @@ impl CharacterHandler {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
-            state: state_at(&timeline, self.character.id, at)?,
-            working_state: timeline
-                .character_working_state_at(self.character.id, at)
-                .map_err(|error| CharacterError::Internal(error.to_string()))?,
-            memories: timeline
-                .character_memories_at(self.character.id, at)
-                .map_err(|error| CharacterError::Internal(error.to_string()))?
-                .list(),
+            state: captured.state,
+            working_state: captured.working_state,
+            memories: captured.memories.list(),
             history: captured.history,
             view: captured.view,
         })
@@ -490,24 +472,15 @@ fn state_at(
     character: CharacterId,
     at: ContextAnchor,
 ) -> Result<CharacterState, CharacterError> {
-    let replies = timeline
-        .accepted_replies_at(character, at)
-        .map_err(|error| CharacterError::Internal(error.to_string()))?;
-    let behavior = timeline
-        .character_behavior_at(character, at)
-        .map_err(|error| CharacterError::Internal(error.to_string()))?;
-    Ok(CharacterState {
-        accepted_replies: replies,
-        revision: replies,
-        attitude: behavior.attitude,
-        boredom: behavior.boredom,
-        stress: behavior.stress,
-    })
+    timeline
+        .character_state_at(character, at)
+        .map_err(|error| CharacterError::Internal(error.to_string()))
 }
 
 #[cfg(test)]
 mod turn_tests {
     use super::*;
+    use crate::generation::ProposedResponse;
     use crate::timeline::domain::{BranchId, EventDraft, EventKind};
 
     fn handler() -> CharacterHandler {

@@ -12,3 +12,6 @@ pub mod server;
 pub mod settings;
 pub mod timeline;
 pub mod voice;
+
+pub mod memory;
+pub mod turn;
