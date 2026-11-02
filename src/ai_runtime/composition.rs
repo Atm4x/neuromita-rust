@@ -17,9 +17,9 @@ pub struct ServiceSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeComposition {
-    pub python_version: String,
-    pub paths: Vec<PathBuf>,
-    pub services: Vec<AiService>,
+    python_version: String,
+    paths: Vec<PathBuf>,
+    services: Vec<AiService>,
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +37,10 @@ pub enum CompositionError {
 }
 
 impl RuntimeComposition {
+    pub fn python_version(&self) -> &str { &self.python_version }
+    pub fn paths(&self) -> &[PathBuf] { &self.paths }
+    pub fn services(&self) -> &[AiService] { &self.services }
+
     pub async fn resolve(
         topology: ProcessTopology,
         requested_service: AiService,
