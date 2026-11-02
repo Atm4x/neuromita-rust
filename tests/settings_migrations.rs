@@ -1,12 +1,12 @@
 use std::{fs, num::NonZeroUsize, path::PathBuf, process::Command, sync::Arc, time::Duration};
 
 use neuromita::{
-    app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
+    app::{ApplicationConfig, ApplicationError, ApplicationLifecycle, RuntimeLimits},
     generation::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
     },
-    migration::Migration,
+    migration::{Migration, MigrationError, MigrationStore, StartupMigration},
     settings::{
         AppSettings, JsonSettingsRepository, Language, PresetId, PresetSelection,
         PythonSettingsMigration, RustSettingsMigration, SETTINGS_SCHEMA_VERSION, SettingsApi,
@@ -228,6 +228,45 @@ fn config(repository: Arc<dyn SettingsRepository>) -> ApplicationConfig {
     config
 }
 
+struct StartupProbe(PathBuf);
+
+struct StartupGate {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl StartupMigration for StartupGate {
+    fn name(&self) -> &str {
+        "gate"
+    }
+    fn run(&self) -> Result<(), MigrationError> {
+        self.entered
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .send(())
+            .unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv()
+            .map_err(|error| MigrationError::Storage(error.to_string()))
+    }
+}
+
+impl StartupMigration for StartupProbe {
+    fn name(&self) -> &str {
+        "extension"
+    }
+    fn run(&self) -> Result<(), MigrationError> {
+        let document: Value = serde_json::from_slice(&fs::read(&self.0).unwrap()).unwrap();
+        assert_eq!(document["schema_version"], 2);
+        assert!(SettingsApi::snapshot_all().is_err());
+        Err(MigrationError::Storage("injected extension failure".into()))
+    }
+}
+
 #[tokio::test]
 async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart() {
     let directory = Directory::new();
@@ -245,6 +284,41 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     assert!(SettingsApi::snapshot_all().is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
     fs::write(&path, legacy(&record(9))).unwrap();
+    let mut failing = config(repository.clone());
+    failing
+        .migrations
+        .register(StartupProbe(path.clone()))
+        .unwrap();
+    assert!(
+        matches!(ApplicationLifecycle::start(failing).await, Err(ApplicationError::StartupMigration(error)) if error.module == "extension")
+    );
+    assert!(SettingsApi::snapshot_all().is_err());
+    assert_eq!(repository.load().unwrap(), record(9));
+    let (entered, running) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let mut blocked = config(repository.clone());
+    blocked
+        .migrations
+        .register(StartupGate {
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(released),
+        })
+        .unwrap();
+    let starting = tokio::spawn(ApplicationLifecycle::start(blocked));
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap();
+    starting.abort();
+    assert!(matches!(starting.await, Err(error) if error.is_cancelled()));
+    assert!(matches!(
+        ApplicationLifecycle::start(config(repository.clone())).await,
+        Err(ApplicationError::Busy)
+    ));
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ApplicationLifecycle::wait_stopped())
+        .await
+        .unwrap();
     let app = ApplicationLifecycle::start(config(repository.clone()))
         .await
         .unwrap();
@@ -294,6 +368,54 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     restarted.shutdown().await.unwrap();
 }
 
+#[test]
+fn stale_migration_snapshot_cannot_overwrite_another_writer() {
+    let directory = Directory::new();
+    let path = directory.path("settings.json");
+    fs::write(&path, legacy(&record(9))).unwrap();
+    let repository = JsonSettingsRepository::new(path.clone());
+    let original = repository.read_versioned().unwrap();
+    let next = RustSettingsMigration::service()
+        .prepare(original.clone())
+        .unwrap();
+    let mut changed = record(10);
+    changed.settings.voice.volume = Volume::new(17).unwrap();
+    JsonSettingsRepository::new(path.clone())
+        .save(&changed)
+        .unwrap();
+    assert!(matches!(
+        repository.commit(&original, &next),
+        Err(MigrationError::Conflict)
+    ));
+    assert_eq!(repository.load().unwrap(), changed);
+    let before = fs::read(&path).unwrap();
+    repository.migrate().unwrap();
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn failed_persisted_upgrade_keeps_version_one_until_retry_commits() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let directory = Directory::new();
+    let path = directory.path("settings.json");
+    let original = legacy(&record(9));
+    fs::write(&path, &original).unwrap();
+    let repository = JsonSettingsRepository::new(path.clone());
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&path)
+        .unwrap();
+    assert!(repository.migrate().is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    drop(locked);
+    repository.migrate().unwrap();
+    assert_eq!(repository.read_versioned().unwrap().version, 2);
+    assert_eq!(repository.load().unwrap(), record(9));
+}
+
 #[cfg(windows)]
 #[test]
 fn a_locked_destination_keeps_the_previous_file_and_allows_retry() {
@@ -320,7 +442,7 @@ fn a_locked_destination_keeps_the_previous_file_and_allows_retry() {
     assert_eq!(fs::read(&path).unwrap(), before);
     repository.import(&bytes).unwrap();
     assert_eq!(repository.load().unwrap(), next);
-    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
 }
 
 #[test]

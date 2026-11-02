@@ -61,7 +61,7 @@ ChatApi предоставляет reply/react/initiate/send и возвраща
 
 SettingsApi предоставляет snapshot/replace/edit/observe/flush/retry_save. Schema 2 содержит разделы presets, characters, voice, capture и interface; поддерживаемая schema 1 мигрируется явно. Volume валидируется как тип. Повреждённая текущая конфигурация не восполняется скрытыми defaults.
 
-SettingsApi::prepare_import проверяет и мигрирует байты в закрытый SettingsTransfer; import(expected_revision, transfer) применяет все разделы через текущего владельца с CAS и обновлением bindings. Export возвращает текущие значения для encode. Та же RustSettingsMigration используется при загрузке; общий Migration trait принадлежит модулю migration. PythonSettingsMigration пока возвращает NotImplemented. [Контракты миграций](future/settings-migrations.md).
+SettingsApi::prepare_import проверяет и мигрирует байты в закрытый SettingsTransfer; import(expected_revision, transfer) применяет все разделы через текущего владельца с CAS и обновлением bindings. Export возвращает текущие значения для encode. Startup и импорт используют общий MigrationService: схема, шаги и атомарное хранилище принадлежат модулю. StartupMigrations выполняет обязательный settings job и ApplicationConfig.migrations до публикации Core; ошибка останавливает запуск. PythonSettingsMigration пока возвращает NotImplemented. [Общая система](future/migration-system.md), [перенос настроек](future/settings-migrations.md).
 
 Offline-команды без Core/ключа: `neuromita settings export --source STORE.json --destination BACKUP.json` и `neuromita settings import --source BACKUP.json --destination STORE.json`. Они переносят AppSettings; тела пресетов, credentials и Timeline не включаются. Приложение, использующее файл, должно быть остановлено.
 

@@ -24,6 +24,7 @@ use crate::{
     identity::EventId,
     interaction::{TurnIntent, UserInput},
     lifecycle::Lifecycle,
+    migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
         CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SettingsPresenter,
     },
@@ -34,7 +35,7 @@ use crate::{
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
         AppSettings, JsonSettingsRepository, MemorySettingsRepository, SettingsConfig,
-        SettingsError, SettingsLifecycle, SettingsSource,
+        SettingsError, SettingsLifecycle, SettingsSource, SettingsStartupMigration,
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
@@ -56,6 +57,7 @@ pub struct RuntimeLimits {
 }
 
 pub struct ApplicationConfig {
+    pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
     pub limits: RuntimeLimits,
@@ -73,6 +75,7 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
     ) -> Self {
         Self {
+            migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
             presets: PresetCatalog::single(preset),
@@ -128,6 +131,10 @@ pub enum ApplicationError {
     Busy,
     #[error("application task failed: {0}")]
     Task(String),
+    #[error(transparent)]
+    MigrationPlan(#[from] MigrationError),
+    #[error(transparent)]
+    StartupMigration(#[from] StartupMigrationError),
     #[error(transparent)]
     Settings(#[from] SettingsError),
     #[error(transparent)]
@@ -231,6 +238,7 @@ impl ApplicationLifecycle {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
+            migrations,
             presets,
             generator,
             limits,
@@ -239,6 +247,18 @@ impl ApplicationLifecycle {
             timeline,
             server,
         } = config;
+        let mut startup = StartupMigrations::new();
+        if matches!(&settings.source, SettingsSource::Stored) {
+            startup.register(SettingsStartupMigration(Arc::clone(&settings.repository)))?;
+        }
+        startup.append(migrations)?;
+        let (lease, migrated) = tokio::task::spawn_blocking(move || {
+            let result = startup.run();
+            (lease, result)
+        })
+        .await
+        .map_err(|error| ApplicationError::Task(error.to_string()))?;
+        migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));

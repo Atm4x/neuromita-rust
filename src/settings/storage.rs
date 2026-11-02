@@ -4,9 +4,11 @@ use std::{
     sync::Mutex,
 };
 
+use crate::migration::{MigrationError, MigrationSchema, MigrationStore, VersionedData};
 use serde::{Deserialize, Serialize};
 
 use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
+use super::{RustSettingsMigration, migration::SettingsSchema};
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
@@ -19,6 +21,8 @@ pub struct StoredSettings {
 }
 
 pub trait SettingsRepository: Send + Sync + 'static {
+    /// Completes required persisted upgrades before settings are published.
+    fn migrate(&self) -> Result<(), SettingsError>;
     fn load(&self) -> Result<StoredSettings, SettingsError>;
     fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError>;
 }
@@ -39,6 +43,10 @@ impl Default for MemorySettingsRepository {
     }
 }
 impl SettingsRepository for MemorySettingsRepository {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        SettingsTransfer::new(self.load()?)?;
+        Ok(())
+    }
     fn load(&self) -> Result<StoredSettings, SettingsError> {
         self.value
             .lock()
@@ -83,6 +91,12 @@ impl JsonSettingsRepository {
     }
 }
 impl SettingsRepository for JsonSettingsRepository {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        RustSettingsMigration::service()
+            .run(self)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?;
+        Ok(())
+    }
     fn load(&self) -> Result<StoredSettings, SettingsError> {
         let bytes =
             std::fs::read(&self.path).map_err(|error| SettingsError::Storage(error.to_string()))?;
@@ -94,9 +108,62 @@ impl SettingsRepository for JsonSettingsRepository {
     }
 }
 
-/// Publishes one complete file using a unique sibling temp. This is not an
-/// interprocess lock and does not promise directory/power-loss durability.
+impl MigrationStore<Vec<u8>> for JsonSettingsRepository {
+    fn read_versioned(&self) -> Result<VersionedData<Vec<u8>>, MigrationError> {
+        let bytes = std::fs::read(&self.path)
+            .map_err(|error| MigrationError::Storage(error.to_string()))?;
+        RustSettingsMigration::document(bytes)
+            .map_err(|error| MigrationError::InvalidData(error.to_string()))
+    }
+
+    fn commit(
+        &self,
+        expected: &VersionedData<Vec<u8>>,
+        next: &VersionedData<Vec<u8>>,
+    ) -> Result<(), MigrationError> {
+        SettingsSchema.validate(next)?;
+        if next.version <= expected.version {
+            return Err(MigrationError::InvalidData(
+                "migration must advance the schema".into(),
+            ));
+        }
+        let _lock =
+            writer_lock(&self.path).map_err(|error| MigrationError::Storage(error.to_string()))?;
+        let current = self.read_versioned()?;
+        if current != *expected {
+            return Err(MigrationError::Conflict);
+        }
+        atomic_replace(&self.path, &next.data)
+            .map_err(|error| MigrationError::Storage(error.to_string()))
+    }
+}
+
+/// Serializes cooperating writers using a stable sidecar lock, then publishes
+/// one complete file. Directory/power-loss durability is not promised.
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
+    let _lock = writer_lock(path)?;
+    atomic_replace(path, bytes)
+}
+
+fn writer_lock(path: &Path) -> Result<std::fs::File, SettingsError> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| SettingsError::Storage("settings path has no file name".into()))?;
+    let mut lock_name = name.to_os_string();
+    lock_name.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name(lock_name))
+        .map_err(|error| SettingsError::Storage(error.to_string()))?;
+    file.lock()
+        .map_err(|error| SettingsError::Storage(error.to_string()))?;
+    Ok(file)
+}
+
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
     let name = path
         .file_name()
         .ok_or_else(|| SettingsError::Storage("settings path has no file name".into()))?;

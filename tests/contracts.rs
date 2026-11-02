@@ -93,6 +93,9 @@ struct Storage {
     fail: AtomicBool,
 }
 impl SettingsRepository for Storage {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.json.migrate()
+    }
     fn load(&self) -> Result<StoredSettings, SettingsError> {
         self.json.load()
     }

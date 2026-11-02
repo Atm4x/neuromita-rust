@@ -4,6 +4,7 @@ mod storage;
 mod transfer;
 
 pub use crate::generation::PresetId;
+pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
 pub use storage::*;
@@ -364,6 +365,9 @@ mod tests {
         release: Arc<Barrier>,
     }
     impl SettingsRepository for GatedFailure {
+        fn migrate(&self) -> Result<(), SettingsError> {
+            Err(SettingsError::Storage("not used".into()))
+        }
         fn load(&self) -> Result<StoredSettings, SettingsError> {
             Err(SettingsError::Storage("not used".into()))
         }

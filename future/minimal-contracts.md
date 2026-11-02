@@ -50,7 +50,7 @@ ContextPosition::Latest фиксируется при начале обрабо�
 
 SettingsApi предоставляет typed snapshot/replace/edit и observe. AppSettings schema 2 содержит разделы presets, characters, voice, capture и interface. Volume проверяется как тип, комбинации полей валидируются перед публикацией. Загрузчик явно мигрирует поддерживаемую schema 1; повреждённые текущие документы не восполняются скрытыми defaults.
 
-Общий Migration trait и RustSettingsMigration объединяют startup и подготовку импорта. SettingsApi/SettingsPresenter поддерживают export и import подготовленного SettingsTransfer; применение через owner использует CAS и локальную revision, уведомляет обычные bindings. Python import имеет только явный NotImplemented stub. Offline-перенос и границы форматов описаны в [settings-migrations](settings-migrations.md).
+MigrationSchema/Step/Store и общий MigrationService объединяют startup и подготовку импорта. Модули регистрируют сервисы в ApplicationConfig.migrations; StartupMigrations завершает их до публикации API. Настройки фиксируют обновление схемы на диске через атомарный store до запуска потребителей. SettingsApi/SettingsPresenter поддерживают export и import подготовленного SettingsTransfer; применение через owner использует CAS и локальную revision, уведомляет обычные bindings. Python import имеет только явный NotImplemented stub. [Система миграций](migration-system.md), [перенос настроек](settings-migrations.md).
 
 SettingsSource::Initial и SettingsSource::Stored выбираются явно. initial_profile — явная конфигурация минимального запуска, не fallback после ошибки загрузки.
 

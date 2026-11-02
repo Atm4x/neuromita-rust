@@ -70,6 +70,9 @@ impl Storage {
 }
 
 impl SettingsRepository for Storage {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.inner.migrate()
+    }
     fn load(&self) -> Result<StoredSettings, SettingsError> {
         Self::block(&self.load_gate);
         self.inner.load()

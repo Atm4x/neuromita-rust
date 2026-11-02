@@ -1,6 +1,6 @@
 # Миграции и перенос настроек
 
-Объём от 2026-11-02: минимальный общий контракт миграции, единая подготовка Rust-настроек при старте и импорте, применение через существующего владельца настроек. Python-перенос не реализуется.
+Объём от 2026-11-02: настройки подключены к [общей системе миграций](migration-system.md), единая подготовка Rust-настроек при старте и импорте, применение через существующего владельца настроек. Python-перенос не реализуется.
 
 - [x] Общий Migration trait без глобального реестра и скрытого поиска модулей.
 - [x] Одна строгая цепочка Rust schema 1 → 2 для startup и import; текущая schema проверяется без defaults.
@@ -9,7 +9,7 @@
 - [x] Offline CLI и атомарная файловая запись без запуска Core/LLM.
 - [x] Проверки миграции, импорта, ошибок, сохранения и рестарта; Cargo test/Clippy/fmt.
 
-Migration преобразует вход в результат или ошибку. Форматы и версии знает конкретный модуль. Порядок startup задаётся композицией: SettingsLifecycle загружает и проверяет настройки до публикации API. Trait не является service locator, не запускает произвольные callbacks и не обещает транзакцию между всеми хранилищами Core. Существующие миграции SQLite не переводятся на новый механизм в рамках этой задачи.
+Migration преобразует внешний формат в результат или ошибку. Версии, шаги и storage adapter принадлежат модулю; цепочку выполняет общий MigrationService. StartupMigrations запускает явно подключённые модули до публикации API. Между всеми хранилищами Core нет общей транзакции. Существующие миграции SQLite не переводятся на новый механизм в рамках этой задачи.
 
 SettingsTransfer — полный проверенный Rust envelope, одновременно подготовленный пакет переноса. Подготовка из байтов не изменяет состояние или файлы. Rust использует ту же миграцию, что startup. Python имеет отдельный явный вход, который пока возвращает NotImplemented.
 
@@ -19,9 +19,9 @@ Offline import заменяет весь файл, сохраняет revision �
 
 ## Контракты и связи
 
-`Migration<Input>` в `src/migration.rs` содержит associated Output/Error и единственный метод migrate. Реализации RustSettingsMigration и PythonSettingsMigration принадлежат settings. Следующий модуль Core может реализовать тот же trait для своего входа; порядок и границу записи определяет его владелец при prepare/startup. Универсального реестра startup hooks нет.
+`Migration<Input>` задаёт преобразование внешнего формата. Полный контракт версионированной миграции состоит из MigrationSchema, MigrationStep, MigrationStore и MigrationService. RustSettingsMigration::service создаёт сервис со схемой настроек и шагом SettingsV1ToV2. Другому модулю достаточно реализовать свои схему/шаги/адаптер и зарегистрировать сервис в ApplicationConfig.migrations.
 
-Startup: ApplicationLifecycle::start → SettingsLifecycle::prepare → JsonSettingsRepository::load → SettingsTransfer::decode → RustSettingsMigration. Ошибка прерывает старт до публикации API, исходный файл не заменяется. Миграция выполняется в памяти; сохранение schema 2 идёт существующим SettingsLifecycle, с обычной наблюдаемой Pending/Saved/Failed и flush.
+Startup: ApplicationLifecycle::start → StartupMigrations → settings job → SettingsRepository::migrate → MigrationService::run → проверка/шаг/атомарная запись schema 2 → SettingsLifecycle::prepare. Ошибка миграции или её записи прерывает старт до публикации API; последний завершённый шаг остаётся зафиксированным. Обычный load и подготовка импорта не изменяют исходный файл. Последующие пользовательские изменения сохраняются существующим SettingsLifecycle с Pending/Saved/Failed и flush.
 
 Импорт: SettingsApi::prepare_import(format, bytes) → SettingsTransfer → SettingsApi::import(expected_revision, transfer) → SettingsOwner::change → SettingsSnapshot/watch и фоновое сохранение. Подготовка доступна до старта Core, применение требует работающего владельца. Prepared transfer не хранит ссылку на Core. SettingsPresenter::import/export обращаются к своему owner, поэтому старый Presenter не переключится на новый Core после рестарта.
 
@@ -31,7 +31,7 @@ Startup: ApplicationLifecycle::start → SettingsLifecycle::prepare → JsonSett
 
 Текущая схема — 2, все её разделы обязательны. Schema 1 поддерживает два исторических варианта: исходные voice/capture/interface без presets и расширенный presets с character assignments. Недостающие presets/assignments создаются только явным правилом версии 1. Существующие значения и revision сохраняются; assignments перемещаются в characters. Эти правила не применяются к повреждённой schema 2. Неизвестная версия, повторяющиеся/неизвестные поля и неверные значения дают ошибку.
 
-Следующая версия добавляется в RustSettingsMigration вместе с типом старого документа, явным преобразованием и проверками сохранения значений. Для Python реализуется PythonSettingsMigration::migrate; пока результат всегда SettingsTransferError::NotImplemented. Функция не читает реальные Python settings и не создаёт пустую успешную конфигурацию.
+Следующая версия добавляется новым MigrationStep, типом старого документа и обновлением SettingsSchema. Исполнитель и startup dispatcher при этом не меняются. Для Python реализуется PythonSettingsMigration::migrate; пока результат всегда SettingsTransferError::NotImplemented. Функция не читает реальные Python settings и не создаёт пустую успешную конфигурацию.
 
 ## CLI
 
@@ -41,8 +41,8 @@ neuromita settings import --source BACKUP.json --destination STORE.json
 neuromita settings import --source PYTHON.json --destination STORE.json --format python
 ```
 
-Последняя команда пока завершается явной ошибкой без изменения назначения. Имя формата по умолчанию — rust, автодетекта или переключения после ошибки нет. При ошибке валидации/миграции файловая запись не начинается. Замена использует уникальный соседний temp с create_new, sync, закрытием и rename; неудачная замена сохраняет предыдущий файл. Межпроцессного lock и гарантий power-loss durability нет.
+Последняя команда пока завершается явной ошибкой без изменения назначения. Имя формата по умолчанию — rust, автодетекта или переключения после ошибки нет. При ошибке валидации/миграции файловая запись не начинается. Замена использует общий sidecar lock, уникальный соседний temp с create_new, sync, закрытием и rename; неудачная замена сохраняет предыдущий файл. Гарантий power-loss durability нет. Offline import по-прежнему предназначен для остановленного приложения.
 
 Проверки в tests/settings_migrations.rs: одинаковая миграция при load/prepare/import, строгая текущая схема, ошибочный startup без публикации API, CAS и binding, экспорт до flush, повторный импорт, сохранение и restart, отказ rename/share lock, offline CLI и Python stub. Внешние модели и реальные Python настройки не вызываются.
 
-Проверено на Windows: cargo test --locked --offline — 186 passed, 1 live ignored; с --no-default-features — 135 passed, 1 live ignored. Clippy --all-targets с -D warnings в обоих режимах и rustfmt прошли. Новых dependencies и изменений vendor нет.
+Первый срез импорта/экспорта проходил 186 тестов с SQLite и 135 без него. Актуальная проверка расширенной системы описана в [migration-system](migration-system.md). Новых dependencies и изменений vendor нет.

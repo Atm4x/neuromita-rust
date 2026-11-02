@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::migration::Migration;
+use crate::migration::{Migration, MigrationError};
 
 use super::{
     PythonSettingsMigration, RustSettingsMigration, SETTINGS_SCHEMA_VERSION, SettingsError,
@@ -27,6 +27,17 @@ pub enum SettingsTransferError {
     InvalidValue(String),
     #[error("{format:?} settings migration is not implemented")]
     NotImplemented { format: SettingsImportFormat },
+    #[error(transparent)]
+    Migration(MigrationError),
+}
+
+impl From<MigrationError> for SettingsTransferError {
+    fn from(error: MigrationError) -> Self {
+        match error {
+            MigrationError::UnsupportedVersion { found, .. } => Self::UnsupportedSchema { found },
+            other => Self::Migration(other),
+        }
+    }
 }
 
 impl From<SettingsTransferError> for SettingsError {

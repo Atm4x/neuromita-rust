@@ -1,22 +1,30 @@
 use serde::Deserialize;
 
-use crate::migration::Migration;
+use crate::migration::{
+    Migration, MigrationError, MigrationSchema, MigrationService, MigrationStep, StartupMigration,
+    VersionedData,
+};
+use std::sync::Arc;
 
 use super::{
     AppSettings, CaptureSettings, CharacterSettings, CharactersSettings, InterfaceSettings,
     OperationPresets, PresetId, PresetSettings, SETTINGS_SCHEMA_VERSION, SettingsImportFormat,
-    SettingsTransferError, StoredSettings, VoiceSettings,
+    SettingsRepository, SettingsTransferError, StoredSettings, VoiceSettings,
 };
 
 /// The same explicit schema upgrades serve startup and prepared imports.
 pub struct RustSettingsMigration;
 
-impl Migration<&[u8]> for RustSettingsMigration {
-    type Output = StoredSettings;
-    type Error = SettingsTransferError;
+impl RustSettingsMigration {
+    pub fn service() -> MigrationService<Vec<u8>> {
+        MigrationService::new(SettingsSchema, vec![Box::new(SettingsV1ToV2)])
+            .expect("the built-in settings migration plan is valid")
+    }
 
-    fn migrate(&self, bytes: &[u8]) -> Result<StoredSettings, SettingsTransferError> {
-        let document: serde_json::Value = serde_json::from_slice(bytes)
+    pub(crate) fn document(
+        bytes: Vec<u8>,
+    ) -> Result<VersionedData<Vec<u8>>, SettingsTransferError> {
+        let document: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|error| SettingsTransferError::MalformedJson(error.to_string()))?;
         let object = document.as_object().ok_or_else(|| {
             SettingsTransferError::NotFullSettingsTransfer("expected an envelope object".into())
@@ -28,17 +36,83 @@ impl Migration<&[u8]> for RustSettingsMigration {
                 )));
             }
         }
-        let header: SchemaHeader = decode(bytes)?;
-        let stored = match header.schema_version {
-            1 => decode::<StoredSettingsV1>(bytes)?.upgrade(),
-            SETTINGS_SCHEMA_VERSION => decode(bytes)?,
-            found => return Err(SettingsTransferError::UnsupportedSchema { found }),
+        let header: SchemaHeader = decode(&bytes)?;
+        Ok(VersionedData {
+            version: header.schema_version,
+            data: bytes,
+        })
+    }
+}
+
+impl Migration<&[u8]> for RustSettingsMigration {
+    type Output = StoredSettings;
+    type Error = SettingsTransferError;
+
+    fn migrate(&self, bytes: &[u8]) -> Result<StoredSettings, SettingsTransferError> {
+        let current = Self::service().prepare(Self::document(bytes.to_vec())?)?;
+        decode(&current.data)
+    }
+}
+
+pub(crate) struct SettingsSchema;
+
+impl MigrationSchema<Vec<u8>> for SettingsSchema {
+    fn current_version(&self) -> u32 {
+        SETTINGS_SCHEMA_VERSION
+    }
+
+    fn validate(&self, value: &VersionedData<Vec<u8>>) -> Result<(), MigrationError> {
+        let validate = || -> Result<(), SettingsTransferError> {
+            let header: SchemaHeader = decode(&value.data)?;
+            if header.schema_version != value.version {
+                return Err(SettingsTransferError::InvalidEnvelope(
+                    "envelope and migration versions differ".into(),
+                ));
+            }
+            let stored: StoredSettings = match value.version {
+                1 => decode::<StoredSettingsV1>(&value.data)?.upgrade(),
+                SETTINGS_SCHEMA_VERSION => decode(&value.data)?,
+                found => return Err(SettingsTransferError::UnsupportedSchema { found }),
+            };
+            stored
+                .settings
+                .validate()
+                .map_err(|error| SettingsTransferError::InvalidValue(error.to_string()))
         };
-        stored
-            .settings
-            .validate()
-            .map_err(|error| SettingsTransferError::InvalidValue(error.to_string()))?;
-        Ok(stored)
+        validate().map_err(|error| MigrationError::InvalidData(error.to_string()))
+    }
+}
+
+struct SettingsV1ToV2;
+
+impl MigrationStep<Vec<u8>> for SettingsV1ToV2 {
+    fn source_version(&self) -> u32 {
+        1
+    }
+    fn target_version(&self) -> u32 {
+        2
+    }
+
+    fn migrate(&self, bytes: Vec<u8>) -> Result<Vec<u8>, MigrationError> {
+        let upgraded = decode::<StoredSettingsV1>(&bytes)
+            .map_err(|error| MigrationError::InvalidData(error.to_string()))?
+            .upgrade();
+        serde_json::to_vec(&upgraded)
+            .map_err(|error| MigrationError::InvalidData(error.to_string()))
+    }
+}
+
+pub(crate) struct SettingsStartupMigration(pub Arc<dyn SettingsRepository>);
+
+impl StartupMigration for SettingsStartupMigration {
+    fn name(&self) -> &str {
+        "settings"
+    }
+
+    fn run(&self) -> Result<(), MigrationError> {
+        self.0
+            .migrate()
+            .map_err(|error| MigrationError::Storage(error.to_string()))
     }
 }
 
@@ -103,7 +177,7 @@ impl StoredSettingsV1 {
     fn upgrade(self) -> StoredSettings {
         debug_assert_eq!(self.schema_version, 1);
         StoredSettings {
-            schema_version: SETTINGS_SCHEMA_VERSION,
+            schema_version: 2,
             revision: self.revision,
             settings: AppSettings {
                 presets: PresetSettings {
