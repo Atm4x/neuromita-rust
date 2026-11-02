@@ -290,10 +290,10 @@ impl AiSupervisor {
         service: AiService,
         composition: &composition::RuntimeComposition,
     ) -> Result<Uuid, AiRuntimeError> {
-        if !composition.services.contains(&service) {
+        if !composition.services().contains(&service) {
             return Err(AiRuntimeError::Protocol("service absent from resolved composition".into()));
         }
-        if self.topology == ProcessTopology::Split && composition.services != [service] {
+        if self.topology == ProcessTopology::Split && composition.services() != [service] {
             return Err(AiRuntimeError::Protocol("split worker contains another service".into()));
         }
         let key = self.topology.key(service);
@@ -301,7 +301,7 @@ impl AiSupervisor {
         if workers.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config, &composition.paths).await?;
+        let worker = WorkerProcess::launch(&self.config, composition.paths()).await?;
         let generation = worker.generation;
         workers.insert(key, Arc::new(Mutex::new(worker)));
         Ok(generation)
