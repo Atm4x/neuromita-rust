@@ -1,0 +1,45 @@
+name: Temporary SomeTests Git bundle export
+
+on:
+  push:
+    branches:
+      - bridge/sometests-bundle-20261102
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out full repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and verify SomeTests bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/SomeTests:refs/heads/SomeTests
+          actual="$(git rev-parse refs/heads/SomeTests)"
+          expected="1ca1d128fe3d3e0034335016a5d41f42eb998d22"
+          test "$actual" = "$expected"
+          git bundle create "$RUNNER_TEMP/neuromita-SomeTests.bundle" refs/heads/SomeTests
+          git bundle verify "$RUNNER_TEMP/neuromita-SomeTests.bundle"
+          (cd "$RUNNER_TEMP" && sha256sum neuromita-SomeTests.bundle > neuromita-SomeTests.bundle.sha256)
+          git bundle list-heads "$RUNNER_TEMP/neuromita-SomeTests.bundle"
+
+      - name: Upload Git bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-SomeTests-full-git-bundle
+          path: |
+            ${{ runner.temp }}/neuromita-SomeTests.bundle
+            ${{ runner.temp }}/neuromita-SomeTests.bundle.sha256
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
