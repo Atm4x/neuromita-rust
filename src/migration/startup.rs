@@ -78,10 +78,12 @@ impl StartupMigrations {
     /// committed if a later one fails; there is no cross-store transaction.
     pub fn run(&self) -> Result<(), StartupMigrationError> {
         for job in &self.jobs {
+            tracing::debug!(module = job.name(), "startup migration started");
             job.run().map_err(|source| StartupMigrationError {
                 module: job.name().to_owned(),
                 source,
             })?;
+            tracing::debug!(module = job.name(), "startup migration complete");
         }
         Ok(())
     }

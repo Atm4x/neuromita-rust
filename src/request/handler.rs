@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use super::*;
 use crate::{
@@ -44,11 +45,37 @@ impl MessageHandler {
             };
             let handler = self.clone();
             let stopping = stop.clone();
-            let task = tokio::spawn(async move {
-                let _guard = WorkGuard(Arc::clone(&record));
-                handler.process(record, message, stopping).await;
-            });
-            let _ = task.await;
+            let span = tracing::info_span!("generation", request_id = %id,
+                character = %record.snapshot().metadata.character_id);
+            let task = tokio::spawn(
+                async move {
+                    let _guard = WorkGuard(Arc::clone(&record));
+                    tracing::info!("request started");
+                    handler
+                        .process(Arc::clone(&record), message, stopping)
+                        .await;
+                    let snapshot = record.snapshot();
+                    let outcome = match &snapshot.state {
+                        RequestState::Cancelled => "cancelled",
+                        RequestState::Finished(RequestOutcome::Success(_)) => "success",
+                        RequestState::Finished(RequestOutcome::TextGenerationFailed(_)) => {
+                            "text_error"
+                        }
+                        RequestState::Finished(RequestOutcome::VoiceGenerationFailed {
+                            ..
+                        }) => "voice_error",
+                        RequestState::Finished(RequestOutcome::InternalError(_)) => {
+                            "internal_error"
+                        }
+                        RequestState::Pending | RequestState::Processing(_) => "incomplete",
+                    };
+                    tracing::info!(outcome, "request finished");
+                }
+                .instrument(span),
+            );
+            if let Err(error) = task.await {
+                tracing::error!(request_id = %id, panicked = error.is_panic(), "request task terminated");
+            }
         }
         queue.close();
         while let Some(id) = queue.recv().await {

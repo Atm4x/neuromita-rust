@@ -1,3 +1,4 @@
+mod logging;
 mod settings_cli;
 mod terminal;
 
@@ -13,13 +14,18 @@ use neuromita::{
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Err(error) = logging::init() {
+        eprintln!("Logging initialization failed: {error}");
+        return ExitCode::FAILURE;
+    }
+    tracing::debug!("starting application");
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     if arguments.next().as_deref() == Some(std::ffi::OsStr::new("launcher")) {
         return match neuromita::launcher::run_cli(arguments.collect::<Vec<_>>()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("Error: {error}");
+                tracing::error!(error = %error, "application failed");
                 ExitCode::FAILURE
             }
         };
@@ -27,7 +33,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error}");
+            tracing::error!(error = %error, "application failed");
             ExitCode::FAILURE
         }
     }
@@ -67,10 +73,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         &options.data_dir,
     )?;
     let app = ApplicationLifecycle::start(config).await?;
-    println!("Server listening on {}", app.server().address());
+    tracing::info!(address = %app.server().address(), "server listening");
     let result = terminal::run(&app.presenter().chat, options).await;
     let stopped = app.shutdown().await;
     result?;
     stopped?;
+    tracing::info!("application stopped");
     Ok(())
 }
