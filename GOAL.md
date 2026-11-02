@@ -58,3 +58,18 @@
 ## Исправления архитектурного аудита
 
 См. [учёт изменений](future/architecture-fixes-20261102.md): общая валидация фактов/пакетов, закрытый TurnProposal, правила Character/Memory, чтение одного префикса без нового TimelineReadSnapshot, bundled SQLite и восстановление памяти при обычном запуске. Отмена TTS через presenter и TCP реализована; frontend-индикатор и анимация остаются планом.
+
+## Architectural Goal: Python AI Plugin Runtime (2026-11-03)
+
+**Статус: проектирование, без реализации; не заменяет текущую цель Generation/Request.** Детальная спецификация: [AI Python Plugin Runtime](future/ai-python-plugin-runtime-architecture.md). Источник поведения: Python NeuroMita 5f3d061; архитектурные ограничения: future/root-primitives-and-client-contexts.md.
+
+**Цель:** динамический AI Hub из Python-плагинов (builtin/community) без hardcoded моделей в Rust. Rust владеет OS-процессами, IPC, выбором активных моделей, состоянием установок и пользовательскими аудиосессиями. Python SDK описывает discovery, настройки, модельные зависимости, установочный план, asset probes и inference. Новая система не вводит EventBus, capabilities/service locator или второй процессный Supervisor внутри Python.
+
+- [ ] **#59:** standalone uv bootstrap → pinned managed Python → versioned Python SDK; статический manifest + изолированный dynamic discovery, typed settings/plan/verify/infer contract, недоверенные install hooks с explicit approval.
+- [ ] **#42:** versioned backend PyTorch/ONNX layers и model-specific overlays; staged install/verify/activate/rollback, реальные проверки imports/version/asset hashes и explicit readiness.
+- [ ] **#24:** один Rust AiSupervisor (Lifecycle), владелец shared/split workers; один выбранный TTS и ASR одновременно, request correlation, generation ID, heartbeat, cancellation, restart. Не создавать per-model workers без подтверждённой потребности.
+- [ ] **#60 / #25:** обособить Rust speech capture/PTT/VAD/segmentation от Python ASR; протестировать wavekat-vad Earshot и optional Silero ONNX. Native VAD работает без Python bootstrap; перенос физических микрофонов только после parity-tests.
+- [ ] **#61 / #26:** отделить Python scripts, packages, weights и voice profiles; plugin-defined speaker lists и per-character RVC pitch без hardcoded CrazyMita mappings. .pth/.onnx/.index/.wav/.txt валидировать по ролям выбранного backend.
+- [ ] **#37 / #51:** AI Hub отражает discovered/installed/environment-ready/worker-ready/model-ready/failed, показывает plugin-provided settings и причины ошибки; никакой фиктивной готовности.
+
+**Минимальная приёмка:** два добавленных без сборки Rust mock-плагина (плюс невалидный), выбор/смена TTS без переподнятия ASR в split, install failure с rollback, missing/incorrect voice assets, unknown speaker/pitch validation, stale worker result и VAD mock PCM segment tests. До этих проверок не объявлять AI Runtime завершённым. Текущий VoiceProvider и ResponseGenerator не подменяются общим AI service.
