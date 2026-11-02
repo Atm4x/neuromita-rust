@@ -95,7 +95,9 @@ impl LockedOverlay {
                 "onnxruntime",
                 "onnxruntime-gpu",
                 "onnxruntime-directml",
-            ].contains(&package.name.to_ascii_lowercase().as_str()) {
+            ]
+            .contains(&package.name.to_ascii_lowercase().as_str())
+            {
                 return Err(OverlayError::Invalid(
                     "backend packages belong to a separate layer".into(),
                 ));
