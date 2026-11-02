@@ -344,6 +344,9 @@ mod tests {
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
+                attitude: 60.0,
+                boredom: 10.0,
+                stress: 5.0,
             },
             history: HistoryView {
                 at: ContextAnchor {
@@ -449,6 +452,9 @@ mod tests {
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
+                attitude: 60.0,
+                boredom: 10.0,
+                stress: 5.0,
             },
             history: HistoryView {
                 at: ContextAnchor {
@@ -537,7 +543,7 @@ mod tests {
         }]},"finishReason":"STOP"}]});
         let response = decode(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert_eq!(response.segments[0].commands, ["move"]);
-        assert!(response.ensure_message_only().is_err());
+        assert!(response.ensure_supported_effects().is_err());
         let malformed = json!({"candidates":[{"content":{"parts":[{"text":
             r#"{"segments":[{"text":"hello","unexpected_effect":true}]}"#
         }]},"finishReason":"STOP"}]});

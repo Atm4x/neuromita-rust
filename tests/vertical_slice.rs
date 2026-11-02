@@ -539,6 +539,59 @@ async fn accepted_structured_segments_keep_emotions_and_order_in_canonical_timel
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn structured_state_deltas_apply_only_with_accepted_reply() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let handle = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "How do you feel?".into())
+        .unwrap();
+    let incoming = server.next().await;
+    assert!(
+        incoming.body["generationConfig"]["responseSchema"]["properties"]["attitude_change"]
+            .is_object()
+    );
+    incoming.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"I'm delighted!","emotions":["happy"]}],"attitude_change":1.25,"boredom_change":-2.0}"#
+    )).unwrap();
+    let snapshot = finished(&handle).await;
+    assert!(matches!(
+        snapshot.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(app.at().through, 3); // input + message + state change in one guarded commit
+    let state = app
+        .character(CharacterId::Mita)
+        .unwrap()
+        .state()
+        .await
+        .unwrap();
+    assert_eq!(state.accepted_replies, 1);
+    assert_eq!(state.attitude, 61.25);
+    assert_eq!(state.boredom, 8.0);
+    assert_eq!(state.stress, 5.0);
+    let state_other = app
+        .character(CharacterId::KindMita)
+        .unwrap()
+        .state()
+        .await
+        .unwrap();
+    assert_eq!(state_other.attitude, 60.0);
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsupported_structured_effect_fails_without_committing_or_synthesizing() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;

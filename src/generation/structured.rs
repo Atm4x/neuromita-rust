@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 use super::GenerationError;
+use crate::timeline::domain::CharacterStateDelta;
 
 pub const RESPONSE_PROTOCOL_VERSION: u32 = 3;
 
@@ -185,6 +186,14 @@ impl StructuredResponse {
         Ok(())
     }
 
+    pub fn state_delta(&self) -> CharacterStateDelta {
+        CharacterStateDelta {
+            attitude: self.attitude_change,
+            boredom: self.boredom_change,
+            stress: self.stress_change,
+        }
+    }
+
     pub fn full_text(&self) -> Arc<str> {
         Arc::from(
             self.segments
@@ -196,16 +205,13 @@ impl StructuredResponse {
         )
     }
 
-    pub fn ensure_message_only(&self) -> Result<(), GenerationError> {
+    pub fn ensure_supported_effects(&self) -> Result<(), GenerationError> {
         if self
             .segments
             .iter()
             .any(ResponseSegment::has_unsupported_content)
             || self.image_description.is_some()
             || self.secret_exposed.is_some()
-            || self.attitude_change != 0.0
-            || self.boredom_change != 0.0
-            || self.stress_change != 0.0
             || self.memory_add.is_some()
             || self.memory_update.is_some()
             || self.memory_delete.is_some()
@@ -244,7 +250,7 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.full_text().as_ref(), "Привет мир");
         assert_eq!(RESPONSE_PROTOCOL_VERSION, 3);
-        parsed.ensure_message_only().unwrap();
+        parsed.ensure_supported_effects().unwrap();
     }
 
     #[test]
@@ -259,7 +265,7 @@ mod tests {
         let parsed = StructuredResponse::parse(&data.to_string()).unwrap();
         assert_eq!(parsed.segments[0].intents[0].payload["object"], "apple");
         assert_eq!(parsed.tool_call.as_ref().unwrap().args["query"], "tea");
-        assert!(parsed.ensure_message_only().is_err());
+        assert!(parsed.ensure_supported_effects().is_err());
         assert_eq!(
             serde_json::to_value(&parsed).unwrap()["segments"][0]["target"],
             "KindMita"
@@ -285,7 +291,23 @@ mod tests {
         let proposed =
             StructuredResponse::parse(r#"{"segments":[{"text":"hello", "commands":["run"]}]}"#)
                 .unwrap();
-        assert!(proposed.ensure_message_only().is_err());
+        assert!(proposed.ensure_supported_effects().is_err());
+    }
+
+    #[test]
+    fn state_changes_are_supported_but_other_side_effects_are_not() {
+        let response = StructuredResponse::parse(
+            r#"{"segments":[{"text":"hi"}],"attitude_change":1.25,"stress_change":-2.5}"#,
+        )
+        .unwrap();
+        response.ensure_supported_effects().unwrap();
+        assert_eq!(response.state_delta().attitude, 1.25);
+        assert_eq!(response.state_delta().stress, -2.5);
+        let unsupported = StructuredResponse::parse(
+            r#"{"segments":[{"text":"hi"}],"attitude_change":1,"memory_add":["remember"]}"#,
+        )
+        .unwrap();
+        assert!(unsupported.ensure_supported_effects().is_err());
     }
 
     #[test]

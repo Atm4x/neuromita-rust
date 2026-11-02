@@ -31,8 +31,8 @@ use view::{MitaView, TimelineMessageQueries};
 use selection::TimelineSelectionRepository;
 
 use domain::{
-    AppendGuard, BranchId, CausalLink, CausalRelation, EventDraft, EventKind, SessionId,
-    TimelineRepository, TimelineStore,
+    AppendGuard, BranchId, CausalLink, CausalRelation, CharacterBehavior, EventDraft, EventKind,
+    SessionId, TimelineRepository, TimelineStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +101,7 @@ pub(crate) struct GeneratedReply {
     pub expected_revision: u64,
     pub content: serde_json::Value,
     pub audience: ConversationAudience,
+    pub state_change: Option<CharacterBehavior>,
 }
 
 pub(crate) struct TimelineContextSnapshot {
@@ -456,6 +457,45 @@ impl SessionTimeline {
         )
     }
 
+    /// Derived behavior for this character at one historical branch prefix.
+    pub(crate) fn character_behavior_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<CharacterBehavior, domain::TimelineError> {
+        let branch = self.inspection_branch(at)?;
+        let mut current = CharacterBehavior::default();
+        for fact in self
+            .store
+            .world(branch)?
+            .iter()
+            .take_while(|fact| fact.sequence <= at.through)
+        {
+            if fact.draft.kind != EventKind::CharacterStateChanged
+                || fact.draft.actor.as_deref() != Some(&character.to_string())
+            {
+                continue;
+            }
+            current = serde_json::from_value(
+                fact.draft
+                    .payload
+                    .get("state")
+                    .cloned()
+                    .ok_or(domain::TimelineError::Invalid("state change has no state"))?,
+            )
+            .map_err(|_| domain::TimelineError::Invalid("invalid state change"))?;
+            if ![current.attitude, current.boredom, current.stress]
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            {
+                return Err(domain::TimelineError::Invalid(
+                    "invalid accepted character state",
+                ));
+            }
+        }
+        Ok(current)
+    }
+
     /// Find only a committed character reply in an immutable branch prefix.
     /// Unanswered/cancelled/unfinished requests are intentionally indistinguishable.
     pub(crate) fn accepted_reply_at(
@@ -714,6 +754,7 @@ impl SessionTimeline {
             expected_revision,
             content,
             audience,
+            state_change,
         } = reply;
         let character = turn.character;
         self.assert_turn(turn)?;
@@ -781,11 +822,40 @@ impl SessionTimeline {
             });
         }
         let draft = message.into_draft()?;
-        self.commit(
-            format!("reply:{}", request.0),
-            draft,
-            Some(turn),
-            Some((character, expected_revision)),
+        let mut drafts = vec![draft];
+        if let Some(behavior) = state_change {
+            if ![behavior.attitude, behavior.boredom, behavior.stress]
+                .iter()
+                .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            {
+                return Err(domain::TimelineError::Invalid("invalid character state"));
+            }
+            let mut change = EventDraft::new(EventKind::CharacterStateChanged);
+            change.actor = Some(character.to_string());
+            change.observers.insert(character);
+            change.links.push(CausalLink {
+                relation: CausalRelation::CausedBy,
+                event_id: id,
+            });
+            change.payload.insert(
+                "state".into(),
+                serde_json::to_value(behavior)
+                    .map_err(|_| domain::TimelineError::Invalid("invalid character state"))?,
+            );
+            drafts.push(change);
+        }
+        let selected = self.selection();
+        self.store.append_guarded(
+            self.branch,
+            self.anchor().through,
+            &format!("reply:{}", request.0),
+            json!({}),
+            drafts,
+            AppendGuard {
+                selection_generation: selected.generation,
+                context: Some((turn.character, turn.context_epoch, turn.trigger)),
+                accepted_reply_revision: Some((character, expected_revision)),
+            },
         )?;
         Ok(id)
     }
@@ -873,6 +943,7 @@ mod tests {
                     expected_revision: 0,
                     content: json!("answer"),
                     audience: ConversationAudience::private_to(CharacterId::Mita),
+                    state_change: None,
                 })
                 .is_err()
         );
@@ -972,6 +1043,7 @@ mod tests {
                 expected_revision: 0,
                 content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
+                state_change: None,
             }),
             Err(domain::TimelineError::ConcurrentWrite)
         );
@@ -1039,6 +1111,7 @@ mod tests {
                 expected_revision: 0,
                 content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
+                state_change: None,
             }),
             Err(domain::TimelineError::ConcurrentWrite)
         );

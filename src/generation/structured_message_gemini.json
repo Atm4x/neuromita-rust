@@ -24,6 +24,18 @@
         "type": "object"
       },
       "type": "array"
+    },
+    "attitude_change": {
+      "type": "number",
+      "description": "Proposed attitude change, accepted only with the reply"
+    },
+    "boredom_change": {
+      "type": "number",
+      "description": "Proposed boredom change, accepted only with the reply"
+    },
+    "stress_change": {
+      "type": "number",
+      "description": "Proposed stress change, accepted only with the reply"
     }
   },
   "type": "object",

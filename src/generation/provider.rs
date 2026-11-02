@@ -3,7 +3,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use thiserror::Error;
 
 use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
-use crate::character::{CharacterContext, ResponseEffect};
+use crate::character::CharacterContext;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum GenerationError {
@@ -33,7 +33,6 @@ impl GenerationRequest {
 #[derive(Debug, Clone)]
 pub struct ProposedResponse {
     pub text: Arc<str>,
-    pub effects: Vec<ResponseEffect>,
     pub structured: Arc<StructuredResponse>,
 }
 
@@ -78,11 +77,10 @@ impl ResponseGenerator {
             .ok_or(GenerationError::Unavailable(kind))?;
         let structured = provider.generate(request.context, template).await?;
         structured.validate()?;
-        structured.ensure_message_only()?;
+        structured.ensure_supported_effects()?;
         let text = structured.full_text();
         Ok(ProposedResponse {
             text,
-            effects: vec![ResponseEffect::RecordAcceptedReply],
             structured: Arc::new(structured),
         })
     }

@@ -11,13 +11,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CharacterContext, CharacterId, CharacterState, CharacterView, ResponseEffect,
+    CharacterContext, CharacterId, CharacterState, CharacterView,
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
     generation::{ProposedResponse, ResponseSegment},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
+    timeline::domain::CharacterBehavior,
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
         SessionTimeline,
@@ -41,6 +42,7 @@ pub enum CharacterError {
 pub struct AcceptedResponse {
     pub text: Arc<str>,
     pub segments: Arc<[ResponseSegment]>,
+    pub state_after: CharacterState,
     pub event_id: EventId,
     pub context: ContextAnchor,
     pub audio: Option<AudioArtifact>,
@@ -356,14 +358,14 @@ impl CharacterHandler {
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
     ) -> Result<AcceptedResponse, CharacterError> {
-        if !matches!(
-            proposed.effects.as_slice(),
-            [ResponseEffect::RecordAcceptedReply]
-        ) {
-            return Err(CharacterError::Internal(
-                "invalid reply effect batch".into(),
-            ));
-        }
+        proposed
+            .structured
+            .validate()
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        proposed
+            .structured
+            .ensure_supported_effects()
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
         let mut timeline = self
             .timeline
             .lock()
@@ -372,21 +374,23 @@ impl CharacterHandler {
         if context.state_revision != self.character.state.revision {
             return Err(CharacterError::StaleState);
         }
-        let accepted_replies = self
-            .character
-            .state
-            .accepted_replies
-            .checked_add(1)
-            .ok_or_else(|| CharacterError::Internal("reply counter overflow".into()))?;
-        let revision = self
-            .character
-            .state
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| CharacterError::Internal("state revision overflow".into()))?;
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
+        let current_behavior = CharacterBehavior {
+            attitude: self.character.state.attitude,
+            boredom: self.character.state.boredom,
+            stress: self.character.state.stress,
+        };
+        let delta = proposed.structured.state_delta();
+        let state_change =
+            if delta.is_empty() {
+                None
+            } else {
+                Some(current_behavior.apply(delta).ok_or_else(|| {
+                    CharacterError::Internal("invalid character state change".into())
+                })?)
+            };
         let event_id = timeline
             .append_reply(GeneratedReply {
                 request,
@@ -397,6 +401,7 @@ impl CharacterHandler {
                     CharacterError::Internal(format!("invalid accepted message segments: {error}"))
                 })?,
                 audience,
+                state_change,
             })
             .map_err(|error| match error {
                 crate::timeline::domain::TimelineError::ConcurrentWrite => {
@@ -404,11 +409,9 @@ impl CharacterHandler {
                 }
                 other => CharacterError::Internal(other.to_string()),
             })?;
-        self.character.state = CharacterState {
-            accepted_replies,
-            revision,
-        };
+        self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         Ok(AcceptedResponse {
+            state_after: self.character.state.clone(),
             text: proposed.text,
             segments: Arc::from(proposed.structured.segments.clone()),
             event_id,
@@ -443,9 +446,15 @@ fn state_at(
     let replies = timeline
         .accepted_replies_at(character, at)
         .map_err(|error| CharacterError::Internal(error.to_string()))?;
+    let behavior = timeline
+        .character_behavior_at(character, at)
+        .map_err(|error| CharacterError::Internal(error.to_string()))?;
     Ok(CharacterState {
         accepted_replies: replies,
         revision: replies,
+        attitude: behavior.attitude,
+        boredom: behavior.boredom,
+        stress: behavior.stress,
     })
 }
 
@@ -501,11 +510,159 @@ mod turn_tests {
             ProposedResponse {
                 text: Arc::from("answer"),
                 structured: Arc::new(crate::generation::StructuredResponse::spoken("answer")),
-                effects: vec![ResponseEffect::RecordAcceptedReply],
             },
             None,
             ConversationAudience::private_to(CharacterId::Mita),
         )
+    }
+
+    fn accept_with_state_change(
+        handler: &mut CharacterHandler,
+        request: RequestId,
+        context: AcceptanceContext,
+        attitude: f64,
+        boredom: f64,
+        stress: f64,
+    ) -> Result<AcceptedResponse, CharacterError> {
+        let mut structured = crate::generation::StructuredResponse::spoken("stateful reply");
+        structured.attitude_change = attitude;
+        structured.boredom_change = boredom;
+        structured.stress_change = stress;
+        handler.accept(
+            request,
+            context,
+            ProposedResponse {
+                text: structured.full_text(),
+                structured: Arc::new(structured),
+            },
+            None,
+            ConversationAudience::private_to(CharacterId::Mita),
+        )
+    }
+
+    #[test]
+    fn state_change_is_atomic_with_reply_and_survives_context_reset() {
+        let mut handler = handler();
+        let (request, context) = prepare(&mut handler);
+        let before = context.anchor;
+        let response = accept_with_state_change(
+            &mut handler,
+            request,
+            acceptance(&context),
+            80.0,
+            -80.0,
+            1.235,
+        )
+        .unwrap();
+        let after = handler.timeline.lock().unwrap().anchor();
+        assert_eq!(after.through, before.through + 2);
+        let state = &handler.character.state;
+        assert_eq!(state.accepted_replies, 1);
+        assert_eq!(state.attitude, 66.0);
+        assert_eq!(state.boredom, 4.0);
+        assert_eq!(state.stress, 6.24);
+        let timeline = handler.timeline.lock().unwrap();
+        assert_ne!(response.event_id, EventId::default());
+        assert_eq!(
+            state_at(&timeline, CharacterId::Mita, before)
+                .unwrap()
+                .attitude,
+            60.0
+        );
+        assert_eq!(
+            state_at(&timeline, CharacterId::KindMita, after)
+                .unwrap()
+                .attitude,
+            60.0
+        );
+        drop(timeline);
+        let reset = EventId::new();
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            let expected = timeline.selection();
+            timeline
+                .reset_character_context(expected, CharacterId::Mita, reset)
+                .unwrap();
+            let now = timeline.anchor();
+            assert_eq!(
+                state_at(&timeline, CharacterId::Mita, now)
+                    .unwrap()
+                    .attitude,
+                66.0
+            );
+            assert_eq!(
+                state_at(&timeline, CharacterId::Mita, now)
+                    .unwrap()
+                    .accepted_replies,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_stale_response_does_not_change_state_or_append_side_effects() {
+        let mut handler = handler();
+        let (request, context) = prepare(&mut handler);
+        let token = acceptance(&context);
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+            reset.observers.insert(CharacterId::Mita);
+            timeline
+                .append_test_fact("cancel-before-accept", reset)
+                .unwrap();
+        }
+        let before = handler.timeline.lock().unwrap().anchor().through;
+        assert!(matches!(
+            accept_with_state_change(&mut handler, request, token, 2.0, 2.0, 2.0),
+            Err(CharacterError::StaleState)
+        ));
+        assert_eq!(handler.timeline.lock().unwrap().anchor().through, before);
+        assert_eq!(handler.character.state.attitude, 60.0);
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn sqlite_state_change_reopens_with_same_values_and_one_commit() {
+        use crate::timeline::{TimelineConfig, domain::SessionId};
+        let path =
+            std::env::temp_dir().join(format!("neuromita-effects-{}.db", uuid::Uuid::new_v4()));
+        let root = BranchId::new();
+        let session = SessionId::new();
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let mut handler = CharacterHandler {
+                character: Character::create(CharacterId::Mita),
+                timeline: Arc::new(Mutex::new(timeline)),
+            };
+            let (request, context) = prepare(&mut handler);
+            accept_with_state_change(&mut handler, request, acceptance(&context), 3.2, -1.0, 2.0)
+                .unwrap();
+            assert_eq!(handler.timeline.lock().unwrap().anchor().through, 3);
+        }
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let at = timeline.anchor();
+            assert_eq!(at.through, 3);
+            let state = state_at(&timeline, CharacterId::Mita, at).unwrap();
+            assert_eq!(state.accepted_replies, 1);
+            assert_eq!(state.attitude, 63.2);
+            assert_eq!(state.boredom, 9.0);
+            assert_eq!(state.stress, 7.0);
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

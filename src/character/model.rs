@@ -9,10 +9,13 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CharacterState {
     pub accepted_replies: u64,
     pub revision: u64,
+    pub attitude: f64,
+    pub boredom: f64,
+    pub stress: f64,
 }
 
 pub(crate) struct Character {
@@ -41,6 +44,9 @@ impl Character {
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
+                attitude: 60.0,
+                boredom: 10.0,
+                stress: 5.0,
             },
         }
     }
@@ -81,9 +87,4 @@ pub struct CharacterView {
     pub state: CharacterState,
     pub history: HistoryView,
     pub view: MitaView,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ResponseEffect {
-    RecordAcceptedReply,
 }
