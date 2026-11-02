@@ -120,3 +120,184 @@ async fn startup_maintenance_replays_expiration_without_running_a_scheduler() {
         task.await.unwrap();
     }
 }
+
+#[test]
+fn recall_is_tied_to_historical_prefix_without_restoring_it() {
+    use crate::knowledge::forgotten_recall::{RecallSelector, recall_forgotten};
+    let mut timeline = SessionTimeline::new();
+    let id = MemoryId::new();
+    let mut record = MemoryRecord::fact(id, MemoryPriority::High, "player has a blue umbrella");
+    record.state = MemoryState::Forgotten;
+    append_memory(&mut timeline, record);
+    let captured_at = timeline.anchor();
+    let snapshot = timeline
+        .inspect_context_at(CharacterId::Mita, captured_at)
+        .unwrap();
+    let recall = recall_forgotten(
+        CharacterId::Mita,
+        snapshot.history.at,
+        &snapshot.memories,
+        RecallSelector::Text {
+            query: "blue umbrella".into(),
+            limit: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(recall.anchor, captured_at);
+    assert_eq!(recall.facts.len(), 1);
+    assert_eq!(recall.facts[0].record.id, id);
+    assert!(
+        recall_forgotten(
+            CharacterId::KindMita,
+            timeline.anchor(),
+            &timeline
+                .inspect_context_at(CharacterId::KindMita, timeline.anchor())
+                .unwrap()
+                .memories,
+            RecallSelector::Text {
+                query: "blue umbrella".into(),
+                limit: 1
+            },
+        )
+        .unwrap()
+        .facts
+        .is_empty()
+    );
+    let selected = timeline.selection();
+    assert_eq!(
+        timeline.expire_character_memories(selected, CharacterId::Mita, u64::MAX),
+        Ok(0)
+    );
+    assert_eq!(timeline.anchor(), captured_at);
+    assert_eq!(
+        timeline
+            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .unwrap()
+            .memories
+            .get(id)
+            .unwrap()
+            .state,
+        MemoryState::Forgotten
+    );
+}
+
+#[tokio::test]
+async fn periodic_maintenance_expires_after_startup_and_exits_with_owners() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    let mut timeline = SessionTimeline::new();
+    let due = MemoryId::new();
+    let protected = MemoryId::new();
+    let now = crate::character::CharacterRegistry::now_unix_ms();
+    for (id, protected_flag) in [(due, false), (protected, true)] {
+        let mut record = MemoryRecord::fact(id, MemoryPriority::Normal, id.0.to_string());
+        record.protected = protected_flag;
+        record.expires_at_unix_ms = Some(now + 150);
+        append_memory(&mut timeline, record);
+    }
+    let before = timeline.anchor().through;
+    let timeline = Arc::new(Mutex::new(timeline));
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (_, tasks) = crate::character::CharacterRegistry::spawn_with_maintenance_interval(
+        Arc::clone(&timeline),
+        stop.clone(),
+        4,
+        Duration::from_millis(10),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let (state, anchor) = {
+            let locked = timeline.lock().unwrap();
+            (
+                locked
+                    .inspect_context_at(CharacterId::Mita, locked.anchor())
+                    .unwrap()
+                    .memories,
+                locked.anchor(),
+            )
+        };
+        if state.get(due).unwrap().state == MemoryState::Forgotten {
+            assert_eq!(state.get(protected).unwrap().state, MemoryState::Active);
+            assert_eq!(anchor.through, before + 1);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "periodic maintenance never expired the record"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop.cancel();
+    for task in tasks {
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn forgotten_recall_and_ttl_survive_sqlite_reopen_without_duplicate_expiration() {
+    use super::{
+        TimelineConfig,
+        domain::{BranchId, SessionId},
+    };
+    use crate::knowledge::forgotten_recall::{RecallSelector, recall_forgotten};
+    let path = std::env::temp_dir().join(format!(
+        "neuromita-memory-recall-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let session = SessionId::new();
+    let branch = BranchId::new();
+    let id = MemoryId::new();
+    let through = {
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root: branch,
+        })
+        .unwrap();
+        let mut record = MemoryRecord::fact(id, MemoryPriority::Normal, "old green umbrella");
+        record.expires_at_unix_ms = Some(500);
+        append_memory(&mut timeline, record);
+        assert_eq!(
+            timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 500),
+            Ok(1)
+        );
+        timeline.anchor().through
+    };
+    {
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root: branch,
+        })
+        .unwrap();
+        assert_eq!(timeline.anchor().through, through);
+        assert_eq!(
+            timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 500),
+            Ok(0)
+        );
+        let snap = timeline
+            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .unwrap();
+        let recalled = recall_forgotten(
+            CharacterId::Mita,
+            snap.history.at,
+            &snap.memories,
+            RecallSelector::Text {
+                query: "green umbrella".into(),
+                limit: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(recalled.facts.len(), 1);
+        assert_eq!(recalled.facts[0].record.id, id);
+        assert_eq!(recalled.facts[0].record.state, MemoryState::Forgotten);
+        assert_eq!(timeline.anchor().through, through);
+    }
+    let _ = std::fs::remove_file(path);
+}

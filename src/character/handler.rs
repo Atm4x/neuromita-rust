@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -174,22 +175,44 @@ impl CharacterRegistry {
         stop: CancellationToken,
         capacity: usize,
     ) -> (Self, Vec<JoinHandle<()>>) {
-        // Startup maintenance is an explicit write-side operation, never a side effect
-        // of reading a character snapshot. Expiration decisions are clock-injected.
-        let now = std::time::SystemTime::now()
+        Self::spawn_with_maintenance_interval(timeline, stop, capacity, Duration::from_secs(60))
+    }
+
+    fn maintenance_pass(
+        timeline: &mut SessionTimeline,
+        now: u64,
+    ) -> Result<usize, crate::timeline::domain::TimelineError> {
+        let selected = timeline.selection();
+        let mut total = 0;
+        for character in CharacterId::ALL {
+            total += timeline.expire_character_memories(selected, character, now)?;
+        }
+        Ok(total)
+    }
+
+    pub(crate) fn now_unix_ms() -> u64 {
+        std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
-            .unwrap_or(u64::MAX);
+            .unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn spawn_with_maintenance_interval(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        interval: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        assert!(
+            !interval.is_zero(),
+            "memory maintenance interval must be positive"
+        );
         {
-            let mut timeline = timeline.lock().expect("timeline lock poisoned");
-            let selected = timeline.selection();
-            for character in CharacterId::ALL {
-                timeline
-                    .expire_character_memories(selected, character, now)
-                    .expect("memory expiration maintenance must commit at startup");
-            }
+            let mut locked = timeline.lock().expect("timeline lock poisoned");
+            Self::maintenance_pass(&mut locked, Self::now_unix_ms())
+                .expect("memory expiration maintenance must commit at startup");
         }
         let mut handles = HashMap::new();
         let mut tasks = Vec::new();
@@ -207,6 +230,27 @@ impl CharacterRegistry {
             handles.insert(id, CharacterHandle { commands: send });
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
         }
+        let maintenance_timeline = Arc::clone(&timeline);
+        tasks.push(tokio::spawn(async move {
+            let mut timer = tokio::time::interval(interval);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    _ = timer.tick() => {
+                        let result = {
+                            let mut timeline = maintenance_timeline.lock().expect("timeline lock poisoned");
+                            Self::maintenance_pass(&mut timeline, Self::now_unix_ms())
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "periodic memory expiration pass failed");
+                        }
+                    }
+                }
+            }
+        }));
         (Self { handles }, tasks)
     }
 

@@ -13,6 +13,7 @@ use super::{
 };
 use crate::{
     identity::CharacterId,
+    memory::{MemoryKind, MemoryState},
     timeline::domain::{MemoryId, MemoryRecord},
 };
 
@@ -184,6 +185,11 @@ impl SemanticMemoryRetriever {
             minimum_graph: 0,
         };
         fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
+        let memories = memories
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Fact && record.state == MemoryState::Active)
+            .cloned()
+            .collect::<Vec<_>>();
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -317,7 +323,7 @@ impl SemanticMemoryRetriever {
         }];
         if !matches!(mode, FusionMode::VectorOnly) {
             let query_tokens = tokens(&query);
-            let lexical_hits = lexical_ranked(memories, &query)
+            let lexical_hits = lexical_ranked(&memories, &query)
                 .into_iter()
                 .filter(|memory| {
                     tokens(&memory.content)

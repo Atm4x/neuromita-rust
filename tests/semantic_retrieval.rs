@@ -571,3 +571,33 @@ fn generation_fusion_opt_in_rejects_invalid_mode_without_provider_calls() {
     assert_eq!(fixture.query_count.load(Ordering::Relaxed), 0);
     assert_eq!(fixture.document_batches.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn forgotten_and_deleted_records_never_reach_embeddings_even_via_direct_retriever() {
+    use neuromita::memory::MemoryState;
+    let fixture = Arc::new(SemanticFixture::new("isolation-model"));
+    let retriever = SemanticMemoryRetriever::new(fixture.clone(), 12).unwrap();
+    let mut forgotten = memory(1901, MemoryPriority::High, "ромашковый чай");
+    forgotten.state = MemoryState::Forgotten;
+    let mut deleted = memory(1902, MemoryPriority::Normal, "картина в мастерской");
+    deleted.state = MemoryState::Deleted;
+    let result = retriever
+        .retrieve(CharacterId::Mita, &[forgotten.clone(), deleted], "чай")
+        .await
+        .unwrap();
+    assert!(result.selected_ids.is_empty());
+    assert_eq!(
+        result.status,
+        neuromita::knowledge::semantic_memory::RetrievalStatus::EmptyCorpus
+    );
+    assert_eq!(fixture.query_count.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.embedded_documents.load(Ordering::Relaxed), 0);
+    let mut restored = forgotten;
+    restored.state = MemoryState::Active;
+    let result = retriever
+        .retrieve(CharacterId::Mita, &[restored], "чай")
+        .await
+        .unwrap();
+    assert_eq!(result.selected_ids.len(), 1);
+    assert_eq!(fixture.embedded_documents.load(Ordering::Relaxed), 1);
+}

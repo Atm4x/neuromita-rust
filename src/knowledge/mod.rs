@@ -2,6 +2,7 @@
 //! The embedding port is an abstraction; provider implementations live outside this module.
 
 pub mod embedding;
+pub mod forgotten_recall;
 pub mod memory_context;
 pub mod retrieval_fusion;
 pub mod semantic_memory;

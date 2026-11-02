@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::timeline::domain::{MemoryId, MemoryPriority, MemoryRecord};
+use crate::{
+    memory::{MemoryKind, MemoryState},
+    timeline::domain::{MemoryId, MemoryPriority, MemoryRecord},
+};
 
 /// Hard character budget for the entire memory handoff, including metadata.
 const MAX_MEMORY_CONTEXT_CHARS: usize = 6_000;
@@ -42,6 +45,7 @@ pub(super) fn lexical_ranked<'a>(
     let query_tokens = tokens(query);
     let mut candidates: Vec<_> = memories
         .iter()
+        .filter(|record| record.kind == MemoryKind::Fact && record.state == MemoryState::Active)
         .map(|record| {
             let matches = tokens(&record.content).intersection(&query_tokens).count();
             (record, matches, priority_rank(record.priority))
@@ -69,6 +73,9 @@ pub(super) fn render_ranked_memory_context<'a>(
     let mut ids = Vec::new();
     let mut used = HEADER.chars().count() + FOOTER.chars().count();
     for record in records {
+        if record.kind != MemoryKind::Fact || record.state != MemoryState::Active {
+            continue;
+        }
         if ids.len() >= MAX_MEMORY_CONTEXT_RECORDS {
             break;
         }
@@ -201,5 +208,37 @@ mod tests {
             rendered.find(&records[1].id.0.to_string()).unwrap()
                 < rendered.find(&records[0].id.0.to_string()).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_visibility_tests {
+    use super::*;
+    use crate::memory::{MemoryKind, MemoryState};
+    use uuid::Uuid;
+
+    #[test]
+    fn implicit_lexical_selection_never_ranks_forgotten_or_deleted_facts() {
+        let record = |id, state| MemoryRecord {
+            id: MemoryId(Uuid::from_u128(id)),
+            priority: MemoryPriority::Critical,
+            content: format!("tea memory {id}"),
+            kind: MemoryKind::Fact,
+            state,
+            protected: false,
+            expires_at_unix_ms: None,
+        };
+        let input = [
+            record(1, MemoryState::Forgotten),
+            record(2, MemoryState::Deleted),
+            record(3, MemoryState::Active),
+        ];
+        assert_eq!(
+            lexical_selected_ids(&input, "tea"),
+            vec![MemoryId(Uuid::from_u128(3))]
+        );
+        let text = render_memory_context(&input, "tea").unwrap();
+        assert!(!text.contains(&Uuid::from_u128(1).to_string()));
+        assert!(!text.contains(&Uuid::from_u128(2).to_string()));
     }
 }
