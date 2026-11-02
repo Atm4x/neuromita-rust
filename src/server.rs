@@ -23,10 +23,10 @@ use crate::{
     lifecycle::Lifecycle,
     request::{
         InitiateRequest, ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId,
-        RequestOutcome, RequestSnapshot, RequestSource, RequestState, UserInput,
+        RequestOutcome, RequestSnapshot, RequestSource, RequestState, SubmitError, UserInput,
     },
     runtime::{self, ApiBindings},
-    settings::{VoiceSettings, Volume},
+    settings::{SettingsError, VoiceSettings, Volume},
     timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
 };
 
@@ -136,13 +136,20 @@ impl ServerLifecycle {
         api: Arc<ApiBindings>,
     ) -> io::Result<()> {
         let clients_stop = CancellationToken::new();
-        let mut clients = JoinSet::new();
+        let mut clients: JoinSet<io::Result<()>> = JoinSet::new();
         self.state.change(|state| state.running = true);
         let mut failure = None;
         loop {
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
+                result = clients.join_next(), if !clients.is_empty() => {
+                    match result {
+                        Some(Ok(Err(error))) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
+                        Some(Err(error)) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
+                        _ => {}
+                    }
+                }
                 connected = self.listener.accept() => {
                     match connected {
                         Ok((stream, _)) => {
@@ -152,19 +159,13 @@ impl ServerLifecycle {
                             let config = Arc::clone(&self.config);
                             let stop = clients_stop.clone();
                             let api = Arc::clone(&api);
+                            let server = ServerHandle { address: self.listener.local_addr()?, state: Arc::clone(&self.state) };
                             clients.spawn(async move {
                                 let _connected = Connected(state);
-                                client(stream, config, stop, api).await
+                                client(stream, config, stop, api, server).await
                             });
                         }
                         Err(error) => { failure = Some(error); break; }
-                    }
-                }
-                result = clients.join_next(), if !clients.is_empty() => {
-                    match result {
-                        Some(Ok(Err(error))) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
-                        Some(Err(error)) => self.state.change(|state| state.last_error = Some(Arc::from(error.to_string()))),
-                        _ => {}
                     }
                 }
             }
@@ -187,10 +188,22 @@ impl Drop for Connected {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
-enum Command {
-    Test,
+macro_rules! commands {
+    ($($variant:ident { $($(#[$attr:meta])* $field:ident : $ty:ty),* $(,)? }),* $(,)?) => {
+        #[derive(Debug, Serialize, Deserialize)]
+        #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+        enum Command { $($variant { $($(#[$attr])* $field: $ty),* }),* }
+
+        #[derive(Clone, Copy, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Method { $($variant),* }
+
+        impl Method { const ALL: &'static [Self] = &[$(Self::$variant),*]; }
+    };
+}
+
+commands! {
+    Ping {}, Methods {}, ServerStatus {}, Test {},
     PublishMessage {
         event_id: Uuid,
         occurred_at_unix_ms: u64,
@@ -223,10 +236,93 @@ enum Command {
     Cancel {
         request_id: Uuid,
     },
-    Settings,
+    Settings {},
     SetVolume {
         value: Volume,
     },
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ErrorCode {
+    MalformedJson,
+    InvalidCommand,
+    UnknownCommand,
+    InvalidValue,
+    CommandIdConflict,
+    QueueFull,
+    ReceiptCapacity,
+    OwnershipDenied,
+    CoreUnavailable,
+    SettingsConflict,
+    SettingsStorage,
+}
+
+fn error_response(id: Option<Uuid>, code: ErrorCode, message: impl std::fmt::Display) -> Value {
+    let mut value = json!({"type":"error", "code":code, "error":message.to_string()});
+    if let Some(id) = id {
+        value["command_id"] = json!(id);
+    }
+    value
+}
+
+fn decode(line: &str) -> Result<Envelope, Value> {
+    if line == "test" {
+        return Ok(Envelope {
+            command_id: Uuid::new_v4(),
+            command: Command::Test {},
+        });
+    }
+    match serde_json::from_str::<Envelope>(line) {
+        Ok(envelope) => Ok(envelope),
+        Err(error) => {
+            let value = serde_json::from_str::<Value>(line);
+            let id = serde_json::from_str::<CommandCorrelation>(line)
+                .ok()
+                .and_then(|v| v.command_id);
+            let code = match &value {
+                Err(_) => ErrorCode::MalformedJson,
+                Ok(value)
+                    if value
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| {
+                            serde_json::from_value::<Method>(json!(name)).is_err()
+                        }) =>
+                {
+                    ErrorCode::UnknownCommand
+                }
+                _ => ErrorCode::InvalidCommand,
+            };
+            Err(error_response(id, code, error))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CommandCorrelation {
+    command_id: Option<Uuid>,
+}
+
+fn settings_code(error: &SettingsError) -> ErrorCode {
+    match error {
+        SettingsError::Validation(_) => ErrorCode::InvalidValue,
+        SettingsError::Conflict { .. } => ErrorCode::SettingsConflict,
+        SettingsError::Storage(_) => ErrorCode::SettingsStorage,
+        SettingsError::Uninitialized | SettingsError::Stopped => ErrorCode::CoreUnavailable,
+    }
+}
+
+fn submit_code(error: &SubmitError) -> ErrorCode {
+    match error {
+        SubmitError::InvalidTargetEvent => ErrorCode::InvalidValue,
+        SubmitError::TimelineUnavailable => ErrorCode::CoreUnavailable,
+        SubmitError::QueueFull => ErrorCode::QueueFull,
+        SubmitError::Uninitialized
+        | SubmitError::Stopped
+        | SubmitError::QueueClosed
+        | SubmitError::CharacterUnavailable => ErrorCode::CoreUnavailable,
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -322,6 +418,7 @@ async fn client(
     config: Arc<ServerConfig>,
     parent_stop: CancellationToken,
     api: Arc<ApiBindings>,
+    server: ServerHandle,
 ) -> io::Result<()> {
     let stop = parent_stop.child_token();
     let client_id = Uuid::new_v4();
@@ -363,15 +460,14 @@ async fn client(
                 _ = stop.cancelled() => break,
                 line = read_command(&mut reader, config.max_command_bytes.get()) => match line? { Some(line) => line, None => break },
             };
-            let envelope = if line == "test" { Ok(Envelope { command_id: Uuid::new_v4(), command: Command::Test }) } else { serde_json::from_str::<Envelope>(&line) };
-            let envelope = match envelope {
+            let envelope = match decode(&line) {
                 Ok(envelope) => envelope,
-                Err(error) => { send(&outbound, json!({"type":"error","error":error.to_string()}), &stop).await?; continue; }
+                Err(error) => { send(&outbound, error, &stop).await?; continue; }
             };
             let fingerprint = serde_json::to_string(&envelope.command).map_err(io::Error::other)?;
             if let Some(receipt) = receipts.iter().find(|receipt| receipt.command_id == envelope.command_id) {
                 if receipt.fingerprint != fingerprint {
-                    send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":"command ID reused for different intent"}), &stop).await?;
+                    send(&outbound, error_response(Some(envelope.command_id), ErrorCode::CommandIdConflict, "command ID reused for different intent"), &stop).await?;
                 } else {
                     match &receipt.result {
                         ReceiptResult::Generation(handle) => {
@@ -385,19 +481,32 @@ async fn client(
                 }
                 continue;
             }
-            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Test | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
-            if track && receipts.len() >= config.receipt_capacity.get() {
-                if receipts.front().is_some_and(|receipt| match &receipt.result {
+            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Test {} | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
+            let eviction = if track && receipts.len() >= config.receipt_capacity.get() {
+                match receipts.iter().position(|receipt| match &receipt.result {
                     ReceiptResult::Published(_) => true,
                     ReceiptResult::Generation(handle) => handle.snapshot().state.is_terminal(),
                 }) {
-                    receipts.pop_front();
-                } else {
-                    send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":"too many tracked requests"}), &stop).await?;
-                    continue;
+                    Some(index) => Some(index),
+                    None => { send(&outbound, error_response(Some(envelope.command_id), ErrorCode::ReceiptCapacity, "too many tracked requests"), &stop).await?; continue; }
                 }
-            }
+            } else { None };
             match envelope.command {
+                Command::Ping {} => {
+                    send(&outbound, json!({"type":"pong", "command_id":envelope.command_id}), &stop).await?;
+                }
+                Command::Methods {} => {
+                    send(&outbound, json!({"type":"methods", "command_id":envelope.command_id, "methods":Method::ALL}), &stop).await?;
+                }
+                Command::ServerStatus {} => {
+                    let snapshot = server.snapshot();
+                    send(&outbound, json!({"type":"server_status", "command_id":envelope.command_id,
+                        "address":server.address(), "running":snapshot.running,
+                        "connected_clients":snapshot.connected_clients, "accepted_connections":snapshot.accepted_connections,
+                        "has_error":snapshot.last_error.is_some(),
+                        "limits":{"max_clients":config.max_clients, "outbound_capacity":config.outbound_capacity,
+                            "max_command_bytes":config.max_command_bytes, "receipt_capacity":config.receipt_capacity}}), &stop).await?;
+                }
                 Command::PublishMessage { event_id, occurred_at_unix_ms, speaker, content, audience } => {
                     let mut message = ConversationMessage::new(event_id.to_string(), speaker, content, []);
                     message.id = EventId(event_id);
@@ -405,36 +514,38 @@ async fn client(
                     message.audience = audience.into_audience(None);
                     match api.chat.publish_conversation_message(message) {
                         Ok(event) => {
+                            if let Some(index) = eviction { receipts.remove(index); }
                             send(&outbound, json!({"type":"published","command_id":envelope.command_id,"event_id":event.0,"replayed":false}), &stop).await?;
                             receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, result: ReceiptResult::Published(event) });
                         }
-                        Err(error) => send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error.to_string()}), &stop).await?,
+                        Err(error) => send(&outbound, error_response(Some(envelope.command_id), submit_code(&error), error), &stop).await?,
                     }
                 }
-                Command::Test | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. } => {
+                Command::Test {} | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. } => {
                     let source = RequestSource::Client(client_id);
                     let handle = match envelope.command {
-                        Command::Test => {
+                        Command::Test {} => {
                             UserInput::new("test".to_owned())
-                                .map_err(|error| error.to_string())
-                                .and_then(|input| api.chat.publish_message(config.test_character, input).map_err(|error| error.to_string()))
-                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, message, source)).map_err(|error| error.to_string()))
+                                .map_err(|error| (ErrorCode::InvalidValue, error.to_string()))
+                                .and_then(|input| api.chat.publish_message(config.test_character, input).map_err(|error| (submit_code(&error), error.to_string())))
+                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, message, source)).map_err(|error| (submit_code(&error), error.to_string())))
                         }
                         Command::Reply { character, message_id, audience } => {
-                            api.chat.send(ReplyRequest::new(character, EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(ReplyRequest::new(character, EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| (submit_code(&error), error.to_string()))
                         }
                         Command::React { character, event_id, instruction, audience } => {
-                            api.chat.send(ReactRequest::new(character, EventId(event_id), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(ReactRequest::new(character, EventId(event_id), instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| (submit_code(&error), error.to_string()))
                         }
                         Command::Initiate { character, instruction, audience } => {
-                            api.chat.send(InitiateRequest::new(character, instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| error.to_string())
+                            api.chat.send(InitiateRequest::new(character, instruction, source).with_audience(audience.into_audience(Some(character)))).map_err(|error| (submit_code(&error), error.to_string()))
                         }
                         _ => unreachable!(),
                     };
                     let handle = match handle {
                         Ok(handle) => handle,
-                        Err(error) => { send(&outbound, json!({"type":"error","command_id":envelope.command_id,"error":error}), &stop).await?; continue; }
+                        Err((code, error)) => { send(&outbound, error_response(Some(envelope.command_id), code, error), &stop).await?; continue; }
                     };
+                    if let Some(index) = eviction { receipts.remove(index); }
                     send(&outbound, json!({"type":"accepted","command_id":envelope.command_id,"request_id":handle.id().0,"replayed":false}), &stop).await?;
                     receipts.push_back(Receipt { command_id: envelope.command_id, fingerprint, result: ReceiptResult::Generation(handle.clone()) });
                     let outbound = outbound.clone();
@@ -449,18 +560,21 @@ async fn client(
                 }
                 Command::Cancel { request_id } => {
                     let response = match receipts.iter().find_map(|receipt| match &receipt.result { ReceiptResult::Generation(handle) if handle.id() == RequestId(request_id) => Some(handle), _ => None }) {
-                        Some(handle) => json!({"type":"cancel","request_id":request_id,"result":format!("{:?}", handle.cancel())}),
-                        None => json!({"type":"error","error":"request does not belong to this connection"}),
+                        Some(handle) => json!({"type":"cancel","command_id":envelope.command_id,"request_id":request_id,"result":format!("{:?}", handle.cancel())}),
+                        None => error_response(Some(envelope.command_id), ErrorCode::OwnershipDenied, "request does not belong to this connection"),
                     };
                     send(&outbound, response, &stop).await?;
                 }
-                Command::Settings => {
-                    let snapshot = api.settings.snapshot_all().map_err(io::Error::other)?;
-                    send(&outbound, json!({"type":"settings","revision":snapshot.revision,"settings":snapshot.values}), &stop).await?;
+                Command::Settings {} => {
+                    let response = match api.settings.snapshot_all() {
+                        Ok(snapshot) => json!({"type":"settings","command_id":envelope.command_id,"revision":snapshot.revision,"settings":snapshot.values}),
+                        Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error),
+                    };
+                    send(&outbound, response, &stop).await?;
                 }
                 Command::SetVolume { value } => {
                     let result = api.settings.edit::<VoiceSettings>(|voice| voice.volume = value);
-                    let response = match result { Ok(snapshot) => json!({"type":"settings_applied","revision":snapshot.revision}), Err(error) => json!({"type":"error","error":error.to_string()}) };
+                    let response = match result { Ok(snapshot) => json!({"type":"settings_applied","command_id":envelope.command_id,"revision":snapshot.revision}), Err(error) => error_response(Some(envelope.command_id), settings_code(&error), error) };
                     send(&outbound, response, &stop).await?;
                 }
             }
