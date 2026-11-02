@@ -3,3 +3,5 @@
 Cargo.lock text eol=lf
 *.md text eol=lf
 vendor/** -text -eol
+assets/** -text -eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+future/gui-reference/** -text -eol
