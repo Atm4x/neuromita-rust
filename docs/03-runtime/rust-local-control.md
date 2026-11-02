@@ -19,10 +19,13 @@
 | Команда | Поля | Результат |
 | --- | --- | --- |
 | `ping` | без аргументов | `pong` с command_id; подтверждает работу endpoint, не готовность inference |
-| `methods` | без аргументов | `methods` с массивом имён восьми поддерживаемых команд |
+| `methods` | без аргументов | каталог одиннадцати поддерживаемых команд |
 | `server_status` | без аргументов | диагностика listener, клиентов и настроенных пределов |
 | `test` | только `command_id`, `command` | запрос `test` заданному в ServerConfig персонажу |
-| `reply` | `character`: `mita` или `kind-mita`; непустой `text` | `accepted` с `request_id` либо `error` |
+| `publish_message` | event_id, occurred_at_unix_ms, speaker, content и audience | published с event_id, без генерации |
+| `reply` | character, message_id и audience | accepted с request_id; цель — уже опубликованное известное сообщение |
+| `react` | character, event_id, instruction и audience | генерация реакции на известное событие |
+| `initiate` | character, instruction и audience | генерация без целевого события |
 | `cancel` | `request_id` | результат отмены своего запроса либо отказ |
 | `settings` | без аргументов | snapshot с revision |
 | `set_volume` | `value`: целое 0..100 | `settings_applied` либо отказ |

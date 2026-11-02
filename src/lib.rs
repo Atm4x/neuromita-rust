@@ -4,6 +4,7 @@ pub mod character;
 pub mod generation;
 mod identity;
 mod interaction;
+pub mod launcher;
 pub mod lifecycle;
 pub mod migration;
 pub mod presentation;

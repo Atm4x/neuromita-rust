@@ -35,6 +35,10 @@ YOUR_GEMINI_MODEL — доступный вам model ID. Стартовый с�
 
 Консольные команды: /character mita, /character kind-mita, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
 
+## Launcher
+
+`neuromita launcher status` только читает выбранную установку и наблюдаемые процессы. `neuromita launcher session` владеет одним процессом игры на время интерактивной сессии и принимает `status`, `start`, `stop`, `open-location`, `quit`. Для launcher не нужен `GEMINI_API_KEY`. Сохраняются только root/candidate; PID и ownership между процессами не переносятся. Детали и матрица проверок: [rust-launcher](docs/03-runtime/rust-launcher.md).
+
 ## Перезапуск Core в одном процессе
 
 Статические `ChatApi`, `SettingsApi` и `CharacterApi` используют общий синхронизированный runtime slot вместо необратимого `OnceLock`. Одновременно допускается только одно ядро. `ApplicationLifecycle::start()` резервирует слот, а `shutdown()`/`Drop` закрывают приём новых обращений и доводят исполнителей до завершения. `ApplicationLifecycle::wait_stopped()` ожидает полного освобождения слота; после него можно запустить новый экземпляр. Старые presenter/handle не перепривязываются к новому ядру. `tests/restart.rs` проверяет последовательные запуски, отменённый старт, сбой IO и старые handles.

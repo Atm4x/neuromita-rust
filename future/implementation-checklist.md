@@ -50,6 +50,18 @@
 
 Пользователь просит при остатке примерно 8–10% 5-часового лимита зафиксировать и отправить текущее состояние и явно указать незавершённое. Инструмент счётчика найден в процессе работы; остаток контролируется. Не требуется расходовать лимит до порога, если задача уже завершена.
 
+## Launcher (#43)
+
+- [x] Типизированные config/install selections и атомарное JSON-хранение без PID/ownership.
+- [x] Статический `LauncherApi` с явными входами и отдельный owned `LauncherService`/`LauncherSession`, без нового глобального runtime.
+- [x] Безопасный explicit/known-name discovery с проверкой root, path containment, reparse point и executable signature.
+- [x] Read-only status и Windows process identity по пути и creation time; stale/foreign процессы отделены.
+- [x] Owned `std::process::Child`: start/stop/status/completion, kill только собственного handle, drop cleanup.
+- [x] Direct-argument open-location без shell; тестовая операция через recorder без Explorer.
+- [x] CLI `launcher status`/`launcher session` до Gemini initialization; standalone start/stop отклоняются.
+- [x] Реальные process integration tests: missing install, stale PID, already running, permission denied, completion, stop, drop, reopen.
+- [x] Документация, отклонения и точная матрица критериев: [rust-launcher](../docs/03-runtime/rust-launcher.md).
+
 ## Текущее состояние
 
 Дополнительное исправление по исходному Python-протоколу: Gemini использует ?key=..., а не заголовок x-goog-api-key. Добавлена проверка URL-кодирования и отсутствия auth-заголовков в локальном HTTP-сценарии. Ключ не сохраняется в диагностическом URL.

@@ -13,6 +13,17 @@ use neuromita::{
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let mut arguments = std::env::args_os();
+    let _program = arguments.next();
+    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("launcher")) {
+        return match neuromita::launcher::run_cli(arguments.collect::<Vec<_>>()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
