@@ -427,8 +427,9 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        1
+        2
     );
+    assert_eq!(speaking.cancel(), CancelResult::TooLate);
     speech
         .reply
         .send(Ok(AudioArtifact {
@@ -468,22 +469,22 @@ async fn complete_minimal_contracts() {
         3
     );
 
-    let cancelled = presenter
+    let committed = presenter
         .chat
         .reply(CharacterId::Mita, "cancel voice".into())
         .unwrap();
     next(&mut generations)
         .await
         .reply
-        .send(Ok(Arc::from("not accepted")))
+        .send(Ok(Arc::from("already accepted")))
         .unwrap();
     let speech = next(&mut voices).await;
-    assert_eq!(cancelled.cancel(), CancelResult::Requested);
+    assert_eq!(committed.cancel(), CancelResult::TooLate);
+    speech.reply.send(Err(VoiceError::Unavailable)).unwrap();
     assert!(matches!(
-        done(&cancelled).await.state,
-        RequestState::Cancelled
+        done(&committed).await.state,
+        RequestState::Finished(RequestOutcome::VoiceGenerationFailed { .. })
     ));
-    drop(speech);
     assert_eq!(
         presenter
             .characters
@@ -491,18 +492,37 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        3
+        4
     );
     assert!(
-        !app.timeline()
+        app.timeline()
             .iter()
-            .any(|event| event.request_id == Some(cancelled.id())
+            .any(|event| event.request_id == Some(committed.id())
                 && matches!(event.content, EventContent::CharacterReply { .. }))
     );
-    let trace = ChatApi::trace(cancelled.id()).unwrap().unwrap();
-    assert_eq!(trace.generated_text.as_deref(), Some("not accepted"));
+    let trace = ChatApi::trace(committed.id()).unwrap().unwrap();
+    assert_eq!(trace.generated_text.as_deref(), Some("already accepted"));
     assert!(trace.context.is_some());
     assert!(!trace.preset_description.contains("fixture-secret-key"));
+    assert!(
+        !trace
+            .transitions
+            .iter()
+            .any(|change| change.phase == EffectPhase::Discarded)
+    );
+
+    let cancelled = presenter
+        .chat
+        .reply(CharacterId::Mita, "cancel before LLM".into())
+        .unwrap();
+    let generation = next(&mut generations).await;
+    assert_eq!(cancelled.cancel(), CancelResult::Requested);
+    assert!(matches!(
+        done(&cancelled).await.state,
+        RequestState::Cancelled
+    ));
+    drop(generation);
+    let trace = ChatApi::trace(cancelled.id()).unwrap().unwrap();
     assert!(
         trace
             .transitions
@@ -533,7 +553,7 @@ async fn complete_minimal_contracts() {
         .send(Ok(Arc::from("retained partial")))
         .unwrap();
     assert!(
-        matches!(&done(&voice_panic).await.state, RequestState::Finished(RequestOutcome::InternalError(failure)) if failure.partial_text.as_deref() == Some("retained partial"))
+        matches!(&done(&voice_panic).await.state, RequestState::Finished(RequestOutcome::VoiceGenerationFailed { response, .. }) if response.text.as_ref() == "retained partial")
     );
     assert_eq!(
         presenter
@@ -542,7 +562,7 @@ async fn complete_minimal_contracts() {
             .await
             .unwrap()
             .accepted_replies,
-        3
+        5
     );
     presenter
         .settings

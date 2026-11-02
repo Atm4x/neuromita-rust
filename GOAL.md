@@ -1,6 +1,6 @@
 # NeuroMita Rust — текущая цель
 
-**Актуальный срез:** 2026-11-02. **Локальная базовая ревизия:** `a88318b` (`codex/preset-resolve-at-execution-20261102`). Этот документ — рабочий план, а не утверждение о полной Python parity.
+**Актуальный срез:** 2026-11-02. **Локальная базовая ревизия:** `adb90ce` (`codex/structured-state-effects-20261102`); изменения текущего прохода — typed effects и граница acceptance до TTS. Этот документ — рабочий план, а не утверждение о полной Python parity.
 
 ## Текущий приоритет: самостоятельный Generation Core (без Unity)
 
@@ -8,7 +8,7 @@
 2. [x] Отдельная публикация Message, единая подготовка LLM-истории, типизированные настройки персонажей и presenter bindings.
 3. [x] `ChatApi` без пресета; назначение `Active | Specific(PresetId)` по персонажу и операции; **единственное разрешение и материализация пресета перед генерацией**.
 4. [x] **#16, базовый persistent catalog**: независимые определения, CRUD, постоянное хранение без API-ключей в JSON, presenter и проверка после restart. Полный пользовательский редактор/авторизация/другие протоколы остаются в #16.
-5. [~] **#19: StructuredResponse v3**: типизированный DTO, Gemini JSON Schema (текст, эмоции, три delta-поля состояния), строгая проверка; сегменты сохраняются как JSON одного Message. Первое применяемое действие — изменение характеристик персонажа: validation → guarded atomic append Message + CharacterStateChanged → derived state/AcceptedResponse. Инструменты, память, рабочее состояние, игровые действия и полный цикл внешних applied-effects остаются открытыми.
+5. [~] **#19: StructuredResponse v3**: типизированный DTO, Gemini JSON Schema (текст, эмоции, три delta-поля состояния), строгая проверка; сегменты сохраняются как JSON одного Message. Первое применяемое действие оформлено как `ResponseEffect::ChangeCharacterState` → `AppliedEffect::CharacterStateChanged`: validation → `EffectPhase::Accepting` → guarded atomic append Message + CharacterStateChanged → `EffectPhase::Applied` → TTS. `AcceptedResponse` содержит материализованные эффекты и производное состояние. Отмена после начала принятия — TooLate, сбой TTS не откатывает коммит. Инструменты, память, рабочее состояние, игровые действия и полный цикл внешних applied-effects остаются открытыми.
 6. [ ] #18: prompt sets / переменные / DSL; #16: transforms, альтернативные протоколы; #17: streaming/retry.
 7. [ ] Функциональная проверка end-to-end генерации, настроек, сохранения и восстановления без Unity. Unity C# и выбор игровых свидетелей сейчас вне scope.
 

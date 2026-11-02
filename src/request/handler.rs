@@ -9,7 +9,7 @@ use crate::{
     generation::{GenerationRequest, PresetCatalog, ResponseGenerator},
     settings::SettingsOwner,
     timeline::selection::TimelineSelection,
-    voice::{VoiceOptions, VoiceProvider},
+    voice::{VoiceError, VoiceOptions, VoiceProvider},
 };
 
 #[derive(Clone)]
@@ -43,9 +43,10 @@ impl MessageHandler {
                 continue;
             };
             let handler = self.clone();
+            let stopping = stop.clone();
             let task = tokio::spawn(async move {
                 let _guard = WorkGuard(Arc::clone(&record));
-                handler.process(record, message).await;
+                handler.process(record, message, stopping).await;
             });
             let _ = task.await;
         }
@@ -58,7 +59,12 @@ impl MessageHandler {
         }
     }
 
-    async fn process(&self, record: Arc<RequestRecord>, message: Box<dyn GenerationCommand>) {
+    async fn process(
+        &self,
+        record: Arc<RequestRecord>,
+        message: Box<dyn GenerationCommand>,
+        stop: CancellationToken,
+    ) {
         let id = record.snapshot().metadata.id;
         let prepared = tokio::select! {
             biased;
@@ -154,48 +160,57 @@ impl MessageHandler {
         };
         let text = Arc::clone(&proposed.text);
         record.text_ready(Arc::clone(&text));
-        let voice = match voice_options {
-            None => Ok(None),
-            Some(options) => {
-                if !record.generating_voice(Arc::clone(&text)) {
-                    record.finish_cancelled();
-                    return;
-                }
-                tokio::select! {
-                    biased;
-                    _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
-                    _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
-                        record.cancel();
-                        record.finish_cancelled();
-                        return;
-                    }
-                    _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
-                        record.cancel();
-                        record.finish_cancelled();
-                        return;
-                    }
-                    audio = self.voice.synthesize(Arc::clone(&text), options) => audio.map(Some),
-                }
-            }
-        };
-        let (audio, voice_error) = match voice {
-            Ok(audio) => (audio, None),
-            Err(error) => (None, Some(error)),
-        };
         if !record.begin_accepting() {
             record.finish_cancelled();
             return;
         }
-        let outcome = match self
+        let mut accepted = match self
             .character
-            .accept(id, acceptance, proposed, audio, message.audience().clone())
+            .accept(id, acceptance, proposed, None, message.audience().clone())
             .await
         {
-            Ok(response) => match voice_error {
-                Some(error) => RequestOutcome::VoiceGenerationFailed { response, error },
-                None => RequestOutcome::Success(response),
-            },
-            Err(error) => RequestOutcome::InternalError(record.failure(error.to_string())),
+            Ok(response) => response,
+            Err(error) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(error.to_string()),
+                ));
+                return;
+            }
+        };
+        record.mark_applied();
+        let outcome = match voice_options {
+            None => RequestOutcome::Success(accepted),
+            Some(options) => {
+                record.generating_voice(Arc::clone(&text));
+                let voice = Arc::clone(&self.voice);
+                let mut voice_task =
+                    tokio::spawn(async move { voice.synthesize(text, options).await });
+                let result = tokio::select! {
+                    result = &mut voice_task => result,
+                    _ = stop.cancelled() => {
+                        voice_task.abort();
+                        let _ = voice_task.await;
+                        return record.finish(RequestOutcome::VoiceGenerationFailed {
+                            response: accepted,
+                            error: VoiceError::Generation("voice interrupted by shutdown".into()),
+                        });
+                    }
+                };
+                match result {
+                    Ok(Ok(audio)) => {
+                        accepted.audio = Some(audio);
+                        RequestOutcome::Success(accepted)
+                    }
+                    Ok(Err(error)) => RequestOutcome::VoiceGenerationFailed {
+                        response: accepted,
+                        error,
+                    },
+                    Err(error) => RequestOutcome::VoiceGenerationFailed {
+                        response: accepted,
+                        error: VoiceError::Generation(format!("voice worker stopped: {error}")),
+                    },
+                }
+            }
         };
         record.finish(outcome);
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use super::GenerationError;
+use super::{GenerationError, ResponseEffect};
 use crate::timeline::domain::CharacterStateDelta;
 
 pub const RESPONSE_PROTOCOL_VERSION: u32 = 3;
@@ -186,11 +186,16 @@ impl StructuredResponse {
         Ok(())
     }
 
-    pub fn state_delta(&self) -> CharacterStateDelta {
-        CharacterStateDelta {
+    pub fn proposed_effects(&self) -> Vec<ResponseEffect> {
+        let change = CharacterStateDelta {
             attitude: self.attitude_change,
             boredom: self.boredom_change,
             stress: self.stress_change,
+        };
+        if change.is_empty() {
+            Vec::new()
+        } else {
+            vec![ResponseEffect::ChangeCharacterState(change)]
         }
     }
 
@@ -301,8 +306,9 @@ mod tests {
         )
         .unwrap();
         response.ensure_supported_effects().unwrap();
-        assert_eq!(response.state_delta().attitude, 1.25);
-        assert_eq!(response.state_delta().stress, -2.5);
+        assert!(matches!(response.proposed_effects().as_slice(),
+            [ResponseEffect::ChangeCharacterState(delta)] if delta.attitude == 1.25 && delta.stress == -2.5
+        ));
         let unsupported = StructuredResponse::parse(
             r#"{"segments":[{"text":"hi"}],"attitude_change":1,"memory_add":["remember"]}"#,
         )

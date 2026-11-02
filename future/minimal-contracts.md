@@ -28,13 +28,13 @@
 
 ## Жизнь запроса
 
-Pending → Processing(GeneratingText) → Processing(GeneratingVoice), если озвучка запрошена → принятие → Finished. Публичный Processing не раскрывает внутренний Accepting.
+Pending → Processing(GeneratingText) → скрытое `Accepting` → атомарное применение типизированных эффектов → `Applied` → Processing(GeneratingVoice), если озвучка запрошена → Finished. Публичный Processing не раскрывает внутренний Accepting/Applied.
 
 Итоги: Success, TextGenerationFailed, VoiceGenerationFailed с принятым текстом, InternalError с доступным частичным текстом. Отмена до принятия даёт Cancelled и не применяет эффекты.
 
-VoiceGenerationFailed означает: генерация текста успешна, он и связанные эффекты приняты; аудио отсутствует. Если пользователь отменил ожидающую озвучку, ответ и эффекты не принимаются. API отмены после входа в Accepting возвращает TooLate.
+VoiceGenerationFailed означает: генерация текста успешна, он и связанные эффекты приняты; аудио отсутствует. Отмена после начала Accepting, включая ожидание TTS, возвращает TooLate; ответ и эффекты уже могут быть приняты. Ошибка TTS не откатывает принятый пакет.
 
-Провайдер текста возвращает сырой видимый текст. ResponseGenerator формирует ProposedResponse и план эффектов; исполнитель передаёт этот план владельцу. Сейчас содержательный эффект минимален: RecordAcceptedReply. Владелец валидирует весь пакет до изменения памяти, записывает ответ в timeline и обновляет state в одном коротком участке. Обработка дополнительных эффектов расширяется здесь, а не в UI.
+Провайдер возвращает типизированный `StructuredResponse` v3. `ResponseGenerator` валидирует его и создаёт `ProposedResponse { structured, text, effects }`, где эффекты представлены enum `ResponseEffect` (сейчас `ChangeCharacterState`). Владелец персонажа проверяет контекст, материализует `AppliedEffect` и записывает сообщение и эффект в один guarded Timeline batch. `CharacterState` выводится из принятой истории; нет дублирующего mutable state store. Новые виды эффектов добавляются через собственные типизированные контракты, а не через универсальный event bus.
 
 ## at и состояние персонажа
 

@@ -1103,7 +1103,7 @@ impl neuromita::voice::VoiceProvider for PausedVoice {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
+async fn reset_during_voice_after_commit_cannot_cancel_accepted_response() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
     let preset = preset(&server.endpoint);
@@ -1154,16 +1154,7 @@ async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
         .await
         .unwrap()
         .unwrap();
-    let reset_id = neuromita::timeline::EventId::new();
-    assert_eq!(
-        app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset_id),
-        Ok(reset_id)
-    );
-    assert!(matches!(
-        finished(&reply).await.state,
-        RequestState::Cancelled
-    ));
-    assert!(voice_release.send(()).is_err());
+    assert_eq!(reply.cancel(), neuromita::request::CancelResult::TooLate);
     assert_eq!(
         app.character(CharacterId::Mita)
             .unwrap()
@@ -1171,9 +1162,85 @@ async fn reset_during_voice_generation_cancels_before_response_is_accepted() {
             .await
             .unwrap()
             .accepted_replies,
-        0
+        1
+    );
+    let reset_id = neuromita::timeline::EventId::new();
+    assert_eq!(
+        app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset_id),
+        Ok(reset_id)
+    );
+    voice_release.send(()).unwrap();
+    assert!(matches!(
+        finished(&reply).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Mita)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        1
     );
     app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_during_post_commit_voice_keeps_accepted_reply() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let preset = preset(&server.endpoint);
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let (voice_started, mut voice_calls) = mpsc::unbounded_channel();
+    let mut config = ApplicationConfig::minimal(
+        preset,
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.voice = Arc::new(PausedVoice(voice_started));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    app.presenter()
+        .settings
+        .voice
+        .in_launcher
+        .set(true)
+        .unwrap();
+    let reply = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Mita,
+        ChatApi::publish_message(
+            CharacterId::Mita,
+            UserInput::new("Voice must not hold the commit open".into()).unwrap(),
+        )
+        .unwrap(),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Text("accepted text"))
+        .unwrap();
+    let release = timeout(Duration::from_secs(10), voice_calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.cancel(), neuromita::request::CancelResult::TooLate);
+    let stopping = tokio::spawn(async move { app.shutdown().await });
+    let result = finished(&reply).await;
+    assert!(matches!(result.state,
+        RequestState::Finished(RequestOutcome::VoiceGenerationFailed { ref response, .. })
+            if response.text.as_ref() == "accepted text"
+    ));
+    assert!(release.send(()).is_err());
+    timeout(Duration::from_secs(10), stopping)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     server.shutdown().await;
 }
 

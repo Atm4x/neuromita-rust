@@ -195,7 +195,7 @@ impl RequestRecord {
         if inner.snapshot.state.is_terminal() {
             return CancelResult::AlreadyFinished;
         }
-        if inner.phase == EffectPhase::Accepting {
+        if matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied) {
             return CancelResult::TooLate;
         }
         self.cancellation.cancel();
@@ -231,20 +231,36 @@ impl RequestRecord {
         true
     }
 
+    pub(crate) fn mark_applied(&self) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        assert_eq!(inner.phase, EffectPhase::Accepting);
+        inner.phase = EffectPhase::Applied;
+        let snapshot = Arc::clone(&inner.snapshot);
+        if let Some(trace) = &mut inner.trace {
+            trace.transitions.push(RequestTransition {
+                revision: snapshot.revision,
+                phase: EffectPhase::Applied,
+                state: snapshot.state.clone(),
+            });
+        }
+    }
+
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal() {
             return;
         }
         let cancelled = inner.phase == EffectPhase::Working && self.cancellation.is_cancelled();
-        inner.phase = if matches!(
-            outcome,
-            RequestOutcome::Success(_) | RequestOutcome::VoiceGenerationFailed { .. }
-        ) {
-            EffectPhase::Applied
-        } else {
-            EffectPhase::Discarded
-        };
+        if inner.phase != EffectPhase::Applied {
+            inner.phase = if matches!(
+                outcome,
+                RequestOutcome::Success(_) | RequestOutcome::VoiceGenerationFailed { .. }
+            ) {
+                EffectPhase::Applied
+            } else {
+                EffectPhase::Discarded
+            };
+        }
         let state = if cancelled {
             RequestState::Cancelled
         } else {
@@ -257,7 +273,9 @@ impl RequestRecord {
 
     pub(crate) fn finish_cancelled(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() || inner.phase == EffectPhase::Accepting {
+        if inner.snapshot.state.is_terminal()
+            || matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied)
+        {
             return;
         }
         inner.phase = EffectPhase::Discarded;
@@ -308,7 +326,7 @@ impl RequestRecord {
     }
     pub(crate) fn generating_voice(&self, text: Arc<str>) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() || self.cancellation.is_cancelled() {
+        if inner.snapshot.state.is_terminal() || inner.phase != EffectPhase::Applied {
             return false;
         }
         self.publish(
@@ -377,6 +395,35 @@ mod tests {
             }
             assert_eq!(registry.active_count(), 0);
         }
+    }
+
+    #[test]
+    fn committed_effects_remain_applied_while_voice_is_pending_or_fails() {
+        let registry = RequestRegistry::new(4);
+        let handle = registry.register(
+            Box::new(request()),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: selection(),
+                context_epoch: 0,
+            },
+        );
+        let record = Arc::clone(&handle.record);
+        assert!(record.try_start().is_some());
+        assert!(record.begin_accepting());
+        record.mark_applied();
+        assert!(record.generating_voice(Arc::from("accepted text")));
+        assert_eq!(handle.cancel(), CancelResult::TooLate);
+        assert!(!record.cancellation.is_cancelled());
+        let trace = record.trace().unwrap();
+        assert_eq!(
+            trace.transitions.last().unwrap().phase,
+            EffectPhase::Applied
+        );
+        record.finish(RequestOutcome::InternalError(
+            record.failure("simulated post-commit worker failure".into()),
+        ));
+        assert!(matches!(handle.snapshot().state, RequestState::Finished(_)));
     }
 
     #[test]

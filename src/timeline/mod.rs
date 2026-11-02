@@ -31,8 +31,8 @@ use view::{MitaView, TimelineMessageQueries};
 use selection::TimelineSelectionRepository;
 
 use domain::{
-    AppendGuard, BranchId, CausalLink, CausalRelation, CharacterBehavior, EventDraft, EventKind,
-    SessionId, TimelineRepository, TimelineStore,
+    AppendGuard, AppliedEffect, BranchId, CausalLink, CausalRelation, CharacterBehavior,
+    EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +101,7 @@ pub(crate) struct GeneratedReply {
     pub expected_revision: u64,
     pub content: serde_json::Value,
     pub audience: ConversationAudience,
-    pub state_change: Option<CharacterBehavior>,
+    pub effects: Vec<AppliedEffect>,
 }
 
 pub(crate) struct TimelineContextSnapshot {
@@ -754,7 +754,7 @@ impl SessionTimeline {
             expected_revision,
             content,
             audience,
-            state_change,
+            effects,
         } = reply;
         let character = turn.character;
         self.assert_turn(turn)?;
@@ -823,26 +823,31 @@ impl SessionTimeline {
         }
         let draft = message.into_draft()?;
         let mut drafts = vec![draft];
-        if let Some(behavior) = state_change {
-            if ![behavior.attitude, behavior.boredom, behavior.stress]
-                .iter()
-                .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
-            {
-                return Err(domain::TimelineError::Invalid("invalid character state"));
+        for effect in effects {
+            match effect {
+                AppliedEffect::CharacterStateChanged(behavior) => {
+                    if ![behavior.attitude, behavior.boredom, behavior.stress]
+                        .iter()
+                        .all(|value| value.is_finite() && (0.0..=100.0).contains(value))
+                    {
+                        return Err(domain::TimelineError::Invalid("invalid character state"));
+                    }
+                    let mut change = EventDraft::new(EventKind::CharacterStateChanged);
+                    change.actor = Some(character.to_string());
+                    change.observers.insert(character);
+                    change.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    change.payload.insert(
+                        "state".into(),
+                        serde_json::to_value(behavior).map_err(|_| {
+                            domain::TimelineError::Invalid("invalid character state")
+                        })?,
+                    );
+                    drafts.push(change);
+                }
             }
-            let mut change = EventDraft::new(EventKind::CharacterStateChanged);
-            change.actor = Some(character.to_string());
-            change.observers.insert(character);
-            change.links.push(CausalLink {
-                relation: CausalRelation::CausedBy,
-                event_id: id,
-            });
-            change.payload.insert(
-                "state".into(),
-                serde_json::to_value(behavior)
-                    .map_err(|_| domain::TimelineError::Invalid("invalid character state"))?,
-            );
-            drafts.push(change);
         }
         let selected = self.selection();
         self.store.append_guarded(
@@ -943,7 +948,7 @@ mod tests {
                     expected_revision: 0,
                     content: json!("answer"),
                     audience: ConversationAudience::private_to(CharacterId::Mita),
-                    state_change: None,
+                    effects: Vec::new(),
                 })
                 .is_err()
         );
@@ -1043,7 +1048,7 @@ mod tests {
                 expected_revision: 0,
                 content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
-                state_change: None,
+                effects: Vec::new(),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
         );
@@ -1111,7 +1116,7 @@ mod tests {
                 expected_revision: 0,
                 content: json!("reaction"),
                 audience: ConversationAudience::private_to(CharacterId::Mita),
-                state_change: None,
+                effects: Vec::new(),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
         );

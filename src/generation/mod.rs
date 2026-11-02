@@ -1,8 +1,10 @@
 mod conversation;
+mod effects;
 pub mod gemini;
 mod presets;
 mod provider;
 mod structured;
+pub use effects::ResponseEffect;
 pub use presets::{
     EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
     PresetCatalogError, PresetCatalogSnapshot, PresetCredentials, PresetDefinition, PresetId,

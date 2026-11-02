@@ -108,6 +108,13 @@ impl Default for CharacterBehavior {
     }
 }
 
+/// Materialized, committed effect owned by the canonical Timeline domain.
+/// Other modules produce this value but Timeline never depends on the generator.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AppliedEffect {
+    CharacterStateChanged(CharacterBehavior),
+}
+
 impl CharacterBehavior {
     /// Current Python default bounds. An explicit stat policy can replace
     /// these defaults without changing already accepted historical values.

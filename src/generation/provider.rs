@@ -2,7 +2,7 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
+use super::{GenerationPreset, ProviderKind, ProviderTemplate, ResponseEffect, StructuredResponse};
 use crate::character::CharacterContext;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -34,6 +34,19 @@ impl GenerationRequest {
 pub struct ProposedResponse {
     pub text: Arc<str>,
     pub structured: Arc<StructuredResponse>,
+    pub effects: Arc<[ResponseEffect]>,
+}
+
+impl ProposedResponse {
+    pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
+        structured.validate()?;
+        structured.ensure_supported_effects()?;
+        Ok(Self {
+            text: structured.full_text(),
+            effects: structured.proposed_effects().into(),
+            structured: Arc::new(structured),
+        })
+    }
 }
 
 pub type ProviderFuture<'a> =
@@ -76,12 +89,6 @@ impl ResponseGenerator {
             .get(&kind)
             .ok_or(GenerationError::Unavailable(kind))?;
         let structured = provider.generate(request.context, template).await?;
-        structured.validate()?;
-        structured.ensure_supported_effects()?;
-        let text = structured.full_text();
-        Ok(ProposedResponse {
-            text,
-            structured: Arc::new(structured),
-        })
+        ProposedResponse::from_structured(structured)
     }
 }

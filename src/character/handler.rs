@@ -15,10 +15,10 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
-    generation::{ProposedResponse, ResponseSegment},
+    generation::{ProposedResponse, ResponseEffect, ResponseSegment},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
-    timeline::domain::CharacterBehavior,
+    timeline::domain::{AppliedEffect, CharacterBehavior},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
         SessionTimeline,
@@ -42,6 +42,7 @@ pub enum CharacterError {
 pub struct AcceptedResponse {
     pub text: Arc<str>,
     pub segments: Arc<[ResponseSegment]>,
+    pub effects: Arc<[AppliedEffect]>,
     pub state_after: CharacterState,
     pub event_id: EventId,
     pub context: ContextAnchor,
@@ -366,6 +367,11 @@ impl CharacterHandler {
             .structured
             .ensure_supported_effects()
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        if proposed.effects.as_ref() != proposed.structured.proposed_effects().as_slice() {
+            return Err(CharacterError::Internal(
+                "proposed effects do not match the validated response".into(),
+            ));
+        }
         let mut timeline = self
             .timeline
             .lock()
@@ -382,15 +388,17 @@ impl CharacterHandler {
             boredom: self.character.state.boredom,
             stress: self.character.state.stress,
         };
-        let delta = proposed.structured.state_delta();
-        let state_change =
-            if delta.is_empty() {
-                None
-            } else {
-                Some(current_behavior.apply(delta).ok_or_else(|| {
-                    CharacterError::Internal("invalid character state change".into())
-                })?)
-            };
+        let mut effects = Vec::with_capacity(proposed.effects.len());
+        for effect in proposed.effects.iter() {
+            match effect {
+                ResponseEffect::ChangeCharacterState(delta) => {
+                    let state = current_behavior.apply(*delta).ok_or_else(|| {
+                        CharacterError::Internal("invalid character state change".into())
+                    })?;
+                    effects.push(AppliedEffect::CharacterStateChanged(state));
+                }
+            }
+        }
         let event_id = timeline
             .append_reply(GeneratedReply {
                 request,
@@ -401,7 +409,7 @@ impl CharacterHandler {
                     CharacterError::Internal(format!("invalid accepted message segments: {error}"))
                 })?,
                 audience,
-                state_change,
+                effects: effects.clone(),
             })
             .map_err(|error| match error {
                 crate::timeline::domain::TimelineError::ConcurrentWrite => {
@@ -414,6 +422,7 @@ impl CharacterHandler {
             state_after: self.character.state.clone(),
             text: proposed.text,
             segments: Arc::from(proposed.structured.segments.clone()),
+            effects: effects.into(),
             event_id,
             context: context.anchor,
             audio,
@@ -507,10 +516,10 @@ mod turn_tests {
         handler.accept(
             request,
             context,
-            ProposedResponse {
-                text: Arc::from("answer"),
-                structured: Arc::new(crate::generation::StructuredResponse::spoken("answer")),
-            },
+            ProposedResponse::from_structured(crate::generation::StructuredResponse::spoken(
+                "answer",
+            ))
+            .unwrap(),
             None,
             ConversationAudience::private_to(CharacterId::Mita),
         )
@@ -531,10 +540,7 @@ mod turn_tests {
         handler.accept(
             request,
             context,
-            ProposedResponse {
-                text: structured.full_text(),
-                structured: Arc::new(structured),
-            },
+            ProposedResponse::from_structured(structured).unwrap(),
             None,
             ConversationAudience::private_to(CharacterId::Mita),
         )
@@ -561,6 +567,14 @@ mod turn_tests {
         assert_eq!(state.attitude, 66.0);
         assert_eq!(state.boredom, 4.0);
         assert_eq!(state.stress, 6.24);
+        assert_eq!(
+            response.effects.as_ref(),
+            &[AppliedEffect::CharacterStateChanged(CharacterBehavior {
+                attitude: 66.0,
+                boredom: 4.0,
+                stress: 6.24,
+            })]
+        );
         let timeline = handler.timeline.lock().unwrap();
         assert_ne!(response.event_id, EventId::default());
         assert_eq!(
