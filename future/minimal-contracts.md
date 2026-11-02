@@ -12,9 +12,9 @@
 | Конкурентность | Разные персонажи генерируются параллельно; один персонаж принимает предыдущий результат перед следующей работой |
 | Владение | CharacterRegistry выдаёт handles владельцев; CharacterHandler отдельно обслуживает свой mailbox |
 | Субъективный контекст | CharacterHandle::get_context(at), prepare запроса, история только известных персонажу событий |
-| Timeline | Vec, EventId, branch ID и through; at_event, read_at, наблюдения, reply/react/initiate и причинные ссылки |
+| Timeline | In-memory или bundled SQLite, EventId, branch ID и through; исторические чтения, fork, наблюдения и причинные ссылки |
 | Генерация | Общий GenerationProvider, типизированные ProviderTemplate/GenerationPreset, отдельный GeminiTemplate и wire-модуль |
-| Подготовленный результат | ProposedResponse с текстом и ResponseEffect; нет мутации Character при получении текста |
+| Подготовленный результат | TurnProposal с закрытыми полями text/segments/effects; ProposedResponse сохранён как совместимый alias |
 | Озвучка | VoiceProvider/VoicePlan/VoiceOptions/AudioArtifact, GeneratingVoice, успех или ошибка с рабочим текстом |
 | Принятие | Working/Accepting/Applied/Discarded, атомарная гонка с отменой, Finished после применения |
 | Наблюдение | Watch снимков одного запроса и согласованное discovery новых обращений из всех источников |
@@ -28,13 +28,13 @@
 
 ## Жизнь запроса
 
-Pending → Processing(GeneratingText) → скрытое `Accepting` → атомарное применение типизированных эффектов → `Applied` → Processing(GeneratingVoice), если озвучка запрошена → Finished. Публичный Processing не раскрывает внутренний Accepting/Applied.
+Pending → Processing(GeneratingText) → Processing(GeneratingVoice), если озвучка запрошена → скрытое `Accepting` → атомарное принятие сообщения и типизированных эффектов → `Applied` → Finished. Во время LLM и TTS фаза эффектов остаётся Working. Публичный Processing не раскрывает внутренний Accepting/Applied.
 
 Итоги: Success, TextGenerationFailed, VoiceGenerationFailed с принятым текстом, InternalError с доступным частичным текстом. Отмена до принятия даёт Cancelled и не применяет эффекты.
 
-VoiceGenerationFailed означает: генерация текста успешна, он и связанные эффекты приняты; аудио отсутствует. Отмена после начала Accepting, включая ожидание TTS, возвращает TooLate; ответ и эффекты уже могут быть приняты. Ошибка TTS не откатывает принятый пакет.
+VoiceGenerationFailed означает: генерация текста успешна, он и связанные эффекты приняты; аудио отсутствует. Отмена во время TTS отбрасывает предложение без принятия сообщения или эффектов. После начала короткого Accepting отмена возвращает TooLate; коммит не прерывается посередине. Ошибка TTS допускает принятие текста, но не может подменять пользовательскую отмену.
 
-Провайдер возвращает типизированный `StructuredResponse` v3. `ResponseGenerator` валидирует его и создаёт `ProposedResponse { structured, text, effects }`, где эффекты представлены enum `ResponseEffect` (сейчас `ChangeCharacterState`). Владелец персонажа проверяет контекст, материализует `AppliedEffect` и записывает сообщение и эффект в один guarded Timeline batch. `CharacterState` выводится из принятой истории; нет дублирующего mutable state store. Новые виды эффектов добавляются через собственные типизированные контракты, а не через универсальный event bus.
+Провайдер возвращает типизированный `StructuredResponse` v3. Генерация валидирует его и создаёт `TurnProposal` с текстом, сегментами и типизированными `ResponseEffect`: изменение характеристик, замена рабочего состояния и операции памяти. Владелец персонажа не разбирает DTO провайдера: проверяет актуальность контекста, материализует предметные изменения и записывает сообщение и эффекты в один guarded Timeline batch. Общая граница записи проверяет структуру специальных фактов и применимость операций памяти. `CharacterState` выводится из принятой истории; нет дублирующего mutable state store.
 
 ## at и состояние персонажа
 
@@ -44,11 +44,11 @@ ContextPosition::Latest фиксируется при начале обрабо�
 
 Запрос со старым состоянием не применяет эффект к изменившемуся Character: при принятии проверяется revision. В этом случае возвращается InternalError с подготовленным текстом. Снимок истории и состояние не смешиваются молча.
 
-Это минимальный механизм адресации, не полная реализация forks, сброса знаний и checkpoint restoration.
+Ветвление, исторические чтения и сброс знаний реализованы. Полный контекст строится из одного прочитанного префикса существующими ContextAnchor/MitaView и проекциями персонажа; отдельный обязательный объект копии Timeline не вводится. Полное восстановление незавершённых запросов после crash остаётся отдельной работой.
 
 ## Настройки и представление
 
-SettingsApi предоставляет typed snapshot/replace/edit и observe. AppSettings содержит VoiceSettings, CaptureSettings, InterfaceSettings. Volume проверяется как тип, комбинации полей валидируются перед публикацией. Обязательные поля файла не восполняются через Default.
+SettingsApi предоставляет typed snapshot/replace/edit и observe. AppSettings schema 2 содержит разделы presets, characters, voice, capture и interface. Volume проверяется как тип, комбинации полей валидируются перед публикацией. Загрузчик явно мигрирует поддерживаемую schema 1; повреждённые текущие документы не восполняются скрытыми defaults.
 
 SettingsSource::Initial и SettingsSource::Stored выбираются явно. initial_profile — явная конфигурация минимального запуска, не fallback после ошибки загрузки.
 
@@ -68,8 +68,8 @@ SettingsPresenter отдаёт bindable volume/in_launcher/in_game/voice. Setter
 
 ## Что сознательно остаётся минимальным
 
-- Факты timeline и технический журнал запросов в памяти; нет SQLite и восстановления после crash.
-- Один timeline branch; нет тяжёлой системы веток/сохранений.
+- Timeline сохраняется в bundled SQLite при persistent-конфигурации и восстанавливается после перезапуска; RequestTrace остаётся ограниченным журналом в памяти. Полное crash recovery запросов отсутствует.
+- Нет семантического поиска памяти через embeddings; текущий retrieval лексический, с ограничением контекста и дедупликацией.
 - Реальный TTS-движок не подключён. По умолчанию VoiceProvider возвращает Unavailable; контракт проверен управляемым тестовым исполнителем. Это не имитация работающей озвучки.
 - Стартовые персонажи имеют минимальные новые descriptions/prompts, а не весь набор функционала Python-персонажей.
 - Нет tools, мультимодального ввода и потока текстовых чанков; речь идёт о контрактах, обсуждённых для запроса.

@@ -59,7 +59,7 @@ ChatApi предоставляет reply/react/initiate/send и возвраща
 
 ## Настройки и binding
 
-SettingsApi предоставляет snapshot/replace/edit/observe/flush/retry_save. Структуры разделов: VoiceSettings, CaptureSettings, InterfaceSettings. Volume валидируется как тип. Обязательные поля сериализованной конфигурации не восполняются скрытыми defaults.
+SettingsApi предоставляет snapshot/replace/edit/observe/flush/retry_save. Schema 2 содержит разделы presets, characters, voice, capture и interface; поддерживаемая schema 1 мигрируется явно. Volume валидируется как тип. Повреждённая текущая конфигурация не восполняется скрытыми defaults.
 
 SettingsPresenter.voice предоставляет bindable volume/in_launcher/in_game/voice: get, set и observe. Значение из другого источника обновляет свойство; наблюдение не вызывает повторную запись. Ошибка проверки оставляет подтверждённое значение.
 
@@ -95,7 +95,7 @@ test
 
 ## Timeline, персонажи и диагностика
 
-Timeline — событийное хранилище с in-memory/SQLite, ветками, EventId и through. CharacterHandler предоставляет get_context(at); факты фильтруются по знанию персонажа. Историческое состояние минимального счётчика восстанавливается по префиксу. Старый контекст не применяется к изменившемуся Character молча.
+Timeline — событийное хранилище с in-memory/SQLite, ветками, EventId и through. CharacterHandler предоставляет get_context(at); факты фильтруются по знанию персонажа. Состояние, память и история восстанавливаются из одного прочитанного префикса. Старый контекст не применяется к изменившемуся Character молча.
 
 Character владеет description/prompts/state, а живым Character владеет один CharacterHandler. Registry выдаёт handles. Разные персонажи генерируются параллельно, один персонаж — последовательно.
 
