@@ -17,6 +17,7 @@ class AssetRequirement:
     role: str
     relative_path: str
     required: bool = True
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)
