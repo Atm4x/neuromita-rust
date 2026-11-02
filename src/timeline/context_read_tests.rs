@@ -125,6 +125,7 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
                 content: "known memory".into(),
                 kind: crate::memory::MemoryKind::Fact,
                 state: crate::memory::MemoryState::Active,
+                protected: false,
                 expires_at_unix_ms: None,
             }
         )),

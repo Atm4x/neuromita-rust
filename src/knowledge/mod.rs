@@ -156,6 +156,7 @@ mod tests {
             content: "ромашковый чай".into(),
             kind: crate::memory::MemoryKind::Fact,
             state: crate::memory::MemoryState::Active,
+            protected: false,
             expires_at_unix_ms: None,
         }
     }

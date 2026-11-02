@@ -11,3 +11,11 @@ The authoritative data structure is `CharacterMemories`, captured and replayed b
 - The request orchestration projects active islands into a bounded `[MEMORY ISLANDS]` data block and ranks ordinary active facts separately. The inference boundary remains `EmbeddingProvider` implemented outside the domain; island projection never invokes inference.
 
 **Not yet complete:** user-facing editor, scheduler/maintenance worker, protected rules, timestamps and usage-frequency policy, forgotten-memory recall and backup-before-purge. These require explicit behavioral decisions before wiring automated changes into Timeline.
+
+## Protected facts and startup maintenance
+
+- `MemoryRecord.protected` defaults to false and is omitted from legacy JSON on serialization. Changes are made only via auditable `MemoryChange::SetProtection`, produced by `MemoryCommand::SetProtection`. Ordinary `Upsert` cannot silently change protection or mutate a protected record. Protected records cannot be forgotten, soft-deleted, purged, merged, or edited until explicitly unprotected.
+- Protection is not inferred from `MemoryPriority::Critical`; priority and retention safety are separate concerns. This ensures no implicit protection of preexisting critical memories. An explicit administrative command is required to protect an existing record.
+- An explicit `SessionTimeline::expire_character_memories(selection, character, as_of_unix_ms)` commits all eligible expirations in one guarded append. No expired candidates means no appended events. A stale selection fails before any append. Protection exempts records from the automatic pass.
+- The Core startup orchestrator invokes the operation once per character using a single captured timestamp, **before** creating character workers. It does not launch a periodic scheduler, does not read models or AI Engine, and does not mutate memory on context reads. A continuously running service needs a separately scheduled invocation if expiration must occur before the next restart.
+- No user-facing protection control, backup, recovery-before-purge, or periodic maintenance loop is claimed. The current explicit `SetProtection` command is an internal domain contract; applying it from the UI will require a permission/confirmation boundary.

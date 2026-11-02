@@ -24,6 +24,7 @@ fn memory(id: u128, priority: MemoryPriority, content: &str) -> MemoryRecord {
         content: content.into(),
         kind: neuromita::memory::MemoryKind::Fact,
         state: neuromita::memory::MemoryState::Active,
+        protected: false,
         expires_at_unix_ms: None,
     }
 }

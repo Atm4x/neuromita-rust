@@ -138,6 +138,7 @@ async fn benchmark(
                 priority: memory.priority.into(),
                 kind: neuromita::memory::MemoryKind::Fact,
                 state: neuromita::memory::MemoryState::Active,
+                protected: false,
                 expires_at_unix_ms: None,
             })
             .collect();

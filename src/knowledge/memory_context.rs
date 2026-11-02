@@ -139,6 +139,7 @@ mod tests {
             content: content.to_owned(),
             kind: crate::memory::MemoryKind::Fact,
             state: crate::memory::MemoryState::Active,
+            protected: false,
             expires_at_unix_ms: None,
         }
     }

@@ -174,6 +174,23 @@ impl CharacterRegistry {
         stop: CancellationToken,
         capacity: usize,
     ) -> (Self, Vec<JoinHandle<()>>) {
+        // Startup maintenance is an explicit write-side operation, never a side effect
+        // of reading a character snapshot. Expiration decisions are clock-injected.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        {
+            let mut timeline = timeline.lock().expect("timeline lock poisoned");
+            let selected = timeline.selection();
+            for character in CharacterId::ALL {
+                timeline
+                    .expire_character_memories(selected, character, now)
+                    .expect("memory expiration maintenance must commit at startup");
+            }
+        }
         let mut handles = HashMap::new();
         let mut tasks = Vec::new();
         for id in CharacterId::ALL {

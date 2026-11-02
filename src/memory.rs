@@ -80,9 +80,16 @@ pub struct MemoryRecord {
     pub kind: MemoryKind,
     #[serde(default, skip_serializing_if = "is_active")]
     pub state: MemoryState,
+    /// A protected record cannot be forgotten, purged or merged until explicitly unprotected.
+    #[serde(default, skip_serializing_if = "is_unprotected")]
+    pub protected: bool,
     /// Explicit expiration cutoff, applied only by a committed maintenance operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix_ms: Option<u64>,
+}
+
+fn is_unprotected(protected: &bool) -> bool {
+    !*protected
 }
 
 fn is_fact(kind: &MemoryKind) -> bool {
@@ -108,6 +115,7 @@ impl MemoryRecord {
             content: content.into(),
             kind: MemoryKind::Fact,
             state: MemoryState::Active,
+            protected: false,
             expires_at_unix_ms: None,
         }
     }
@@ -163,6 +171,10 @@ pub enum MemoryCommand {
         id: MemoryId,
         expires_at_unix_ms: Option<u64>,
     },
+    SetProtection {
+        id: MemoryId,
+        protected: bool,
+    },
 }
 
 /// Canonical committed operation; upserts include complete values, not partial deltas.
@@ -176,6 +188,11 @@ pub enum MemoryCommand {
 pub enum MemoryChange {
     Upsert(MemoryRecord),
     Delete(MemoryId),
+    /// An explicit, auditable protection transition separate from model-authored upserts.
+    SetProtection {
+        id: MemoryId,
+        protected: bool,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -252,12 +269,16 @@ impl CharacterMemories {
                 if !record.is_valid() {
                     return Err("invalid memory record");
                 }
-                if self
-                    .records
-                    .get(&record.id)
-                    .is_some_and(|existing| existing.kind != record.kind)
-                {
-                    return Err("memory kind cannot change for an existing id");
+                if let Some(existing) = self.records.get(&record.id) {
+                    if existing.kind != record.kind {
+                        return Err("memory kind cannot change for an existing id");
+                    }
+                    if existing.protected != record.protected {
+                        return Err("use SetProtection to change memory protection");
+                    }
+                    if existing.protected && existing != record {
+                        return Err("protected memory cannot change before unprotecting");
+                    }
                 }
                 if !self.records.contains_key(&record.id) && self.records.len() >= 1024 {
                     return Err("retained memory capacity exceeded");
@@ -281,9 +302,18 @@ impl CharacterMemories {
             }
             // Legacy physical delete is kept for exact replay compatibility.
             MemoryChange::Delete(id) => {
-                if self.records.remove(id).is_none() {
-                    return Err("unknown memory id");
+                let existing = self.records.get(id).ok_or("unknown memory id")?;
+                if existing.protected {
+                    return Err("protected memory must be unprotected before purge");
                 }
+                self.records.remove(id);
+            }
+            MemoryChange::SetProtection { id, protected } => {
+                let record = self.records.get_mut(id).ok_or("unknown memory id")?;
+                if record.state == MemoryState::Deleted {
+                    return Err("deleted memory cannot change protection");
+                }
+                record.protected = *protected;
             }
         }
         Ok(())
@@ -296,6 +326,7 @@ impl CharacterMemories {
             .values()
             .filter(|record| {
                 record.state == MemoryState::Active
+                    && !record.protected
                     && record
                         .expires_at_unix_ms
                         .is_some_and(|expiry| expiry <= as_of_unix_ms)
@@ -349,6 +380,9 @@ impl CharacterMemories {
                     if record.state != MemoryState::Active || record.kind != MemoryKind::Fact {
                         return Err("memory is not an active fact");
                     }
+                    if record.protected {
+                        return Err("protected memory cannot be edited before unprotecting");
+                    }
                     record.content = content.clone();
                     if let Some(priority) = priority {
                         record.priority = *priority;
@@ -374,6 +408,9 @@ impl CharacterMemories {
                     {
                         return Err("merge requires active facts");
                     }
+                    if target_record.protected {
+                        return Err("protected memory cannot be merged");
+                    }
                     if sources.is_empty() {
                         return Err("merge requires sources");
                     }
@@ -389,6 +426,9 @@ impl CharacterMemories {
                             || source_record.state != MemoryState::Active
                         {
                             return Err("merge requires active facts");
+                        }
+                        if source_record.protected {
+                            return Err("protected memory cannot be merged");
                         }
                         combined.push(source_record.content.clone());
                     }
@@ -417,6 +457,9 @@ impl CharacterMemories {
                     {
                         return Err("forgotten island must be restored explicitly");
                     }
+                    if record.as_ref().is_some_and(|item| item.protected) {
+                        return Err("protected memory cannot be edited before unprotecting");
+                    }
                     let mut record = record.unwrap_or_else(|| MemoryRecord {
                         kind: MemoryKind::Island(*island),
                         ..MemoryRecord::fact(MemoryId::new(), MemoryPriority::Normal, "")
@@ -440,6 +483,9 @@ impl CharacterMemories {
                     if record.state == desired {
                         continue;
                     }
+                    if record.protected && desired != MemoryState::Active {
+                        return Err("protected memory cannot be forgotten or deleted");
+                    }
                     if desired == MemoryState::Forgotten && record.state != MemoryState::Active {
                         return Err("only active memory may be forgotten");
                     }
@@ -457,9 +503,27 @@ impl CharacterMemories {
                     if record.state == MemoryState::Deleted {
                         return Err("deleted memory cannot be rescheduled");
                     }
+                    if record.protected {
+                        return Err("protected memory cannot be rescheduled");
+                    }
                     let mut changed = record.clone();
                     changed.expires_at_unix_ms = *expires_at_unix_ms;
                     let change = MemoryChange::Upsert(changed);
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
+                MemoryCommand::SetProtection { id, protected } => {
+                    let record = next.get(*id).ok_or("unknown memory id")?;
+                    if record.state == MemoryState::Deleted {
+                        return Err("deleted memory cannot change protection");
+                    }
+                    if record.protected == *protected {
+                        continue;
+                    }
+                    let change = MemoryChange::SetProtection {
+                        id: *id,
+                        protected: *protected,
+                    };
                     next.apply_committed(&change)?;
                     changes.push(change);
                 }
@@ -484,6 +548,7 @@ mod tests {
             content: "Player likes TEA".into(),
             kind: crate::memory::MemoryKind::Fact,
             state: crate::memory::MemoryState::Active,
+            protected: false,
             expires_at_unix_ms: None,
         }))
         .unwrap();
@@ -508,6 +573,7 @@ mod tests {
                 content: "Player likes TEA".into(),
                 kind: crate::memory::MemoryKind::Fact,
                 state: crate::memory::MemoryState::Active,
+                protected: false,
                 expires_at_unix_ms: None,
             })
         );
@@ -545,6 +611,7 @@ mod tests {
                 content: content.into(),
                 kind: crate::memory::MemoryKind::Fact,
                 state: crate::memory::MemoryState::Active,
+                protected: false,
                 expires_at_unix_ms: None,
             }))
             .unwrap();
@@ -579,6 +646,7 @@ mod tests {
                 content: content.into(),
                 kind: crate::memory::MemoryKind::Fact,
                 state: crate::memory::MemoryState::Active,
+                protected: false,
                 expires_at_unix_ms: None,
             }))
             .unwrap();
@@ -747,6 +815,109 @@ mod tests {
         assert!(book.resolve_expirations(2000).is_empty());
         assert!(book.list().is_empty());
         assert_eq!(book.forgotten()[0].id, id);
+    }
+
+    #[test]
+    fn protection_is_explicit_auditable_and_rejects_implicit_mutations() {
+        let mut book = CharacterMemories::default();
+        let id = MemoryId::new();
+        let mut initial = MemoryRecord::fact(id, MemoryPriority::Critical, "permanent fact");
+        initial.expires_at_unix_ms = Some(100);
+        book.apply_committed(&MemoryChange::Upsert(initial.clone()))
+            .unwrap();
+        let protect = book
+            .resolve(&[MemoryCommand::SetProtection {
+                id,
+                protected: true,
+            }])
+            .unwrap();
+        assert_eq!(
+            protect,
+            vec![MemoryChange::SetProtection {
+                id,
+                protected: true
+            }]
+        );
+        book.apply_committed(&protect[0]).unwrap();
+        assert!(book.get(id).unwrap().protected);
+        assert!(book.resolve_expirations(1000).is_empty());
+        for forbidden in [
+            MemoryCommand::Forget { id },
+            MemoryCommand::SoftDelete { id },
+            MemoryCommand::Delete { id },
+            MemoryCommand::Update {
+                id,
+                content: "changed".into(),
+                priority: None,
+            },
+            MemoryCommand::SetExpiry {
+                id,
+                expires_at_unix_ms: None,
+            },
+        ] {
+            assert!(book.resolve(&[forbidden]).is_err());
+        }
+        assert_eq!(
+            book.apply_committed(&MemoryChange::Delete(id)),
+            Err("protected memory must be unprotected before purge")
+        );
+        let mut changed = book.get(id).unwrap().clone();
+        changed.protected = false;
+        assert_eq!(
+            book.apply_committed(&MemoryChange::Upsert(changed)),
+            Err("use SetProtection to change memory protection")
+        );
+        let unprotect = book
+            .resolve(&[MemoryCommand::SetProtection {
+                id,
+                protected: false,
+            }])
+            .unwrap();
+        book.apply_committed(&unprotect[0]).unwrap();
+        assert_eq!(book.resolve_expirations(1000).len(), 1);
+        assert_eq!(book.get(id).unwrap().state, MemoryState::Active);
+    }
+
+    #[test]
+    fn protected_island_requires_unprotect_to_replace_or_delete() {
+        let mut book = CharacterMemories::default();
+        apply(
+            &mut book,
+            &[MemoryCommand::SetIsland {
+                island: MemoryIsland::Preferences,
+                content: "Keep this".into(),
+            }],
+        );
+        let id = book.islands()[0].id;
+        apply(
+            &mut book,
+            &[MemoryCommand::SetProtection {
+                id,
+                protected: true,
+            }],
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::SetIsland {
+                island: MemoryIsland::Preferences,
+                content: "Overwrite".into(),
+            }])
+            .is_err()
+        );
+        apply(
+            &mut book,
+            &[MemoryCommand::SetProtection {
+                id,
+                protected: false,
+            }],
+        );
+        apply(
+            &mut book,
+            &[MemoryCommand::SetIsland {
+                island: MemoryIsland::Preferences,
+                content: "Overwrite".into(),
+            }],
+        );
+        assert_eq!(book.islands()[0].id, id);
     }
 
     #[test]
