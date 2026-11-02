@@ -128,3 +128,18 @@
 - [ ] Реальный managed uv/CPython download, PyTorch/ONNX packages, RVC/Silero/F5 TTS, API и UI settings/live lifecycle остаются открытыми. Test fixtures не доказывают production readiness.
 
 **Локальные проверки:** no-default-features full cargo test PASS, `cargo clippy --no-default-features --all-targets -- -D warnings` PASS, Python SDK 5 tests PASS. Реальный dependency download/inference и default-feature full cargo test этого среза отдельно не подтверждены.
+
+
+### AI Runtime implementation checkpoint — 2026-11-03: install evidence and candidate activation
+
+**Source commits:** fb3c971, bf95b39, 61e83ef, 40f85f9, b437553. These are incremental AI Runtime changes in the architecture PR, **not Python parity or production AI readiness**.
+
+- [x] Rust parses Python SDK's typed install plan from an **ephemeral** Python child (not the live inference worker).
+- [x] A model install handler validates backend choice, resolves model pins against backend constraints and publishes an immutable overlay revision.
+- [x] Required/optional model assets are inspected at safe relative paths, with symlink rejection and optional SHA-256; report separates Missing, Present, Verified, HashMismatch. Missing/invalid required files block **ready-for-initialization**, while an installed package overlay can still exist.
+- [x] Supervisor can prepare and initialize a candidate worker and replace the active generation **only after success**. Failure preserves the previous worker; late requests from an old generation return StaleGeneration.
+- [x] Split-mode activation locks are **per worker slot**; preparing TTS does not block ASR calls. Contract tests cover rollback, successful replacement and concurrent ASR access.
+- [ ] **Not done:** actual asset download/installation hooks; verification of Python distributions/imports beyond package-layer manifest; durable active-model selection; real GPU inference / model warmup; persisted readiness; interruption-safe restore across process crashes; OS-level sandbox for arbitrary community Python plugins.
+- [ ] Verify published HEAD through CI on Windows and Linux; local Rust 1.98.1 and Python tests do not substitute for full remote CI or real installed models.
+
+Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin contract), #61 (voice assets) open. Prefer real model probes and installation verification next; do not add a second Python supervisor.
