@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -8,6 +9,7 @@ use neuromita::{
     character::CharacterId,
     presentation::ChatPresenter,
     request::{RequestId, RequestOutcome, RequestSnapshot, RequestState},
+    settings::JsonSettingsRepository,
 };
 use tokio::sync::mpsc;
 
@@ -23,16 +25,9 @@ fn invalid(message: &str) -> io::Error {
 }
 
 impl Options {
-    pub fn parse() -> io::Result<Option<Self>> {
-        let mut args = std::env::args().skip(1);
+    fn parse_from(mut args: impl Iterator<Item = String>) -> io::Result<Self> {
         let mut values = HashMap::new();
         while let Some(argument) = args.next() {
-            if argument == "--help" {
-                println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit"
-                );
-                return Ok(None);
-            }
             if !matches!(
                 argument.as_str(),
                 "--model" | "--character" | "--message" | "--listen"
@@ -59,13 +54,125 @@ impl Options {
             .ok_or_else(|| invalid("--listen is required"))?
             .parse()
             .map_err(|_| invalid("invalid listen address"))?;
-        Ok(Some(Self {
+        Ok(Self {
             model,
             character,
             message: values.remove("--message"),
             listen,
-        }))
+        })
     }
+}
+
+pub const HELP: &str = r#"neuromita - offline settings transfer and interactive Gemini chat
+
+Usage:
+  neuromita settings export --source STORE.json --destination BACKUP.json
+  neuromita settings import --source BACKUP.json --destination STORE.json
+  neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT]
+
+Offline settings transfer (no network and no GEMINI_API_KEY):
+  export  Validates the complete schema 1 Rust AppSettings store and writes a
+          full backup envelope (schema_version, revision, settings).
+  import  Strictly validates the source, then atomically replaces the
+          destination store. The imported revision is restored verbatim.
+          Settings are replaced, never merged; repeating the same import
+          rewrites identical bytes. Other settings formats and future schemas
+          are rejected without touching the destination.
+
+Chat:
+  Required environment: GEMINI_API_KEY
+  Network command: test followed by newline
+  Interactive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit
+"#;
+
+pub enum Invocation {
+    Help,
+    Export {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Import {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Generate(Options),
+}
+
+impl Invocation {
+    pub fn parse() -> io::Result<Self> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.iter().any(|argument| argument == "--help") {
+            return Ok(Self::Help);
+        }
+        if args.first().map(String::as_str) == Some("settings") {
+            let mut args = args.into_iter().skip(1);
+            let command = args
+                .next()
+                .ok_or_else(|| invalid("settings requires export or import; use --help"))?;
+            let (source, destination) = settings_paths(&mut args)?;
+            return match command.as_str() {
+                "export" => Ok(Self::Export {
+                    source,
+                    destination,
+                }),
+                "import" => Ok(Self::Import {
+                    source,
+                    destination,
+                }),
+                _ => Err(invalid("unknown settings command; use export or import")),
+            };
+        }
+        Ok(Self::Generate(Options::parse_from(args.into_iter())?))
+    }
+}
+
+fn settings_paths(args: &mut impl Iterator<Item = String>) -> io::Result<(PathBuf, PathBuf)> {
+    let mut source = None;
+    let mut destination = None;
+    while let Some(argument) = args.next() {
+        let slot = match argument.as_str() {
+            "--source" => &mut source,
+            "--destination" => &mut destination,
+            _ => return Err(invalid("unknown settings argument; use --help")),
+        };
+        let value = args
+            .next()
+            .ok_or_else(|| invalid("argument requires a value"))?;
+        if slot.replace(PathBuf::from(value)).is_some() {
+            return Err(invalid("duplicate argument"));
+        }
+    }
+    Ok((
+        source.ok_or_else(|| invalid("--source is required"))?,
+        destination.ok_or_else(|| invalid("--destination is required"))?,
+    ))
+}
+
+pub fn export(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let transfer = JsonSettingsRepository::new(source.to_path_buf()).export_to(destination)?;
+    let stored = transfer.stored();
+    println!(
+        "Exported full Rust AppSettings (schema {}, revision {}) from {} to {}",
+        stored.schema_version,
+        stored.revision,
+        source.display(),
+        destination.display()
+    );
+    Ok(())
+}
+
+pub fn import(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(source)?;
+    let transfer = JsonSettingsRepository::new(destination.to_path_buf()).import(&bytes)?;
+    let stored = transfer.stored();
+    println!(
+        "Imported full Rust AppSettings (schema {}, revision {}) from {} into {}",
+        stored.schema_version,
+        stored.revision,
+        source.display(),
+        destination.display()
+    );
+    Ok(())
 }
 
 fn input() -> mpsc::Receiver<io::Result<String>> {

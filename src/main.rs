@@ -22,8 +22,20 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    let Some(options) = terminal::Options::parse()? else {
-        return Ok(());
+    let options = match terminal::Invocation::parse()? {
+        terminal::Invocation::Help => {
+            print!("{}", terminal::HELP);
+            return Ok(());
+        }
+        terminal::Invocation::Export {
+            source,
+            destination,
+        } => return terminal::export(&source, &destination),
+        terminal::Invocation::Import {
+            source,
+            destination,
+        } => return terminal::import(&source, &destination),
+        terminal::Invocation::Generate(options) => options,
     };
     let key = std::env::var("GEMINI_API_KEY").map_err(|_| {
         std::io::Error::new(

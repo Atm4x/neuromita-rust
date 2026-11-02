@@ -1,8 +1,10 @@
 mod model;
 mod storage;
+mod transfer;
 
 pub use model::*;
 pub use storage::*;
+pub use transfer::*;
 
 use std::sync::{Arc, Mutex};
 
@@ -275,7 +277,7 @@ impl SettingsLifecycle {
             SettingsSource::Initial(settings) => {
                 settings.validate()?;
                 StoredSettings {
-                    schema_version: 1,
+                    schema_version: SETTINGS_SCHEMA_VERSION,
                     revision: 0,
                     settings,
                 }
@@ -287,7 +289,7 @@ impl SettingsLifecycle {
                     .map_err(|error| SettingsError::Storage(error.to_string()))??
             }
         };
-        if stored.schema_version != 1 {
+        if stored.schema_version != SETTINGS_SCHEMA_VERSION {
             return Err(SettingsError::Storage("unsupported settings schema".into()));
         }
         stored.settings.validate()?;
@@ -325,7 +327,7 @@ impl SettingsLifecycle {
             return Ok(());
         }
         let stored = StoredSettings {
-            schema_version: 1,
+            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: snapshot.revision,
             settings: snapshot.values.clone(),
         };
