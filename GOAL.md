@@ -98,3 +98,15 @@
 - [ ] Контрактная сверка опубликованного Git tree в CI; локальные тесты выполнены на исходниках рабочей копии.
 
 Все статусы readiness различать: discovered / installed / environment-ready / worker-ready / model-ready. Не считать наличие manifest доказательством импортируемости модулей и работоспособности модели.
+
+
+### AI Runtime implementation continuation — 2026-11-03
+
+- [x] Добавлен `UvInstaller`: отдельный pinned distribution descriptor (release version, HTTPS/file URL, SHA-256, archive format), ограниченный download в staging, verified tar/ZIP extraction, запуск `uv --version`, atomic publish и receipt with executable digest; no shell installer, no PATH mutation.
+- [x] Общая immutable installation infrastructure `ai_runtime::layer` для model overlays и backend layers; shared uv invocation, staging и revisions. Overlay запрещает torch/onnxruntime distributions; backend validates selected runtime family and exclusive ONNX variants.
+- [x] Contract tests: install/reuse/tampered uv, wrong archive checksum, backend revision conflict/family, previous overlay regressions; tests without real model downloads.
+- [ ] Соединить `UvInstaller.prepare()` и `PythonBootstrap.prepare()` с пользовательским AI Hub startup: сейчас обе операции — самостоятельные Rust API, не автоматическая цепочка при старте приложения.
+- [ ] Получить/закрепить platform-specific official distribution checksums, mirrors, CI для Windows ZIP; проверить настоящий managed Python download и native wheel install. Сейчас network installer покрыт лишь локальными архивами и mock uv.
+- [ ] Добавить resolver/version lock generation и Python runtime import/file probes. Manifest о наличии backend/overlay означает **файловую установку**, не доказательство inference readiness. Разрешить композиции общих backend layers и активных overlays с проверкой cross-layer distribution conflicts.
+
+**Проверка:** `cargo fmt --check`, `cargo clippy --offline --locked --all-targets -- -D warnings` для default и no-default PASS; полный `cargo test --offline --locked --no-default-features -- --test-threads=1` PASS (199 passed, 2 ignored). Полный default-feature `cargo test` не завершился до инструментального таймаута во время компиляции, не помечать PASS.

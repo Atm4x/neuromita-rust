@@ -1,11 +1,12 @@
-//! Versioned package overlay publication from a previously resolved dependency lock.
+//! Immutable model-specific dependency overlays (never contain shared backend distributions).
 
 use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tokio::{process::Command, time::timeout};
-use uuid::Uuid;
+
+use super::layer::{LayerError, LayerInstaller, valid_segment, validate_lock};
+
+pub type OverlayError = LayerError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedPackage {
@@ -21,20 +22,6 @@ pub struct LockedOverlay {
     pub packages: Vec<LockedPackage>,
 }
 
-#[derive(Debug, Error)]
-pub enum OverlayError {
-    #[error("invalid overlay specification: {0}")]
-    Invalid(String),
-    #[error("overlay already exists with different contents")]
-    Conflict,
-    #[error("overlay filesystem error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("uv overlay install timed out")]
-    Timeout,
-    #[error("uv overlay install failed: {0}")]
-    Install(String),
-}
-
 pub struct OverlayInstaller {
     pub uv_executable: PathBuf,
     pub python_executable: PathBuf,
@@ -45,49 +32,15 @@ pub struct OverlayInstaller {
 
 impl LockedOverlay {
     fn validate(&self) -> Result<(), OverlayError> {
-        let safe_id = |value: &str| {
-            !value.is_empty()
-                && value.is_ascii()
-                && value
-                    .bytes()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
-                && value != "."
-                && value != ".."
-        };
-        if !safe_id(&self.plugin_id) || !safe_id(&self.revision) {
-            return Err(OverlayError::Invalid(
-                "invalid plugin ID or revision".into(),
-            ));
+        if !valid_segment(&self.plugin_id) || !valid_segment(&self.revision) {
+            return Err(LayerError::Invalid("invalid plugin ID or revision".into()));
         }
-        if self.python_version.is_empty()
-            || !self
-                .python_version
-                .bytes()
-                .all(|c| c.is_ascii_digit() || c == b'.')
-        {
-            return Err(OverlayError::Invalid("invalid Python version".into()));
-        }
-        if self.packages.len() > 256 {
-            return Err(OverlayError::Invalid("package limit exceeded".into()));
-        }
+        validate_lock(&self.packages, &self.python_version)?;
         for package in &self.packages {
-            if package.name.is_empty()
-                || !package
-                    .name
-                    .bytes()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' || ch == b'-')
-                || package.version.is_empty()
-                || !package.version.bytes().all(|ch| {
-                    ch.is_ascii_alphanumeric()
-                        || ch == b'.'
-                        || ch == b'+'
-                        || ch == b'-'
-                        || ch == b'_'
-                })
-                || !package.version.bytes().next().unwrap().is_ascii_digit()
-            {
-                return Err(OverlayError::Invalid("invalid locked distribution".into()));
-            }
+            let name = package
+                .name
+                .to_ascii_lowercase()
+                .replace(['-', '_', '.'], "-");
             if [
                 "torch",
                 "torchaudio",
@@ -96,9 +49,9 @@ impl LockedOverlay {
                 "onnxruntime-gpu",
                 "onnxruntime-directml",
             ]
-            .contains(&package.name.to_ascii_lowercase().as_str())
+            .contains(&name.as_str())
             {
-                return Err(OverlayError::Invalid(
+                return Err(LayerError::Invalid(
                     "backend packages belong to a separate layer".into(),
                 ));
             }
@@ -108,12 +61,19 @@ impl LockedOverlay {
 }
 
 impl OverlayInstaller {
+    fn layer(&self) -> LayerInstaller<'_> {
+        LayerInstaller {
+            uv_executable: &self.uv_executable,
+            python_executable: &self.python_executable,
+            cache_directory: &self.cache_directory,
+            timeout: self.timeout,
+        }
+    }
+
     pub fn installed_path(&self, plan: &LockedOverlay) -> Result<PathBuf, OverlayError> {
         plan.validate()?;
         if !self.overlays_directory.is_absolute() {
-            return Err(OverlayError::Invalid(
-                "overlay root must be absolute".into(),
-            ));
+            return Err(LayerError::Invalid("overlay root must be absolute".into()));
         }
         Ok(self
             .overlays_directory
@@ -122,99 +82,27 @@ impl OverlayInstaller {
     }
 
     pub async fn installed(&self, plan: &LockedOverlay) -> Result<bool, OverlayError> {
-        let destination = self.installed_path(plan)?;
-        let manifest = destination.join(".neuromita-overlay.json");
-        if !destination.exists() {
-            return Ok(false);
-        }
-        let bytes = tokio::fs::read(manifest)
+        self.layer()
+            .installed(&self.installed_path(plan)?, ".neuromita-overlay.json", plan)
             .await
-            .map_err(|_| OverlayError::Conflict)?;
-        let saved: LockedOverlay =
-            serde_json::from_slice(&bytes).map_err(|_| OverlayError::Conflict)?;
-        if saved != *plan {
-            return Err(OverlayError::Conflict);
-        }
-        Ok(true)
     }
 
     pub async fn install(&self, plan: &LockedOverlay) -> Result<PathBuf, OverlayError> {
-        let destination = self.installed_path(plan)?;
-        if self.installed(plan).await? {
-            return Ok(destination);
-        }
-        if !self.uv_executable.is_file() || !self.python_executable.is_file() {
-            return Err(OverlayError::Invalid(
-                "uv or managed Python is missing".into(),
-            ));
-        }
-        if !self.uv_executable.is_absolute()
-            || !self.python_executable.is_absolute()
-            || !self.cache_directory.is_absolute()
-        {
-            return Err(OverlayError::Invalid(
-                "executable and cache paths must be absolute".into(),
-            ));
-        }
-        let parent = destination
-            .parent()
-            .expect("destination always has a parent");
-        tokio::fs::create_dir_all(parent).await?;
-        tokio::fs::create_dir_all(&self.cache_directory).await?;
-        let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
-        tokio::fs::create_dir(&staging).await?;
-        let result = async {
-            if !plan.packages.is_empty() {
-                let mut cmd = Command::new(&self.uv_executable);
-                cmd.args([
-                    "pip",
-                    "install",
-                    "--no-config",
-                    "--no-deps",
-                    "--no-python-downloads",
-                    "--python",
-                ])
-                .arg(&self.python_executable)
-                .arg("--target")
-                .arg(&staging)
-                .env("UV_CACHE_DIR", &self.cache_directory)
-                .env_remove("VIRTUAL_ENV")
-                .kill_on_drop(true);
-                for package in &plan.packages {
-                    cmd.arg(format!("{}=={}", package.name, package.version));
-                }
-                let output = timeout(self.timeout, cmd.output())
-                    .await
-                    .map_err(|_| OverlayError::Timeout)??;
-                if !output.status.success() {
-                    return Err(OverlayError::Install(
-                        String::from_utf8_lossy(&output.stderr)
-                            .chars()
-                            .take(1200)
-                            .collect(),
-                    ));
-                }
-            }
-            let bytes = serde_json::to_vec_pretty(plan)
-                .map_err(|e| OverlayError::Invalid(e.to_string()))?;
-            tokio::fs::write(staging.join(".neuromita-overlay.json"), bytes).await?;
-            if destination.exists() {
-                return Err(OverlayError::Conflict);
-            }
-            tokio::fs::rename(&staging, &destination).await?;
-            Ok(destination.clone())
-        }
-        .await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_dir_all(staging).await;
-        }
-        result
+        self.layer()
+            .publish(
+                &self.installed_path(plan)?,
+                ".neuromita-overlay.json",
+                plan,
+                &plan.packages,
+            )
+            .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn plan() -> LockedOverlay {
         LockedOverlay {
@@ -248,7 +136,7 @@ mod tests {
         changed.python_version = "3.13.6".into();
         assert!(matches!(
             installer.installed(&changed).await,
-            Err(OverlayError::Conflict)
+            Err(LayerError::Conflict)
         ));
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
