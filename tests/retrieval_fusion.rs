@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use neuromita::{
     character::CharacterId,
-    generation::retrieval_fusion::{
+    knowledge::retrieval_fusion::{
         FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey,
         RetrievalMethod, RetrievalSource, fuse,
     },
@@ -33,7 +33,7 @@ fn config(mode: FusionMode, limit: usize) -> FusionConfig {
     }
 }
 
-fn ids(hits: &[neuromita::generation::retrieval_fusion::FusedHit]) -> Vec<String> {
+fn ids(hits: &[neuromita::knowledge::retrieval_fusion::FusedHit]) -> Vec<String> {
     hits.iter().map(|h| h.key.id.clone()).collect()
 }
 

@@ -4,7 +4,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::embedding::{
+use crate::knowledge::embedding::{
     Embedding, EmbeddingError, EmbeddingFuture, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace,
 };
 

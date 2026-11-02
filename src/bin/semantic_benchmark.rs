@@ -1,11 +1,11 @@
 use std::{collections::HashSet, env, fs, sync::Arc, time::Instant};
 
 use neuromita::{
+    adapters::gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
     character::CharacterId,
-    generation::{
+    knowledge::{
         embedding::EmbeddingProvider,
-        gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
-        lexical_selected_ids,
+        memory_context::lexical_selected_ids,
         semantic_memory::{RetrievalCost, SemanticMemoryRetriever},
     },
     timeline::domain::{MemoryId, MemoryPriority, MemoryRecord},
@@ -224,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_fixture_evaluates_the_same_production_rankers() {
-        use neuromita::generation::embedding::{
+        use neuromita::knowledge::embedding::{
             Embedding, EmbeddingFuture, EmbeddingPurpose, EmbeddingSpace,
         };
         struct Fixture {

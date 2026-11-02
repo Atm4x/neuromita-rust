@@ -1,7 +1,5 @@
 use serde_json::{Map, Value};
 
-use super::memory_context::{MemoryHandoff, render_memory_context};
-
 use crate::{
     character::CharacterContext,
     identity::{CharacterId, EventId},
@@ -265,7 +263,7 @@ impl LlmConversation {
 
     pub(crate) fn from_context_with_memory(
         context: &CharacterContext,
-        semantic_memory: &MemoryHandoff,
+        prepared_knowledge: &Option<String>,
     ) -> Self {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
@@ -273,7 +271,6 @@ impl LlmConversation {
         };
         let (mut messages, target_present) =
             project_history(&context.view, context.character_id, focus);
-        let history_message_count = messages.len();
         if !context.working_state.is_empty() {
             let state = &context.working_state;
             let mut handoff = vec![
@@ -301,13 +298,7 @@ impl LlmConversation {
                 text: handoff.join("\n"),
             });
         }
-        let memory_text = match semantic_memory {
-            MemoryHandoff::Semantic(text) => text.clone(),
-            MemoryHandoff::Lexical => render_memory_context(
-                &context.memories,
-                &Self::build_memory_query(context, &messages[..history_message_count]),
-            ),
-        };
+        let memory_text = prepared_knowledge.clone();
         if let Some(text) = memory_text {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,

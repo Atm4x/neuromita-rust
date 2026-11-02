@@ -1,9 +1,11 @@
+pub mod adapters;
 pub mod api;
 pub mod app;
 pub mod character;
 pub mod generation;
 mod identity;
 mod interaction;
+pub mod knowledge;
 pub mod launcher;
 pub mod lifecycle;
 pub mod migration;

@@ -4,7 +4,7 @@
 
 `ChatApi::reply`, `ChatApi::react`, and `ChatApi::initiate` express *what to do*, never a provider, model, preset or transport configuration. A pending `GenerationCommand` stores only character, operation, target/instruction, source and audience. It does **not** resolve or retain a preset at admission.
 
-At exactly one point, **after dequeue and immediately before beginning LLM generation**, the generation executor reads the currently configured preset assignment for `(CharacterId, operation)` and the active preset ID. It resolves the ID against the configured preset catalog, **materializes/clones a fully owned `GenerationPreset`**, then supplies that value to `GenerationRequest::new(context, preset)`. No additional preset settings reads or re-resolution occur for that attempt, including retries.
+At exactly one point, **after dequeue and immediately before beginning LLM generation**, the generation executor reads the currently configured preset assignment for `(CharacterId, operation)` and the active preset ID. It resolves the ID against the configured preset catalog, **materializes/clones a fully owned `GenerationPreset`**, then supplies that value to `GenerationRequest::new(context, preset, prepared_knowledge)`. No additional preset settings reads or re-resolution occur for that attempt, including retries.
 
 - Queued commands pick up edited assignments and active presets on their eventual execution.
 - A running command retains the preset value selected at its start even if assignments or preset definitions change later.

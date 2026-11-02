@@ -4,13 +4,13 @@ use std::sync::{
 };
 
 use neuromita::{
+    adapters::gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
     character::CharacterId,
-    generation::{
+    knowledge::{
         embedding::{
             Embedding, EmbeddingError, EmbeddingFuture, EmbeddingProvider, EmbeddingPurpose,
             EmbeddingSpace,
         },
-        gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
         semantic_memory::SemanticMemoryRetriever,
     },
     timeline::domain::{MemoryId, MemoryPriority, MemoryRecord},
@@ -399,7 +399,7 @@ async fn semantic_ranking_preserves_prompt_budget_and_order_independence() {
 
 #[tokio::test]
 async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_space() {
-    use neuromita::generation::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
+    use neuromita::knowledge::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
 
     let fixture = Arc::new(SemanticFixture::new("model-a"));
     let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
@@ -457,7 +457,7 @@ async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_spac
 
 #[tokio::test]
 async fn invalid_similarity_filter_is_rejected_before_embedding_requests() {
-    use neuromita::generation::semantic_memory::SemanticRetrievalFilter;
+    use neuromita::knowledge::semantic_memory::SemanticRetrievalFilter;
 
     let fixture = Arc::new(SemanticFixture::new("model-a"));
     let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
@@ -481,7 +481,7 @@ async fn invalid_similarity_filter_is_rejected_before_embedding_requests() {
 
 #[tokio::test]
 async fn semantic_results_remain_distinguishable_from_provider_failure() {
-    use neuromita::generation::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
+    use neuromita::knowledge::semantic_memory::{RetrievalStatus, SemanticRetrievalFilter};
 
     let fixture = Arc::new(SemanticFixture {
         fail: true,
@@ -511,7 +511,7 @@ async fn semantic_results_remain_distinguishable_from_provider_failure() {
 
 #[tokio::test]
 async fn explicit_fusion_reranks_synthetic_memory_without_changing_vector_default() {
-    use neuromita::generation::{
+    use neuromita::knowledge::{
         retrieval_fusion::{FusionMode, RetrievalMethod},
         semantic_memory::SemanticRetrievalFilter,
     };
@@ -560,17 +560,10 @@ async fn explicit_fusion_reranks_synthetic_memory_without_changing_vector_defaul
 
 #[test]
 fn generation_fusion_opt_in_rejects_invalid_mode_without_provider_calls() {
-    use neuromita::generation::{
-        GenerationProvider, ResponseGenerator, retrieval_fusion::FusionMode,
-    };
+    use neuromita::knowledge::{KnowledgeRetrieval, retrieval_fusion::FusionMode};
     let fixture = Arc::new(SemanticFixture::new("fixture-fusion-validation"));
     let retrieval = Arc::new(SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap());
-    let generator = ResponseGenerator::new(Vec::<Arc<dyn GenerationProvider>>::new()).unwrap();
-    assert!(
-        generator
-            .with_semantic_memory_fusion(retrieval, FusionMode::Rrf { k: 0 })
-            .is_err()
-    );
+    assert!(KnowledgeRetrieval::semantic_fusion(retrieval, FusionMode::Rrf { k: 0 }).is_err());
     assert_eq!(fixture.query_count.load(Ordering::Relaxed), 0);
     assert_eq!(fixture.document_batches.load(Ordering::Relaxed), 0);
 }

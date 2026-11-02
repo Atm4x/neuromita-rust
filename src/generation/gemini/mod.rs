@@ -24,7 +24,8 @@ impl GeminiProvider {
         context: GenerationInput,
         template: GeminiTemplate,
     ) -> Result<super::StructuredResponse, GenerationError> {
-        let body = wire::encode_with_memory(context.context, &template, &context.memory_handoff);
+        let body =
+            wire::encode_with_memory(context.context, &template, &context.prepared_knowledge);
         let mut response = self
             .client
             .post(template.request_url())
