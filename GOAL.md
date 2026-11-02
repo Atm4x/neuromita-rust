@@ -66,6 +66,7 @@
 - [x] Асинхронный retrieval от зафиксированной проекции Timeline без второго canonical store и блокировок во время HTTP.
 - [x] Корректное членство при изменении, удалении, merge, fork/history и пересоздании cache; lexical явно сохраняется.
 - [x] Синтетическое сравнение качества и числа embedding-запросов; HTTP fixture tests в обоих профилях.
-- [ ] Реальный live model benchmark/cost и выбор в GUI/пресетах, расширенные RAG/knowledge graph операции.
+- [x] Опциональный live benchmark harness: единый lexical/semantic shortlist, проверка размеченного корпуса, Hit@1/Hit@3, latency, request/text/cache counters; синтетический offline fixture. См. `src/generation/SEMANTIC_BENCHMARK.md`.
+- [ ] Реальные измерения на представительном корпусе с явно предоставленным Gemini API key, точные billing tokens/USD, GUI/пресеты и расширенные RAG/knowledge graph операции.
 
 Технический контракт: [src/generation/SEMANTIC_RETRIEVAL.md](src/generation/SEMANTIC_RETRIEVAL.md).

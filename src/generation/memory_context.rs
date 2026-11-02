@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::timeline::domain::{MemoryPriority, MemoryRecord};
+use crate::timeline::domain::{MemoryId, MemoryPriority, MemoryRecord};
 
 /// Hard character budget for the entire memory handoff, including metadata.
 const MAX_MEMORY_CONTEXT_CHARS: usize = 6_000;
@@ -33,9 +33,15 @@ pub(super) fn priority_rank(priority: MemoryPriority) -> u8 {
 /// A bounded, deterministic lexical shortlist, not vector or semantic retrieval.
 /// All records remain in the canonical Timeline regardless of selection.
 pub(crate) fn render_memory_context(memories: &[MemoryRecord], query: &str) -> Option<String> {
-    if memories.is_empty() {
-        return None;
-    }
+    render_ranked_memory_context(lexical_ranked(memories, query).into_iter()).0
+}
+
+/// Returns the IDs admitted to the same bounded prompt as the lexical generation path.
+pub fn lexical_selected_ids(memories: &[MemoryRecord], query: &str) -> Vec<MemoryId> {
+    render_ranked_memory_context(lexical_ranked(memories, query).into_iter()).1
+}
+
+fn lexical_ranked<'a>(memories: &'a [MemoryRecord], query: &str) -> Vec<&'a MemoryRecord> {
     let query_tokens = tokens(query);
     let mut candidates: Vec<_> = memories
         .iter()
@@ -52,8 +58,10 @@ pub(crate) fn render_memory_context(memories: &[MemoryRecord], query: &str) -> O
                 .then_with(|| left.id.cmp(&right.id))
         },
     );
-
-    render_ranked_memory_context(candidates.into_iter().map(|(record, _, _)| record)).0
+    candidates
+        .into_iter()
+        .map(|(record, _, _)| record)
+        .collect()
 }
 
 /// Preserve the caller's ranking (semantic or lexical), enforcing identical output budgets.
