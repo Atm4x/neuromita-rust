@@ -1,0 +1,33 @@
+name: Export pinned PR72 main delta for AI branch
+on:
+  push:
+    branches:
+      - bridge/ai-main72-refresh-20261103
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export main delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=302b98ce26bb110d4716aa482a37c1ed1cfceae5
+          HEAD=c4901f2cfc881a1268804dd406f4005368b1c70c
+          git fetch origin main:refs/heads/new-main
+          test "$(git rev-parse refs/heads/new-main)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git bundle create main72.bundle refs/heads/new-main "^$BASE"
+          git bundle verify main72.bundle
+          sha256sum main72.bundle > main72.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-main72-delta
+          path: |
+            main72.bundle
+            main72.bundle.sha256
+          retention-days: 1
