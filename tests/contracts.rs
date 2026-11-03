@@ -11,7 +11,7 @@ use std::{
 use neuromita::{
     api::{CharacterApi, ChatApi},
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
-    character::{CharacterContext, CharacterId},
+    character::CharacterId,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator,
@@ -39,7 +39,7 @@ use tokio::{
 use uuid::Uuid;
 
 struct GenerationCall {
-    context: CharacterContext,
+    context: neuromita::generation::GenerationInput,
     reply: oneshot::Sender<Result<Arc<str>, GenerationError>>,
 }
 struct ControlledGeneration(mpsc::UnboundedSender<GenerationCall>);
@@ -49,7 +49,7 @@ impl GenerationProvider for ControlledGeneration {
     }
     fn generate(
         &self,
-        context: CharacterContext,
+        context: neuromita::generation::GenerationInput,
         _template: ProviderTemplate,
     ) -> ProviderFuture<'_> {
         Box::pin(async move {

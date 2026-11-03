@@ -1,6 +1,6 @@
 # NeuroMita Rust — текущая цель
 
-Обновление после интеграции PR #55–58: все четыре merged в main, вместе с исправлениями ядра и системой миграций. Следующий незавершённый этап — semantic retrieval. Он ещё не реализован; точка продолжения и проверки объединённой базы: [semantic-retrieval](future/semantic-retrieval.md).
+Обновление после интеграции PR #55–58: все четыре merged в main, вместе с исправлениями ядра и системой миграций. Semantic retrieval реализован как отдельный opt-in срез: Gemini 001/2 embedding HTTP, bounded derived cache, точное cosine-ранжирование и синтетические fixture-тесты. Живое качество модели и тарифная стоимость не подтверждены; см. [semantic-retrieval](future/semantic-retrieval.md).
 
 **Актуальный срез:** 2026-11-02. **Базовая ревизия перед текущим проходом:** `8994f8d` (`codex/typed-long-term-memory-20261102`); текущий проход — ограниченный отбор воспоминаний и точная дедупликация. Этот документ — рабочий план, а не утверждение о полной Python parity.
 
@@ -143,3 +143,14 @@
 - [ ] Verify published HEAD through CI on Windows and Linux; local Rust 1.98.1 and Python tests do not substitute for full remote CI or real installed models.
 
 Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin contract), #61 (voice assets) open. Prefer real model probes and installation verification next; do not add a second Python supervisor.
+
+## Semantic retrieval (новый срез)
+
+- [x] Независимый EmbeddingProvider и Gemini 001/2 HTTP adapters; явные модели, task/protocol и cache-key space.
+- [x] Асинхронный retrieval от зафиксированной проекции Timeline без второго canonical store и блокировок во время HTTP.
+- [x] Корректное членство при изменении, удалении, merge, fork/history и пересоздании cache; lexical явно сохраняется.
+- [x] Синтетическое сравнение качества и числа embedding-запросов; HTTP fixture tests в обоих профилях.
+- [x] Опциональный live benchmark harness: единый lexical/semantic shortlist, проверка размеченного корпуса, Hit@1/Hit@3, latency, request/text/cache counters; синтетический offline fixture. См. `src/generation/SEMANTIC_BENCHMARK.md`.
+- [ ] Реальные измерения на представительном корпусе с явно предоставленным Gemini API key, точные billing tokens/USD, GUI/пресеты и расширенные RAG/knowledge graph операции.
+
+Технический контракт: [src/generation/SEMANTIC_RETRIEVAL.md](src/generation/SEMANTIC_RETRIEVAL.md).

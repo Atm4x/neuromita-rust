@@ -23,6 +23,7 @@ use crate::{
     },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
+    knowledge::KnowledgeRetrieval,
     lifecycle::Lifecycle,
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
@@ -60,6 +61,7 @@ pub struct ApplicationConfig {
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
+    pub knowledge: KnowledgeRetrieval,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub settings: SettingsConfig,
@@ -80,6 +82,7 @@ impl ApplicationConfig {
             timeline: TimelineConfig::Transient,
             presets: PresetCatalog::single(preset),
             generator,
+            knowledge: KnowledgeRetrieval::lexical(),
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             settings: SettingsConfig {
@@ -241,6 +244,7 @@ impl ApplicationLifecycle {
             migrations,
             presets,
             generator,
+            knowledge,
             limits,
             voice,
             settings,
@@ -276,6 +280,7 @@ impl ApplicationLifecycle {
             limits.character_commands.get(),
         );
         let generator = Arc::new(generator);
+        let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
         let settings_owner = settings.owner();
         let mut handlers = HashMap::new();
@@ -291,6 +296,7 @@ impl ApplicationLifecycle {
                 character: characters.get(id).expect("hardcoded character exists"),
                 registry: Arc::clone(&registry),
                 generator: Arc::clone(&generator),
+                knowledge: Arc::clone(&knowledge),
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),

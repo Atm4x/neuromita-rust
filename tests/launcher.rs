@@ -254,7 +254,11 @@ fn config_persists_only_install_selection_and_reopens() {
     store.save(&config).expect("save config");
 
     let mut updated = config.clone();
-    updated.candidate = Some(PathBuf::from(".\\NeuroMita.exe"));
+    updated.candidate = Some(PathBuf::from(if cfg!(windows) {
+        ".\\NeuroMita.exe"
+    } else {
+        "./NeuroMita.exe"
+    }));
     store.save(&updated).expect("overwrite existing config");
 
     let reopened = ConfigStore::new(&path).load().expect("reload config");

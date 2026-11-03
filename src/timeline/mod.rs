@@ -18,6 +18,14 @@ pub mod conversation;
 pub mod domain;
 pub mod ingress;
 mod legacy;
+#[cfg(test)]
+mod memory_maintenance_tests;
+mod memory_operations;
+// Administrative purge is not reachable from generation or runtime until an authorized UI exists.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod memory_purge;
+#[cfg(test)]
+mod memory_purge_tests;
 pub mod message_actions;
 pub mod selection;
 pub mod storage;
@@ -392,6 +400,50 @@ impl SessionTimeline {
         self.store
             .append(self.branch, head, key, json!({}), vec![draft])?;
         Ok(())
+    }
+
+    /// Apply expired, unprotected memories in one guarded Timeline transaction.
+    /// The scheduler/caller supplies time and selection; no read-side mutation occurs.
+    pub(crate) fn expire_character_memories(
+        &mut self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        as_of_unix_ms: u64,
+    ) -> Result<usize, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let head = self.anchor().through;
+        let facts = self.store.world(self.branch)?;
+        let memories = crate::character::projection::character_memories_at(&facts, character)?;
+        let changes = memories.resolve_expirations(as_of_unix_ms);
+        if changes.is_empty() {
+            return Ok(0);
+        }
+        let count = changes.len();
+        let mut drafts = Vec::with_capacity(count);
+        for change in changes {
+            let mut draft = EventDraft::new(EventKind::CharacterMemoryChanged);
+            draft.actor = Some(character.to_string());
+            draft.observers.insert(character);
+            draft.payload.insert(
+                "change".into(),
+                serde_json::to_value(change)
+                    .map_err(|_| domain::TimelineError::Invalid("invalid expiry change"))?,
+            );
+            drafts.push(draft);
+        }
+        self.store.append_guarded(
+            self.branch,
+            head,
+            &format!("memory-expiry:{character}:{as_of_unix_ms}:{head}"),
+            json!({"character": character.to_string(), "as_of_unix_ms": as_of_unix_ms}),
+            drafts,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(count)
     }
 
     pub(crate) fn anchor(&self) -> ContextAnchor {
@@ -1270,6 +1322,10 @@ mod tests {
                 id: memory_id,
                 priority: MemoryPriority::High,
                 content: "first fact".into(),
+                kind: crate::memory::MemoryKind::Fact,
+                state: crate::memory::MemoryState::Active,
+                protected: false,
+                expires_at_unix_ms: None,
             };
             let turn = timeline
                 .capture_turn(CharacterId::Mita, None, timeline.anchor())
@@ -1292,6 +1348,10 @@ mod tests {
                 id: memory_id,
                 priority: MemoryPriority::Critical,
                 content: "corrected fact".into(),
+                kind: crate::memory::MemoryKind::Fact,
+                state: crate::memory::MemoryState::Active,
+                protected: false,
+                expires_at_unix_ms: None,
             };
             let turn = timeline
                 .capture_turn(CharacterId::Mita, None, timeline.anchor())

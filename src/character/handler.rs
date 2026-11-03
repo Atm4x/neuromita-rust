@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -15,8 +16,10 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
+    character::memory_access::{CharacterMemorySnapshot, MemoryEditResult},
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
+    memory::MemoryCommand,
     timeline::domain::{AppliedEffect, CharacterBehavior},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
@@ -34,6 +37,8 @@ pub enum CharacterError {
     Unavailable,
     #[error("character state changed since context preparation")]
     StaleState,
+    #[error("invalid character memory operation: {0}")]
+    InvalidMemory(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
 }
@@ -75,6 +80,12 @@ enum Command {
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
     },
     State(oneshot::Sender<Result<CharacterState, CharacterError>>),
+    MemorySnapshot(oneshot::Sender<Result<CharacterMemorySnapshot, CharacterError>>),
+    EditMemory {
+        expected: CharacterMemorySnapshot,
+        commands: Vec<MemoryCommand>,
+        reply: oneshot::Sender<Result<MemoryEditResult, CharacterError>>,
+    },
     View {
         at: ContextAnchor,
         reply: oneshot::Sender<Result<CharacterView, CharacterError>>,
@@ -91,6 +102,32 @@ pub struct CharacterHandle {
 }
 
 impl CharacterHandle {
+    pub async fn memories(&self) -> Result<CharacterMemorySnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::MemorySnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn edit_memories(
+        &self,
+        expected: CharacterMemorySnapshot,
+        commands: Vec<MemoryCommand>,
+    ) -> Result<MemoryEditResult, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::EditMemory {
+                expected,
+                commands,
+                reply,
+            })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
     pub async fn state(&self) -> Result<CharacterState, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -174,6 +211,45 @@ impl CharacterRegistry {
         stop: CancellationToken,
         capacity: usize,
     ) -> (Self, Vec<JoinHandle<()>>) {
+        Self::spawn_with_maintenance_interval(timeline, stop, capacity, Duration::from_secs(60))
+    }
+
+    fn maintenance_pass(
+        timeline: &mut SessionTimeline,
+        now: u64,
+    ) -> Result<usize, crate::timeline::domain::TimelineError> {
+        let selected = timeline.selection();
+        let mut total = 0;
+        for character in CharacterId::ALL {
+            total += timeline.expire_character_memories(selected, character, now)?;
+        }
+        Ok(total)
+    }
+
+    pub(crate) fn now_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn spawn_with_maintenance_interval(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        interval: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        assert!(
+            !interval.is_zero(),
+            "memory maintenance interval must be positive"
+        );
+        {
+            let mut locked = timeline.lock().expect("timeline lock poisoned");
+            Self::maintenance_pass(&mut locked, Self::now_unix_ms())
+                .expect("memory expiration maintenance must commit at startup");
+        }
         let mut handles = HashMap::new();
         let mut tasks = Vec::new();
         for id in CharacterId::ALL {
@@ -190,6 +266,27 @@ impl CharacterRegistry {
             handles.insert(id, CharacterHandle { commands: send });
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
         }
+        let maintenance_timeline = Arc::clone(&timeline);
+        tasks.push(tokio::spawn(async move {
+            let mut timer = tokio::time::interval(interval);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    _ = timer.tick() => {
+                        let result = {
+                            let mut timeline = maintenance_timeline.lock().expect("timeline lock poisoned");
+                            Self::maintenance_pass(&mut timeline, Self::now_unix_ms())
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "periodic memory expiration pass failed");
+                        }
+                    }
+                }
+            }
+        }));
         (Self { handles }, tasks)
     }
 
@@ -232,6 +329,51 @@ impl CharacterHandler {
                     reply,
                 } => {
                     let _ = reply.send(self.accept(request, context, proposed, audio, audience));
+                }
+                Command::MemorySnapshot(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            timeline
+                                .character_memory_snapshot(self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::EditMemory {
+                    expected,
+                    commands,
+                    reply,
+                } => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|mut timeline| {
+                            if expected.character != self.character.id {
+                                return Err(CharacterError::StaleState);
+                            }
+                            let applied = timeline
+                                .edit_character_memories(
+                                    self.character.id,
+                                    expected.selection,
+                                    expected.anchor,
+                                    &commands,
+                                )
+                                .map_err(|error| match error {
+                                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                        CharacterError::StaleState
+                                    }
+                                    other => CharacterError::Internal(other.to_string()),
+                                })?;
+                            let snapshot = timeline
+                                .character_memory_snapshot(self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                            Ok(MemoryEditResult { applied, snapshot })
+                        });
+                    let _ = reply.send(result);
                 }
                 Command::State(reply) => {
                     let state = self
@@ -312,6 +454,7 @@ impl CharacterHandler {
         let state = captured.state;
         let working_state = captured.working_state;
         let memories = captured.memories.list();
+        let memory_islands = captured.memories.islands();
         let reaction = match intent {
             TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
                 captured
@@ -356,6 +499,7 @@ impl CharacterHandler {
             state,
             working_state,
             memories,
+            memory_islands,
             history: captured.history,
             view: captured.view,
             current_input: guidance,
@@ -461,6 +605,7 @@ impl CharacterHandler {
             state: captured.state,
             working_state: captured.working_state,
             memories: captured.memories.list(),
+            memory_islands: captured.memories.islands(),
             history: captured.history,
             view: captured.view,
         })

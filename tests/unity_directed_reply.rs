@@ -8,7 +8,7 @@ use neuromita::timeline::{
 use neuromita::{
     api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
-    character::{CharacterContext, CharacterId},
+    character::CharacterId,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator,
@@ -35,7 +35,7 @@ use tokio::{
 };
 
 struct LlmCall {
-    context: CharacterContext,
+    context: neuromita::generation::GenerationInput,
     reply: oneshot::Sender<Arc<str>>,
 }
 
@@ -48,7 +48,7 @@ impl GenerationProvider for ControlledProvider {
 
     fn generate(
         &self,
-        context: CharacterContext,
+        context: neuromita::generation::GenerationInput,
         _template: ProviderTemplate,
     ) -> ProviderFuture<'_> {
         Box::pin(async move {

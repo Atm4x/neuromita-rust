@@ -72,6 +72,10 @@ fn check(store: &mut dyn TimelineRepository) {
         id: MemoryId::new(),
         priority: MemoryPriority::High,
         content: "Player likes tea".into(),
+        kind: neuromita::memory::MemoryKind::Fact,
+        state: neuromita::memory::MemoryState::Active,
+        protected: false,
+        expires_at_unix_ms: None,
     };
     let memory =
         |change: MemoryChange| effect(EventKind::CharacterMemoryChanged, json!({"change":change}));
@@ -121,6 +125,10 @@ fn check(store: &mut dyn TimelineRepository) {
             id: MemoryId::new(),
             priority: MemoryPriority::Normal,
             content: format!("memory {index}"),
+            kind: neuromita::memory::MemoryKind::Fact,
+            state: neuromita::memory::MemoryState::Active,
+            protected: false,
+            expires_at_unix_ms: None,
         })));
     }
     let before = store.branch(branch).unwrap().head_sequence;
@@ -157,11 +165,19 @@ fn check(store: &mut dyn TimelineRepository) {
         id: MemoryId::new(),
         priority: MemoryPriority::Normal,
         content: "merge target".into(),
+        kind: neuromita::memory::MemoryKind::Fact,
+        state: neuromita::memory::MemoryState::Active,
+        protected: false,
+        expires_at_unix_ms: None,
     };
     let source = MemoryRecord {
         id: MemoryId::new(),
         priority: MemoryPriority::High,
         content: "merge source".into(),
+        kind: neuromita::memory::MemoryKind::Fact,
+        state: neuromita::memory::MemoryState::Active,
+        protected: false,
+        expires_at_unix_ms: None,
     };
     assert!(push(
         store,
@@ -198,6 +214,115 @@ fn sqlite_uses_the_same_canonical_validation_inside_the_transaction() {
     ));
     let mut repository = SqliteTimelineRepository::open(&path).unwrap();
     check(&mut repository);
+    drop(repository);
+    std::fs::remove_file(path).unwrap();
+}
+
+fn check_lifecycle_effects(store: &mut dyn TimelineRepository) {
+    use neuromita::memory::{MemoryIsland, MemoryKind, MemoryState};
+    let branch = BranchId::new();
+    store.create_session(SessionId::new(), branch).unwrap();
+    let mut island =
+        MemoryRecord::fact(MemoryId::new(), MemoryPriority::Normal, "Player likes tea");
+    island.kind = MemoryKind::Island(MemoryIsland::Preferences);
+    let encode = |record: MemoryRecord| {
+        effect(
+            EventKind::CharacterMemoryChanged,
+            json!({"change": MemoryChange::Upsert(record)}),
+        )
+    };
+    assert!(push(store, branch, vec![encode(island.clone())]));
+    let mut duplicate = island.clone();
+    duplicate.id = MemoryId::new();
+    assert!(!push(store, branch, vec![encode(duplicate)]));
+    let mut forgotten = island.clone();
+    forgotten.state = MemoryState::Forgotten;
+    assert!(push(store, branch, vec![encode(forgotten.clone())]));
+    let mut restored = forgotten;
+    restored.state = MemoryState::Active;
+    assert!(push(store, branch, vec![encode(restored)]));
+    let mut deleted = island;
+    deleted.state = MemoryState::Deleted;
+    assert!(push(store, branch, vec![encode(deleted)]));
+}
+
+#[test]
+fn canonical_memory_lifecycle_is_validated_in_memory() {
+    check_lifecycle_effects(&mut TimelineStore::new());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn canonical_memory_lifecycle_is_validated_in_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path =
+        std::env::temp_dir().join(format!("neuromita-islands-{}.sqlite", uuid::Uuid::new_v4()));
+    let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+    check_lifecycle_effects(&mut repository);
+    drop(repository);
+    std::fs::remove_file(path).unwrap();
+}
+
+fn check_protected_effects(store: &mut dyn TimelineRepository) {
+    let branch = BranchId::new();
+    store.create_session(SessionId::new(), branch).unwrap();
+    let mut record = MemoryRecord::fact(MemoryId::new(), MemoryPriority::Critical, "protected");
+    let change =
+        |value: MemoryChange| effect(EventKind::CharacterMemoryChanged, json!({"change": value}));
+    assert!(push(
+        store,
+        branch,
+        vec![change(MemoryChange::Upsert(record.clone()))]
+    ));
+    assert!(push(
+        store,
+        branch,
+        vec![change(MemoryChange::SetProtection {
+            id: record.id,
+            protected: true,
+        })]
+    ));
+    let before = store.branch(branch).unwrap().head_sequence;
+    record.state = neuromita::memory::MemoryState::Forgotten;
+    assert!(!push(
+        store,
+        branch,
+        vec![change(MemoryChange::Upsert(record.clone()))]
+    ));
+    assert!(!push(
+        store,
+        branch,
+        vec![change(MemoryChange::Delete(record.id))]
+    ));
+    assert_eq!(store.branch(branch).unwrap().head_sequence, before);
+    assert!(push(
+        store,
+        branch,
+        vec![
+            change(MemoryChange::SetProtection {
+                id: record.id,
+                protected: false
+            }),
+            change(MemoryChange::Upsert(record)),
+        ]
+    ));
+}
+
+#[test]
+fn protection_is_canonical_and_atomic_in_memory() {
+    check_protected_effects(&mut TimelineStore::new());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn protection_is_canonical_and_atomic_in_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let path = std::env::temp_dir().join(format!(
+        "neuromita-protection-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut repository = SqliteTimelineRepository::open(&path).unwrap();
+    check_protected_effects(&mut repository);
     drop(repository);
     std::fs::remove_file(path).unwrap();
 }

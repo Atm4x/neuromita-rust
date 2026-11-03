@@ -7,7 +7,10 @@ use tracing::Instrument;
 use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
-    generation::{GenerationRequest, PresetCatalog, ResponseGenerator},
+    generation::{
+        GenerationError, GenerationRequest, LlmConversation, PresetCatalog, ResponseGenerator,
+    },
+    knowledge::KnowledgeRetrieval,
     settings::SettingsOwner,
     timeline::selection::TimelineSelection,
     voice::{VoiceError, VoiceOptions, VoiceProvider},
@@ -18,6 +21,7 @@ pub(crate) struct MessageHandler {
     pub(crate) character: CharacterHandle,
     pub(crate) registry: Arc<RequestRegistry>,
     pub(crate) generator: Arc<ResponseGenerator>,
+    pub(crate) knowledge: Arc<KnowledgeRetrieval>,
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
@@ -162,7 +166,6 @@ impl MessageHandler {
             }
         };
         record.set_preset_description(format!("{:?}", preset));
-        let request = GenerationRequest::new(context, preset);
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
@@ -176,7 +179,18 @@ impl MessageHandler {
                 record.finish_cancelled();
                 return;
             }
-            response = self.generator.generate(request) => response,
+            response = async {
+                let query = LlmConversation::memory_query(&context);
+                let selected = self.knowledge
+                    .select_with_islands(context.character_id, &context.memories, &context.memory_islands, &query)
+                    .await
+                    .map_err(|error| GenerationError::Response(
+                        format!("knowledge retrieval failed: {error}")
+                    ))?;
+                self.generator
+                    .generate(GenerationRequest::new(context, preset, selected))
+                    .await
+            } => response,
         };
         let proposed = match generated {
             Ok(proposed) => proposed,
