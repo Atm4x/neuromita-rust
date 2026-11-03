@@ -31,7 +31,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit\n\n{}",
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -104,6 +104,156 @@ fn input() -> mpsc::Receiver<io::Result<String>> {
         }
     });
     receive
+}
+
+/// Real user workflow over the same typed `RemindersApi` the model tools use.
+async fn reminder_command(character: CharacterId, line: &str) -> Result<String, String> {
+    use neuromita::reminders::{
+        CreateReminder, CreateTimer, RemindersApi, TimeZoneId, UpdateReminder, parse_friendly_due,
+        parse_structured_repeat, system_timezone,
+    };
+    let settings =
+        neuromita::settings::SettingsApi::snapshot::<neuromita::settings::RemindersSettings>()
+            .map_err(|error| error.to_string())?;
+    let zone = settings.value.timezone.clone();
+    let policy = settings.value.policy;
+    let now = RemindersApi::now()
+        .await
+        .map_err(|error| error.to_string())?;
+    let rest = if line.trim() == "/reminders" {
+        "list"
+    } else {
+        line.trim_start_matches("/reminder").trim()
+    };
+    let (action, args) = match rest.split_once(char::is_whitespace) {
+        Some((action, args)) => (action, args.trim()),
+        None => (rest, ""),
+    };
+    match action {
+        "" | "list" => {
+            let views = RemindersApi::list(character)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut lines = views.iter().map(|view| view.summary()).collect::<Vec<_>>();
+            if lines.is_empty() {
+                lines.push("Нет активных напоминаний.".into());
+            }
+            let snapshot = RemindersApi::snapshot().map_err(|error| error.to_string())?;
+            for delivery in snapshot
+                .deliveries
+                .iter()
+                .filter(|delivery| delivery.character == character)
+            {
+                lines.push(format!(
+                    "Доставка {}: {:?}; запрос {:?}; ошибка {:?}",
+                    delivery.id, delivery.state, delivery.request_id, delivery.last_error
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+        "add" => {
+            let (due, text) = args
+                .split_once('|')
+                .ok_or("формат: /reminder add <когда> | <текст>")?;
+            let due = parse_friendly_due(due.trim(), now, &zone, policy)
+                .map_err(|error| error.to_string())?;
+            let view = RemindersApi::create(CreateReminder::new(character, text.trim(), due))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Создано: {}", view.summary()))
+        }
+        "timer" => {
+            let (delay, instruction) = args
+                .split_once('|')
+                .ok_or("формат: /reminder timer <секунды> | <инструкция>")?;
+            let delay: f64 = delay
+                .trim()
+                .parse()
+                .map_err(|_| "задержка должна быть числом секунд".to_string())?;
+            if !delay.is_finite() || delay <= 0.0 {
+                return Err("задержка должна быть положительной".into());
+            }
+            let delay = std::time::Duration::try_from_secs_f64(delay)
+                .map_err(|_| "задержка вне допустимого диапазона".to_string())?;
+            let view =
+                RemindersApi::create_timer(CreateTimer::new(character, instruction.trim(), delay))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            Ok(format!("Запущен таймер: {}", view.summary()))
+        }
+        "update" => {
+            let (number, rest) = args
+                .split_once(char::is_whitespace)
+                .ok_or("формат: /reminder update <N> text|due|repeat <значение>")?;
+            let number: u64 = number
+                .parse()
+                .map_err(|_| "N должно быть числом".to_string())?;
+            let (field, value) = rest
+                .split_once(char::is_whitespace)
+                .ok_or("формат: /reminder update <N> text|due|repeat <значение>")?;
+            let mut input = UpdateReminder::new(character, number);
+            match field {
+                "text" => input = input.text(value.trim()),
+                "due" => {
+                    let due = parse_friendly_due(value.trim(), now, &zone, policy)
+                        .map_err(|error| error.to_string())?;
+                    input = input.due(due);
+                }
+                "repeat" => {
+                    let repeat =
+                        parse_structured_repeat(value.trim()).map_err(|error| error.to_string())?;
+                    input = input.repeat(repeat);
+                }
+                other => return Err(format!("неизвестное поле '{other}'")),
+            }
+            let view = RemindersApi::update(input)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Обновлено: {}", view.summary()))
+        }
+        "delete" => {
+            let number: u64 = args
+                .parse()
+                .map_err(|_| "формат: /reminder delete <N>".to_string())?;
+            let view = RemindersApi::delete(character, number)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Удалено: {}", view.summary()))
+        }
+        "enable" | "disable" => {
+            RemindersApi::set_enabled(action == "enable")
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(if action == "enable" {
+                "Планировщик напоминаний включён".into()
+            } else {
+                "Планировщик напоминаний выключен; записи сохранены".into()
+            })
+        }
+        "retry" => {
+            let id = args
+                .parse::<uuid::Uuid>()
+                .map_err(|_| "формат: /reminder retry <delivery-uuid>".to_string())?;
+            let delivery = neuromita::reminders::DeliveryId(neuromita::timeline::EventId(id));
+            RemindersApi::retry(delivery)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok("Повтор доставки разрешён".into())
+        }
+        "zone" => {
+            let zone = if args.eq_ignore_ascii_case("local") {
+                system_timezone().map_err(|error| error.to_string())?
+            } else {
+                TimeZoneId::parse(args).map_err(|error| error.to_string())?
+            };
+            RemindersApi::set_timezone(zone.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Часовой пояс напоминаний: {zone}"))
+        }
+        "now" => Ok(format!("Сейчас: {now}")),
+        other => Err(format!("неизвестная команда /reminder {other}")),
+    }
 }
 
 fn display(snapshot: &RequestSnapshot) {
@@ -207,6 +357,11 @@ pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> 
                                     Err(error) => eprintln!("{error}"),
                                 }
                                 Err(_) => eprintln!("Invalid request UUID"),
+                            }
+                        } else if line.starts_with("/reminder") {
+                            match reminder_command(character, line.trim()).await {
+                                Ok(text) => println!("{text}"),
+                                Err(error) => eprintln!("{error}"),
                             }
                         } else {
                             match presenter.reply(character, line) {

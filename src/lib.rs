@@ -16,6 +16,7 @@ pub mod localization;
 mod maintenance;
 pub mod migration;
 pub mod presentation;
+pub mod reminders;
 pub mod request;
 mod runtime;
 pub mod server;

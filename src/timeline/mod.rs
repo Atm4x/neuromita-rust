@@ -564,6 +564,94 @@ impl SessionTimeline {
             .read(branch, 0, Some(at.through), i64::MAX as usize, None)
     }
 
+    pub(crate) fn reminder_facts_at(
+        &self,
+        at: ContextAnchor,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        self.read_prefix(at)
+    }
+
+    /// Facts of the selected branch that can carry reminder state. Unselected
+    /// branches stay untouched, so their pending deliveries are never lost.
+    pub(crate) fn reminder_facts(
+        &self,
+        selection: crate::timeline::selection::TimelineSelection,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        self.assert_selection(selection)?;
+        self.read_prefix(self.anchor())
+    }
+
+    /// Head and facts of one branch in the active session, read as a single
+    /// consistent prefix so a delivery guard and its append can use one CAS.
+    pub(crate) fn reminder_snapshot_on(
+        &self,
+        branch: BranchId,
+    ) -> Result<(u64, Vec<domain::TimelineFact>), domain::TimelineError> {
+        if self.store.branch(branch)?.session_id != self.store.branch(self.branch)?.session_id {
+            return Err(domain::TimelineError::Invalid(
+                "branch belongs to another session",
+            ));
+        }
+        let head = self.store.branch(branch)?.head_sequence;
+        let facts = self.store.read(branch, 0, None, i64::MAX as usize, None)?;
+        Ok((head, facts))
+    }
+
+    /// Append a delivery transition to the branch that owns the fired
+    /// occurrence, even when another branch is selected. Only the three
+    /// delivery transition kinds are accepted; this is not a general write
+    /// bypass. The caller supplies the head it validated against, so a stale
+    /// settlement is rejected instead of being re-read and applied blindly.
+    pub(crate) fn append_delivery_transition(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        draft: domain::EventDraft,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        if !matches!(
+            draft.kind,
+            domain::EventKind::ReminderDeliverySettled
+                | domain::EventKind::ReminderDeliveryFailed
+                | domain::EventKind::ReminderDeliveryRetried
+        ) {
+            return Err(domain::TimelineError::Invalid(
+                "only delivery transitions may target another branch",
+            ));
+        }
+        if self.store.branch(branch)?.session_id != self.store.branch(self.branch)?.session_id {
+            return Err(domain::TimelineError::Invalid(
+                "branch belongs to another session",
+            ));
+        }
+        self.store
+            .append(branch, expected_head, key, json!({}), vec![draft])
+    }
+
+    pub(crate) fn append_reminder_facts(
+        &mut self,
+        expected: TimelineSelection,
+        key: &str,
+        drafts: Vec<domain::EventDraft>,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        if self.selection() != expected {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let anchor = self.anchor();
+        self.store.append_guarded(
+            self.branch,
+            anchor.through,
+            key,
+            json!({}),
+            drafts,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )
+    }
+
     fn inspection_branch(&self, at: ContextAnchor) -> Result<BranchId, domain::TimelineError> {
         let branch = BranchId(at.branch_id);
         let active_session = self.store.branch(self.branch)?.session_id;
@@ -954,6 +1042,9 @@ impl SessionTimeline {
         let draft = message.into_draft()?;
         let mut drafts = vec![draft];
         let mut changes_memory = false;
+        let occurred_at = crate::reminders::UtcInstant::from_unix_micros(
+            i64::try_from(drafts[0].occurred_at_unix_ms).ok().and_then(|time| time.checked_mul(1000)).ok_or(domain::TimelineError::Invalid("reply timestamp out of reminder range"))?,
+        );
         for effect in effects {
             match effect {
                 AppliedEffect::CharacterStateChanged(behavior) => {
@@ -1011,6 +1102,23 @@ impl SessionTimeline {
                             .map_err(|_| domain::TimelineError::Invalid("invalid working state"))?,
                     );
                     drafts.push(handoff);
+                }
+                AppliedEffect::ReminderChanged(change) => {
+                    let reminder = crate::reminders::change_draft(&change, Some(id), occurred_at)
+                        .map_err(|_| {
+                        domain::TimelineError::Invalid("invalid reminder change")
+                    })?;
+                    drafts.push(reminder);
+                }
+                AppliedEffect::ReminderToolResult(content) => {
+                    let result = crate::reminders::tool_result_draft(
+                        character,
+                        &content,
+                        Some(id),
+                        occurred_at,
+                    )
+                    .map_err(|_| domain::TimelineError::Invalid("invalid reminder tool result"))?;
+                    drafts.push(result);
                 }
             }
         }

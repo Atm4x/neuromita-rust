@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
 use super::{RustSettingsMigration, migration::SettingsSchema};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -211,6 +211,7 @@ mod tests {
         });
         let mut old_settings = serde_json::to_value(&settings).unwrap();
         old_settings.as_object_mut().unwrap().remove("characters");
+        old_settings.as_object_mut().unwrap().remove("reminders");
         old_settings["presets"]["characters"] = old_assignments;
         let old_record = json!({
             "schema_version": 1,
@@ -226,7 +227,7 @@ mod tests {
         repo.save(&upgraded).unwrap();
 
         let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], 2);
+        assert_eq!(persisted["schema_version"], SETTINGS_SCHEMA_VERSION);
         assert!(persisted["settings"]["presets"].get("characters").is_none());
         assert!(persisted["settings"]["characters"].is_object());
         assert_eq!(repo.load().unwrap().settings, settings);
