@@ -1,0 +1,41 @@
+name: Publish verified Character Memory Git bundle
+on:
+  push:
+    branches:
+      - bridge/character-memory-idempotent-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify Git objects and publish exact original commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=".github/bridge/character-memory-idempotent.bundle.b64"
+          if [[ ! -f "$FILE" ]]; then
+            echo "Awaiting bundle payload"
+            exit 0
+          fi
+          BASE="3035ed9538259f58487423a58ba3ea1c6d1cc1d9"
+          HEAD="ab46d9d5b5a13bc4a342f35f4d96351622297e77"
+          TARGET="refs/heads/codex/character-memory-idempotent-20261103"
+          SOURCE="refs/heads/codex/character-memory-idempotent-20261103"
+          git fetch origin refs/heads/codex/character-memory-capacity-20261103:refs/remotes/origin/verified-memory-base
+          test "$(git rev-parse refs/remotes/origin/verified-memory-base)" = "$BASE"
+          base64 -d "$FILE" > /tmp/character-memory.bundle
+          echo "76214215157af71cace9ca26037eb61a33613c350bcde1c3f87b9a97fc6c0dc1  /tmp/character-memory.bundle" | sha256sum -c -
+          git bundle verify /tmp/character-memory.bundle
+          git fetch /tmp/character-memory.bundle "$SOURCE:refs/heads/verified-memory-candidate"
+          test "$(git rev-parse refs/heads/verified-memory-candidate)" = "$HEAD"
+          test "$(git rev-parse "$HEAD^")" = "$BASE"
+          test "$(git rev-parse "$HEAD^{tree}")" = "17cb00289b8f0dd1e376a952b4bdf82be9327b0d"
+          test "$(git show -s --format='%an <%ae>|%cn <%ce>' "$HEAD")" = "Atm4x <mrtaktplay@gmail.com>|Atm4x <mrtaktplay@gmail.com>"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin "refs/heads/verified-memory-candidate:$TARGET"
+          git ls-remote origin "$TARGET" | grep -q "^$HEAD[[:space:]]"
+          echo "Published original Git object with matching HEAD, tree and author"
