@@ -91,3 +91,27 @@ impl PythonReranker {
             .collect()
     }
 }
+
+impl crate::knowledge::reranking::RerankProvider for PythonReranker {
+    fn score<'a>(
+        &'a self,
+        query: &'a str,
+        candidates: &'a [String],
+    ) -> crate::knowledge::reranking::RerankFuture<'a> {
+        Box::pin(async move {
+            self.score(query, candidates)
+                .await
+                .map_err(|error| match error {
+                    RerankError::Invalid(message) => {
+                        crate::knowledge::embedding::EmbeddingError::Configuration(message)
+                    }
+                    RerankError::Response(message) => {
+                        crate::knowledge::embedding::EmbeddingError::Response(message)
+                    }
+                    RerankError::Runtime(error) => {
+                        crate::knowledge::embedding::EmbeddingError::Transport(error.to_string())
+                    }
+                })
+        })
+    }
+}

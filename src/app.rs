@@ -30,6 +30,7 @@ use crate::{
     knowledge::{
         KnowledgeRetrieval,
         embedding::{EmbeddingError, EmbeddingProvider, EmbeddingSpace},
+        reranking::{RerankPolicy, RerankProvider},
         retrieval_fusion::FusionMode,
         semantic_memory::SemanticMemoryRetriever,
     },
@@ -70,6 +71,13 @@ pub struct AiKnowledgeSelection {
     pub space: EmbeddingSpace,
     pub cache_entries: usize,
     pub fusion: FusionMode,
+    pub reranker: Option<AiRerankSelection>,
+}
+
+pub struct AiRerankSelection {
+    pub model_id: String,
+    pub protocol: String,
+    pub policy: RerankPolicy,
 }
 
 pub struct ApplicationConfig {
@@ -167,6 +175,8 @@ pub enum ApplicationError {
     Ai(#[from] AiApplicationError),
     #[error("AI knowledge selection requires an activated embedding worker")]
     MissingEmbeddingWorker,
+    #[error("AI reranking selection requires an activated reranker worker")]
+    MissingRerankerWorker,
     #[error(transparent)]
     Knowledge(#[from] EmbeddingError),
     #[error("server: {0}")]
@@ -312,11 +322,17 @@ impl ApplicationLifecycle {
                     .embedding_provider(selection.space)
                     .ok_or(ApplicationError::MissingEmbeddingWorker)?;
                 let provider: Arc<dyn EmbeddingProvider> = Arc::new(adapter);
-                let retriever = Arc::new(SemanticMemoryRetriever::new(
-                    provider,
-                    selection.cache_entries,
-                )?);
-                KnowledgeRetrieval::semantic_fusion(retriever, selection.fusion)?
+                let mut retriever =
+                    SemanticMemoryRetriever::new(provider, selection.cache_entries)?;
+                if let Some(reranker) = selection.reranker {
+                    let adapter = runtime
+                        .reranker(reranker.model_id, reranker.protocol)
+                        .ok_or(ApplicationError::MissingRerankerWorker)?
+                        .map_err(|error| EmbeddingError::Configuration(error.to_string()))?;
+                    let scorer: Arc<dyn RerankProvider> = Arc::new(adapter);
+                    retriever = retriever.with_reranker(scorer, reranker.policy)?;
+                }
+                KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
             }
         };
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));

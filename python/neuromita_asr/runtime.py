@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import base64
 import io
 import re
@@ -13,6 +15,7 @@ from neuromita_ai_sdk.distributions import check_distributions
 
 
 WHISPER_MODELS = ("large-v3-turbo", "large-v3")
+GIGAAM_MODELS = ("v2_rnnt", "v2_ctc", "v3_rnnt", "v3_ctc", "v3_e2e_ctc", "v3_e2e_rnnt")
 WHISPER_FILES = (
     "config.json", "preprocessor_config.json", "tokenizer.json",
     "vocabulary.json", "model.bin",
@@ -47,13 +50,66 @@ def schema(plugin_id: str) -> dict:
             "compute_type": {"type": "string", "default": "auto", "choices": ["auto", "int8", "float16", "float32", "int8_float16"]},
             "beam_size": {"type": "integer", "default": 5, "choices": [1, 2, 3, 5, 8]},
         }
+    if plugin_id in ("gigaam", "gigaam_onnx"):
+        return {
+            "language": {"type": "string", "default": "ru", "choices": ["ru"]},
+            "model": {"type": "string", "default": "v3_e2e_rnnt" if plugin_id == "gigaam" else "v2_rnnt", "choices": list(GIGAAM_MODELS)},
+            "device": {"type": "string", "default": "auto", "choices": ["auto", "cpu", "cuda"] if plugin_id == "gigaam" else ["auto", "cpu", "dml"]},
+        }
+    if plugin_id == "whisper_onnx":
+        return {
+            "language": {"type": "string", "default": "ru"},
+            "device": {"type": "string", "default": "auto", "choices": ["auto", "cpu", "dml"]},
+            "max_tokens": {"type": "integer", "default": 192, "choices": [96, 128, 160, 192, 224, 256]},
+        }
     raise ValueError("unknown ASR engine")
+
+
+def _gigaam_onnx_files(model: str) -> tuple[str, ...]:
+    if "ctc" in model and "rnnt" not in model:
+        required = (f"{model}.yaml", f"{model}.onnx")
+    else:
+        required = (f"{model}.yaml", *(f"{model}_{part}.onnx" for part in ("encoder", "decoder", "joint")))
+    if "e2e" in model:
+        required += (f"{model}_tokenizer.model",)
+    return required
+
+
+WHISPER_ONNX_FILES = (
+    "config.json", "tokenizer.json", "tokenizer_config.json",
+    "special_tokens_map.json", "preprocessor_config.json", "generation_config.json",
+    "onnx/encoder_model.onnx", "onnx/encoder_model.onnx_data",
+    "onnx/decoder_model.onnx", "onnx/decoder_with_past_model.onnx",
+)
 
 
 def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
     options = validate_settings(schema(plugin_id), settings or {})
     if plugin_id == "google":
         return InstallPlan(requirements=("SpeechRecognition>=3.10,<4",), supported_python_minors=("3.11", "3.12"))
+    if plugin_id == "gigaam":
+        model = options["model"]
+        assets = [AssetRequirement("gigaam_checkpoint", f"{model}.ckpt")]
+        if "e2e" in model:
+            assets.append(AssetRequirement("gigaam_tokenizer", f"{model}_tokenizer.model"))
+        return InstallPlan(
+            requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
+            assets=tuple(assets), supported_python_minors=("3.11", "3.12"),
+        )
+    if plugin_id == "gigaam_onnx":
+        ort = "onnxruntime-directml>=1.18,<2" if options["device"] == "dml" else "onnxruntime>=1.18,<2"
+        return InstallPlan(
+            requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", ort, "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
+            assets=tuple(AssetRequirement("gigaam_onnx", name) for name in _gigaam_onnx_files(options["model"])),
+            supported_python_minors=("3.11", "3.12"),
+        )
+    if plugin_id == "whisper_onnx":
+        ort = "onnxruntime-directml>=1.18,<2" if options["device"] == "dml" else "onnxruntime>=1.18,<2"
+        return InstallPlan(
+            requirements=("numpy==1.26.0", "scipy>=1.12,<2", "torch>=2.3,<3", "transformers>=4.40,<5", "optimum>=1.20,<3", ort),
+            assets=tuple(AssetRequirement("whisper_onnx", name) for name in WHISPER_ONNX_FILES),
+            supported_python_minors=("3.11", "3.12"),
+        )
     selected = options["model"]
     assets = tuple(AssetRequirement("whisper_ct2", f"{selected}/{name}") for name in WHISPER_FILES)
     return InstallPlan(
@@ -64,17 +120,30 @@ def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
 
 def probe(plugin_id: str, settings: dict | None = None) -> dict:
     options = validate_settings(schema(plugin_id), settings or {})
+    distributions = {
+        "google": ("SpeechRecognition",),
+        "whisper": ("numpy", "faster-whisper", "ctranslate2"),
+        "gigaam": ("numpy", "torch", "torchaudio", "omegaconf", "hydra-core", "sentencepiece", "tqdm"),
+        "gigaam_onnx": ("numpy", "torch", "torchaudio", "onnxruntime", "omegaconf", "hydra-core", "sentencepiece", "tqdm"),
+        "whisper_onnx": ("numpy", "scipy", "torch", "transformers", "optimum", "onnxruntime"),
+    }
+    required = list(distributions[plugin_id])
+    if plugin_id in ("gigaam_onnx", "whisper_onnx") and options["device"] == "dml":
+        required[required.index("onnxruntime")] = "onnxruntime-directml"
     missing = check_distributions(
-        ("SpeechRecognition",) if plugin_id == "google" else ("numpy", "faster-whisper", "ctranslate2"),
-        exact_versions={"numpy": "1.26.0"} if plugin_id == "whisper" else None,
+        required,
+        exact_versions={"numpy": "1.26.0"} if plugin_id != "google" else None,
     )
-    if plugin_id == "whisper":
+    if plugin_id in ("gigaam_onnx", "whisper_onnx") and options["device"] == "dml" and sys.platform != "win32":
+        missing.append("device:DirectML requires Windows")
+    if plugin_id != "google":
         try:
-            folder = selected_model_root(plugin_id) / options["model"]
-            for name in WHISPER_FILES:
+            folder = selected_model_root(plugin_id) / options["model"] if plugin_id == "whisper" else selected_model_root(plugin_id)
+            files = WHISPER_FILES if plugin_id == "whisper" else [asset.relative_path for asset in install_plan(plugin_id, options).assets]
+            for name in files:
                 file = folder / name
                 if file.is_symlink() or not file.is_file() or file.stat().st_size == 0:
-                    missing.append(f"asset:{options['model']}/{name}")
+                    missing.append(f"asset:{options['model']}/{name}" if plugin_id == "whisper" else f"asset:{name}")
         except (ValueError, OSError) as error:
             missing.append(f"model:{error}")
     return {"installed": not missing, "missing": missing}
@@ -114,7 +183,7 @@ class AsrPlugin:
         self.options = None
 
     def describe(self) -> dict:
-        return {"id": self.plugin_id, "kind": "asr", "language_modes": ["ru", "en", "auto"]}
+        return {"id": self.plugin_id, "kind": "asr", "language_modes": ["ru"] if self.plugin_id.startswith("gigaam") else ["ru", "en", "auto"]}
 
     def settings_schema(self) -> dict:
         return schema(self.plugin_id)

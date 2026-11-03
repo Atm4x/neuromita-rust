@@ -320,6 +320,7 @@ async fn application_binds_explicit_local_embedding_retriever_without_fallback()
         space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
         cache_entries: 32,
         fusion: FusionMode::VectorOnly,
+        reranker: None,
     });
     let app = ApplicationLifecycle::start(config).await.unwrap();
     app.shutdown().await.unwrap();
@@ -328,6 +329,7 @@ async fn application_binds_explicit_local_embedding_retriever_without_fallback()
         space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
         cache_entries: 32,
         fusion: FusionMode::VectorOnly,
+        reranker: None,
     });
     let result = ApplicationLifecycle::start(invalid).await;
     assert!(matches!(
@@ -338,5 +340,60 @@ async fn application_binds_explicit_local_embedding_retriever_without_fallback()
         .await
         .unwrap();
     next.shutdown().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn application_requires_an_explicit_reranker_worker_for_reranked_knowledge() {
+    use neuromita::{
+        app::{AiKnowledgeSelection, AiRerankSelection, ApplicationError},
+        knowledge::{
+            embedding::EmbeddingSpace, reranking::RerankPolicy, retrieval_fusion::FusionMode,
+        },
+    };
+    let _guard = CORE_TEST_MUTEX.lock().await;
+    let root = std::env::temp_dir().join(format!("nm-app-reranker-{}", Uuid::new_v4()));
+    let mut ai = runtime(&root, "mock_tts").await;
+    ai.workers = vec![fixture_worker(&root, AiService::Embedding, "mock_embedding").await];
+    let mut config = application(ai);
+    config.ai_knowledge = Some(AiKnowledgeSelection {
+        space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
+        cache_entries: 32,
+        fusion: FusionMode::VectorOnly,
+        reranker: Some(AiRerankSelection {
+            model_id: "rerank-fixture".into(),
+            protocol: "fixture-rerank-v1".into(),
+            policy: RerankPolicy {
+                alpha: 0.75,
+                limit: 8,
+            },
+        }),
+    });
+    let result = ApplicationLifecycle::start(config).await;
+    assert!(matches!(
+        result,
+        Err(ApplicationError::MissingRerankerWorker)
+    ));
+    let mut ai = runtime(&root, "mock_tts").await;
+    ai.workers = vec![
+        fixture_worker(&root, AiService::Embedding, "mock_embedding").await,
+        fixture_worker(&root, AiService::Reranker, "mock_reranker").await,
+    ];
+    let mut config = application(ai);
+    config.ai_knowledge = Some(AiKnowledgeSelection {
+        space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
+        cache_entries: 32,
+        fusion: FusionMode::VectorOnly,
+        reranker: Some(AiRerankSelection {
+            model_id: "rerank-fixture".into(),
+            protocol: "fixture-rerank-v1".into(),
+            policy: RerankPolicy {
+                alpha: 0.75,
+                limit: 8,
+            },
+        }),
+    });
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    app.shutdown().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
