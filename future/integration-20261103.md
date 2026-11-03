@@ -15,6 +15,16 @@
 
 Промежуточные origin-ветки памяти и semantic retrieval включены через последнюю вершину этой цепочки. Остальные старые функциональные ветки уже являлись предками объединяемой истории.
 
+### Дополнительная отправка пользователя
+
+После повторного fetch включены новые вершины:
+
+- `codex/character-memory-slint-rebased-20261103` / `b640b177` и исходная `codex/character-memory-boundaries-20261103` / `b517c65e`: отдельный контракт memory edits и удержание soft-deleted знаний. Совпадающие изменения применены один раз; обе истории сохранены.
+- `codex/slint-ai-runtime-formal-20261103` / `2cd201dc` и обновлённая `codex/ai-python-plugin-architecture-20261103` / `1c065b99`: двенадцать TTS SDK adapters, requirement specs, dependency resolver, проверки Silero speaker и optional RVC index. Проверены лёгкие контракты, а не реальный синтез с GPU-моделями.
+- `bridge/ai-runtime-bundle-export-20261103` / `1bc33f41`, `bridge/memory-slint-rebase-import-20261103` / `4cb6eeb9` и его предок `ci/slint-bundle-export-20261103` / `7b8bb8b5`: история переноса включена; временные export/import workflow и `transport/memory-slint-rebase.b64` отсутствуют в итоговом дереве.
+
+Пользовательский checkpoint `862ad41e` сохранён в истории. Новые ветки были подготовлены поверх него; рабочие изменения пользователя не перезаписывались.
+
 ## Служебные ветки
 
 Включены предки `bridge/request-semantic-publish-20261102` (`1c530f56`), `bridge/sometests-bundle-20261102` (`24ab511e`) и `bridge/timeline-audit-source-20261101` (`41fc6ec7`). Их изменения проверены: это транспорт Git-патчей/архивов, а не функциональность приложения.
@@ -33,7 +43,15 @@
 
 ## Проверка и границы
 
-На Windows прошёл общий набор с GUI: 321 passed, 2 ignored. Python SDK: 5 passed. Проверки default/no-default, Clippy и итоговая сборка отражаются в актуальном HANDOFF после завершения прогона.
+Окончательные проверки на Windows после дополнительной отправки:
+
+- `cargo test --locked --offline --features gui`: 323 passed, 2 ignored.
+- `cargo test --locked --offline`: 322 passed, 2 ignored.
+- `cargo test --locked --offline --no-default-features`: 266 passed, 2 ignored.
+- Python SDK/voice contracts: 10 passed.
+- Clippy с `-D warnings` для default, GUI и no-default; `cargo fmt --all -- --check`; debug-сборка с GUI проходят.
+
+Исправлена также проверка composition: однократная передача ссылки через `std::slice::from_ref` вместо клонирования selection.
 
 Живые Gemini/embedding benchmarks, загрузка настоящих GPU-пакетов/моделей и production inference этим объединением не проверяются. GUI остаётся самостоятельным preview, не запускает AI Supervisor автоматически. Часть bootstrap/archive fixtures исходных веток работает только на Unix и не считается проверенной этим Windows-прогоном.
 

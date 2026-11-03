@@ -300,7 +300,7 @@ mod tests {
             RuntimeComposition::resolve(
                 ProcessTopology::Split,
                 AiService::Tts,
-                &[selection.clone()],
+                std::slice::from_ref(&selection),
                 &b,
                 &o
             )
