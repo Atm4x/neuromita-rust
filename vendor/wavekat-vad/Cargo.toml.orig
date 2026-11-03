@@ -1,0 +1,61 @@
+[package]
+name = "wavekat-vad"
+version = "0.1.17"
+edition = "2021"
+description = "Unified voice activity detection with multiple backends"
+license = "Apache-2.0"
+repository = "https://github.com/wavekat/wavekat-vad"
+homepage = "https://github.com/wavekat/wavekat-vad"
+documentation = "https://docs.rs/wavekat-vad"
+readme = "../../README.md"
+keywords = ["vad", "voice-detection", "audio", "speech", "webrtc"]
+categories = ["multimedia::audio"]
+
+[features]
+default = ["webrtc"]
+webrtc = ["dep:webrtc-vad"]
+silero = ["dep:ort", "dep:ndarray", "dep:ureq"]
+denoise = ["dep:nnnoiseless"]
+ten-vad = ["dep:ort", "dep:ndarray", "dep:realfft", "dep:ureq"]
+firered = ["dep:ort", "dep:ndarray", "dep:realfft", "dep:ureq"]
+earshot = ["dep:earshot"]
+serde = ["dep:serde"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+webrtc-vad = { version = "0.4", optional = true }
+ort = { version = "2.0.0-rc.12", optional = true, features = ["ndarray"] }
+ndarray = { version = "0.17", optional = true }
+nnnoiseless = { version = "0.5", optional = true }
+rubato = "0.16"
+realfft = { version = "3", optional = true }
+earshot = { version = "1.2.1", optional = true }
+
+[build-dependencies]
+ureq = { version = "3", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+hound = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[example]]
+name = "detect_speech"
+
+[[example]]
+name = "ten_vad_file"
+required-features = ["ten-vad"]
+
+[[example]]
+name = "firered_file"
+required-features = ["firered"]
+
+[[bench]]
+name = "vad_comparison"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
