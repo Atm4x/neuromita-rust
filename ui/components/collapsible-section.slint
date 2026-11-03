@@ -40,7 +40,8 @@ export component CollapsibleSettingsSection inherits Rectangle {
                 Glyph { text: root.expanded ? Fa.down : "\u{f054}"; width: 18px; font-size: 13px; color: #ff9ed3; }
             }
         }
-        if root.expanded: Rectangle {
+        Rectangle {
+            visible: root.expanded;
             vertical-stretch: 0;
             background: #0809136b;
             border-radius: 10px;
