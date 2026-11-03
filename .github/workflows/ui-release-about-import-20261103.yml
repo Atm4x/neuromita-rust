@@ -1,0 +1,61 @@
+name: Import Releases and About Slint implementation
+on:
+  push:
+    branches:
+      - bridge/ui-release-about-export-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Read bridge payload
+        uses: actions/checkout@v4
+        with:
+          path: bridge
+          persist-credentials: false
+      - name: Checkout pinned target
+        uses: actions/checkout@v4
+        with:
+          ref: 98ffea7ace324f20f66916ddc961257112c183d9
+          path: source
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Verify and apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source rev-parse HEAD)" = "98ffea7ace324f20f66916ddc961257112c183d9"
+          base64 -d bridge/bridge/release-about-ui.patch.xz.b64 > /tmp/release-about-ui.patch.xz
+          echo "3d1b94159f1f5ab398da602eebbc8d7812681f71781dd93cbdf4b657d3b7eeb3  /tmp/release-about-ui.patch.xz" | sha256sum -c -
+          xz -dc /tmp/release-about-ui.patch.xz > /tmp/release-about-ui.patch
+          git -C source apply --check /tmp/release-about-ui.patch
+          git -C source apply /tmp/release-about-ui.patch
+          git -C source diff --check
+      - name: Commit and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c codex/releases-about-slint-20261103
+          git add ui/pages/releases.slint ui/pages/about.slint ui/app.slint ui/components/sidebar.slint ui/theme.slint assets/icons/fontawesome/external-link.svg assets/icons/fontawesome/rotate-right.svg src/bin/neuromita-gui/main.rs src/bin/neuromita-gui/presenter.rs src/bin/neuromita-gui/binding.rs src/bin/neuromita-gui/releases.rs
+          git commit -m "feat(gui): port releases and add about page in Slint"
+          git push origin HEAD:refs/heads/codex/releases-about-slint-20261103
+  check:
+    runs-on: ubuntu-latest
+    needs: import
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/releases-about-slint-20261103
+      - name: Validate Rust and Slint
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal
+          mkdir -p .cargo
+          printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
+          cargo +1.98.1 check --offline --features gui --bin neuromita-gui
