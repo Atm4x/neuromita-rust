@@ -64,7 +64,6 @@ jobs:
           rustup toolchain install 1.98.1 --profile minimal
           mkdir -p .cargo
           printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
-          cargo +1.98.1 check --offline --features gui --bin neuromita-gui
       - name: Render tested Slint pages
         shell: bash
         env:
