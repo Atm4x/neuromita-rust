@@ -206,10 +206,32 @@ pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError
     StructuredResponse::parse(&text)
 }
 
-pub(super) fn observation_metadata(bytes: &[u8]) -> (Option<Arc<str>>, Option<ProviderUsage>) {
+#[derive(Default)]
+pub(super) struct ResponseObservation {
+    pub answer_text: Option<Arc<str>>,
+    pub finish_reason: Option<Arc<str>>,
+    pub usage: Option<ProviderUsage>,
+}
+
+pub(super) fn observation_metadata(bytes: &[u8]) -> ResponseObservation {
     let Ok(Value::Object(root)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return (None, None);
+        return ResponseObservation::default();
     };
+    let answer_text = root
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part.get("thought").and_then(Value::as_bool) != Some(true))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .map(Arc::from);
     let finish_reason = root
         .get("candidates")
         .and_then(serde_json::Value::as_array)
@@ -226,7 +248,11 @@ pub(super) fn observation_metadata(bytes: &[u8]) -> (Option<Arc<str>>, Option<Pr
         };
         (parsed != ProviderUsage::default()).then_some(parsed)
     });
-    (finish_reason, usage)
+    ResponseObservation {
+        answer_text,
+        finish_reason,
+        usage,
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +471,7 @@ mod tests {
             },
             game: None,
             game_key: None,
+            game_guard: None,
         };
         let template = GeminiTemplate::google(
             "test-model",
@@ -563,6 +590,7 @@ mod tests {
             },
             game: None,
             game_key: None,
+            game_guard: None,
         };
         let template = GeminiTemplate::google(
             "test-model",
@@ -603,6 +631,11 @@ mod tests {
     #[test]
     fn reasoning_is_not_returned_as_answer() {
         let body = json!({"candidates":[{"content":{"parts":[{"text":"secret thought","thought":true},{"text":"{\"segments\":[{\"text\":\"answer\"}]}"}]},"finishReason":"STOP"}]});
+        let observation = observation_metadata(&serde_json::to_vec(&body).unwrap());
+        assert_eq!(
+            observation.answer_text.as_deref(),
+            Some("{\"segments\":[{\"text\":\"answer\"}]}")
+        );
         assert_eq!(
             decode(&serde_json::to_vec(&body).unwrap())
                 .unwrap()

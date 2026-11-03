@@ -97,6 +97,8 @@ pub struct ProviderReply {
     pub status: Option<u16>,
     /// Body received before provider decoding or application validation.
     pub raw_body: Arc<str>,
+    /// Provider answer text before application validation, excluding thought parts.
+    pub answer_text: Option<Arc<str>>,
     /// False when transport stopped or the bounded response limit was hit.
     pub complete: bool,
     pub finish_reason: Option<Arc<str>>,

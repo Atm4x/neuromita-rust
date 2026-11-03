@@ -1585,6 +1585,7 @@ mod tests {
         trace.configure_redaction(["credential-value".to_owned()]);
         trace.text_ready("credential-value response");
         let response = AcceptedResponse {
+            game_invite: None,
             text: Arc::from("credential-value response"),
             segments: Vec::new().into(),
             effects: Vec::new().into(),

@@ -75,6 +75,7 @@ impl GeminiProvider {
                     observer.response_received(ProviderReply {
                         status: Some(status.as_u16()),
                         raw_body: String::from_utf8_lossy(&bytes).into_owned().as_str().into(),
+                        answer_text: None,
                         complete: false,
                         finish_reason: None,
                         usage: None,
@@ -93,6 +94,7 @@ impl GeminiProvider {
                 observer.response_received(ProviderReply {
                     status: Some(status.as_u16()),
                     raw_body: String::from_utf8_lossy(&bytes).into_owned().as_str().into(),
+                    answer_text: None,
                     complete: false,
                     finish_reason: None,
                     usage: None,
@@ -105,13 +107,14 @@ impl GeminiProvider {
             bytes.extend_from_slice(&chunk);
         }
         let raw_body = String::from_utf8_lossy(&bytes).into_owned();
-        let (finish_reason, usage) = wire::observation_metadata(&bytes);
+        let observation = wire::observation_metadata(&bytes);
         observer.response_received(ProviderReply {
             status: Some(status.as_u16()),
             raw_body: raw_body.as_str().into(),
+            answer_text: observation.answer_text,
             complete: true,
-            finish_reason,
-            usage,
+            finish_reason: observation.finish_reason,
+            usage: observation.usage,
             elapsed: started.elapsed(),
         });
         if !status.is_success() {

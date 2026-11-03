@@ -82,6 +82,7 @@ pub(crate) struct AcceptanceContext {
     pub state_revision: u64,
     pub turn: TimelineTurn,
     pub game: Option<EventId>,
+    pub game_guard: Option<EventId>,
 }
 
 enum Command {
@@ -559,6 +560,14 @@ impl CharacterHandler {
                     ContextCaptureError::Invalid(reason) => CharacterError::Internal(reason),
                 })?;
         let anchor = captured.history.at;
+        let game_guard = if anchor == timeline.anchor() {
+            captured.game_token
+        } else {
+            timeline
+                .game_at(self.character.id, timeline.anchor())
+                .map_err(CharacterError::Internal)?
+                .1
+        };
         let state = captured.state;
         let working_state = captured.working_state;
         let now = CharacterRegistry::now_unix_ms();
@@ -627,6 +636,7 @@ impl CharacterHandler {
             anchor,
             turn,
             game_key: captured.game_token,
+            game_guard,
         })
     }
 
@@ -653,6 +663,9 @@ impl CharacterHandler {
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
+        if context.game_guard != current.game_token {
+            return Err(CharacterError::StaleState);
+        }
         let branch = timeline.selection().branch_id;
         let mut next_game = current.game;
         let mut game_effects = Vec::new();
@@ -977,6 +990,32 @@ mod turn_tests {
     }
 
     #[test]
+    fn stale_game_context_rejects_a_reply_without_game_commands() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let (request, context) = prepare(&mut handler);
+        handler
+            .game_command(UserGameCommand::SetAutoReactions(true))
+            .unwrap();
+        let before = handler.timeline.lock().unwrap().anchor();
+        let mut response = crate::generation::StructuredResponse::spoken("stale game commentary");
+        response.attitude_change = 5.0;
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            TurnProposal::from_structured(response).unwrap(),
+            None,
+            ConversationAudience::private_to(CharacterId::Mita),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+    }
+
+    #[test]
     fn game_token_rejects_flag_change_and_epoch_rejects_game_proposal_atomically() {
         let mut handler = handler();
         handler
@@ -1145,6 +1184,7 @@ mod turn_tests {
             state_revision: context.state.revision,
             turn: context.turn,
             game: context.game_key,
+            game_guard: context.game_guard,
         }
     }
 

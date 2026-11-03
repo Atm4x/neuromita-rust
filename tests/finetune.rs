@@ -213,6 +213,7 @@ fn fixture_ok(text: &str, total_tokens: u64) -> GenerationFixture {
         result: Ok(structured),
         response: Some(ProviderReply {
             status: Some(200),
+            answer_text: Some(answer.as_str().into()),
             raw_body: json!({
                 "candidates": [{"content":{"parts":[{"text": answer}]},"finishReason":"STOP"}],
                 "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": total_tokens - 3, "totalTokenCount": total_tokens}
@@ -237,6 +238,7 @@ fn fixture_http_error(status: u16) -> GenerationFixture {
         response: Some(ProviderReply {
             status: Some(status),
             raw_body: "fixture error".into(),
+            answer_text: None,
             complete: true,
             finish_reason: None,
             usage: None,

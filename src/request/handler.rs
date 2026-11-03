@@ -153,6 +153,7 @@ impl MessageHandler {
             state_revision: context.state.revision,
             turn: context.turn,
             game: context.game_key,
+            game_guard: context.game_guard,
         };
         record.prepared(context.clone());
         let preset_id = settings

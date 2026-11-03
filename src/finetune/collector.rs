@@ -185,7 +185,11 @@ fn build_sample(
     request: &PreparedRequest,
     response: &ProviderReply,
 ) -> FineTuneSample {
-    let response_text = extract_provider_text(&response.raw_body);
+    let response_text = response
+        .answer_text
+        .as_deref()
+        .unwrap_or_default()
+        .to_owned();
     let messages = request
         .prompt
         .iter()
@@ -252,22 +256,42 @@ fn usage_payload(usage: ProviderUsage) -> Value {
     })
 }
 
-/// Gemini's provider answer text is extracted without structured decoding so
-/// malformed application JSON still leaves the exact provider payload intact.
-fn extract_provider_text(raw_body: &str) -> String {
-    let Ok(value) = serde_json::from_str::<Value>(raw_body) else {
-        return String::new();
-    };
-    value
-        .get("candidates")
-        .and_then(Value::as_array)
-        .and_then(|candidates| candidates.first())
-        .and_then(|candidate| candidate.get("content"))
-        .and_then(|content| content.get("parts"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|part| part.get("thought").and_then(Value::as_bool) != Some(true))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_uses_normalized_answer_without_parsing_provider_wire_json() {
+        let scope = CaptureScope {
+            request_id: RequestId::new(),
+            character_id: "mita".into(),
+            intent: TurnIntent::Initiate,
+            source: RequestSource::Presenter,
+        };
+        let request = PreparedRequest {
+            provider: ProviderKind::Gemini,
+            model: "fixture".into(),
+            endpoint: "https://example.test".into(),
+            temperature: 1.0,
+            max_output_tokens: 128,
+            prompt: Vec::new().into(),
+            payload_json: "opaque request".into(),
+            captured_at: std::time::SystemTime::now(),
+        };
+        let response = ProviderReply {
+            status: Some(200),
+            raw_body: "opaque provider response".into(),
+            answer_text: Some("normalized answer".into()),
+            complete: true,
+            finish_reason: None,
+            usage: None,
+            elapsed: std::time::Duration::ZERO,
+        };
+        let sample = build_sample(&scope, &request, &response);
+        assert_eq!(sample.response, "normalized answer");
+        assert_eq!(
+            sample.provider_response.as_deref(),
+            Some("opaque provider response")
+        );
+    }
 }

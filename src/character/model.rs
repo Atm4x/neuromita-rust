@@ -88,6 +88,7 @@ pub struct CharacterContext {
     pub anchor: ContextAnchor,
     pub(crate) turn: TimelineTurn,
     pub(crate) game_key: Option<crate::identity::EventId>,
+    pub(crate) game_guard: Option<crate::identity::EventId>,
 }
 
 #[derive(Debug, Clone)]

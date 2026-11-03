@@ -1,8 +1,4 @@
-use std::sync::Arc;
-
 use crate::{
-    api::CharacterApi,
-    api::ChatApi,
     character::{CharacterError, CharacterId},
     games::{
         GameError, GamePolicy, GameReceipt, ReactionInvite, UserGameCommand,
@@ -38,13 +34,17 @@ impl GameApi {
         character: CharacterId,
         command: UserGameCommand,
     ) -> Result<GameOutcome, GameError> {
-        let policy = Self::policy()?;
+        let bindings = crate::runtime::current().map_err(|_| GameError::Unavailable)?;
+        let policy = &bindings.games;
         if !policy.enabled && matches!(command, UserGameCommand::Start { .. }) {
             return Err(GameError::Disabled);
         }
-        let handle = CharacterApi::get(character).map_err(|_| GameError::Unavailable)?;
+        let handle = bindings
+            .characters
+            .get(character)
+            .ok_or(GameError::Unavailable)?;
         let reply = handle.game(command).await.map_err(map_character)?;
-        let reaction = Self::submit(policy.as_ref(), character, reply.invite);
+        let reaction = Self::submit(&bindings.chat, policy, character, reply.invite);
         Ok(GameOutcome {
             receipt: reply.receipt,
             reaction,
@@ -102,18 +102,16 @@ impl GameApi {
     }
 
     pub async fn view(character: CharacterId) -> Result<GameReceipt, GameError> {
-        Self::policy()?;
-        let handle = CharacterApi::get(character).map_err(|_| GameError::Unavailable)?;
+        let bindings = crate::runtime::current().map_err(|_| GameError::Unavailable)?;
+        let handle = bindings
+            .characters
+            .get(character)
+            .ok_or(GameError::Unavailable)?;
         handle.game_view().await.map_err(map_character)
     }
 
-    fn policy() -> Result<Arc<GamePolicy>, GameError> {
-        crate::runtime::current()
-            .map(|bindings| Arc::clone(&bindings.games))
-            .map_err(|_| GameError::Unavailable)
-    }
-
     fn submit(
+        chat: &crate::request::ChatApiState,
         policy: &GamePolicy,
         character: CharacterId,
         invite: Option<ReactionInvite>,
@@ -122,7 +120,7 @@ impl GameApi {
         if invite.auto_gated && !policy.auto_reactions {
             return None;
         }
-        Some(ChatApi::react(ReactRequest::new(
+        Some(chat.send(ReactRequest::new(
             character,
             invite.event_id,
             invite.instruction,

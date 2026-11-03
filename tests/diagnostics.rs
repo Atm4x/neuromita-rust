@@ -104,6 +104,7 @@ impl GenerationProvider for ScriptedProvider {
                     observer.response_received(ProviderReply {
                         status: Some(200),
                         raw_body: raw.as_str().into(),
+                        answer_text: Some(raw.as_str().into()),
                         complete: true,
                         finish_reason: Some("STOP".into()),
                         usage: Some(usage),
@@ -280,6 +281,7 @@ async fn malformed_response_keeps_raw_body_and_error_history() {
             reply: Some(ProviderReply {
                 status: Some(200),
                 raw_body: "{\"segments\":[]}".into(),
+                answer_text: Some("{\"segments\":[]}".into()),
                 complete: true,
                 finish_reason: Some("STOP".into()),
                 usage: None,
@@ -339,6 +341,7 @@ async fn transport_partial_body_and_cancellation_are_visible() {
             reply: Some(ProviderReply {
                 status: Some(200),
                 raw_body: "{\"candidates\":[".into(),
+                answer_text: None,
                 complete: false,
                 finish_reason: None,
                 usage: None,
