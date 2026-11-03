@@ -234,6 +234,26 @@ impl CharacterMemories {
             .collect()
     }
 
+    /// Live read-side boundary: an expired record is never offered to generation,
+    /// even if the periodic durable TTL pass has not committed its transition.
+    pub fn list_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRecord> {
+        self.records
+            .values()
+            .filter(|record| record.kind == MemoryKind::Fact && record.available_at(as_of_unix_ms))
+            .cloned()
+            .collect()
+    }
+
+    pub fn islands_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRecord> {
+        self.records
+            .values()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Island(_)) && record.available_at(as_of_unix_ms)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Complete retained history for inspection, restore, and maintenance.
     pub fn all(&self) -> Vec<MemoryRecord> {
         self.records.values().cloned().collect()
@@ -434,7 +454,10 @@ impl CharacterMemories {
                     }
                     target_record.content = content.clone().unwrap_or_else(|| combined.join(" | "));
                     for source in sources {
-                        let change = MemoryChange::Delete(*source);
+                        let mut retained =
+                            next.get(*source).expect("validated merge source").clone();
+                        retained.state = MemoryState::Deleted;
+                        let change = MemoryChange::Upsert(retained);
                         next.apply_committed(&change)?;
                         changes.push(change);
                     }
@@ -663,8 +686,15 @@ mod tests {
         }
         assert_eq!(book.list().len(), 1);
         assert_eq!(book.get(a).unwrap().content, "first | second");
-        assert!(book.get(b).is_none());
-        assert!(book.resolve(&[MemoryCommand::Delete { id: b }]).is_err());
+        assert_eq!(book.get(b).unwrap().state, MemoryState::Deleted);
+        assert!(
+            book.resolve(&[MemoryCommand::Merge {
+                target: a,
+                sources: vec![b],
+                content: None,
+            }])
+            .is_err()
+        );
     }
     fn apply(book: &mut CharacterMemories, commands: &[MemoryCommand]) {
         let changes = book.resolve(commands).expect("valid memory batch");
@@ -815,6 +845,29 @@ mod tests {
         assert!(book.resolve_expirations(2000).is_empty());
         assert!(book.list().is_empty());
         assert_eq!(book.forgotten()[0].id, id);
+    }
+
+    #[test]
+    fn live_selection_excludes_expired_facts_and_islands_without_mutating_history() {
+        let mut book = CharacterMemories::default();
+        let fact = MemoryId::new();
+        let island = MemoryId::new();
+        let mut fact_record = MemoryRecord::fact(fact, MemoryPriority::High, "short-lived fact");
+        fact_record.expires_at_unix_ms = Some(100);
+        book.apply_committed(&MemoryChange::Upsert(fact_record))
+            .unwrap();
+        let mut island_record =
+            MemoryRecord::fact(island, MemoryPriority::Normal, "temporary preference");
+        island_record.kind = MemoryKind::Island(MemoryIsland::Preferences);
+        island_record.expires_at_unix_ms = Some(100);
+        book.apply_committed(&MemoryChange::Upsert(island_record))
+            .unwrap();
+        assert_eq!(book.list_at(99).len(), 1);
+        assert_eq!(book.islands_at(99).len(), 1);
+        assert!(book.list_at(100).is_empty());
+        assert!(book.islands_at(100).is_empty());
+        assert_eq!(book.all().len(), 2);
+        assert_eq!(book.resolve_expirations(100).len(), 2);
     }
 
     #[test]

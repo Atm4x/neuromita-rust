@@ -811,6 +811,22 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     assert_eq!(now.len(), 1);
     assert_eq!(now[0].id, tea);
     assert_eq!(now[0].content, "The player prefers tea with milk");
+    let retained_after_merge = app
+        .presenter()
+        .characters
+        .memories(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert_eq!(retained_after_merge.records().len(), 2);
+    assert_eq!(
+        retained_after_merge
+            .records()
+            .iter()
+            .find(|item| item.id == milk)
+            .unwrap()
+            .state,
+        neuromita::memory::MemoryState::Deleted
+    );
     let at_before_bad = app.at();
 
     let invalid = app
@@ -876,6 +892,21 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
             .unwrap()
             .memories
             .is_empty()
+    );
+    let retained_after_delete = app
+        .presenter()
+        .characters
+        .memories(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_after_delete
+            .records()
+            .iter()
+            .find(|item| item.id == tea)
+            .unwrap()
+            .state,
+        neuromita::memory::MemoryState::Deleted
     );
 
     app.shutdown().await.unwrap();
