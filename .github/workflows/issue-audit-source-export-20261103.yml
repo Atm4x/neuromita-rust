@@ -1,0 +1,37 @@
+name: Export pinned Rust source Git bundle for issue audit
+on:
+  push:
+    branches:
+      - bridge/issue-audit-source-export-20261103
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build pinned Git bundle
+        shell: bash
+        env:
+          TARGET_SHA: 1a0dfdfa0cea965d03ce6b1703f1037b39f66479
+        run: |
+          set -euo pipefail
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git update-ref refs/heads/audit-source "${TARGET_SHA}"
+          git bundle create rust-source.bundle refs/heads/audit-source
+          git bundle verify rust-source.bundle
+          sha256sum rust-source.bundle > rust-source.bundle.sha256
+          printf '%s\n' "${TARGET_SHA}" > rust-source.commit
+          ls -lh rust-source.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-audit-rust-source-20261103
+          path: |
+            rust-source.bundle
+            rust-source.bundle.sha256
+            rust-source.commit
+          retention-days: 2
+          if-no-files-found: error
