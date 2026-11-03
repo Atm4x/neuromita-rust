@@ -70,3 +70,5 @@ Raw JSONL сохраняет фактические provider request/response, �
 ## Границы
 
 В этом срезе нет автоматической отправки датасета, Python-import, GUI picker и отдельного user-facing rating widget. `character_name` в standalone Core совпадает с ID, `game_connected=false`, потому что Unity-состояние ядру здесь неизвестно. Реальный provider call проверяется локальным HTTP fixture; production credentials и внешняя сеть в тестах не используются.
+
+Референс сверки: Python `Atm4x_NeuroMita` commit `36f942106ab04522492477087e7db5ca41f0d626`, `src/managers/finetune_collector.py` и вызов `save_sample` в `src/handlers/chat_handler.py`. Сохранены пары до очистки ответа, provider usage, помесячные файлы, оценки ±1 и фильтрованный экспорт. В Rust сбор включается явно, sample ID равен RequestId вместо общего pending-slot, а accepted outcome хранится отдельно от provider response. Это перенос сценариев на текущую архитектуру Core; импорт Python-файлов и идентичность GUI не заявляются.

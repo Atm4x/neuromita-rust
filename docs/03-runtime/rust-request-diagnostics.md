@@ -40,3 +40,5 @@ TCP-клиент видит только запросы своего соеди�
 ## Проверка и границы
 
 Проверки используют локальные fixtures: success/failure/cancel, malformed и partial body, late lookup, retention, redaction, source ownership и экспорт. Production API, платные запросы и загрузка моделей для них не нужны. Команды доступны через терминал и TCP; отдельная GUI-панель в этот срез не входит.
+
+Референс сверки: Python `Atm4x_NeuroMita` commit `36f942106ab04522492477087e7db5ca41f0d626`, `src/core/performance_trace.py`, `src/managers/llm_request_runner.py` и аудит `docs/03-runtime/per-request-performance-traces-and-diagnostic-metrics.md`. Сохранены корреляция запроса, стадии, частичная ошибка и snapshots активных/завершённых запросов. Rust использует lifecycle своего RequestHandle и собственные границы хранения; Python fallback chain, ASR-трассы и агрегаты производительности не воспроизводятся этой функцией диагностики генерации.
