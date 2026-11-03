@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 fn effect(kind: EventKind, payload: Value) -> EventDraft {
     let mut draft = EventDraft::new(kind);
-    draft.actor = Some(CharacterId::Mita.to_string());
-    draft.observers.insert(CharacterId::Mita);
+    draft.actor = Some(CharacterId::Crazy.to_string());
+    draft.observers.insert(CharacterId::Crazy);
     draft.payload = payload.as_object().unwrap().clone();
     draft
 }
@@ -64,7 +64,7 @@ fn check(store: &mut dyn TimelineRepository) {
         EventKind::CharacterWorkingStateReplaced,
         json!({"working_state":{}}),
     );
-    public.observers.insert(CharacterId::KindMita);
+    public.observers.insert(CharacterId::Kind);
     assert!(!push(store, branch, vec![public]));
     assert_eq!(store.branch(branch).unwrap().head_sequence, 0);
 

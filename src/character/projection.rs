@@ -30,7 +30,12 @@ pub(crate) fn character_behavior_at(
     let mut current = CharacterBehavior::default();
     for fact in facts.iter() {
         if fact.draft.kind != EventKind::CharacterStateChanged
-            || fact.draft.actor.as_deref() != Some(&character.to_string())
+            || fact
+                .draft
+                .actor
+                .as_deref()
+                .and_then(crate::identity::CharacterId::parse)
+                != Some(character)
         {
             continue;
         }
@@ -61,7 +66,12 @@ pub(crate) fn character_working_state_at(
             current = CharacterWorkingState::default();
         }
         if fact.draft.kind != EventKind::CharacterWorkingStateReplaced
-            || fact.draft.actor.as_deref() != Some(&character.to_string())
+            || fact
+                .draft
+                .actor
+                .as_deref()
+                .and_then(crate::identity::CharacterId::parse)
+                != Some(character)
         {
             continue;
         }
@@ -85,7 +95,12 @@ pub(crate) fn character_memories_at(
     let mut book = CharacterMemories::default();
     for fact in facts.iter() {
         if fact.draft.kind != EventKind::CharacterMemoryChanged
-            || fact.draft.actor.as_deref() != Some(&character.to_string())
+            || fact
+                .draft
+                .actor
+                .as_deref()
+                .and_then(crate::identity::CharacterId::parse)
+                != Some(character)
         {
             continue;
         }

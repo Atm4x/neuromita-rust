@@ -179,8 +179,8 @@ mod tests {
             query: "green tea".into(),
             limit: 2,
         };
-        let recalled = recall_forgotten(CharacterId::Mita, anchor(), &book, selection).unwrap();
-        assert_eq!(recalled.character, CharacterId::Mita);
+        let recalled = recall_forgotten(CharacterId::Crazy, anchor(), &book, selection).unwrap();
+        assert_eq!(recalled.character, CharacterId::Crazy);
         assert_eq!(recalled.anchor, anchor());
         assert_eq!(
             recalled
@@ -207,7 +207,7 @@ mod tests {
         let book = sample();
         let id = |n| MemoryId(Uuid::from_u128(n));
         let valid = recall_forgotten(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             anchor(),
             &book,
             RecallSelector::Ids(vec![id(5), id(1)]),
@@ -220,7 +220,7 @@ mod tests {
         for bad in [3, 4, 99] {
             assert_eq!(
                 recall_forgotten(
-                    CharacterId::Mita,
+                    CharacterId::Crazy,
                     anchor(),
                     &book,
                     RecallSelector::Ids(vec![id(1), id(bad)])
@@ -230,7 +230,7 @@ mod tests {
         }
         assert_eq!(
             recall_forgotten(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 anchor(),
                 &book,
                 RecallSelector::Ids(vec![id(1), id(1)])
@@ -239,7 +239,7 @@ mod tests {
         );
         assert_eq!(
             recall_forgotten(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 anchor(),
                 &book,
                 RecallSelector::Ids(vec![])
@@ -256,19 +256,19 @@ mod tests {
             limit,
         };
         assert_eq!(
-            recall_forgotten(CharacterId::Mita, anchor(), &book, query("!", 2)),
+            recall_forgotten(CharacterId::Crazy, anchor(), &book, query("!", 2)),
             Err(RecallError::InvalidQuery)
         );
         assert_eq!(
-            recall_forgotten(CharacterId::Mita, anchor(), &book, query("tea", 0)),
+            recall_forgotten(CharacterId::Crazy, anchor(), &book, query("tea", 0)),
             Err(RecallError::InvalidLimit)
         );
         assert_eq!(
-            recall_forgotten(CharacterId::Mita, anchor(), &book, query("tea", 13)),
+            recall_forgotten(CharacterId::Crazy, anchor(), &book, query("tea", 13)),
             Err(RecallError::InvalidLimit)
         );
         assert!(
-            recall_forgotten(CharacterId::Mita, anchor(), &book, query("aardvark", 12))
+            recall_forgotten(CharacterId::Crazy, anchor(), &book, query("aardvark", 12))
                 .unwrap()
                 .facts
                 .is_empty()

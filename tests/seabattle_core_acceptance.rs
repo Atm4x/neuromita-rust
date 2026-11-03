@@ -75,12 +75,12 @@ async fn start(policy: GamePolicy) -> (ApplicationLifecycle, mpsc::UnboundedRece
 
 fn request() -> RequestHandle {
     let event = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("game acceptance".into()).unwrap(),
     )
     .unwrap();
     ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         event,
         RequestSource::Presenter,
     ))
@@ -114,7 +114,7 @@ async fn owner_transactions_reject_partial_stale_and_cancelled_model_moves() {
         auto_reactions: false,
     })
     .await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
     let first = GameApi::start(character, false).await.unwrap();
     assert!(first.reaction.is_none());
     assert!(first.receipt.view.is_some());
@@ -130,7 +130,7 @@ async fn owner_transactions_reject_partial_stale_and_cancelled_model_moves() {
     assert!(placed.receipt.view.unwrap().own_board[0].starts_with("SSSS"));
     assert!(placed.receipt.key.unwrap().revision > first_key.revision);
     assert!(
-        GameApi::view(CharacterId::KindMita)
+        GameApi::view(CharacterId::Kind)
             .await
             .unwrap()
             .view

@@ -252,7 +252,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
     let mut discovery = ChatApi::observe_requests().unwrap();
     let mut seen = HashSet::new();
 
-    let started = GameApi::start(CharacterId::Mita, true).await.unwrap();
+    let started = GameApi::start(CharacterId::Crazy, true).await.unwrap();
     assert_eq!(started.receipt.events.len(), 1);
     let session = started.receipt.key.unwrap().session;
     let greeting = started.reaction.expect("greeting submitted").unwrap();
@@ -260,7 +260,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
     server.next().await.respond.send(GREETING).unwrap();
     assert_accepted(wait_done(greeting).await);
 
-    let events = place_player_fleet(CharacterId::Mita).await;
+    let events = place_player_fleet(CharacterId::Crazy).await;
     let placement_handle = follow_up(&mut discovery, &mut seen).await;
     let placement = server.next().await;
     assert_eq!(
@@ -281,7 +281,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
     placement.respond.send(PLACEMENT).unwrap();
     assert_accepted(wait_done(placement_handle).await);
 
-    let view = GameApi::view(CharacterId::Mita).await.unwrap();
+    let view = GameApi::view(CharacterId::Crazy).await.unwrap();
     let player_board = view.view.as_ref().expect("active match");
     assert_eq!(player_board.phase.code(), "battle");
     assert_eq!(player_board.own_board[0], "SSSS.SSS..");
@@ -294,7 +294,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
         "the human view must not reveal Mita's fleet"
     );
 
-    let miss = GameApi::fire(CharacterId::Mita, Coordinate::parse("J10").unwrap())
+    let miss = GameApi::fire(CharacterId::Crazy, Coordinate::parse("J10").unwrap())
         .await
         .unwrap();
     let mut all_events = events;
@@ -309,7 +309,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
     server.next().await.respond.send(MOVE_J10).unwrap();
     assert_accepted(wait_done(follow_handle).await);
 
-    let after = GameApi::view(CharacterId::Mita).await.unwrap();
+    let after = GameApi::view(CharacterId::Crazy).await.unwrap();
     let after_view = after.view.clone().expect("active match");
     assert_eq!(after_view.session, session);
     assert_eq!(after.key.unwrap().revision, after_view.revision);
@@ -318,7 +318,7 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
         all_events.len()
     );
 
-    let other = CharacterApi::get(CharacterId::KindMita)
+    let other = CharacterApi::get(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -327,14 +327,14 @@ async fn model_commands_commit_privately_and_follow_the_real_turn() {
     assert!(!other_history.contains("SEA BATTLE"), "{other_history}");
     assert!(!other_history.contains("J10"), "{other_history}");
 
-    let closed = GameApi::close(CharacterId::Mita).await.unwrap();
+    let closed = GameApi::close(CharacterId::Crazy).await.unwrap();
     assert!(closed.receipt.view.is_none());
     let close_handle = closed.reaction.expect("close reaction").unwrap();
     seen.insert(close_handle.id());
     server.next().await.respond.send(GREETING).unwrap();
     assert_accepted(wait_done(close_handle).await);
 
-    let restart = GameApi::start(CharacterId::Mita, true).await.unwrap();
+    let restart = GameApi::start(CharacterId::Crazy, true).await.unwrap();
     assert_ne!(restart.receipt.key.unwrap().session, session);
     let restart_handle = restart.reaction.expect("restart greeting").unwrap();
     seen.insert(restart_handle.id());
@@ -355,7 +355,7 @@ async fn manual_turn_places_the_fleet_when_auto_reactions_are_off() {
     let app = start_app(&server.endpoint, GamePolicy::default()).await;
     let mut seen = HashSet::new();
 
-    let started = GameApi::start(CharacterId::Mita, false).await.unwrap();
+    let started = GameApi::start(CharacterId::Crazy, false).await.unwrap();
     assert!(started.reaction.is_none());
     assert!(
         timeout(Duration::from_millis(200), server.calls.recv())
@@ -363,14 +363,14 @@ async fn manual_turn_places_the_fleet_when_auto_reactions_are_off() {
             .is_err()
     );
 
-    let _ = place_player_fleet(CharacterId::Mita).await;
+    let _ = place_player_fleet(CharacterId::Crazy).await;
     assert!(
         timeout(Duration::from_millis(200), server.calls.recv())
             .await
             .is_err()
     );
 
-    let manual = GameApi::request_mita_turn(CharacterId::Mita).await.unwrap();
+    let manual = GameApi::request_mita_turn(CharacterId::Crazy).await.unwrap();
     let handle = manual.reaction.expect("manual placement request").unwrap();
     seen.insert(handle.id());
     let call = server.next().await;
@@ -384,7 +384,7 @@ async fn manual_turn_places_the_fleet_when_auto_reactions_are_off() {
     );
     call.respond.send(PLACEMENT).unwrap();
     assert_accepted(wait_done(handle).await);
-    let view = GameApi::view(CharacterId::Mita).await.unwrap();
+    let view = GameApi::view(CharacterId::Crazy).await.unwrap();
     let board = view.view.expect("active match");
     assert_eq!(board.phase.code(), "battle");
     assert_eq!(board.own_board[0], "SSSS.SSS..");
@@ -401,17 +401,17 @@ async fn cancelled_model_turn_applies_no_move() {
     let mut discovery = ChatApi::observe_requests().unwrap();
     let mut seen = HashSet::new();
 
-    GameApi::start(CharacterId::Mita, true).await.unwrap();
+    GameApi::start(CharacterId::Crazy, true).await.unwrap();
     let greeting = follow_up(&mut discovery, &mut seen).await;
     server.next().await.respond.send(GREETING).unwrap();
     assert_accepted(wait_done(greeting).await);
-    place_player_fleet(CharacterId::Mita).await;
+    place_player_fleet(CharacterId::Crazy).await;
     let placement = follow_up(&mut discovery, &mut seen).await;
     server.next().await.respond.send(PLACEMENT).unwrap();
     assert_accepted(wait_done(placement).await);
-    GameApi::view(CharacterId::Mita).await.unwrap();
+    GameApi::view(CharacterId::Crazy).await.unwrap();
 
-    let shot = GameApi::fire(CharacterId::Mita, Coordinate::parse("J10").unwrap())
+    let shot = GameApi::fire(CharacterId::Crazy, Coordinate::parse("J10").unwrap())
         .await
         .unwrap();
     let before = shot.receipt.key.expect("match key");
@@ -422,7 +422,7 @@ async fn cancelled_model_turn_applies_no_move() {
         CancelResult::Cancelled | CancelResult::Requested
     ));
     let _ = handle.wait().await.unwrap();
-    let after = GameApi::view(CharacterId::Mita).await.unwrap();
+    let after = GameApi::view(CharacterId::Crazy).await.unwrap();
     assert_eq!(after.key.unwrap(), before);
 
     app.shutdown().await.unwrap();
@@ -437,15 +437,15 @@ async fn historical_generation_before_match_remains_available_while_match_is_act
     let app = start_app(&server.endpoint, GamePolicy::default()).await;
 
     let input = UserInput::new("старое сообщение".into()).unwrap();
-    ChatApi::publish_message(CharacterId::Mita, input).unwrap();
+    ChatApi::publish_message(CharacterId::Crazy, input).unwrap();
     let old = app.at();
     let input = UserInput::new("новее".into()).unwrap();
-    ChatApi::publish_message(CharacterId::Mita, input).unwrap();
+    ChatApi::publish_message(CharacterId::Crazy, input).unwrap();
 
-    GameApi::start(CharacterId::Mita, false).await.unwrap();
+    GameApi::start(CharacterId::Crazy, false).await.unwrap();
 
     let handle = ChatApi::initiate(
-        InitiateRequest::new(CharacterId::Mita, "продолжи", RequestSource::Presenter)
+        InitiateRequest::new(CharacterId::Crazy, "продолжи", RequestSource::Presenter)
             .at(ContextPosition::At(old)),
     )
     .unwrap();
@@ -453,7 +453,7 @@ async fn historical_generation_before_match_remains_available_while_match_is_act
     call.respond.send(GREETING).unwrap();
     assert_accepted(wait_done(handle).await);
     assert!(
-        CharacterApi::get(CharacterId::Mita)
+        CharacterApi::get(CharacterId::Crazy)
             .unwrap()
             .get_context(old)
             .await
@@ -462,7 +462,7 @@ async fn historical_generation_before_match_remains_available_while_match_is_act
             .is_none()
     );
     assert!(
-        GameApi::view(CharacterId::Mita)
+        GameApi::view(CharacterId::Crazy)
             .await
             .unwrap()
             .view
@@ -487,10 +487,10 @@ async fn disabled_policy_blocks_every_start_path() {
     .await;
 
     assert!(matches!(
-        GameApi::start(CharacterId::Mita, true).await,
+        GameApi::start(CharacterId::Crazy, true).await,
         Err(GameError::Disabled)
     ));
-    let direct = CharacterApi::get(CharacterId::Mita)
+    let direct = CharacterApi::get(CharacterId::Crazy)
         .unwrap()
         .game(neuromita::games::UserGameCommand::Start {
             auto_reactions: true,

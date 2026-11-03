@@ -1,6 +1,6 @@
 use super::{
     runtime::Command,
-    view::{AppWindow, PresetItem, SettingsUi},
+    view::{AppWindow, CharacterPresets, PresetItem, SettingsUi},
 };
 use neuromita::{
     character::CharacterId,
@@ -100,20 +100,6 @@ fn id(value: &str) -> Result<PresetId, String> {
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let settings = window.global::<SettingsUi>();
     let weak = window.as_weak();
-    settings.on_search_character(move |search| {
-        let Some(window) = weak.upgrade() else {
-            return;
-        };
-        let query = search.trim().to_lowercase();
-        let settings = window.global::<SettingsUi>();
-        settings.set_show_mita("мита".contains(&query) || "mita".contains(&query));
-        settings.set_show_kind(
-            "добрая мита".contains(&query)
-                || "kind-mita".contains(&query)
-                || "kind".contains(&query),
-        );
-    });
-    let weak = window.as_weak();
     let send = dispatch.clone();
     settings.on_preset_save(move || {
         let Some(component) = weak.upgrade() else {
@@ -208,10 +194,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let window = component.global::<SettingsUi>();
-        let character = match character {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => {
+        let character = match CharacterId::from_index(character) {
+            Some(id) => id,
+            None => {
                 window.set_settings_error("Unknown character".into());
                 return;
             }
@@ -242,10 +227,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let ui = component.global::<SettingsUi>();
-        let character = match character {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => {
+        let character = match CharacterId::from_index(character) {
+            Some(id) => id,
+            None => {
                 ui.set_settings_error("Unknown character".into());
                 return;
             }
@@ -290,45 +274,32 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
-    let mita = settings.values.characters.mita.presets;
-    let kind = settings.values.characters.kind_mita.presets;
+    let previous = window.get_character_presets();
     let encode = |value: PresetSelection| match value {
-        PresetSelection::Active => "active".to_owned(),
-        PresetSelection::Specific(id) => id.0.to_string(),
-    };
-    if [
-        window.get_mita_reply().to_string(),
-        window.get_mita_react().to_string(),
-        window.get_mita_initiate().to_string(),
-    ] != [
-        encode(mita.reply),
-        encode(mita.react),
-        encode(mita.initiate),
-    ] {
-        window.set_split_mita_presets(mita.reply != mita.react || mita.reply != mita.initiate);
-    }
-    if [
-        window.get_kind_reply().to_string(),
-        window.get_kind_react().to_string(),
-        window.get_kind_initiate().to_string(),
-    ] != [
-        encode(kind.reply),
-        encode(kind.react),
-        encode(kind.initiate),
-    ] {
-        window.set_split_kind_presets(kind.reply != kind.react || kind.reply != kind.initiate);
-    }
-    let selection = |value: PresetSelection| match value {
         PresetSelection::Active => "active".into(),
-        PresetSelection::Specific(id) => id.0.to_string(),
+        PresetSelection::Specific(id) => id.0.to_string().into(),
     };
-    window.set_mita_reply(selection(settings.values.characters.mita.presets.reply).into());
-    window.set_mita_react(selection(settings.values.characters.mita.presets.react).into());
-    window.set_mita_initiate(selection(settings.values.characters.mita.presets.initiate).into());
-    window.set_kind_reply(selection(settings.values.characters.kind_mita.presets.reply).into());
-    window.set_kind_react(selection(settings.values.characters.kind_mita.presets.react).into());
-    window
-        .set_kind_initiate(selection(settings.values.characters.kind_mita.presets.initiate).into());
+    let rows = CharacterId::ALL
+        .into_iter()
+        .map(|id| {
+            let presets = settings.values.characters.for_character(id).presets;
+            let mut row = CharacterPresets {
+                reply: encode(presets.reply),
+                react: encode(presets.react),
+                initiate: encode(presets.initiate),
+                split: presets.reply != presets.react || presets.reply != presets.initiate,
+            };
+            if let Some(old) = previous.row_data(id.index())
+                && old.reply == row.reply
+                && old.react == row.react
+                && old.initiate == row.initiate
+            {
+                row.split = old.split;
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    window.set_character_presets(ModelRc::new(VecModel::from(rows)));
     let records = model
         .presets
         .iter()

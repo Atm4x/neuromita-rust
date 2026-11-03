@@ -138,7 +138,7 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
     let handler = SpeechInputHandler::new(
         Arc::new(Transcriber),
         Arc::new(ChatReplyTarget {
-            character: CharacterId::Mita,
+            character: CharacterId::Crazy,
             source: RequestSource::Presenter,
         }) as Arc<dyn SpeechConversation>,
         Arc::new(Playback(Arc::clone(&recorded))),
@@ -175,7 +175,7 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
     let snapshot = app
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     assert!(

@@ -1,3 +1,4 @@
+import { CharacterCatalog } from "../characters/catalog.slint";
 import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
@@ -16,7 +17,7 @@ component ConversationStrip inherits Rectangle {
         padding-left: 14px; padding-right: 14px; padding-top: 8px; padding-bottom: 8px; spacing: 14px;
         Glyph { text: Fa.heart; color: #ff7eb6; width: 14px; font-size: 14px; }
         Caption {
-            text: I18n.i18n("sandbox.conversation", "Разговор с ") + (root.character == 0 ? I18n.i18n("sandbox.conversation.mita", "Митой") : I18n.i18n("sandbox.conversation.kind", "Доброй Митой"));
+            text: I18n.i18n("sandbox.conversation", "Разговор с ") + CharacterCatalog.conversation-name(CharacterCatalog.entries[root.character]);
             font-weight: 700; font-size: 13.3333px; horizontal-stretch: 1;
         }
         GhostButton { text: I18n.i18n("sandbox.history", "История"); glyph: Fa.database; activated => { ConversationUi.history = true; } }
@@ -119,8 +120,7 @@ export component SandboxChat inherits Rectangle {
                     for item in root.messages: MessageRow {
                         item: item;
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
-                        character-name: root.character == 0 ? I18n.i18n("sandbox.character.mita", "Мита") : I18n.i18n("sandbox.character.kind", "Добрая Мита");
-                        avatar: @image-url("../../assets/avatars/crazy.png");
+                        character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
                     }
                 }

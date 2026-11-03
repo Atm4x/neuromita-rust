@@ -21,8 +21,8 @@ fn memory(
     record.state = state;
     record.protected = protected;
     let mut event = EventDraft::new(EventKind::CharacterMemoryChanged);
-    event.actor = Some(CharacterId::Mita.to_string());
-    event.observers.insert(CharacterId::Mita);
+    event.actor = Some(CharacterId::Crazy.to_string());
+    event.observers.insert(CharacterId::Crazy);
     event
         .payload
         .insert("change".into(), json!(MemoryChange::Upsert(record)));
@@ -70,21 +70,21 @@ fn preview_is_read_only_bounded_and_rejects_mixed_or_protected_targets() {
     ] {
         assert!(
             timeline
-                .preview_memory_purge(selection, CharacterId::Mita, &ids)
+                .preview_memory_purge(selection, CharacterId::Crazy, &ids)
                 .is_err()
         );
         assert_eq!(timeline.anchor(), head);
     }
     assert!(
         timeline
-            .preview_memory_purge(selection, CharacterId::KindMita, &[deleted])
+            .preview_memory_purge(selection, CharacterId::Kind, &[deleted])
             .is_err()
     );
     let preview = timeline
-        .preview_memory_purge(selection, CharacterId::Mita, &[deleted])
+        .preview_memory_purge(selection, CharacterId::Crazy, &[deleted])
         .unwrap();
     assert_eq!(preview.records().len(), 1);
-    assert_eq!(preview.character(), CharacterId::Mita);
+    assert_eq!(preview.character(), CharacterId::Crazy);
     assert_eq!(preview.anchor(), head);
 }
 
@@ -100,7 +100,7 @@ fn confirmed_purge_requires_backup_and_cannot_overwrite_previous_backup() {
         false,
     );
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let destination = path("confirmed");
     let head = timeline.anchor();
@@ -120,12 +120,12 @@ fn confirmed_purge_requires_backup_and_cannot_overwrite_previous_backup() {
     assert_eq!(backup["format"], "neuromita-memory-purge-backup");
     assert_eq!(backup["records"][0]["id"], id.0.to_string());
     assert_eq!(backup["records"][0]["content"], "private to backup");
-    assert_eq!(backup["character"], "mita");
+    assert_eq!(backup["character"], "Crazy");
     assert_eq!(backup["through"], head.through);
     assert_eq!(timeline.anchor().through, head.through + 1);
     assert!(
         timeline
-            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .inspect_context_at(CharacterId::Crazy, timeline.anchor())
             .unwrap()
             .memories
             .get(id)
@@ -144,7 +144,7 @@ fn failed_backup_and_existing_path_never_remove_memory() {
     let id = MemoryId::new();
     memory(&mut timeline, id, "sensitive", MemoryState::Deleted, false);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let head = timeline.anchor();
     let destination = path("existing");
@@ -165,7 +165,7 @@ fn failed_backup_and_existing_path_never_remove_memory() {
     assert_eq!(timeline.anchor(), head);
     assert!(
         timeline
-            .inspect_context_at(CharacterId::Mita, head)
+            .inspect_context_at(CharacterId::Crazy, head)
             .unwrap()
             .memories
             .get(id)
@@ -180,7 +180,7 @@ fn stale_head_or_selection_rejects_backup_and_purge() {
     let id = MemoryId::new();
     memory(&mut timeline, id, "old", MemoryState::Deleted, false);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let path = path("stale");
     let next = MemoryId::new();
@@ -191,7 +191,7 @@ fn stale_head_or_selection_rejects_backup_and_purge() {
     ));
     assert!(!path.exists());
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let old = timeline.selection();
     timeline.select_branch(old.branch_id, old).unwrap();
@@ -210,7 +210,7 @@ fn multi_purge_is_single_atomic_append_and_sorted_in_backup() {
     memory(&mut timeline, a, "apple", MemoryState::Deleted, false);
     memory(&mut timeline, b, "banana", MemoryState::Deleted, false);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[b, a])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[b, a])
         .unwrap();
     assert!(
         preview
@@ -226,7 +226,7 @@ fn multi_purge_is_single_atomic_append_and_sorted_in_backup() {
     );
     assert_eq!(timeline.anchor().through, before + 2);
     let snap = timeline
-        .inspect_context_at(CharacterId::Mita, timeline.anchor())
+        .inspect_context_at(CharacterId::Crazy, timeline.anchor())
         .unwrap();
     assert!(snap.memories.get(a).is_none() && snap.memories.get(b).is_none());
     let _ = std::fs::remove_file(destination);
@@ -259,7 +259,7 @@ fn durable_purge_replays_after_sqlite_reopen_and_backup_remains() {
             false,
         );
         let preview = timeline
-            .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+            .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
             .unwrap();
         assert_eq!(
             purge_with_backup(&mut timeline, &preview, true, &backup).unwrap(),
@@ -277,7 +277,7 @@ fn durable_purge_replays_after_sqlite_reopen_and_backup_remains() {
         assert_eq!(timeline.anchor().through, through);
         assert!(
             timeline
-                .inspect_context_at(CharacterId::Mita, timeline.anchor())
+                .inspect_context_at(CharacterId::Crazy, timeline.anchor())
                 .unwrap()
                 .memories
                 .get(id)
@@ -285,7 +285,7 @@ fn durable_purge_replays_after_sqlite_reopen_and_backup_remains() {
         );
         assert!(
             timeline
-                .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+                .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
                 .is_err()
         );
         let saved: serde_json::Value =
@@ -309,7 +309,7 @@ fn archived_records_can_be_restored_as_soft_deleted_not_active() {
         false,
     );
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let backup = path("restore");
     purge_with_backup(&mut timeline, &preview, true, &backup).unwrap();
@@ -325,7 +325,7 @@ fn archived_records_can_be_restored_as_soft_deleted_not_active() {
     );
     assert_eq!(
         timeline
-            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .inspect_context_at(CharacterId::Crazy, timeline.anchor())
             .unwrap()
             .memories
             .get(id)
@@ -345,7 +345,7 @@ fn corrupted_or_forged_backup_never_mutates_timeline() {
     let id = MemoryId::new();
     memory(&mut timeline, id, "original", MemoryState::Deleted, false);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let backup = path("corrupt");
     purge_with_backup(&mut timeline, &preview, true, &backup).unwrap();
@@ -375,7 +375,7 @@ fn backup_refuses_symlink_destination_and_is_private_to_owner() {
     let id = MemoryId::new();
     memory(&mut timeline, id, "secret", MemoryState::Deleted, false);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let target = path("symlink-target");
     let link = path("symlink-link");
@@ -422,7 +422,7 @@ fn restore_backup_after_reopening_sqlite_keeps_it_deleted() {
             false,
         );
         let preview = timeline
-            .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+            .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
             .unwrap();
         purge_with_backup(&mut timeline, &preview, true, &backup).unwrap();
         timeline.anchor().through
@@ -442,7 +442,7 @@ fn restore_backup_after_reopening_sqlite_keeps_it_deleted() {
         assert_eq!(timeline.anchor().through, after_purge + 1);
         assert_eq!(
             timeline
-                .inspect_context_at(CharacterId::Mita, timeline.anchor())
+                .inspect_context_at(CharacterId::Crazy, timeline.anchor())
                 .unwrap()
                 .memories
                 .get(id)
@@ -468,7 +468,7 @@ fn foreign_branch_backup_and_duplicate_archive_entries_fail_closed() {
         false,
     );
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     let archive = path("foreign");
     purge_with_backup(&mut timeline, &preview, true, &archive).unwrap();
@@ -493,10 +493,10 @@ fn memory_purge_and_restore_notify_only_after_authorized_commits() {
     let mut timeline = SessionTimeline::new();
     let id = MemoryId::new();
     memory(&mut timeline, id, "archived", MemoryState::Deleted, false);
-    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
-    let mut other = timeline.observe_memory_changes(CharacterId::KindMita);
+    let mut mita = timeline.observe_memory_changes(CharacterId::Crazy);
+    let mut other = timeline.observe_memory_changes(CharacterId::Kind);
     let preview = timeline
-        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .preview_memory_purge(timeline.selection(), CharacterId::Crazy, &[id])
         .unwrap();
     assert!(!mita.has_changed().unwrap());
     let destination = path("watch-commits");

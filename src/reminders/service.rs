@@ -1543,9 +1543,9 @@ mod recurrence_tests {
 
     fn record(local: &str, zone: &str, repeat: RepeatRule) -> ReminderRecord {
         let zone = TimeZoneId::parse(zone).unwrap();
-        ReminderProjection::empty(BranchId::new(), CharacterId::Mita)
+        ReminderProjection::empty(BranchId::new(), CharacterId::Crazy)
             .apply_create(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 ReminderKind::Reminder,
                 "calendar recurrence".into(),
                 DueSpec::local(LocalDateTime::parse(local).unwrap(), zone.clone()),

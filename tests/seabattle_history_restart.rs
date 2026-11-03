@@ -120,11 +120,11 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
         auto_reactions: false,
     };
     let (app, mut calls) = start(policy, config()).await;
-    let owner = CharacterApi::get(CharacterId::Mita).unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
     let before_game = app.at();
-    GameApi::start(CharacterId::Mita, false).await.unwrap();
+    GameApi::start(CharacterId::Crazy, false).await.unwrap();
     GameApi::place_ship(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         Coordinate::parse("A1").unwrap(),
         4,
         Orientation::Horizontal,
@@ -132,12 +132,12 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
     .await
     .unwrap();
     let input = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("saved question".into()).unwrap(),
     )
     .unwrap();
     let saved = app.at();
-    let saved_key = GameApi::view(CharacterId::Mita).await.unwrap().key;
+    let saved_key = GameApi::view(CharacterId::Crazy).await.unwrap().key;
     // Fork from an explicit Timeline checkpoint after the private placement snapshot.
     let child = BranchId::new();
     {
@@ -166,7 +166,7 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
             assert_eq!(fact.draft.actor.as_deref(), Some("mita"));
             assert_eq!(
                 fact.draft.observers.iter().copied().collect::<Vec<_>>(),
-                vec![CharacterId::Mita]
+                vec![CharacterId::Crazy]
             );
             assert!(fact.draft.payload.contains_key("game_state"));
             for character in CharacterId::ALL {
@@ -206,7 +206,7 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
             .all(|row| !row.contains('S'))
     );
     assert!(
-        CharacterApi::get(CharacterId::KindMita)
+        CharacterApi::get(CharacterId::Kind)
             .unwrap()
             .get_context(saved)
             .await
@@ -216,12 +216,12 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
     );
     // A later message makes the anchor historical without changing game or character revision.
     ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("later message".into()).unwrap(),
     )
     .unwrap();
     let historical = ChatApi::reply(
-        ReplyRequest::new(CharacterId::Mita, input, RequestSource::Presenter)
+        ReplyRequest::new(CharacterId::Crazy, input, RequestSource::Presenter)
             .at(ContextPosition::At(saved)),
     )
     .unwrap();
@@ -267,12 +267,12 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
             .starts_with("SSSS")
     );
     let mixed_input = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("mixed transaction".into()).unwrap(),
     )
     .unwrap();
     let mixed = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         mixed_input,
         RequestSource::Presenter,
     ))
@@ -291,17 +291,17 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
     ));
     assert_eq!(app.at(), before_mixed);
     assert!(
-        neuromita::reminders::RemindersApi::list(CharacterId::Mita)
+        neuromita::reminders::RemindersApi::list(CharacterId::Crazy)
             .await
             .unwrap()
             .is_empty()
     );
-    let root_view = GameApi::view(CharacterId::Mita).await.unwrap().view;
+    let root_view = GameApi::view(CharacterId::Crazy).await.unwrap().view;
     // Fork inherits the prefix, with an independent game state thereafter.
     app.select_timeline_branch(child, app.timeline_selection())
         .unwrap();
     assert_eq!(
-        GameApi::view(CharacterId::Mita)
+        GameApi::view(CharacterId::Crazy)
             .await
             .unwrap()
             .key
@@ -311,31 +311,31 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
     );
     assert_eq!(owner.get_context(app.at()).await.unwrap().game, old.game);
     GameApi::place_ship(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         Coordinate::parse("A3").unwrap(),
         3,
         Orientation::Horizontal,
     )
     .await
     .unwrap();
-    let child_view = GameApi::view(CharacterId::Mita).await.unwrap().view;
+    let child_view = GameApi::view(CharacterId::Crazy).await.unwrap().view;
     app.select_timeline_branch(root, app.timeline_selection())
         .unwrap();
     assert_eq!(
-        GameApi::view(CharacterId::Mita).await.unwrap().view,
+        GameApi::view(CharacterId::Crazy).await.unwrap().view,
         root_view
     );
     app.shutdown().await.unwrap();
     let (app, mut calls) = start(policy, config()).await;
     assert_eq!(
-        GameApi::view(CharacterId::Mita).await.unwrap().view,
+        GameApi::view(CharacterId::Crazy).await.unwrap().view,
         root_view
     );
-    let owner = CharacterApi::get(CharacterId::Mita).unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
     assert_eq!(owner.get_context(saved).await.unwrap().game, old.game);
     // Historical generation still runs, but a changed actual game/revision rejects the whole proposal.
     let stale = ChatApi::reply(
-        ReplyRequest::new(CharacterId::Mita, input, RequestSource::Presenter)
+        ReplyRequest::new(CharacterId::Crazy, input, RequestSource::Presenter)
             .at(ContextPosition::At(saved)),
     )
     .unwrap();
@@ -351,34 +351,34 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
     ));
     assert_eq!(app.at(), before);
     assert_eq!(
-        GameApi::view(CharacterId::Mita).await.unwrap().view,
+        GameApi::view(CharacterId::Crazy).await.unwrap().view,
         root_view
     );
     app.select_timeline_branch(child, app.timeline_selection())
         .unwrap();
     assert_eq!(
-        GameApi::view(CharacterId::Mita).await.unwrap().view,
+        GameApi::view(CharacterId::Crazy).await.unwrap().view,
         child_view
     );
     assert!(
-        GameApi::view(CharacterId::KindMita)
+        GameApi::view(CharacterId::Kind)
             .await
             .unwrap()
             .view
             .is_none()
     );
-    GameApi::close(CharacterId::Mita).await.unwrap();
+    GameApi::close(CharacterId::Crazy).await.unwrap();
     app.shutdown().await.unwrap();
     let (app, _) = start(policy, config()).await;
     assert!(
-        GameApi::view(CharacterId::Mita)
+        GameApi::view(CharacterId::Crazy)
             .await
             .unwrap()
             .view
             .is_none()
     );
     assert_eq!(
-        CharacterApi::get(CharacterId::Mita)
+        CharacterApi::get(CharacterId::Crazy)
             .unwrap()
             .get_context(saved)
             .await

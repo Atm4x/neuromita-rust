@@ -48,11 +48,11 @@ fn documents(
 
 fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     let shared = add_message(timeline, &CharacterId::ALL, "original");
-    let private = add_message(timeline, &[CharacterId::Mita], "secret");
+    let private = add_message(timeline, &[CharacterId::Crazy], "secret");
     let selection = timeline.selection();
     let branch = selection.branch_id;
     let old =
-        TimelineMessageQueries::capture(timeline.store.as_ref(), branch, CharacterId::Mita, None)
+        TimelineMessageQueries::capture(timeline.store.as_ref(), branch, CharacterId::Crazy, None)
             .unwrap();
     assert_eq!(old.count(), 2);
 
@@ -61,13 +61,13 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
         targets: vec![shared],
     };
     let first = timeline
-        .change_message(selection, CharacterId::Mita, hidden, action.clone())
+        .change_message(selection, CharacterId::Crazy, hidden, action.clone())
         .unwrap();
     assert_eq!(first.draft.kind, EventKind::MessageHidden);
-    assert_eq!(documents(timeline, CharacterId::Mita).len(), 1);
-    assert_eq!(documents(timeline, CharacterId::KindMita).len(), 1);
+    assert_eq!(documents(timeline, CharacterId::Crazy).len(), 1);
+    assert_eq!(documents(timeline, CharacterId::Kind).len(), 1);
     assert_eq!(
-        documents(timeline, CharacterId::KindMita)[0]["content"],
+        documents(timeline, CharacterId::Kind)[0]["content"],
         "original"
     );
     assert_eq!(old.count(), 2);
@@ -75,7 +75,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     let after_hide = timeline.store.branch(branch).unwrap().head_sequence;
     assert_eq!(
         timeline
-            .change_message(selection, CharacterId::Mita, hidden, action.clone())
+            .change_message(selection, CharacterId::Crazy, hidden, action.clone())
             .unwrap(),
         first,
     );
@@ -86,7 +86,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     assert_eq!(
         timeline.change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             hidden,
             MessageAction::Restore { target: shared }
         ),
@@ -100,7 +100,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     assert_eq!(
         timeline.change_message(
             selection,
-            CharacterId::KindMita,
+            CharacterId::Kind,
             EventId::new(),
             MessageAction::Hide {
                 targets: vec![private]
@@ -115,7 +115,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     timeline
         .change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Revise {
                 target: shared,
@@ -123,33 +123,33 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
             },
         )
         .unwrap();
-    assert_eq!(documents(timeline, CharacterId::Mita).len(), 2);
+    assert_eq!(documents(timeline, CharacterId::Crazy).len(), 2);
     timeline
         .change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Hide {
                 targets: vec![shared],
             },
         )
         .unwrap();
-    assert_eq!(documents(timeline, CharacterId::Mita).len(), 1);
+    assert_eq!(documents(timeline, CharacterId::Crazy).len(), 1);
     timeline
         .change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Restore { target: shared },
         )
         .unwrap();
-    let now = documents(timeline, CharacterId::Mita);
+    let now = documents(timeline, CharacterId::Crazy);
     assert_eq!(now.len(), 2);
     assert_eq!(now[0]["content"], "modified");
     assert_eq!(now[0]["annotation"], "from editor");
     assert_eq!(now[0]["timeline_event_id"], shared.0.to_string());
     assert_eq!(
-        documents(timeline, CharacterId::KindMita)[0]["content"],
+        documents(timeline, CharacterId::Kind)[0]["content"],
         "original"
     );
 
@@ -159,7 +159,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     timeline
         .change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Revise {
                 target: shared,
@@ -167,9 +167,9 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
             },
         )
         .unwrap();
-    assert_eq!(documents(timeline, CharacterId::Mita)[0]["content"], parts);
+    assert_eq!(documents(timeline, CharacterId::Crazy)[0]["content"], parts);
     assert_eq!(
-        documents(timeline, CharacterId::KindMita)[0]["content"],
+        documents(timeline, CharacterId::Kind)[0]["content"],
         "original"
     );
 
@@ -179,7 +179,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
     assert!(matches!(
         timeline.change_message(
             selection,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Revise {
                 target: shared,
@@ -189,7 +189,7 @@ fn presentation_contract(timeline: &mut SessionTimeline) -> EventId {
         Err(TimelineError::Invalid(_)),
     ));
     assert_eq!(old.messages()[0].content, "original");
-    assert_eq!(view(timeline, CharacterId::Mita).len(), 2);
+    assert_eq!(view(timeline, CharacterId::Crazy).len(), 2);
     shared
 }
 
@@ -225,15 +225,15 @@ fn message_actions_survive_sqlite_reopen_and_do_not_modify_other_character() {
         })
         .unwrap();
         assert_eq!(
-            documents(&timeline, CharacterId::Mita)[0]["content"],
+            documents(&timeline, CharacterId::Crazy)[0]["content"],
             json!([{"type": "text", "text": "edited in parts"}]),
         );
         assert_eq!(
-            documents(&timeline, CharacterId::KindMita)[0]["content"],
+            documents(&timeline, CharacterId::Kind)[0]["content"],
             "original"
         );
         assert_eq!(
-            documents(&timeline, CharacterId::Mita)[0]["timeline_event_id"],
+            documents(&timeline, CharacterId::Crazy)[0]["timeline_event_id"],
             shared.0.to_string(),
         );
     }
@@ -245,14 +245,14 @@ fn message_actions_survive_sqlite_reopen_and_do_not_modify_other_character() {
 #[test]
 fn message_actions_reject_stale_selection_without_writing() {
     let mut timeline = SessionTimeline::new();
-    let original = add_message(&mut timeline, &[CharacterId::Mita], "original");
+    let original = add_message(&mut timeline, &[CharacterId::Crazy], "original");
     let stale = timeline.selection();
     timeline.select_branch(stale.branch_id, stale).unwrap();
     let head = timeline.anchor().through;
     assert_eq!(
         timeline.change_message(
             stale,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             MessageAction::Hide {
                 targets: vec![original]

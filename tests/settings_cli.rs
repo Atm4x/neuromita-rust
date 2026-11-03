@@ -5,8 +5,7 @@ use std::{
 };
 
 use neuromita::settings::{
-    AppSettings, JsonSettingsRepository, SETTINGS_SCHEMA_VERSION, SettingsRepository,
-    StoredSettings, Volume,
+    AppSettings, JsonSettingsRepository, SettingsRepository, StoredSettings, Volume,
 };
 use uuid::Uuid;
 
@@ -36,11 +35,7 @@ impl Drop for TempDir {
 fn stored(revision: u64, volume: u8) -> StoredSettings {
     let mut settings = AppSettings::initial_profile();
     settings.voice.volume = Volume::new(volume).unwrap();
-    StoredSettings {
-        schema_version: SETTINGS_SCHEMA_VERSION,
-        revision,
-        settings,
-    }
+    StoredSettings { revision, settings }
 }
 
 fn run(arguments: &[&str]) -> Output {
@@ -84,7 +79,7 @@ fn offline_export_and_import_roundtrip_without_api_key() {
     ]);
     assert!(exported.status.success(), "{}", stderr(&exported));
     assert!(
-        stdout(&exported).contains("Exported full Rust AppSettings (schema 3, revision 5)"),
+        stdout(&exported).contains("Exported full Rust AppSettings (revision 5)"),
         "{}",
         stdout(&exported)
     );
@@ -111,7 +106,7 @@ fn offline_export_and_import_roundtrip_without_api_key() {
     ]);
     assert!(imported.status.success(), "{}", stderr(&imported));
     assert!(
-        stdout(&imported).contains("Imported full Rust AppSettings (schema 3, revision 5)"),
+        stdout(&imported).contains("Imported full Rust AppSettings (revision 5)"),
         "{}",
         stdout(&imported)
     );
@@ -131,9 +126,13 @@ fn invalid_cli_import_preserves_the_destination() {
     let before = fs::read(&destination_path).unwrap();
 
     let invalid_source = directory.path("future.json");
-    let mut future = stored(9, 10);
-    future.schema_version = neuromita::settings::SETTINGS_SCHEMA_VERSION + 1;
-    fs::write(&invalid_source, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
+    let mut invalid = serde_json::to_value(stored(9, 10)).unwrap();
+    invalid["schema_version"] = serde_json::json!(5);
+    fs::write(
+        &invalid_source,
+        serde_json::to_vec_pretty(&invalid).unwrap(),
+    )
+    .unwrap();
     let rejected = run(&[
         "settings",
         "import",
@@ -144,7 +143,7 @@ fn invalid_cli_import_preserves_the_destination() {
     ]);
     assert!(!rejected.status.success());
     assert!(
-        stderr(&rejected).contains("unsupported settings schema 4"),
+        stderr(&rejected).contains("invalid settings transfer"),
         "{}",
         stderr(&rejected)
     );

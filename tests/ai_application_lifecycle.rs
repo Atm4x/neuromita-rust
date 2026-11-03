@@ -244,7 +244,7 @@ async fn occupied_port_stops_startup_before_ai_activation() {
     let mut config = application(runtime_with_python(&root, "mock_tts", "3.12.10").await);
     config.server = neuromita::server::ServerConfig::test_protocol(
         socket.local_addr().unwrap(),
-        neuromita::character::CharacterId::Mita,
+        neuromita::character::CharacterId::Crazy,
     );
     let outcome = ApplicationLifecycle::start(config).await;
     assert!(matches!(

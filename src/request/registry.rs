@@ -284,7 +284,7 @@ mod tests {
         };
         let registry = RequestRegistry::new_with_diagnostics(4, limits);
         let command = ReactRequest::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             "x".repeat(100),
             RequestSource::Presenter,

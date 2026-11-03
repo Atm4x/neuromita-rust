@@ -50,17 +50,17 @@ fn recovery_uses_only_accepted_replies_not_admission_or_reset() {
     let branch = BranchId::new();
     repo.create_session(SessionId::new(), branch).unwrap();
     let request = RequestId(Uuid::new_v4());
-    let incoming = append(&mut repo, branch, "in", input(request, CharacterId::Mita));
+    let incoming = append(&mut repo, branch, "in", input(request, CharacterId::Crazy));
     let accepted = |repo: &dyn TimelineRepository, at| {
-        repo.accepted_reply_at(branch, CharacterId::Mita, request.0, at)
+        repo.accepted_reply_at(branch, CharacterId::Crazy, request.0, at)
             .unwrap()
     };
     assert!(accepted(&repo, None).is_none());
     assert!(accepted(&repo, Some(incoming.sequence)).is_none());
 
     let mut proactive = EventDraft::new(EventKind::ProactiveOpportunity);
-    proactive.actor = Some(CharacterId::Mita.to_string());
-    proactive.observers.insert(CharacterId::Mita);
+    proactive.actor = Some(CharacterId::Crazy.to_string());
+    proactive.observers.insert(CharacterId::Crazy);
     proactive
         .payload
         .insert("request_id".into(), json!(request.to_string()));
@@ -71,27 +71,27 @@ fn recovery_uses_only_accepted_replies_not_admission_or_reset() {
         &mut repo,
         branch,
         "accepted",
-        reply(request, CharacterId::Mita),
+        reply(request, CharacterId::Crazy),
     );
     assert_eq!(accepted(&repo, None), Some(committed.clone()));
     assert!(accepted(&repo, Some(committed.sequence - 1)).is_none());
     assert_eq!(
-        repo.accepted_reply_at(branch, CharacterId::KindMita, request.0, None)
+        repo.accepted_reply_at(branch, CharacterId::Kind, request.0, None)
             .unwrap(),
         None
     );
     assert_eq!(
-        repo.accepted_reply_at(branch, CharacterId::Mita, Uuid::new_v4(), None)
+        repo.accepted_reply_at(branch, CharacterId::Crazy, Uuid::new_v4(), None)
             .unwrap(),
         None
     );
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::Mita);
+    reset.observers.insert(CharacterId::Crazy);
     append(&mut repo, branch, "reset", reset);
     assert_eq!(accepted(&repo, None), Some(committed));
     assert!(matches!(
-        repo.accepted_reply_at(branch, CharacterId::Mita, request.0, Some(1_000)),
+        repo.accepted_reply_at(branch, CharacterId::Crazy, request.0, Some(1_000)),
         Err(TimelineError::Invalid(_))
     ));
 }
@@ -104,15 +104,15 @@ fn recovery_follows_fork_cutoff_and_detects_duplicate_commit() {
     repo.create_session(SessionId::new(), root).unwrap();
     let prior = RequestId(Uuid::new_v4());
     let future = RequestId(Uuid::new_v4());
-    let committed = append(&mut repo, root, "prior", reply(prior, CharacterId::Mita));
+    let committed = append(&mut repo, root, "prior", reply(prior, CharacterId::Crazy));
     let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
     checkpoint.payload.insert("snapshot".into(), json!({}));
     let checkpoint_id = checkpoint.id;
     append(&mut repo, root, "checkpoint", checkpoint);
     repo.fork(root, checkpoint_id, child).unwrap();
-    append(&mut repo, root, "future", reply(future, CharacterId::Mita));
+    append(&mut repo, root, "future", reply(future, CharacterId::Crazy));
     assert_eq!(
-        repo.accepted_reply_at(child, CharacterId::Mita, prior.0, None)
+        repo.accepted_reply_at(child, CharacterId::Crazy, prior.0, None)
             .unwrap()
             .unwrap()
             .draft
@@ -120,7 +120,7 @@ fn recovery_follows_fork_cutoff_and_detects_duplicate_commit() {
         committed.draft.id
     );
     assert!(
-        repo.accepted_reply_at(child, CharacterId::Mita, future.0, None)
+        repo.accepted_reply_at(child, CharacterId::Crazy, future.0, None)
             .unwrap()
             .is_none()
     );
@@ -128,10 +128,10 @@ fn recovery_follows_fork_cutoff_and_detects_duplicate_commit() {
         &mut repo,
         child,
         "branch-reply",
-        reply(future, CharacterId::Mita),
+        reply(future, CharacterId::Crazy),
     );
     assert!(
-        repo.accepted_reply_at(child, CharacterId::Mita, future.0, None)
+        repo.accepted_reply_at(child, CharacterId::Crazy, future.0, None)
             .unwrap()
             .is_some()
     );
@@ -139,10 +139,10 @@ fn recovery_follows_fork_cutoff_and_detects_duplicate_commit() {
         &mut repo,
         child,
         "duplicate",
-        reply(future, CharacterId::Mita),
+        reply(future, CharacterId::Crazy),
     );
     assert_eq!(
-        repo.accepted_reply_at(child, CharacterId::Mita, future.0, None),
+        repo.accepted_reply_at(child, CharacterId::Crazy, future.0, None),
         Err(TimelineError::Conflict)
     );
 }
@@ -164,31 +164,31 @@ fn sqlite_reopen_reconciles_uncertain_commits_without_replaying_them() {
             &mut repo,
             branch,
             "admitted",
-            input(unaccepted, CharacterId::Mita),
+            input(unaccepted, CharacterId::Crazy),
         );
         append(
             &mut repo,
             branch,
             "input",
-            input(accepted, CharacterId::Mita),
+            input(accepted, CharacterId::Crazy),
         );
         append(
             &mut repo,
             branch,
             "accepted",
-            reply(accepted, CharacterId::Mita),
+            reply(accepted, CharacterId::Crazy),
         )
     };
     for _ in 0..2 {
         let repo = SqliteTimelineRepository::open(&path).unwrap();
         let before = repo.branch(branch).unwrap().head_sequence;
         assert_eq!(
-            repo.accepted_reply_at(branch, CharacterId::Mita, accepted.0, None)
+            repo.accepted_reply_at(branch, CharacterId::Crazy, accepted.0, None)
                 .unwrap(),
             Some(committed.clone())
         );
         assert!(
-            repo.accepted_reply_at(branch, CharacterId::Mita, unaccepted.0, None)
+            repo.accepted_reply_at(branch, CharacterId::Crazy, unaccepted.0, None)
                 .unwrap()
                 .is_none()
         );
@@ -212,7 +212,7 @@ fn request_evidence_distinguishes_ingress_dispatch_and_commit() {
 
     let evidence = |store: &TimelineStore, id: RequestId, at: Option<u64>| {
         store
-            .request_evidence_at(branch, CharacterId::Mita, id.0, at)
+            .request_evidence_at(branch, CharacterId::Crazy, id.0, at)
             .unwrap()
     };
     assert_eq!(evidence(&repo, unknown, None), RequestEvidence::NoRecord);
@@ -220,20 +220,20 @@ fn request_evidence_distinguishes_ingress_dispatch_and_commit() {
         &mut repo,
         branch,
         "input",
-        input(request, CharacterId::Mita),
+        input(request, CharacterId::Crazy),
     );
     assert_eq!(
         evidence(&repo, request, None),
         RequestEvidence::PlayerInput(incoming.clone())
     );
     assert_eq!(
-        repo.request_evidence_at(branch, CharacterId::KindMita, request.0, None),
+        repo.request_evidence_at(branch, CharacterId::Kind, request.0, None),
         Ok(RequestEvidence::NoRecord)
     );
 
     let mut opportunity = EventDraft::new(EventKind::ProactiveOpportunity);
-    opportunity.actor = Some(CharacterId::Mita.to_string());
-    opportunity.observers.insert(CharacterId::Mita);
+    opportunity.actor = Some(CharacterId::Crazy.to_string());
+    opportunity.observers.insert(CharacterId::Crazy);
     opportunity
         .payload
         .insert("request_id".into(), json!(proactive_request.to_string()));
@@ -251,7 +251,7 @@ fn request_evidence_distinguishes_ingress_dispatch_and_commit() {
         &mut repo,
         branch,
         "reply",
-        reply(request, CharacterId::Mita),
+        reply(request, CharacterId::Crazy),
     );
     assert_eq!(
         evidence(&repo, request, None),
@@ -262,20 +262,20 @@ fn request_evidence_distinguishes_ingress_dispatch_and_commit() {
         RequestEvidence::PlayerInput(incoming.clone())
     );
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::Mita);
+    reset.observers.insert(CharacterId::Crazy);
     append(&mut repo, branch, "reset", reset);
     assert_eq!(
         evidence(&repo, request, None),
         RequestEvidence::AcceptedReply(accepted)
     );
     assert!(matches!(
-        repo.request_evidence_at(branch, CharacterId::Mita, request.0, Some(10_000)),
+        repo.request_evidence_at(branch, CharacterId::Crazy, request.0, Some(10_000)),
         Err(TimelineError::Invalid(_))
     ));
 
     let mut no_request_id = EventDraft::new(EventKind::PlayerMessage);
     no_request_id.actor = Some("player".into());
-    no_request_id.observers.insert(CharacterId::Mita);
+    no_request_id.observers.insert(CharacterId::Crazy);
     append(&mut repo, branch, "message-only", no_request_id);
     assert_eq!(evidence(&repo, unknown, None), RequestEvidence::NoRecord);
 }
@@ -290,7 +290,12 @@ fn request_evidence_respects_fork_privacy_and_detects_ambiguous_facts() {
     repo.create_session(SessionId::new(), root).unwrap();
     let original = RequestId(Uuid::new_v4());
     let after_fork = RequestId(Uuid::new_v4());
-    let seen = append(&mut repo, root, "input", input(original, CharacterId::Mita));
+    let seen = append(
+        &mut repo,
+        root,
+        "input",
+        input(original, CharacterId::Crazy),
+    );
     let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
     checkpoint.payload.insert("snapshot".into(), json!({}));
     let checkpoint_id = checkpoint.id;
@@ -300,29 +305,29 @@ fn request_evidence_respects_fork_privacy_and_detects_ambiguous_facts() {
         &mut repo,
         root,
         "parent-future",
-        reply(after_fork, CharacterId::Mita),
+        reply(after_fork, CharacterId::Crazy),
     );
 
     assert_eq!(
-        repo.request_evidence_at(fork, CharacterId::Mita, original.0, None),
+        repo.request_evidence_at(fork, CharacterId::Crazy, original.0, None),
         Ok(RequestEvidence::PlayerInput(seen))
     );
     assert_eq!(
-        repo.request_evidence_at(fork, CharacterId::Mita, after_fork.0, None),
+        repo.request_evidence_at(fork, CharacterId::Crazy, after_fork.0, None),
         Ok(RequestEvidence::NoRecord)
     );
     assert_eq!(
-        repo.request_evidence_at(fork, CharacterId::KindMita, original.0, None),
+        repo.request_evidence_at(fork, CharacterId::Kind, original.0, None),
         Ok(RequestEvidence::NoRecord)
     );
     let accepted = append(
         &mut repo,
         fork,
         "fork-reply",
-        reply(after_fork, CharacterId::Mita),
+        reply(after_fork, CharacterId::Crazy),
     );
     assert_eq!(
-        repo.request_evidence_at(fork, CharacterId::Mita, after_fork.0, None),
+        repo.request_evidence_at(fork, CharacterId::Crazy, after_fork.0, None),
         Ok(RequestEvidence::AcceptedReply(accepted))
     );
 
@@ -330,14 +335,14 @@ fn request_evidence_respects_fork_privacy_and_detects_ambiguous_facts() {
         &mut repo,
         fork,
         "duplicate",
-        reply(after_fork, CharacterId::Mita),
+        reply(after_fork, CharacterId::Crazy),
     );
     assert_eq!(
-        repo.request_evidence_at(fork, CharacterId::Mita, after_fork.0, None),
+        repo.request_evidence_at(fork, CharacterId::Crazy, after_fork.0, None),
         Err(TimelineError::Conflict)
     );
     assert!(
-        repo.accepted_reply_at(fork, CharacterId::Mita, after_fork.0, None)
+        repo.accepted_reply_at(fork, CharacterId::Crazy, after_fork.0, None)
             .is_err()
     );
 }
@@ -361,23 +366,23 @@ fn request_evidence_survives_sqlite_reopen_without_a_request_registry() {
             &mut repo,
             branch,
             "pending",
-            input(pending, CharacterId::Mita),
+            input(pending, CharacterId::Crazy),
         );
         append(
             &mut repo,
             branch,
             "accepted-input",
-            input(accepted, CharacterId::Mita),
+            input(accepted, CharacterId::Crazy),
         );
         let accepted_fact = append(
             &mut repo,
             branch,
             "reply",
-            reply(accepted, CharacterId::Mita),
+            reply(accepted, CharacterId::Crazy),
         );
         let mut trigger = EventDraft::new(EventKind::ProactiveOpportunity);
-        trigger.actor = Some(CharacterId::KindMita.to_string());
-        trigger.observers.insert(CharacterId::KindMita);
+        trigger.actor = Some(CharacterId::Kind.to_string());
+        trigger.observers.insert(CharacterId::Kind);
         trigger
             .payload
             .insert("request_id".into(), json!(proactive.to_string()));
@@ -387,19 +392,19 @@ fn request_evidence_survives_sqlite_reopen_without_a_request_registry() {
     for _ in 0..2 {
         let repo = SqliteTimelineRepository::open(&path).unwrap();
         assert_eq!(
-            repo.request_evidence_at(branch, CharacterId::Mita, pending.0, None),
+            repo.request_evidence_at(branch, CharacterId::Crazy, pending.0, None),
             Ok(RequestEvidence::PlayerInput(pending_fact.clone()))
         );
         assert_eq!(
-            repo.request_evidence_at(branch, CharacterId::Mita, accepted.0, None),
+            repo.request_evidence_at(branch, CharacterId::Crazy, accepted.0, None),
             Ok(RequestEvidence::AcceptedReply(accepted_fact.clone()))
         );
         assert_eq!(
-            repo.request_evidence_at(branch, CharacterId::KindMita, proactive.0, None),
+            repo.request_evidence_at(branch, CharacterId::Kind, proactive.0, None),
             Ok(RequestEvidence::ProactiveTrigger(trigger_fact.clone()))
         );
         assert_eq!(
-            repo.request_evidence_at(branch, CharacterId::Mita, proactive.0, None),
+            repo.request_evidence_at(branch, CharacterId::Crazy, proactive.0, None),
             Ok(RequestEvidence::NoRecord)
         );
     }
@@ -423,17 +428,17 @@ fn preissued_input_identity_recovers_request_without_handle() {
     let child = BranchId::new();
     repo.create_session(SessionId::new(), root).unwrap();
     let req = RequestId(Uuid::new_v4());
-    let mut draft = input(req, CharacterId::Mita);
+    let mut draft = input(req, CharacterId::Crazy);
     draft.id = input_id;
     let admitted = append(&mut repo, root, "first", draft);
     let lookup = |repo: &TimelineStore, branch, character, through| {
         repo.request_evidence_for_input_at(branch, character, input_id, through)
             .unwrap()
     };
-    assert_eq!(lookup(&repo, root, CharacterId::Mita, Some(0)), None);
-    assert_eq!(lookup(&repo, root, CharacterId::KindMita, None), None);
+    assert_eq!(lookup(&repo, root, CharacterId::Crazy, Some(0)), None);
+    assert_eq!(lookup(&repo, root, CharacterId::Kind, None), None);
     assert_eq!(
-        lookup(&repo, root, CharacterId::Mita, None),
+        lookup(&repo, root, CharacterId::Crazy, None),
         Some((req.0, RequestEvidence::PlayerInput(admitted.clone())))
     );
 
@@ -442,17 +447,17 @@ fn preissued_input_identity_recovers_request_without_handle() {
     let checkpoint_id = checkpoint.id;
     append(&mut repo, root, "checkpoint", checkpoint);
     repo.fork(root, checkpoint_id, child).unwrap();
-    let accepted = append(&mut repo, root, "reply", reply(req, CharacterId::Mita));
+    let accepted = append(&mut repo, root, "reply", reply(req, CharacterId::Crazy));
     assert_eq!(
-        lookup(&repo, root, CharacterId::Mita, None),
+        lookup(&repo, root, CharacterId::Crazy, None),
         Some((req.0, RequestEvidence::AcceptedReply(accepted)))
     );
     assert_eq!(
-        lookup(&repo, child, CharacterId::Mita, None),
+        lookup(&repo, child, CharacterId::Crazy, None),
         Some((req.0, RequestEvidence::PlayerInput(admitted)))
     );
     assert!(matches!(
-        repo.request_evidence_for_input_at(root, CharacterId::Mita, input_id, Some(10_000)),
+        repo.request_evidence_for_input_at(root, CharacterId::Crazy, input_id, Some(10_000)),
         Err(TimelineError::Invalid(_))
     ));
 }
@@ -465,29 +470,29 @@ fn preissued_identity_matches_proactive_trigger_not_message_only() {
     repo.create_session(SessionId::new(), branch).unwrap();
     let request = RequestId(Uuid::new_v4());
     let mut proactive = EventDraft::new(EventKind::ProactiveOpportunity);
-    proactive.actor = Some(CharacterId::Mita.to_string());
-    proactive.observers.insert(CharacterId::Mita);
+    proactive.actor = Some(CharacterId::Crazy.to_string());
+    proactive.observers.insert(CharacterId::Crazy);
     proactive
         .payload
         .insert("request_id".into(), json!(request.to_string()));
     let recorded = append(&mut repo, branch, "trigger", proactive);
     assert_eq!(
-        repo.request_evidence_for_input_at(branch, CharacterId::Mita, recorded.draft.id, None),
+        repo.request_evidence_for_input_at(branch, CharacterId::Crazy, recorded.draft.id, None),
         Ok(Some((
             request.0,
             RequestEvidence::ProactiveTrigger(recorded.clone())
         )))
     );
     assert_eq!(
-        repo.request_evidence_for_input_at(branch, CharacterId::KindMita, recorded.draft.id, None),
+        repo.request_evidence_for_input_at(branch, CharacterId::Kind, recorded.draft.id, None),
         Ok(None)
     );
     let mut plain = EventDraft::new(EventKind::PlayerMessage);
     plain.actor = Some("player".into());
-    plain.observers.insert(CharacterId::Mita);
+    plain.observers.insert(CharacterId::Crazy);
     let plain = append(&mut repo, branch, "plain", plain);
     assert_eq!(
-        repo.request_evidence_for_input_at(branch, CharacterId::Mita, plain.draft.id, None),
+        repo.request_evidence_for_input_at(branch, CharacterId::Crazy, plain.draft.id, None),
         Ok(None)
     );
 }
@@ -503,19 +508,19 @@ fn preissued_identity_survives_sqlite_restart_and_resists_duplicate() {
     {
         let mut repo = SqliteTimelineRepository::open(&path).unwrap();
         repo.create_session(SessionId::new(), branch).unwrap();
-        let mut first = input(request, CharacterId::Mita);
+        let mut first = input(request, CharacterId::Crazy);
         first.id = input_id;
         append(&mut repo, branch, "admit", first);
     }
     {
         let mut repo = SqliteTimelineRepository::open(&path).unwrap();
         let evidence = repo
-            .request_evidence_for_input_at(branch, CharacterId::Mita, input_id, None)
+            .request_evidence_for_input_at(branch, CharacterId::Crazy, input_id, None)
             .unwrap()
             .unwrap();
         assert_eq!(evidence.0, request.0);
         assert!(matches!(evidence.1, RequestEvidence::PlayerInput(_)));
-        let mut duplicate = input(RequestId(Uuid::new_v4()), CharacterId::Mita);
+        let mut duplicate = input(RequestId(Uuid::new_v4()), CharacterId::Crazy);
         duplicate.id = input_id;
         assert_eq!(
             repo.append(branch, 1, "duplicate", json!({}), vec![duplicate]),

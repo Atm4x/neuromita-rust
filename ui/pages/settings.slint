@@ -1,13 +1,17 @@
+import { CharacterCatalog } from "../characters/catalog.slint";
+import { CharacterPortrait } from "../characters/portrait.slint";
 import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
 import { MemoryUi, MemoryPanel } from "../sandbox/memory.slint";
 import { VolumeSlider } from "../components/volume-slider.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "../sandbox/theme.slint";
 import { Caption, Glyph, HeaderButton, QuickAction, Centered, Field, Toggle, StyledCheckbox } from "../sandbox/controls.slint";
 import { ActionSurface } from "../components/controls.slint";
-import { Avatar } from "../components/avatar.slint";
 import { CollapsibleSettingsSection } from "../components/collapsible-section.slint";
 import { I18n } from "../i18n.slint";
+
+export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
 export struct PresetItem { id: string, name: string, model: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
 export global SettingsUi {
@@ -21,19 +25,9 @@ export global SettingsUi {
     in-out property <bool> settings-voice-launcher;
     in-out property <bool> settings-voice-game;
     in-out property <string> settings-voice-name;
-    in-out property <string> mita-reply;
-    in-out property <string> mita-react;
-    in-out property <string> mita-initiate;
-    in-out property <string> kind-reply;
-    in-out property <string> kind-react;
-    in-out property <string> kind-initiate;
-    in-out property <bool> show-mita: true;
-    in-out property <bool> show-kind: true;
-    in-out property <bool> split-mita-presets;
-    in-out property <bool> split-kind-presets;
+    in-out property <[CharacterPresets]> character-presets;
     in-out property <int> selected-character;
     in-out property <bool> character-prompt-expanded: true;
-    callback search-character(string);
     in-out property <string> preset-edit-id;
     in-out property <string> preset-save-token;
     in-out property <string> preset-name;
@@ -102,7 +96,7 @@ component PresetChoice inherits Rectangle {
     callback selected(string);
     height: 40px; min-width: 0px; background: SettingsTheme.field; border-width: 1px; border-color: SettingsTheme.field-border; border-radius: 10px;
     HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 8px;
-        SettingsLabel { text: root.value == "active" ? I18n.i18n("settings.preset.active", "Активный пресет") + " (#" + SettingsUi.settings-active + ")" : "#" + root.value; horizontal-stretch: 1; }
+        SettingsLabel { text: root.value == "" ? I18n.i18n("settings.preset.unset", "Не выбран") : root.value == "active" ? I18n.i18n("settings.preset.active", "Активный пресет") + " (#" + SettingsUi.settings-active + ")" : "#" + root.value; horizontal-stretch: 1; }
         Glyph { text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
     }
     TouchArea { mouse-cursor: pointer; clicked => { menu.show(); } }
@@ -128,7 +122,7 @@ component CharacterWorkspace inherits HorizontalLayout {
     in-out property <bool> maintenance-expanded;
     in-out property <bool> danger-expanded;
     spacing: 9px;
-    changed search => { SettingsUi.search-character(root.search); }
+    property <CharacterPresets> presets: SettingsUi.character-presets[root.character];
     Rectangle {
         width: max(240px, (parent.width - 9px) / 4);
         background: SettingsTheme.panel; border-width: 1px; border-color: SettingsTheme.border; border-radius: 12px;
@@ -137,7 +131,7 @@ component CharacterWorkspace inherits HorizontalLayout {
             HorizontalLayout {
                 height: 20px;
                 SettingsLabel { text: I18n.i18n("settings.characters.library", "Библиотека персонажей"); font-size: 14px; font-weight: 600; horizontal-stretch: 1; }
-                SettingsLabel { text: "2"; color: SettingsTheme.muted; }
+                SettingsLabel { text: "" + CharacterCatalog.entries.length; color: SettingsTheme.muted; }
             }
             SettingsField { text <=> root.search; placeholder: I18n.i18n("settings.characters.search", "Поиск персонажей…"); leading-glyph: "\u{f002}"; height: 38px; border-radius: 10px; }
             Rectangle {
@@ -147,34 +141,25 @@ component CharacterWorkspace inherits HorizontalLayout {
                 ScrollView {
                 content-width: self.visible-width;
                 VerticalLayout {
-                    padding: 3px; spacing: 6px; alignment: start;
-                    if SettingsUi.show-mita: ActionSurface {
-                        height: 48px; label: I18n.i18n("sandbox.character.mita", "Мита");
-                        selected: root.character == 0; border-radius: 9px; border-width: 1px; border-color: root.character == 0 || self.hovered ? SettingsTheme.selected-border : SettingsTheme.item-border; background: SettingsTheme.panel;
+                    padding: 3px; spacing: 0px; alignment: start;
+                    for entry in CharacterCatalog.entries: VerticalLayout { padding: 0px; spacing: 0px; vertical-stretch: 0;
+                    if CharacterCatalog.matches(entry, root.search): ActionSurface {
+                        height: 48px; label: CharacterCatalog.name(entry);
+                        selected: root.character == entry.index; border-radius: 9px; border-width: 1px;
+                        border-color: self.selected || self.hovered ? SettingsTheme.selected-border : SettingsTheme.item-border;
+                        background: SettingsTheme.panel;
                         HorizontalLayout {
                             padding-left: 8px; padding-right: 7px; spacing: 10px;
-                            Centered { width: 32px; Avatar { width: 32px; height: 32px; source: @image-url("../../assets/avatars/crazy.png"); surface: SettingsTheme.panel; } }
+                            Centered { width: 32px; CharacterPortrait { width: 32px; height: 32px; character: entry.index; surface: SettingsTheme.panel; } }
                             VerticalLayout {
                                 padding: 0px; spacing: 2px; alignment: center;
-                                SettingsLabel { text: I18n.i18n("sandbox.character.mita", "Мита"); font-weight: 700; }
-                                SettingsLabel { text: "id: mita"; color: SettingsTheme.muted; font-size: 11px; }
+                                SettingsLabel { text: CharacterCatalog.name(entry); font-weight: 700; }
+                                SettingsLabel { text: "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
                             }
                         }
-                        activated => { root.character = 0; if (root.connected) { MemoryUi.select(0); } }
+                        activated => { root.character = entry.index; if (root.connected) { MemoryUi.select(entry.index); } }
                     }
-                    if SettingsUi.show-kind: ActionSurface {
-                        height: 48px; label: I18n.i18n("sandbox.character.kind", "Добрая Мита");
-                        selected: root.character == 1; border-radius: 9px; border-width: 1px; border-color: root.character == 1 || self.hovered ? SettingsTheme.selected-border : SettingsTheme.item-border; background: SettingsTheme.panel;
-                        HorizontalLayout {
-                            padding-left: 8px; padding-right: 7px; spacing: 10px;
-                            Centered { width: 32px; Avatar { width: 32px; height: 32px; source: @image-url("../../assets/avatars/kind.png"); surface: SettingsTheme.panel; } }
-                            VerticalLayout {
-                                padding: 0px; spacing: 2px; alignment: center;
-                                SettingsLabel { text: I18n.i18n("sandbox.character.kind", "Добрая Мита"); font-weight: 700; }
-                                SettingsLabel { text: "id: kind-mita"; color: SettingsTheme.muted; font-size: 11px; }
-                            }
-                        }
-                        activated => { root.character = 1; if (root.connected) { MemoryUi.select(1); } }
+                    if CharacterCatalog.matches(entry, root.search): Rectangle { height: 6px; }
                     }
                 }
                 }
@@ -189,23 +174,25 @@ component CharacterWorkspace inherits HorizontalLayout {
             padding: 12px; spacing: 14px;
             HorizontalLayout {
                 height: 56px; spacing: 14px;
-                Centered { width: 56px; Avatar {
+                Centered { width: 56px; CharacterPortrait {
                     width: 56px; height: 56px;
-                    source: root.character == 0 ? @image-url("../../assets/avatars/crazy.png") : @image-url("../../assets/avatars/kind.png");
+                    character: root.character;
                     surface: SettingsTheme.panel;
                 } }
                 VerticalLayout {
                     padding: 0px; spacing: 2px; alignment: center;
                     SettingsLabel {
-                        text: root.character == 0 ? I18n.i18n("sandbox.character.mita", "Мита") : I18n.i18n("sandbox.character.kind", "Добрая Мита");
+                        text: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         font-size: 20px; font-weight: 700;
                     }
-                    SettingsLabel { text: root.character == 0 ? "id: mita" : "id: kind-mita"; color: SettingsTheme.muted; }
+                    SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }
                 }
             }
-            ScrollView {
-                content-width: self.visible-width; vertical-stretch: 1;
-                VerticalLayout {
+            SettingsScrollView {
+                vertical-stretch: 1;
+                content-height: sections.preferred-height;
+                sections := VerticalLayout {
+                    width: parent.width;
                     padding: 0px; spacing: 12px; alignment: start;
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
 VerticalLayout {
@@ -241,22 +228,21 @@ VerticalLayout {
                             SettingsLabel { text: I18n.i18n("settings.characters.generation-presets", "Пресеты генерации"); font-size: 14px; font-weight: 700; }
                             StyledCheckbox {
                                 text: I18n.i18n("settings.characters.split-presets", "Отдельные пресеты для разных видов генерации");
-                                checked: root.character == 0 ? SettingsUi.split-mita-presets : SettingsUi.split-kind-presets;
+                                checked: root.presets.split;
                                 enabled: root.connected;
                                 toggled(value) => {
-                                    if (value) { if root.character == 0 { SettingsUi.split-mita-presets = true; } else { SettingsUi.split-kind-presets = true; } }
+                                    if (value) { SettingsUi.character-presets[root.character].split = true; }
                                     else {
-                                        if root.character == 0 && SettingsUi.mita-reply == SettingsUi.mita-react && SettingsUi.mita-reply == SettingsUi.mita-initiate { SettingsUi.split-mita-presets = false; }
-                                        if root.character == 1 && SettingsUi.kind-reply == SettingsUi.kind-react && SettingsUi.kind-reply == SettingsUi.kind-initiate { SettingsUi.split-kind-presets = false; }
-                                        SettingsUi.character-common(root.character, root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply);
+                                        if root.presets.reply == root.presets.react && root.presets.reply == root.presets.initiate { SettingsUi.character-presets[root.character].split = false; }
+                                        SettingsUi.character-common(root.character, root.presets.reply);
                                     }
                                 }
                             }
-                            if !(root.character == 0 ? SettingsUi.split-mita-presets : SettingsUi.split-kind-presets): VerticalLayout {
+                            if !(root.presets.split): VerticalLayout {
                                 padding: 0px; spacing: 6px;
                                 SettingsLabel { text: I18n.i18n("settings.characters.generation-preset", "Пресет генерации"); color: SettingsTheme.muted; }
                                 PresetChoice {
-                                    value: root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply;
+                                    value: root.presets.reply;
                                     selected(value) => {
                                         if (root.connected) {
                                             SettingsUi.character-common(root.character, value);
@@ -264,13 +250,13 @@ VerticalLayout {
                                     }
                                 }
                             }
-                            if (root.character == 0 ? SettingsUi.split-mita-presets : SettingsUi.split-kind-presets): VerticalLayout {
+                            if (root.presets.split): VerticalLayout {
                                 padding: 0px; spacing: 10px;
                                 for title[index] in [I18n.i18n("settings.operation.reply", "Ответ на сообщение"), I18n.i18n("settings.operation.react", "Реакция на событие"), I18n.i18n("settings.operation.initiate", "Инициатива")]: VerticalLayout {
                                     padding: 0px; spacing: 5px;
                                     SettingsLabel { text: title; color: SettingsTheme.muted; }
                                     PresetChoice {
-                                        value: root.character == 0 ? index == 0 ? SettingsUi.mita-reply : index == 1 ? SettingsUi.mita-react : SettingsUi.mita-initiate : index == 0 ? SettingsUi.kind-reply : index == 1 ? SettingsUi.kind-react : SettingsUi.kind-initiate;
+                                        value: index == 0 ? root.presets.reply : index == 1 ? root.presets.react : root.presets.initiate;
                                         selected(value) => { if (root.connected) { SettingsUi.character-preset(root.character, index, value); } }
                                     }
                                 }

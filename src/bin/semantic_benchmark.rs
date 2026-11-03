@@ -276,7 +276,7 @@ mod tests {
     fn fixture_rejects_unknown_ground_truth() {
         let case = BenchmarkCase {
             query: "tea".into(),
-            character: CharacterId::Mita,
+            character: CharacterId::Crazy,
             memories: vec![BenchmarkMemory {
                 id: Uuid::from_u128(1),
                 content: "tea".into(),
