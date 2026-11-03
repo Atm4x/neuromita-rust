@@ -590,17 +590,20 @@ async fn client(
 }
 
 pub fn status(snapshot: &RequestSnapshot) -> Value {
-    let mut message = json!({"type":"request_status","request_id":snapshot.metadata.id.0,"character":snapshot.metadata.character_id.to_string(),"revision":snapshot.revision});
+    let mut message = json!({"type":"request_status","request_id":snapshot.metadata.id.0,"character":snapshot.metadata.character_id.to_string(),"revision":snapshot.revision,"can_cancel":snapshot.can_cancel()});
     match &snapshot.state {
         RequestState::Pending => message["state"] = json!("pending"),
         RequestState::Processing(stage) => {
             message["state"] = json!("processing");
             match stage {
                 ProcessingStage::GeneratingText => message["stage"] = json!("text"),
-                ProcessingStage::GeneratingVoice { text } => {
-                    message["stage"] = json!("voice");
-                    message["text"] = json!(text);
-                }
+                ProcessingStage::TextReady { .. } => message["stage"] = json!("text_ready"),
+                ProcessingStage::GeneratingVoice { .. } => message["stage"] = json!("voice"),
+                ProcessingStage::Accepting { .. } => message["stage"] = json!("accepting"),
+            }
+            if let Some(text) = snapshot.provisional_text() {
+                message["text"] = json!(text);
+                message["provisional"] = json!(true);
             }
         }
         RequestState::Cancelled => message["state"] = json!("cancelled"),

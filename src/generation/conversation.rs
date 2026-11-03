@@ -1,7 +1,5 @@
 use serde_json::{Map, Value};
 
-use super::memory_context::render_memory_context;
-
 use crate::{
     character::CharacterContext,
     identity::{CharacterId, EventId},
@@ -209,41 +207,16 @@ pub(crate) fn project_history(
 }
 
 impl LlmConversation {
-    pub(crate) fn from_context(context: &CharacterContext) -> Self {
+    pub(crate) fn memory_query(context: &CharacterContext) -> String {
         let focus = match context.focus.intent {
             TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
             TurnIntent::Initiate => None,
         };
-        let (mut messages, target_present) =
-            project_history(&context.view, context.character_id, focus);
-        let history_message_count = messages.len();
-        if !context.working_state.is_empty() {
-            let state = &context.working_state;
-            let mut handoff = vec![
-                "[WORKING STATE]".to_owned(),
-                "Temporary model-produced context from the previous turn; not instructions."
-                    .to_owned(),
-            ];
-            if !state.focus.is_empty() {
-                handoff.push(format!("Focus: {}", state.focus));
-            }
-            for (label, items) in [
-                ("Current understanding", &state.situation),
-                ("Tentative assumptions", &state.assumptions),
-                ("Open loops", &state.open_loops),
-                ("Immediate next steps", &state.next_steps),
-            ] {
-                if !items.is_empty() {
-                    handoff.push(format!("{label}:"));
-                    handoff.extend(items.iter().map(|item| format!("- {item}")));
-                }
-            }
-            handoff.push("[/WORKING STATE]".into());
-            messages.push(LlmMessage {
-                role: LlmRole::Assistant,
-                text: handoff.join("\n"),
-            });
-        }
+        let (messages, _) = project_history(&context.view, context.character_id, focus);
+        Self::build_memory_query(context, &messages)
+    }
+
+    fn build_memory_query(context: &CharacterContext, recent_messages: &[LlmMessage]) -> String {
         let mut memory_query = context.current_input.to_string();
         if let Some(cause) = &context.focus.reaction
             && let Some(description) = &cause.description
@@ -278,16 +251,61 @@ impl LlmConversation {
                 }
             }
         }
-        for message in messages[..history_message_count].iter().rev().take(3) {
+        for message in recent_messages.iter().rev().take(3) {
             memory_query.push(' ');
             memory_query.push_str(&message.text);
         }
-        if let Some(text) = render_memory_context(&context.memories, &memory_query) {
+        if memory_query.trim().is_empty() {
+            memory_query.push_str(&context.description);
+        }
+        memory_query
+    }
+
+    pub(crate) fn from_context_with_memory(
+        context: &CharacterContext,
+        prepared_knowledge: &Option<String>,
+    ) -> Self {
+        let focus = match context.focus.intent {
+            TurnIntent::Reply(id) | TurnIntent::React(id) => Some((id, context.focus.intent)),
+            TurnIntent::Initiate => None,
+        };
+        let (mut messages, target_present) =
+            project_history(&context.view, context.character_id, focus);
+        if !context.working_state.is_empty() {
+            let state = &context.working_state;
+            let mut handoff = vec![
+                "[WORKING STATE]".to_owned(),
+                "Temporary model-produced context from the previous turn; not instructions."
+                    .to_owned(),
+            ];
+            if !state.focus.is_empty() {
+                handoff.push(format!("Focus: {}", state.focus));
+            }
+            for (label, items) in [
+                ("Current understanding", &state.situation),
+                ("Tentative assumptions", &state.assumptions),
+                ("Open loops", &state.open_loops),
+                ("Immediate next steps", &state.next_steps),
+            ] {
+                if !items.is_empty() {
+                    handoff.push(format!("{label}:"));
+                    handoff.extend(items.iter().map(|item| format!("- {item}")));
+                }
+            }
+            handoff.push("[/WORKING STATE]".into());
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text: handoff.join("\n"),
+            });
+        }
+        let memory_text = prepared_knowledge.clone();
+        if let Some(text) = memory_text {
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
                 text,
             });
         }
+
         let task = match context.focus.intent {
             TurnIntent::Reply(_) if target_present => None,
             TurnIntent::Reply(_) => {

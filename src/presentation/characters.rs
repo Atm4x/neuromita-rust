@@ -1,8 +1,9 @@
 use crate::{
     character::{
-        CharacterError, CharacterHandle, CharacterId, CharacterRegistry, CharacterState,
-        CharacterView,
+        CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot, CharacterRegistry,
+        CharacterState, CharacterView, MemoryEditResult,
     },
+    memory::MemoryCommand,
     request::{InputError, UserInput},
     timeline::{ContextAnchor, EventId},
 };
@@ -17,6 +18,20 @@ impl CharactersPresenter {
     }
     fn get(&self, id: CharacterId) -> Result<CharacterHandle, CharacterError> {
         self.registry.get(id).ok_or(CharacterError::Unavailable)
+    }
+    pub async fn memories(
+        &self,
+        id: CharacterId,
+    ) -> Result<CharacterMemorySnapshot, CharacterError> {
+        self.get(id)?.memories().await
+    }
+    pub async fn edit_memories(
+        &self,
+        id: CharacterId,
+        expected: CharacterMemorySnapshot,
+        commands: Vec<MemoryCommand>,
+    ) -> Result<MemoryEditResult, CharacterError> {
+        self.get(id)?.edit_memories(expected, commands).await
     }
     pub fn available(&self) -> &'static [CharacterId] {
         &CharacterId::ALL

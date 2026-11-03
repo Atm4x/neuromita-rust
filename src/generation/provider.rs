@@ -22,15 +22,39 @@ pub enum GenerationError {
 pub struct GenerationRequest {
     pub context: CharacterContext,
     pub preset: GenerationPreset,
+    pub prepared_knowledge: Option<String>,
 }
 
 impl GenerationRequest {
-    pub fn new(context: CharacterContext, preset: GenerationPreset) -> Self {
-        Self { context, preset }
+    pub fn new(
+        context: CharacterContext,
+        preset: GenerationPreset,
+        prepared_knowledge: Option<String>,
+    ) -> Self {
+        Self {
+            context,
+            preset,
+            prepared_knowledge,
+        }
     }
 }
 
 pub use crate::turn::TurnProposal as ProposedResponse;
+
+/// Providers consume an immutable character snapshot and already selected knowledge.
+/// No provider performs retrieval or chooses between semantic and lexical modes.
+#[derive(Clone)]
+pub struct GenerationInput {
+    pub context: CharacterContext,
+    pub prepared_knowledge: Option<String>,
+}
+
+impl std::ops::Deref for GenerationInput {
+    type Target = CharacterContext;
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
 
 impl ProposedResponse {
     pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
@@ -47,8 +71,7 @@ pub type ProviderFuture<'a> =
 
 pub trait GenerationProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
-    fn generate(&self, context: CharacterContext, template: ProviderTemplate)
-    -> ProviderFuture<'_>;
+    fn generate(&self, context: GenerationInput, template: ProviderTemplate) -> ProviderFuture<'_>;
 }
 
 pub struct ResponseGenerator {
@@ -81,7 +104,11 @@ impl ResponseGenerator {
             .providers
             .get(&kind)
             .ok_or(GenerationError::Unavailable(kind))?;
-        let structured = provider.generate(request.context, template).await?;
+        let input = GenerationInput {
+            context: request.context,
+            prepared_knowledge: request.prepared_knowledge,
+        };
+        let structured = provider.generate(input, template).await?;
         ProposedResponse::from_structured(structured)
     }
 }

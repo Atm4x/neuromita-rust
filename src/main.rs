@@ -5,10 +5,14 @@ mod terminal;
 use std::{error::Error, num::NonZeroUsize, process::ExitCode, sync::Arc, time::Duration};
 
 use neuromita::{
+    adapters::gemini_embedding::{GeminiEmbeddingProtocol, GeminiEmbeddingProvider},
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     generation::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
+    },
+    knowledge::{
+        KnowledgeRetrieval, embedding::EmbeddingProvider, semantic_memory::SemanticMemoryRetriever,
     },
 };
 
@@ -58,6 +62,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(template));
     let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new()?);
     let generator = ResponseGenerator::new([provider])?;
+    let mut knowledge = KnowledgeRetrieval::lexical();
+    if let Some(model) = std::env::var_os("NEUROMITA_MEMORY_EMBEDDING_MODEL") {
+        let protocol = match model.to_str() {
+            Some("gemini-embedding-001") => GeminiEmbeddingProtocol::Embedding001,
+            Some("gemini-embedding-2") => GeminiEmbeddingProtocol::Embedding2,
+            _ => return Err("NEUROMITA_MEMORY_EMBEDDING_MODEL must name gemini-embedding-001 or gemini-embedding-2".into()),
+        };
+        let embedding: Arc<dyn EmbeddingProvider> =
+            Arc::new(GeminiEmbeddingProvider::google(protocol, &key, 768)?);
+        knowledge =
+            KnowledgeRetrieval::semantic(Arc::new(SemanticMemoryRetriever::new(embedding, 512)?));
+    }
     let limits = RuntimeLimits {
         request_queue: NonZeroUsize::new(16).expect("positive limit"),
         discovery_buffer: NonZeroUsize::new(128).expect("positive limit"),
@@ -65,13 +81,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         presenter_updates: NonZeroUsize::new(128).expect("positive limit"),
         retained_finished: NonZeroUsize::new(100).expect("positive limit"),
     };
-    let config = ApplicationConfig::persistent(
+    let mut config = ApplicationConfig::persistent(
         preset,
         generator,
         limits,
         options.listen,
         &options.data_dir,
     )?;
+    config.knowledge = knowledge;
     let app = ApplicationLifecycle::start(config).await?;
     tracing::info!(address = %app.server().address(), "server listening");
     let result = terminal::run(&app.presenter().chat, options).await;

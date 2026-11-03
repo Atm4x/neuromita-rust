@@ -52,6 +52,7 @@ syscall! {
     // Must be done custom because LLVM reserves ESI
     //syscall4(a, b, c, d, e,);
     //syscall5(a, b, c, d, e, f,);
+    //syscall6(a, b, c, d, e, f, g,);
 }
 
 #[cfg(feature = "userspace")]
@@ -86,6 +87,48 @@ pub unsafe fn syscall5(
         xchg esi, {e}",
         e = in(reg) e,
         inout("eax") a,
+        in("ebx") b,
+        in("ecx") c,
+        in("edx") d,
+        in("edi") f,
+        options(nostack),
+    );
+
+    Error::demux(a)
+}
+
+#[cfg(feature = "userspace")]
+pub unsafe fn syscall6(
+    mut a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    e: usize,
+    f: usize,
+    g: usize,
+) -> Result<usize> {
+    #[repr(C)]
+    struct PackedArgs {
+        arg4: usize,
+        arg6: usize,
+        nr: usize,
+    }
+    let args = PackedArgs {
+        arg4: e,
+        arg6: g,
+        nr: a,
+    };
+    let args_ptr = &args as *const PackedArgs;
+    asm!(
+        "push ebp",
+        "push esi",
+        "mov esi, [eax + 0]", // arg4 -> esi
+        "mov ebp, [eax + 4]", // arg6 -> ebp
+        "mov eax, [eax + 8]", // nr -> eax
+        "int 0x80",
+        "pop esi",
+        "pop ebp",
+        inout("eax") args_ptr => a,
         in("ebx") b,
         in("ecx") c,
         in("edx") d,
@@ -229,6 +272,21 @@ impl Deref for Exception {
                 self as *const Exception as *const u8,
                 mem::size_of::<Exception>(),
             )
+        }
+    }
+}
+
+impl Exception {
+    pub fn pack(&self) -> (usize, usize) {
+        // In x86 error code for last 15 bits are reserved, so we can use it
+        let code = ((self.kind & 0xFF) << 24) | (self.code & 0x00FF_FFFF);
+        (code, self.address)
+    }
+    pub fn unpack(code: usize, address: usize) -> Self {
+        Exception {
+            kind: code >> 24,
+            code: code & 0x00FF_FFFF,
+            address,
         }
     }
 }

@@ -13,7 +13,7 @@ use neuromita::{
     app::{
         ApplicationConfig, ApplicationError, ApplicationLifecycle, ApplicationStatus, RuntimeLimits,
     },
-    character::{CharacterContext, CharacterId},
+    character::CharacterId,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator,
@@ -87,7 +87,7 @@ impl SettingsRepository for Storage {
 }
 
 struct Call {
-    context: CharacterContext,
+    context: neuromita::generation::GenerationInput,
     model: String,
     reply: oneshot::Sender<Arc<str>>,
 }
@@ -100,7 +100,7 @@ impl GenerationProvider for ControlledProvider {
     }
     fn generate(
         &self,
-        context: CharacterContext,
+        context: neuromita::generation::GenerationInput,
         template: ProviderTemplate,
     ) -> ProviderFuture<'_> {
         Box::pin(async move {

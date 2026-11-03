@@ -3,7 +3,7 @@ use std::{future::Future, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::D
 use neuromita::{
     api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
-    character::{CharacterContext, CharacterId},
+    character::CharacterId,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator, StructuredResponse,
@@ -35,7 +35,7 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
 }
 
 struct GenerationCall {
-    context: CharacterContext,
+    context: neuromita::generation::GenerationInput,
     reply: oneshot::Sender<Result<Arc<str>, GenerationError>>,
 }
 
@@ -54,7 +54,11 @@ impl GenerationProvider for ControlledGeneration {
         ProviderKind::Gemini
     }
 
-    fn generate(&self, context: CharacterContext, _: ProviderTemplate) -> ProviderFuture<'_> {
+    fn generate(
+        &self,
+        context: neuromita::generation::GenerationInput,
+        _: ProviderTemplate,
+    ) -> ProviderFuture<'_> {
         Box::pin(async move {
             let (reply, receive) = oneshot::channel();
             self.0

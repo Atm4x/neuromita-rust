@@ -1,0 +1,18 @@
+{
+  "app.window.title": { "source": "Чат с NeuroMita — макет интерфейса", "translation": "Chat with NeuroMita — UI preview" },
+  "navigation.sandbox": { "source": "Песочница", "translation": "Sandbox" },
+  "navigation.logs": { "source": "Логи", "translation": "Logs" },
+  "launcher.actions.more": { "source": "Дополнительно", "translation": "More" },
+  "launcher.actions.install": { "source": "Установить / обновить Unity", "translation": "Install / update Unity" },
+  "launcher.actions.verify": { "source": "Проверить файлы Unity", "translation": "Verify Unity files" },
+  "launcher.releases.title": { "source": "ПОСЛЕДНИЕ РЕЛИЗЫ", "translation": "LATEST RELEASES" },
+  "placeholder.description": { "source": "Страница подготовлена для будущей реализации.", "translation": "This page is ready for its implementation." },
+  "page.sandbox.title": { "source": "Песочница / Sandbox", "translation": "Sandbox" },
+  "preview.play.unavailable": { "source": "Макет интерфейса: запуск игры пока не подключён.", "translation": "UI preview: game launch is not connected yet." },
+  "preview.action.unavailable": { "source": "Макет интерфейса: «{action}» пока не подключено.", "translation": "UI preview: {action} is not connected yet." },
+  "preview.social.unavailable": { "source": "Макет интерфейса: ссылка {name} пока не подключена.", "translation": "UI preview: the {name} link is not connected yet." },
+  "localization.reload": { "source": "Перечитать переводы", "translation": "Reload translations" },
+  "localization.reload.unconfigured": { "source": "Каталог внешних переводов не задан.", "translation": "No external translation directory was configured." },
+  "localization.reload.success": { "source": "Переводы обновлены.", "translation": "Translations reloaded." },
+  "localization.error": { "source": "Ошибка локализации: {error}", "translation": "Localization error: {error}" }
+}

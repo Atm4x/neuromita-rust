@@ -1,7 +1,7 @@
 mod conversation;
+pub(crate) use conversation::LlmConversation;
 mod effects;
 pub mod gemini;
-mod memory_context;
 mod presets;
 mod provider;
 mod structured;
@@ -17,8 +17,8 @@ pub use structured::{
 };
 
 pub use provider::{
-    GenerationError, GenerationProvider, GenerationRequest, ProposedResponse, ProviderFuture,
-    ResponseGenerator,
+    GenerationError, GenerationInput, GenerationProvider, GenerationRequest, ProposedResponse,
+    ProviderFuture, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

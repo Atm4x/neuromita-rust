@@ -75,6 +75,7 @@ pub struct CharacterContext {
     pub state: CharacterState,
     pub working_state: CharacterWorkingState,
     pub memories: Vec<MemoryRecord>,
+    pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
     pub current_input: Arc<str>,
@@ -91,6 +92,7 @@ pub struct CharacterView {
     pub state: CharacterState,
     pub working_state: CharacterWorkingState,
     pub memories: Vec<MemoryRecord>,
+    pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
 }

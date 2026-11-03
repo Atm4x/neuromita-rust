@@ -3,8 +3,8 @@ mod wire;
 
 pub use template::{GeminiTemplate, GenerationSettings, PresetError};
 
+use super::provider::GenerationInput;
 use super::{GenerationError, GenerationProvider, ProviderFuture, ProviderKind, ProviderTemplate};
-use crate::character::CharacterContext;
 
 pub struct GeminiProvider {
     client: reqwest::Client,
@@ -21,10 +21,11 @@ impl GeminiProvider {
 
     async fn execute(
         &self,
-        context: CharacterContext,
+        context: GenerationInput,
         template: GeminiTemplate,
     ) -> Result<super::StructuredResponse, GenerationError> {
-        let body = wire::encode(context, &template);
+        let body =
+            wire::encode_with_memory(context.context, &template, &context.prepared_knowledge);
         let mut response = self
             .client
             .post(template.request_url())
@@ -56,11 +57,7 @@ impl GenerationProvider for GeminiProvider {
         ProviderKind::Gemini
     }
 
-    fn generate(
-        &self,
-        context: CharacterContext,
-        template: ProviderTemplate,
-    ) -> ProviderFuture<'_> {
+    fn generate(&self, context: GenerationInput, template: ProviderTemplate) -> ProviderFuture<'_> {
         Box::pin(async move {
             match template {
                 ProviderTemplate::Gemini(template) => self.execute(context, template).await,

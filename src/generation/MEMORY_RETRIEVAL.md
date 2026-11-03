@@ -20,3 +20,8 @@ This deterministic exact-match policy intentionally does not perform fuzzy simil
 ## Remaining work
 
 Semantic retrieval/RAG, embedding indexing and revisions, user-configurable token budget, stale-index reconciliation, entities and tags, memory islands, TTL/forgetting policies, UI memory editor, and Python ordinal-ID compatibility all remain out of scope. Any future index is a *derived projection* from accepted Timeline memory facts, not an additional canonical source of truth.
+
+
+## Semantic extension
+
+The lexical implementation remains available and the CLI default. An opt-in asynchronous semantic retrieval mode now provides embedding provider contracts, Gemini 001/2 HTTP adapters, a strictly derived bounded cache, and an exact vector shortlist. The cached vectors never define membership. See [SEMANTIC_RETRIEVAL.md](SEMANTIC_RETRIEVAL.md) for the implementation, verification scope and measured synthetic baseline. Live Gemini quality is not certified.
