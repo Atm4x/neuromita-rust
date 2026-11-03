@@ -5,6 +5,7 @@ mod probe {
         import { I18n } from "../../../ui/i18n.slint";
         import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
         import { SettingsTheme } from "../../../ui/settings/theme.slint";
+        import { SettingsScrollView } from "../../../ui/settings/scroll-view.slint";
         export { I18n }
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
@@ -26,6 +27,29 @@ mod probe {
                 }
                 next := Rectangle { height: 50px; }
                 Rectangle { vertical-stretch: 1; }
+            }
+        }
+        export component OverflowProbe inherits Window {
+            preferred-width: 500px; preferred-height: 260px;
+            in-out property <int> expanded-count: 3;
+            in-out property <length> payload-height: 300px;
+            in-out property <length> offset <=> scroll.content-y;
+            out property <length> first-height: first.height;
+            out property <length> second-height: second.height;
+            out property <length> third-height: third.height;
+            out property <length> last-bottom: last.y + last.height;
+            out property <length> content-height: sections.preferred-height;
+            out property <bool> scrollable: scroll.scrollable;
+            scroll := SettingsScrollView {
+                width: parent.width; height: parent.height;
+                content-height: sections.preferred-height;
+                sections := VerticalLayout {
+                    width: parent.width; padding: 0px; spacing: 12px; alignment: start;
+                    first := CollapsibleSettingsSection { expanded: root.expanded-count > 0; Rectangle { height: root.payload-height; } }
+                    second := CollapsibleSettingsSection { expanded: root.expanded-count > 1; Rectangle { height: 200px; } }
+                    third := CollapsibleSettingsSection { expanded: root.expanded-count > 2; Rectangle { height: 300px; } }
+                    last := Rectangle { height: 40px; }
+                }
             }
         }
     }
@@ -76,6 +100,30 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
         closed
     );
     accordion.hide().unwrap();
+    let overflow = probe::OverflowProbe::new().unwrap();
+    overflow.show().unwrap();
+    overflow.window().set_size(slint::PhysicalSize::new(500, 260));
+    overflow.window().take_snapshot().unwrap();
+    assert!(overflow.get_scrollable());
+    assert!(overflow.get_first_height() > 350.0);
+    assert!(overflow.get_second_height() > 250.0);
+    assert!(overflow.get_third_height() > 350.0);
+    let first_height = overflow.get_first_height();
+    overflow.set_expanded_count(1);
+    overflow.window().take_snapshot().unwrap();
+    assert_eq!(overflow.get_first_height(), first_height);
+    overflow.set_payload_height(500.0);
+    overflow.set_expanded_count(3);
+    overflow.window().take_snapshot().unwrap();
+    assert!(overflow.get_first_height() > first_height + 199.0);
+    overflow.set_offset(260.0 - overflow.get_content_height());
+    overflow.window().take_snapshot().unwrap();
+    assert!((overflow.get_last_bottom() + overflow.get_offset() - 260.0).abs() < 1.0);
+    overflow.set_expanded_count(0);
+    overflow.window().take_snapshot().unwrap();
+    assert!(!overflow.get_scrollable());
+    assert_eq!(overflow.get_offset(), 0.0);
+    overflow.hide().unwrap();
     let catalog = Rc::new(RefCell::new(
         Localizer::bundled(FallbackPolicy::EnglishThenSource).unwrap(),
     ));

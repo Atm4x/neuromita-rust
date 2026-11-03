@@ -1,4 +1,5 @@
 import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
 import { MemoryUi, MemoryPanel } from "../sandbox/memory.slint";
 import { VolumeSlider } from "../components/volume-slider.slint";
 import { ScrollView } from "std-widgets.slint";
@@ -203,9 +204,11 @@ component CharacterWorkspace inherits HorizontalLayout {
                     SettingsLabel { text: root.character == 0 ? "id: mita" : "id: kind-mita"; color: SettingsTheme.muted; }
                 }
             }
-            ScrollView {
-                content-width: self.visible-width; vertical-stretch: 1;
-                VerticalLayout {
+            SettingsScrollView {
+                vertical-stretch: 1;
+                content-height: sections.preferred-height;
+                sections := VerticalLayout {
+                    width: parent.width;
                     padding: 0px; spacing: 12px; alignment: start;
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
 VerticalLayout {

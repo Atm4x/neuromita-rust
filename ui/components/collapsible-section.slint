@@ -45,14 +45,13 @@ export component CollapsibleSettingsSection inherits Rectangle {
         }
         Rectangle {
             visible: root.expanded;
-            min-height: 0px;
-            max-height: root.expanded ? 100000px : 0px;
+            height: root.expanded ? content.preferred-height : 0px;
             clip: true;
             vertical-stretch: 0;
             background: SettingsTheme.section-content;
             border-bottom-left-radius: SettingsTheme.section-radius - 1px;
             border-bottom-right-radius: SettingsTheme.section-radius - 1px;
-            VerticalLayout {
+            content := VerticalLayout {
                 padding-left: 20px;
                 padding-right: 20px;
                 padding-top: 12px;
