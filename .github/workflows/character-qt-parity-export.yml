@@ -1,0 +1,32 @@
+name: Export character parity working tree
+on:
+  push:
+    branches:
+      - codex/character-settings-qt-parity-20261103
+    paths:
+      - .github/workflows/character-qt-parity-export.yml
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git branch rust-export "$GITHUB_SHA"
+          git bundle create rust-parity.bundle refs/heads/rust-export
+          git bundle verify rust-parity.bundle
+          sha256sum rust-parity.bundle > rust-parity.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-rust-qt-parity-head-bundle
+          path: |
+            rust-parity.bundle
+            rust-parity.bundle.sha256
+          retention-days: 3
