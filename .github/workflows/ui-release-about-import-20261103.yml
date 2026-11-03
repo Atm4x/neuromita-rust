@@ -39,6 +39,10 @@ jobs:
           cd source
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code --heads origin codex/releases-about-slint-20261103; then
+            echo 'Candidate already published; keeping exact candidate SHA.'
+            exit 0
+          fi
           git switch -c codex/releases-about-slint-20261103
           git add ui/pages/releases.slint ui/pages/about.slint ui/app.slint ui/components/sidebar.slint ui/theme.slint assets/icons/fontawesome/external-link.svg assets/icons/fontawesome/rotate-right.svg src/bin/neuromita-gui/main.rs src/bin/neuromita-gui/presenter.rs src/bin/neuromita-gui/binding.rs src/bin/neuromita-gui/releases.rs
           git commit -m "feat(gui): port releases and add about page in Slint"
@@ -55,6 +59,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfontconfig1-dev libfreetype6-dev libxkbcommon-dev
           rustup toolchain install 1.98.1 --profile minimal
           mkdir -p .cargo
           printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
