@@ -1,0 +1,40 @@
+name: Publish verified API presets dropdown parity
+on:
+  push:
+    branches:
+      - bridge/api-presets-dropdown-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact Git bundle and publish
+        shell: bash
+        env:
+          BASE_SHA: e47c4497f92a1e8defd04cf4090600b14c24a4e3
+          TARGET_SHA: 8d4652b8423c8956fdbbb941e15083ed284c7970
+          SOURCE_REF: refs/heads/codex/api-presets-dropdown-pyqt-parity-20261103
+        run: |
+          set -euo pipefail
+          if [ ! -f bridge/api-presets-dropdown-outgoing.bundle.b64 ]; then
+            echo "Awaiting bundle payload on helper branch"
+            exit 0
+          fi
+          base64 -d bridge/api-presets-dropdown-outgoing.bundle.b64 > changes.bundle
+          echo '01281fec6bd97d7ff00055a47412d874e5b575b5aff254d7877af9c0d43c2016  changes.bundle' | sha256sum -c -
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git bundle verify changes.bundle
+          git fetch changes.bundle "${SOURCE_REF}:refs/heads/api-presets-dropdown-verified"
+          test "$(git rev-parse refs/heads/api-presets-dropdown-verified)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${BASE_SHA}" refs/heads/api-presets-dropdown-verified
+          EXISTING="$(git ls-remote origin "${SOURCE_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Target branch moved unexpectedly: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/api-presets-dropdown-verified:${SOURCE_REF}"
+          test "$(git ls-remote origin "${SOURCE_REF}" | cut -f1)" = "${TARGET_SHA}"
