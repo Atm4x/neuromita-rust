@@ -1,0 +1,36 @@
+name: Export pinned main for API presets parity
+on:
+  push:
+    branches:
+      - bridge/api-presets-main-export-20261104
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact main
+        shell: bash
+        env:
+          TARGET_SHA: 13dc29b81ba572d8729264ba898aa4dcb8fe1402
+        run: |
+          set -euo pipefail
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git update-ref refs/heads/api-main-source "${TARGET_SHA}"
+          git bundle create api-main-source.bundle refs/heads/api-main-source
+          git bundle verify api-main-source.bundle
+          sha256sum api-main-source.bundle > api-main-source.bundle.sha256
+          echo "${TARGET_SHA}" > api-main-source.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-main-source-20261104
+          path: |
+            api-main-source.bundle
+            api-main-source.bundle.sha256
+            api-main-source.commit
+          retention-days: 2
+          if-no-files-found: error
