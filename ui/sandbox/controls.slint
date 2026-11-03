@@ -92,6 +92,30 @@ export component Toggle inherits ActionSurface {
     }
 }
 
+export component StyledCheckbox inherits ActionSurface {
+    in property <bool> checked;
+    in property <string> text;
+    callback toggled(bool);
+    label: root.text;
+    height: 32px;
+    horizontal-stretch: 1;
+    border-width: 0px;
+    border-radius: 7px;
+    activated => { root.toggled(!root.checked); }
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 9px;
+        Rectangle {
+            width: 19px; height: 19px; border-radius: 5px;
+            border-width: 1px;
+            border-color: root.checked ? SandboxTheme.accent-alt : SandboxTheme.border;
+            background: root.checked ? SandboxTheme.accent : #080912;
+            if root.checked: Glyph { text: "\u{f00c}"; width: 100%; height: 100%; font-size: 11px; color: white; }
+        }
+        Caption { text: root.text; horizontal-stretch: 1; font-size: 12px; font-weight: 600; }
+    }
+}
+
 export component StatusRow inherits HorizontalLayout {
     in property <string> title;
     in property <string> state;
