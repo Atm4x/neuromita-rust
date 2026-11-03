@@ -5,8 +5,9 @@ import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
+import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 
-export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption }
+export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita — макет интерфейса");
@@ -25,6 +26,33 @@ export component AppWindow inherits Window {
     in property <bool> backend-selected;
     in property <bool> client-selected;
     in property <string> notice;
+    in property <[ChatRow]> chat-messages;
+    in property <bool> core-connected;
+    in property <bool> core-connecting;
+    in property <bool> chat-sending;
+    in property <int> chat-character;
+    in property <string> chat-model;
+    in property <string> chat-preset;
+    in property <string> chat-address;
+    in property <string> chat-error;
+    in property <string> chat-anchor;
+    in property <int> chat-active;
+    in property <int> chat-volume;
+    in property <bool> chat-voice;
+    in property <string> chat-attitude: "—";
+    in property <string> chat-boredom: "—";
+    in property <string> chat-stress: "—";
+    in property <string> chat-accepted: "—";
+    in-out property <string> chat-draft;
+    in-out property <string> chat-model-input;
+    in-out property <bool> chat-follow-tail: true;
+    callback chat-connect(string);
+    callback chat-send(string);
+    callback chat-cancel(string);
+    callback chat-select-character(int);
+    callback chat-refresh();
+    callback chat-set-volume(int);
+    callback chat-dismiss-error();
     callback navigate(PageId);
     callback language-selected(string);
     callback reload-translations();
@@ -55,7 +83,26 @@ export component AppWindow inherits Window {
                 menu-action(action) => { root.launcher-action(action); }
                 open-releases => { root.navigate(PageId.releases); }
             }
-            if root.page != PageId.home: PlaceholderPage {
+            if root.page == PageId.sandbox: SandboxPage {
+                width: parent.width; height: parent.height;
+                messages: root.chat-messages; connected: root.core-connected; connecting: root.core-connecting;
+                sending: root.chat-sending; character: root.chat-character;
+                model: root.chat-model; preset: root.chat-preset; address: root.chat-address;
+                error: root.chat-error; anchor: root.chat-anchor; active: root.chat-active;
+                volume: root.chat-volume; voice-enabled: root.chat-voice;
+                attitude: root.chat-attitude; boredom: root.chat-boredom; stress: root.chat-stress; accepted: root.chat-accepted;
+                draft <=> root.chat-draft; model-input <=> root.chat-model-input; follow-tail <=> root.chat-follow-tail;
+                connect(model) => { root.chat-connect(model); }
+                send(text) => { root.chat-send(text); }
+                cancel(id) => { root.chat-cancel(id); }
+                select-character(id) => { root.chat-select-character(id); }
+                refresh => { root.chat-refresh(); }
+                set-volume(value) => { root.chat-set-volume(value); }
+                dismiss-error => { root.chat-dismiss-error(); }
+                home => { root.navigate(PageId.home); }
+                settings => { root.navigate(PageId.settings); }
+            }
+            if root.page != PageId.home && root.page != PageId.sandbox: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;

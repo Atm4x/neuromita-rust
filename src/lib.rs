@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod ai_runtime;
 pub mod api;
 pub mod app;
+pub mod audio;
 pub mod character;
 pub mod generation;
 mod identity;

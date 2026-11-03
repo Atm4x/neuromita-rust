@@ -6,7 +6,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,9 @@ use super::{
     model::{Character, GenerationFocus, ReactionCause},
 };
 use crate::{
-    character::memory_access::{CharacterMemorySnapshot, MemoryEditResult},
+    character::memory_access::{
+        CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
+    },
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     memory::MemoryCommand,
@@ -99,9 +101,14 @@ enum Command {
 #[derive(Clone)]
 pub struct CharacterHandle {
     commands: mpsc::Sender<Command>,
+    memory_updates: watch::Receiver<u64>,
 }
 
 impl CharacterHandle {
+    pub(crate) fn memory_updates(&self) -> watch::Receiver<u64> {
+        self.memory_updates.clone()
+    }
+
     pub async fn memories(&self) -> Result<CharacterMemorySnapshot, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -263,7 +270,17 @@ impl CharacterRegistry {
                 character,
                 timeline: Arc::clone(&timeline),
             };
-            handles.insert(id, CharacterHandle { commands: send });
+            let memory_updates = timeline
+                .lock()
+                .expect("timeline lock poisoned")
+                .observe_memory_changes(id);
+            handles.insert(
+                id,
+                CharacterHandle {
+                    commands: send,
+                    memory_updates,
+                },
+            );
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
         }
         let maintenance_timeline = Arc::clone(&timeline);
@@ -336,8 +353,7 @@ impl CharacterHandler {
                         .lock()
                         .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
                         .and_then(|timeline| {
-                            timeline
-                                .character_memory_snapshot(self.character.id)
+                            read_memory_snapshot(&timeline, self.character.id)
                                 .map_err(|error| CharacterError::Internal(error.to_string()))
                         });
                     let _ = reply.send(result);
@@ -352,26 +368,21 @@ impl CharacterHandler {
                         .lock()
                         .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
                         .and_then(|mut timeline| {
-                            if expected.character != self.character.id {
-                                return Err(CharacterError::StaleState);
-                            }
-                            let applied = timeline
-                                .edit_character_memories(
-                                    self.character.id,
-                                    expected.selection,
-                                    expected.anchor,
-                                    &commands,
-                                )
-                                .map_err(|error| match error {
-                                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
-                                        CharacterError::StaleState
-                                    }
-                                    other => CharacterError::Internal(other.to_string()),
-                                })?;
-                            let snapshot = timeline
-                                .character_memory_snapshot(self.character.id)
-                                .map_err(|error| CharacterError::Internal(error.to_string()))?;
-                            Ok(MemoryEditResult { applied, snapshot })
+                            edit_memory_snapshot(
+                                &mut timeline,
+                                self.character.id,
+                                &expected,
+                                &commands,
+                            )
+                            .map_err(|error| match error {
+                                crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                    CharacterError::StaleState
+                                }
+                                crate::timeline::domain::TimelineError::Invalid(reason) => {
+                                    CharacterError::InvalidMemory(reason)
+                                }
+                                other => CharacterError::Internal(other.to_string()),
+                            })
                         });
                     let _ = reply.send(result);
                 }
@@ -453,8 +464,9 @@ impl CharacterHandler {
         let anchor = captured.history.at;
         let state = captured.state;
         let working_state = captured.working_state;
-        let memories = captured.memories.list();
-        let memory_islands = captured.memories.islands();
+        let now = CharacterRegistry::now_unix_ms();
+        let memories = captured.memories.list_at(now);
+        let memory_islands = captured.memories.islands_at(now);
         let reaction = match intent {
             TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
                 captured

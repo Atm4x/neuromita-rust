@@ -26,6 +26,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .renderer_name("femtovg".into())
         .select()?;
     let window = AppWindow::new()?;
+    let _desktop = super::sandbox::attach(
+        &window,
+        options.data_directory.clone(),
+        options.model.clone(),
+    )?;
     let catalog = Rc::new(RefCell::new(catalog));
     window
         .global::<I18n>()
@@ -34,6 +39,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         HomePreview::python_reference(),
         options.locale,
     )));
+    if options.sandbox {
+        presenter
+            .borrow_mut()
+            .dispatch(ShellCommand::Navigate(Page::Sandbox));
+    }
     window.set_version("v2026.10.15.3".into());
     let releases = presenter
         .borrow()
@@ -177,6 +187,9 @@ fn translation_lookup(
 struct Options {
     directory: Option<PathBuf>,
     locale: LocaleId,
+    data_directory: PathBuf,
+    model: Option<String>,
+    sandbox: bool,
 }
 
 impl Options {
@@ -184,10 +197,30 @@ impl Options {
         let mut options = Self {
             directory: None,
             locale: LocaleId::russian(),
+            data_directory: super::runtime::data_directory()?,
+            model: None,
+            sandbox: false,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
+                Some("--sandbox") => options.sandbox = true,
+                Some("--model") => {
+                    options.model = Some(
+                        arguments
+                            .next()
+                            .ok_or("--model requires a model identifier")?
+                            .into_string()
+                            .map_err(|_| "model must be UTF-8")?,
+                    )
+                }
+                Some("--data-dir") => {
+                    let directory = arguments.next().ok_or("--data-dir requires a path")?;
+                    if directory.is_empty() {
+                        return Err("--data-dir must not be empty".into());
+                    }
+                    options.data_directory = directory.into();
+                }
                 Some("--translations-dir") => {
                     options.directory = Some(
                         arguments

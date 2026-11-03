@@ -37,7 +37,8 @@ use crate::{
     lifecycle::Lifecycle,
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
-        CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SettingsPresenter,
+        CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SandboxPresenter,
+        SettingsPresenter,
     },
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
@@ -427,6 +428,13 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                sandbox: SandboxPresenter::new(
+                    chat.clone(),
+                    CharactersPresenter::new(bindings.characters.clone()),
+                    Arc::clone(&timeline),
+                    Arc::clone(&bindings.settings),
+                    Arc::clone(&presets),
+                ),
                 chat,
                 settings: settings_presenter,
                 presets: PresetsPresenter::new(Arc::clone(&presets)),

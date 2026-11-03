@@ -27,7 +27,38 @@ use uuid::Uuid;
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn runtime(root: &Path, plugin_id: &str) -> AiApplicationConfig {
-    runtime_with_python(root, plugin_id, "3.13.5").await
+    runtime_with_python(root, plugin_id, &test_python_version().await).await
+}
+
+async fn test_python_version() -> String {
+    let output = tokio::process::Command::new(test_python())
+        .arg("--version")
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let reported = String::from_utf8(output.stdout).unwrap();
+    let version = reported
+        .trim()
+        .strip_prefix("Python ")
+        .expect("Python version probe");
+    assert!(
+        version.starts_with("3.12."),
+        "Application fixtures require Python 3.12; set NEUROMITA_TEST_PYTHON to that interpreter"
+    );
+    version.to_owned()
+}
+
+fn test_python() -> PathBuf {
+    std::env::var_os("NEUROMITA_TEST_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "python".into()
+            } else {
+                "python3".into()
+            }
+        })
 }
 
 async fn runtime_with_python(
@@ -80,15 +111,7 @@ async fn runtime_with_python(
     AiApplicationConfig {
         topology: ProcessTopology::Split,
         host: PythonHostConfig {
-            python_executable: std::env::var_os("NEUROMITA_TEST_PYTHON")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    if cfg!(windows) {
-                        "python".into()
-                    } else {
-                        "python3".into()
-                    }
-                }),
+            python_executable: test_python(),
             sdk_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
             plugins_directory: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("python/plugins/builtin"),
@@ -181,7 +204,7 @@ async fn invalid_ai_selection_aborts_application_without_voice_fallback() {
 async fn mismatched_locked_python_blocks_application_startup() {
     let _guard = CORE_TEST_MUTEX.lock().await;
     let root = std::env::temp_dir().join(format!("nm-application-ai-abi-{}", Uuid::new_v4()));
-    let incompatible = runtime_with_python(&root, "mock_tts", "3.12.10").await;
+    let incompatible = runtime_with_python(&root, "mock_tts", "99.0.0").await;
     let outcome = ApplicationLifecycle::start(application(incompatible)).await;
     assert!(matches!(
         outcome,
@@ -236,7 +259,7 @@ async fn fixture_worker(root: &Path, service: AiService, plugin_id: &str) -> AiW
     let overlay = LockedOverlay {
         plugin_id: plugin_id.into(),
         revision: "test".into(),
-        python_version: "3.13.5".into(),
+        python_version: test_python_version().await,
         packages: vec![],
         actions: vec![],
     };
