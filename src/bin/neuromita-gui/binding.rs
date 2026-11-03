@@ -6,7 +6,6 @@ use neuromita::localization::{
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::{
-    memory::{EditAction, MemoryIntent, MemoryUi},
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
@@ -48,8 +47,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     window.set_releases(ModelRc::new(VecModel::from(releases)));
     render(&window, &presenter.borrow(), &catalog.borrow());
-    window.set_memory_status("Откройте память, чтобы подключиться к Core".into());
-    let memory = MemoryUi::new(window.as_weak(), options.data_directory.clone());
 
     let weak = window.as_weak();
     let dispatch = Rc::new(move |command| {
@@ -93,24 +90,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         render(&window, &presenter, &catalog.borrow());
     });
     let handler = dispatch.clone();
-    let memory_send = memory.sender();
-    let memory_window = window.as_weak();
-    window.on_navigate(move |page| {
-        let target = from_view(page);
-        handler(ShellCommand::Navigate(target));
-        if target == Page::Memory
-            && let Some(window) = memory_window.upgrade()
-        {
-            window.set_memory_busy(true);
-            window.set_memory_ready(false);
-            window.set_memory_status("Загрузка памяти...".into());
-            if let Some(character) =
-                neuromita::character::CharacterId::parse(&window.get_memory_character())
-            {
-                let _ = memory_send.send(MemoryIntent::Load(character));
-            }
-        }
-    });
+    window.on_navigate(move |page| handler(ShellCommand::Navigate(from_view(page))));
     let handler = dispatch.clone();
     window.on_language_selected(move |code| {
         handler(match LocaleId::new(&code) {
@@ -132,45 +112,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
-    let memory_send = memory.sender();
-    let memory_window = window.as_weak();
-    window.on_memory_character_changed(move |id| {
-        if let Some(character) = neuromita::character::CharacterId::parse(&id) {
-            if let Some(window) = memory_window.upgrade() {
-                window.set_memory_busy(true);
-                window.set_memory_ready(false);
-                window.set_memory_items(ModelRc::new(VecModel::from(Vec::new())));
-                window.set_memory_status("Загрузка памяти...".into());
-            }
-            let _ = memory_send.send(MemoryIntent::Load(character));
-        }
-    });
-    let memory_send = memory.sender();
-    let memory_window = window.as_weak();
-    window.on_memory_execute(move |action, id, text| {
-        let Some(window) = memory_window.upgrade() else {
-            return;
-        };
-        let Some(character) =
-            neuromita::character::CharacterId::parse(&window.get_memory_character())
-        else {
-            return;
-        };
-        window.set_memory_busy(true);
-        window.set_memory_status("Выполнение операции...".into());
-        let intent = match EditAction::from_view(action) {
-            Some(action) => MemoryIntent::Edit {
-                character,
-                action,
-                id: id.to_string(),
-                text: text.to_string(),
-            },
-            None => MemoryIntent::Load(character),
-        };
-        let _ = memory_send.send(intent);
-    });
     window.run()?;
-    drop(memory);
     Ok(())
 }
 
@@ -234,7 +176,6 @@ fn translation_lookup(
 
 struct Options {
     directory: Option<PathBuf>,
-    data_directory: PathBuf,
     locale: LocaleId,
 }
 
@@ -242,7 +183,6 @@ impl Options {
     fn parse() -> Result<Self, Box<dyn Error>> {
         let mut options = Self {
             directory: None,
-            data_directory: PathBuf::new(),
             locale: LocaleId::russian(),
         };
         let mut arguments = std::env::args_os().skip(1);
@@ -255,13 +195,6 @@ impl Options {
                             .ok_or("--translations-dir requires a path")?
                             .into(),
                     )
-                }
-                Some("--data-dir") => {
-                    options.data_directory =
-                        PathBuf::from(arguments.next().ok_or("--data-dir requires a directory")?);
-                    if options.data_directory.as_os_str().is_empty() {
-                        return Err("empty data directory".into());
-                    }
                 }
                 Some("--language") => {
                     options.locale = LocaleId::new(
@@ -279,29 +212,8 @@ impl Options {
                 }
             }
         }
-        if options.data_directory.as_os_str().is_empty() {
-            options.data_directory = default_data_directory()?;
-        }
         Ok(options)
     }
-}
-
-fn default_data_directory() -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(path) = std::env::var_os("NEUROMITA_DATA_DIR") {
-        return Ok(PathBuf::from(path));
-    }
-    #[cfg(windows)]
-    if let Some(path) = std::env::var_os("APPDATA") {
-        return Ok(PathBuf::from(path).join("NeuroMita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(path).join("neuromita"));
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(path).join(".config").join("neuromita"));
-    }
-    Err("data directory unavailable; specify --data-dir".into())
 }
 
 fn launcher_action(action: LauncherMenuAction) -> LauncherAction {
@@ -318,7 +230,6 @@ fn from_view(page: PageId) -> Page {
         PageId::Home => Page::Home,
         PageId::Settings => Page::Settings,
         PageId::Sandbox => Page::Sandbox,
-        PageId::Memory => Page::Memory,
         PageId::Releases => Page::Releases,
         PageId::Gallery => Page::Gallery,
         PageId::Wiki => Page::Wiki,
@@ -330,7 +241,6 @@ fn to_view(page: Page) -> PageId {
         Page::Home => PageId::Home,
         Page::Settings => PageId::Settings,
         Page::Sandbox => PageId::Sandbox,
-        Page::Memory => PageId::Memory,
         Page::Releases => PageId::Releases,
         Page::Gallery => PageId::Gallery,
         Page::Wiki => PageId::Wiki,

@@ -3,11 +3,10 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
-import { MemoryPage, MemoryItem, MemoryAction } from "pages/memory.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 
-export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption, MemoryItem, MemoryAction }
+export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita — макет интерфейса");
@@ -26,17 +25,6 @@ export component AppWindow inherits Window {
     in property <bool> backend-selected;
     in property <bool> client-selected;
     in property <string> notice;
-    in property <[MemoryItem]> memory-items;
-    in-out property <string> memory-character: "mita";
-    in-out property <string> memory-selected-id;
-    in-out property <string> memory-selected-state;
-    in-out property <bool> memory-selected-protected;
-    in-out property <string> memory-draft;
-    in property <bool> memory-busy;
-    in property <bool> memory-ready;
-    in property <string> memory-status;
-    callback memory-character-changed(string);
-    callback memory-execute(MemoryAction, string, string);
     callback navigate(PageId);
     callback language-selected(string);
     callback reload-translations();
@@ -67,21 +55,7 @@ export component AppWindow inherits Window {
                 menu-action(action) => { root.launcher-action(action); }
                 open-releases => { root.navigate(PageId.releases); }
             }
-            if root.page == PageId.memory: MemoryPage {
-                width: parent.width; height: parent.height;
-                memories: root.memory-items;
-                character <=> root.memory-character;
-                selected-id <=> root.memory-selected-id;
-                selected-state <=> root.memory-selected-state;
-                selected-protected <=> root.memory-selected-protected;
-                draft <=> root.memory-draft;
-                ready: root.memory-ready;
-                busy: root.memory-busy;
-                status: root.memory-status;
-                change-character(id) => { root.memory-character-changed(id); }
-                execute(action, id, content) => { root.memory-execute(action, id, content); }
-            }
-            if root.page != PageId.home && root.page != PageId.memory: PlaceholderPage {
+            if root.page != PageId.home: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
