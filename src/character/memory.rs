@@ -169,6 +169,12 @@ pub enum MemoryCommand {
         island: MemoryIsland,
         content: String,
     },
+    /// Initialize one island only if its category has never been retained.
+    /// Unlike SetIsland, repeated seeding never overwrites evolving memory.
+    SeedIsland {
+        island: MemoryIsland,
+        content: String,
+    },
     Forget {
         id: MemoryId,
     },
@@ -606,6 +612,24 @@ impl CharacterMemories {
                     });
                     record.content = content.clone();
                     record.state = MemoryState::Active;
+                    let change = MemoryChange::Upsert(record);
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
+                MemoryCommand::SeedIsland { island, content } => {
+                    if content.trim().is_empty() || content.chars().count() > 2000 {
+                        return Err("invalid memory record");
+                    }
+                    if next
+                        .records
+                        .values()
+                        .any(|record| record.kind == MemoryKind::Island(*island))
+                    {
+                        continue;
+                    }
+                    let mut record =
+                        MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, content.clone());
+                    record.kind = MemoryKind::Island(*island);
                     let change = MemoryChange::Upsert(record);
                     next.apply_committed(&change)?;
                     changes.push(change);
@@ -1308,6 +1332,100 @@ mod tests {
             .is_err()
         );
         assert_eq!(book, original);
+    }
+
+    #[test]
+    fn seed_island_is_one_time_and_does_not_overwrite_any_retained_state() {
+        let mut book = CharacterMemories::default();
+        let seed = MemoryCommand::SeedIsland {
+            island: MemoryIsland::Relationship,
+            content: "initial relationship".into(),
+        };
+        let changes = book.resolve(&[seed.clone(), seed.clone()]).unwrap();
+        assert_eq!(changes.len(), 1);
+        book.apply_committed(&changes[0]).unwrap();
+        let original = book.all()[0].clone();
+        assert_eq!(original.priority, MemoryPriority::High);
+        assert_eq!(
+            original.kind,
+            MemoryKind::Island(MemoryIsland::Relationship)
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "attempted overwrite".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.all(), vec![original.clone()]);
+
+        apply(&mut book, &[MemoryCommand::Forget { id: original.id }]);
+        assert!(book.resolve(&[seed.clone()]).unwrap().is_empty());
+        assert_eq!(book.all()[0].state, MemoryState::Forgotten);
+        apply(&mut book, &[MemoryCommand::SoftDelete { id: original.id }]);
+        assert!(book.resolve(&[seed]).unwrap().is_empty());
+        assert_eq!(book.all()[0].state, MemoryState::Deleted);
+        assert_eq!(book.all()[0].id, original.id);
+    }
+
+    #[test]
+    fn seed_island_preserves_manual_updates_and_protection() {
+        let mut book = CharacterMemories::default();
+        apply(
+            &mut book,
+            &[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Preferences,
+                content: "original preferences".into(),
+            }],
+        );
+        let id = book.islands()[0].id;
+        apply(
+            &mut book,
+            &[MemoryCommand::SetIsland {
+                island: MemoryIsland::Preferences,
+                content: "updated preferences".into(),
+            }],
+        );
+        apply(
+            &mut book,
+            &[MemoryCommand::SetProtection {
+                id,
+                protected: true,
+            }],
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Preferences,
+                content: "should not change".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.islands()[0].id, id);
+        assert_eq!(book.islands()[0].content, "updated preferences");
+        assert!(book.islands()[0].protected);
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Language,
+                content: "   ".into(),
+            }])
+            .is_err()
+        );
+        assert!(
+            book.resolve(&[
+                MemoryCommand::SeedIsland {
+                    island: MemoryIsland::Language,
+                    content: "language seed".into(),
+                },
+                MemoryCommand::SeedIsland {
+                    island: MemoryIsland::Opinion,
+                    content: " ".into(),
+                },
+            ])
+            .is_err()
+        );
+        assert_eq!(book.all().len(), 1);
     }
 
     #[test]

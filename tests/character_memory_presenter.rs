@@ -813,3 +813,94 @@ async fn ensure_fact_reactivates_deleted_identity_across_sqlite_reopen() {
     reopened.shutdown().await.unwrap();
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn seed_island_is_one_time_per_character_via_presenter() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let mut observer = presenter
+        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .unwrap();
+    assert_eq!(observer.next().await.unwrap().total_matches(), 0);
+    let first = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "first story".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.applied.len(), 1);
+    let id = first.snapshot.records()[0].id;
+    assert_eq!(first.snapshot.records()[0].priority, MemoryPriority::High);
+    assert_eq!(observer.next().await.unwrap().total_matches(), 1);
+    let duplicate = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            first.snapshot,
+            vec![MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "would overwrite".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.applied.is_empty());
+    assert_eq!(duplicate.snapshot.records()[0].content, "first story");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), observer.next())
+            .await
+            .is_err()
+    );
+    let forgotten = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            duplicate.snapshot,
+            vec![MemoryCommand::Forget { id }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(observer.next().await.unwrap().summary().forgotten, 1);
+    let repeated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            forgotten.snapshot,
+            vec![MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "do not restore".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(repeated.applied.is_empty());
+    assert_eq!(repeated.snapshot.records()[0].state, MemoryState::Forgotten);
+    assert_eq!(repeated.snapshot.records()[0].id, id);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), observer.next())
+            .await
+            .is_err()
+    );
+    let other = presenter
+        .edit_memories(
+            CharacterId::KindMita,
+            presenter.memories(CharacterId::KindMita).await.unwrap(),
+            vec![MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "other character's story".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(other.snapshot.records().len(), 1);
+    assert_ne!(other.snapshot.records()[0].id, id);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), observer.next())
+            .await
+            .is_err()
+    );
+    app.shutdown().await.unwrap();
+}
