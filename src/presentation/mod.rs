@@ -3,7 +3,7 @@ mod chat;
 mod presets;
 mod settings;
 
-pub use characters::CharactersPresenter;
+pub use characters::{CharactersPresenter, MemoryListPage, MemoryListQuery, MemorySummary};
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
 pub use presets::PresetsPresenter;

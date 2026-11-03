@@ -3,10 +3,136 @@ use crate::{
         CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot, CharacterRegistry,
         CharacterState, CharacterView, MemoryEditResult,
     },
-    memory::MemoryCommand,
+    memory::{MemoryCommand, MemoryKind, MemoryRecord, MemoryState},
     request::{InputError, UserInput},
     timeline::{ContextAnchor, EventId},
 };
+
+/// Read-only selection criteria for a user-facing memory list.
+/// The query never affects canonical data or retrieval context.
+#[derive(Debug, Clone)]
+pub struct MemoryListQuery {
+    pub text: Option<String>,
+    pub state: Option<MemoryState>,
+    pub kind: Option<MemoryKind>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl Default for MemoryListQuery {
+    fn default() -> Self {
+        Self {
+            text: None,
+            state: None,
+            kind: None,
+            offset: 0,
+            limit: 50,
+        }
+    }
+}
+
+/// Counts for the full authoritative character snapshot, independent of list filters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemorySummary {
+    pub active: usize,
+    pub forgotten: usize,
+    pub deleted: usize,
+    pub facts: usize,
+    pub islands: usize,
+    pub protected: usize,
+}
+
+/// A bounded read model with the unfiltered edit token from the same snapshot.
+/// Editing with this token retains the Character owner's optimistic concurrency checks.
+#[derive(Debug, Clone)]
+pub struct MemoryListPage {
+    snapshot: CharacterMemorySnapshot,
+    records: Vec<MemoryRecord>,
+    summary: MemorySummary,
+    total_matches: usize,
+    next_offset: Option<usize>,
+}
+
+impl MemoryListPage {
+    pub fn snapshot(&self) -> &CharacterMemorySnapshot {
+        &self.snapshot
+    }
+
+    pub fn into_snapshot(self) -> CharacterMemorySnapshot {
+        self.snapshot
+    }
+
+    pub fn records(&self) -> &[MemoryRecord] {
+        &self.records
+    }
+
+    pub fn summary(&self) -> MemorySummary {
+        self.summary
+    }
+
+    pub fn total_matches(&self) -> usize {
+        self.total_matches
+    }
+
+    pub fn next_offset(&self) -> Option<usize> {
+        self.next_offset
+    }
+
+    /// Page a previously captured snapshot without re-reading mutable Timeline state.
+    /// This keeps all page offsets and totals stable until the caller requests a refresh.
+    pub fn from_snapshot(
+        snapshot: CharacterMemorySnapshot,
+        query: MemoryListQuery,
+    ) -> Result<Self, CharacterError> {
+        if !(1..=100).contains(&query.limit) {
+            return Err(CharacterError::InvalidMemory(
+                "memory page limit must be 1..100",
+            ));
+        }
+        let search = query.text.as_deref().map(str::trim).unwrap_or_default();
+        if search.chars().count() > 200 {
+            return Err(CharacterError::InvalidMemory(
+                "memory search text exceeds 200 characters",
+            ));
+        }
+        let normalized_search = search.to_lowercase();
+        let mut summary = MemorySummary::default();
+        let mut matching = Vec::new();
+        for record in snapshot.records() {
+            match record.state {
+                MemoryState::Active => summary.active += 1,
+                MemoryState::Forgotten => summary.forgotten += 1,
+                MemoryState::Deleted => summary.deleted += 1,
+            }
+            match record.kind {
+                MemoryKind::Fact => summary.facts += 1,
+                MemoryKind::Island(_) => summary.islands += 1,
+            }
+            if record.protected {
+                summary.protected += 1;
+            }
+            if query.state.is_some_and(|state| record.state != state)
+                || query.kind.is_some_and(|kind| record.kind != kind)
+                || (!normalized_search.is_empty()
+                    && !record.content.to_lowercase().contains(&normalized_search))
+            {
+                continue;
+            }
+            matching.push(record.clone());
+        }
+        let total_matches = matching.len();
+        let start = query.offset.min(total_matches);
+        let end = start.saturating_add(query.limit).min(total_matches);
+        let records = matching[start..end].to_vec();
+        Ok(Self {
+            snapshot,
+            records,
+            summary,
+            total_matches,
+            next_offset: (end < total_matches).then_some(end),
+        })
+    }
+}
 
 #[derive(Clone)]
 pub struct CharactersPresenter {
@@ -24,6 +150,13 @@ impl CharactersPresenter {
         id: CharacterId,
     ) -> Result<CharacterMemorySnapshot, CharacterError> {
         self.get(id)?.memories().await
+    }
+    pub async fn list_memories(
+        &self,
+        id: CharacterId,
+        query: MemoryListQuery,
+    ) -> Result<MemoryListPage, CharacterError> {
+        MemoryListPage::from_snapshot(self.memories(id).await?, query)
     }
     pub async fn edit_memories(
         &self,
