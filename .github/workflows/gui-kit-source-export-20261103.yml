@@ -1,0 +1,28 @@
+name: GUI Kit Source Export
+on:
+  push:
+    branches: [bridge/gui-kit-source-export-20261103]
+  workflow_dispatch:
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bundle branch
+        shell: bash
+        run: |
+          git branch -f export-target "$GITHUB_SHA"
+          git bundle create /tmp/neuromita-rust-source.bundle refs/heads/export-target
+          git bundle verify /tmp/neuromita-rust-source.bundle
+          sha256sum /tmp/neuromita-rust-source.bundle > /tmp/neuromita-rust-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-rust-gui-source
+          path: |
+            /tmp/neuromita-rust-source.bundle
+            /tmp/neuromita-rust-source.bundle.sha256
+          retention-days: 3
