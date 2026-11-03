@@ -31,7 +31,7 @@ impl fmt::Display for CharacterId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub Uuid);
 
 impl RequestId {

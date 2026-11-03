@@ -28,6 +28,10 @@ class GigaAM(nn.Module):
         """
         Perform forward pass through the preprocessor and encoder.
         """
+        if getattr(self, "inference_precision", None) == "fp32":
+            with torch.autocast(device_type=self._device.type, enabled=False):
+                features, feature_lengths = self.preprocessor(features, feature_lengths)
+                return self.encoder(features, feature_lengths)
         features, feature_lengths = self.preprocessor(features, feature_lengths)
         if self._device.type == "cpu":
             return self.encoder(features, feature_lengths)
