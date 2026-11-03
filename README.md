@@ -1,6 +1,8 @@
 # NeuroMita Rust
 
-Slint 1.18.1 и slint-build подготовлены как необязательные зависимости feature `gui` и включены в vendor. Проверка: `cargo check --locked --offline --features gui`. Выбраны Winit, software renderer и accessibility; GUI-код пока не добавлен. Для этой feature требуется Rust 1.92+, обычное ядро сохраняет свой минимальный Rust 1.89.
+Slint 1.18.1 и slint-build включены в необязательную feature `gui` и vendor. Добавлен отдельный макет оболочки с Home и страницами-заглушками: `cargo run --locked --offline --features gui --bin neuromita-gui`. Он использует Winit + FemtoVG/OpenGL, явно заданные данные референса и не запускает ядро/LLM/сервер. [Статус GUI, меню и ограничения](future/gui.md). Для feature `gui` требуется Rust 1.92+, обычное ядро сохраняет минимальный Rust 1.89.
+
+Локализация — общий Rust-модуль с `i18n(ID, source)`, исходными JSON Python и переводом существующего интерфейса при смене языка. EN/RU доступны в sidebar, остальные языки — через глобус. Внешние JSON: `--translations-dir PATH`, стартовый язык: `--language CODE`; в меню глобуса есть перечитывание каталогов. [Контракты и формат](future/localization.md). Экспорт шаблона: `cargo run --locked --offline --bin neuromita-i18n -- template`.
 
 Логи CLI используют tracing/tracing-subscriber: время, уровень, модуль, файл/строка и контекст RequestId/персонажа. Цвет включается только для терминала; перенаправленный stderr и NO_COLOR дают обычный текст. По умолчанию warn для сторонних модулей и info для NeuroMita. Например, в PowerShell `$env:RUST_LOG = 'warn,neuromita=debug'` включает подробные логи приложения. Некорректный фильтр останавливает запуск с явной ошибкой. Текст переписки, ответы и секреты в добавленные события не записываются. Ответы CLI остаются в stdout; автоматического файлового хранения/ротации пока нет.
 

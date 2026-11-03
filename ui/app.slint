@@ -1,0 +1,76 @@
+import { Theme, Icons } from "theme.slint";
+import { Label, ActionSurface } from "components/controls.slint";
+import { Sidebar, PageId } from "components/sidebar.slint";
+import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
+import { PlaceholderPage } from "pages/placeholder.slint";
+import { LauncherMenuAction } from "components/launcher-menu.slint";
+import { I18n, LocaleOption } from "i18n.slint";
+
+export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption }
+
+export component AppWindow inherits Window {
+    title: I18n.i18n("app.window.title", "Чат с NeuroMita — макет интерфейса");
+    icon: @image-url("../assets/launcher_ui/NM_Logo.png");
+    preferred-width: 1560px; preferred-height: 918px;
+    min-width: 1180px; min-height: 680px;
+    background: Theme.background;
+    default-font-family: Theme.font-family;
+    default-font-size: Theme.body-size;
+    in property <PageId> page: home;
+    in property <string> version;
+    in property <string> page-title;
+    in property <ComponentCard> backend;
+    in property <ComponentCard> client;
+    in property <[ReleaseItem]> releases;
+    in property <bool> backend-selected;
+    in property <bool> client-selected;
+    in property <string> notice;
+    callback navigate(PageId);
+    callback language-selected(string);
+    callback reload-translations();
+    callback social-selected(string);
+    callback toggle-backend();
+    callback toggle-client();
+    callback play();
+    callback launcher-action(LauncherMenuAction);
+    callback dismiss-notice();
+    HorizontalLayout {
+        padding: 0px; spacing: 0px;
+        Sidebar {
+            current-page: root.page; version: root.version;
+            navigate(page) => { root.navigate(page); }
+            language-selected(code) => { root.language-selected(code); }
+            reload-translations => { root.reload-translations(); }
+            social-selected(name) => { root.social-selected(name); }
+        }
+        Rectangle {
+            horizontal-stretch: 1; min-width: 0px; clip: true;
+            if root.page == PageId.home: HomePage {
+                width: parent.width; height: parent.height;
+                backend: root.backend; client: root.client; releases: root.releases;
+                backend-selected: root.backend-selected; client-selected: root.client-selected;
+                toggle-backend => { root.toggle-backend(); }
+                toggle-client => { root.toggle-client(); }
+                play => { root.play(); }
+                menu-action(action) => { root.launcher-action(action); }
+                open-releases => { root.navigate(PageId.releases); }
+            }
+            if root.page != PageId.home: PlaceholderPage {
+                width: parent.width; height: parent.height;
+                title: root.page-title;
+                icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
+                home => { root.navigate(PageId.home); }
+            }
+            if root.notice != "": Rectangle {
+                x: (parent.width - self.width) / 2; y: 24px; width: min(650px, parent.width - 56px); height: 64px;
+                border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;
+                Label { x: 18px; width: parent.width - 66px; height: parent.height; text: root.notice; wrap: word-wrap; }
+                ActionSurface {
+                    x: parent.width - 44px; y: 14px; width: 32px; height: 32px; label: I18n.i18n("common.dismiss", "Закрыть");
+                    Label { width: parent.width; height: parent.height; text: "×"; font-size: 22px; horizontal-alignment: center; }
+                    activated => { root.dismiss-notice(); }
+                }
+            }
+        }
+    }
+}

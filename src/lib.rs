@@ -6,6 +6,7 @@ mod identity;
 mod interaction;
 pub mod launcher;
 pub mod lifecycle;
+pub mod localization;
 pub mod migration;
 pub mod presentation;
 pub mod request;

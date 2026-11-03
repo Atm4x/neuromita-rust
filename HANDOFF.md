@@ -1,5 +1,7 @@
 # Handoff: Rust core contracts
 
+GUI/localization update, 2026-11-03: the separate `neuromita-gui` preview now implements the Slint shell/Home with placeholder pages, typed launcher popup actions, and Winit/FemtoVG. It does not start Core/LLM/TTS/server. Read [future/gui.md](future/gui.md) and [future/localization.md](future/localization.md). Common `src/localization/` supplies `i18n(id, source)` descriptors, JSON catalogs, explicit fallback, named/nested arguments, validated external overlays and atomic reload. Slint locale/revision bindings update existing controls immediately; a headless Slint test verifies language switches and catalog revision on one component. Python JSON originals are in `localization/python/`; contextual additions are in `localization/catalogs/`. `neuromita-i18n template` exports declarations; `check [directory]` validates catalogs. Language persistence is not connected to core settings yet. Final GUI-enabled suite: 243 passed, 2 ignored; Clippy default/GUI and fmt pass. Offline debug GUI is built. No live provider calls were made.
+
 Latest handoff: PR #55–58 are merged into main (integration b862c22), including the newer core and shared migration system. 231 tests default / 180 no-default, 2 ignored each; Clippy/fmt pass. Semantic retrieval is NOT implemented yet. Read future/semantic-retrieval.md for exact pending work; the run stopped at 7% remaining of the user's 5-hour limit. Do not treat provider research or this plan as a working semantic backend.
 
 ## Start here
