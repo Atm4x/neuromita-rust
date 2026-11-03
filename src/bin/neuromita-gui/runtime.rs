@@ -39,6 +39,8 @@ pub enum Command {
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
+    SectionVisibility(usize, bool),
+    HidePrivate(bool),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -218,7 +220,7 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
-                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
+                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(id) => publish(Update::AdminSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),

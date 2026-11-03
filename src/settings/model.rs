@@ -62,6 +62,18 @@ pub enum Language {
 pub struct InterfaceSettings {
     pub language: Language,
     pub font_size: u16,
+    #[serde(default = "all_sections_visible")]
+    pub visible_sections: [bool; 12],
+    #[serde(default = "hide_private_by_default")]
+    pub hide_private: bool,
+}
+
+fn all_sections_visible() -> [bool; 12] {
+    [true; 12]
+}
+
+fn hide_private_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +211,8 @@ impl AppSettings {
             interface: InterfaceSettings {
                 language: Language::Russian,
                 font_size: 14,
+                visible_sections: all_sections_visible(),
+                hide_private: true,
             },
             reminders: RemindersSettings::initial_profile(),
         }
@@ -229,6 +243,11 @@ impl AppSettings {
         if self.capture.interval_ms == 0 || !(1..=100).contains(&self.capture.jpeg_quality) {
             return Err(SettingsError::Validation(
                 "invalid capture interval or JPEG quality".into(),
+            ));
+        }
+        if !self.interface.visible_sections[0] {
+            return Err(SettingsError::Validation(
+                "the General settings section must remain visible".into(),
             ));
         }
         if !(6..=96).contains(&self.interface.font_size) {
