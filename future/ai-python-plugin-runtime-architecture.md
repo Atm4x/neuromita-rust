@@ -1,6 +1,6 @@
 # NeuroMita — Rust Core + Python AI Plugin Runtime
 
-**Статус:** архитектурное проектирование; реализация и contract tests не выполнены. 2026-11-03.  
+**Статус:** частичная реализация первого вертикального среза; runtime/install parity не достигнута. 2026-11-03.  
 **Основа:** `Atm4x/NeuroMita` Python `5f3d061`, `Atm4x/neuromita-rust` текущие интерфейсы и `future/root-primitives-and-client-contexts.md`; `wavekat/wavekat-vad` v0.1.17.  
 **Связанные задачи:** #24 AI Runtime, #25 ASR, #26 TTS, #37 AI Hub, #42 Installables, #51 Hardware.  
 **Ограничение области:** не заменяет текущую цель Generation/Request в `GOAL.md` и не объявляет Python parity достигнутой.
@@ -239,3 +239,15 @@ Voice profile не обязан физически содержать все `.p
 **Design risks:** arbitrary community code has host privileges absent a real OS sandbox; ABI/ORT/native extension conflicts require tests; GPU/device contention across workers; shared overlay collisions; TOCTOU around plugin revisions; tests for install cancellation, stale result, disk exhaustion, path traversal and side-effect approval.
 
 **Новые архитектурные issues:** [#59](https://github.com/Atm4x/neuromita-rust/issues/59) Python SDK/bootstrap, [#60](https://github.com/Atm4x/neuromita-rust/issues/60) Rust-native VAD, [#61](https://github.com/Atm4x/neuromita-rust/issues/61) voice profiles/assets.
+
+
+## Implementation checkpoint — 2026-11-03
+
+Реализовано в отдельной ветке:
+
+- `python/neuromita_ai_sdk`: versioned Python protocol, dynamic plugin discovery, contract probing, typed `InstallPlan`, settings schema, initialize/infer/unload.
+- `python/plugins/builtin/mock_tts` и `mock_asr`: независимые fixture plugins. Shared Python host поддерживает по одному активному plugin на kind.
+- `src/ai_runtime/mod.rs`: Rust-owned child process + handshake, timeout, bounded JSON-lines IPC, request correlation, topology Shared/Split, generation ID, restart after stop, adaptation to existing `VoiceProvider`.
+- Проверено: Python unittest (4 теста), Rust 1.98.1 targeted runtime tests (3), полный `cargo test --offline --no-default-features`, `cargo clippy --offline --no-default-features --lib -- -D warnings`.
+
+Не реализовано и не заявляется: uv/CPython bootstrap, продакшен AI Hub discovery, install execution/overlays, модельные assets, Python ASR microphone runtime, wavekat-vad, реальные TTS/RVC/embedding плагины, event stream/cancellation на уровне plugin inference, интеграция Supervisor в ApplicationLifecycle, default-feature CI. Worker stdout передаёт JSON с лимитом кадра, поэтому передача больших аудиоданных отдельным каналом остаётся задачей.

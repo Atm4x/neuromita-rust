@@ -73,3 +73,73 @@
 - [ ] **#37 / #51:** AI Hub отражает discovered/installed/environment-ready/worker-ready/model-ready/failed, показывает plugin-provided settings и причины ошибки; никакой фиктивной готовности.
 
 **Минимальная приёмка:** два добавленных без сборки Rust mock-плагина (плюс невалидный), выбор/смена TTS без переподнятия ASR в split, install failure с rollback, missing/incorrect voice assets, unknown speaker/pitch validation, stale worker result и VAD mock PCM segment tests. До этих проверок не объявлять AI Runtime завершённым. Текущий VoiceProvider и ResponseGenerator не подменяются общим AI service.
+
+
+### Реализация AI Runtime: первый сквозной срез (2026-11-03)
+
+- [x] Базовый Python SDK API v1, обнаружение из plugin.json, mock TTS/ASR, host JSON-lines IPC.
+- [x] Rust-owned Supervisor Shared/Split, version handshake, correlations, bounded frames и отдельные поколения worker; `PythonVoiceProvider` подключает существующий voice trait.
+- [x] Contract tests в Python и Rust, Rust 1.98.1 full no-default suite + Clippy.
+- [ ] Python bootstrap через uv, установка и активация environments, production discovery, assets, VAD, клиенты и интеграция в ApplicationLifecycle. Архитектурные issues #24/#42/#59/#60/#61 остаются открытыми.
+
+## AI Runtime Implementation — staged bootstrap and overlays (2026-11-03)
+
+**Первая публикация:** Python SDK, mock TTS/ASR, типизированный host IPC и Rust-owned Supervisor — коммиты `c4b5748`, `4458119` (предшествующий этап).
+
+**Текущая публикация:** отдельные `src/ai_runtime/bootstrap.rs` и `src/ai_runtime/overlay.rs`. Это инфраструктурные компоненты, **не** завершённый сквозной installer.
+
+- [x] Managed CPython bootstrap из **уже предоставленного uv binary**: exact major.minor.patch, `uv python install --no-bin --install-dir`, `uv python find --managed-python --no-python-downloads`, отдельные AIData/cache, проверка абсолютного managed path, повторный запуск без повторной установки, explicit errors.
+- [x] Immutable package overlay из **предварительно разрешённого lock**: `uv pip install --target` с `--no-deps`, staging, manifest, idempotence/conflict, очистка staging при ошибке, запрет установки torch/onnxruntime в модельный overlay.
+- [x] Локальные Rust tests: 8 AI Runtime tests PASS, full `--no-default-features` PASS, `cargo clippy --no-default-features -D warnings` PASS; полный default-feature suite PASS при последовательном выполнении (параллельный launcher test один раз дал Linux ETXTBSY и отдельно прошёл).
+- [ ] Получение/верификация самого uv с релиза или доверенного зеркала, SHA-256/архивы и конкретная pin-policy.
+- [ ] Resolver/lock step, verifiable backend layers, asset download/probe/hooks, plugin approval и atomic activation.
+- [ ] Стыковка bootstrap/install с `AiSupervisor` и AI Hub, shared/split environment composition.
+- [ ] Реальный скачанный Python/uv integration test и Windows validation (сейчас mock uv; offline tests).
+- [ ] Контрактная сверка опубликованного Git tree в CI; локальные тесты выполнены на исходниках рабочей копии.
+
+Все статусы readiness различать: discovered / installed / environment-ready / worker-ready / model-ready. Не считать наличие manifest доказательством импортируемости модулей и работоспособности модели.
+
+
+### AI Runtime implementation continuation — 2026-11-03
+
+- [x] Добавлен `UvInstaller`: отдельный pinned distribution descriptor (release version, HTTPS/file URL, SHA-256, archive format), ограниченный download в staging, verified tar/ZIP extraction, запуск `uv --version`, atomic publish и receipt with executable digest; no shell installer, no PATH mutation.
+- [x] Общая immutable installation infrastructure `ai_runtime::layer` для model overlays и backend layers; shared uv invocation, staging и revisions. Overlay запрещает torch/onnxruntime distributions; backend validates selected runtime family and exclusive ONNX variants.
+- [x] Contract tests: install/reuse/tampered uv, wrong archive checksum, backend revision conflict/family, previous overlay regressions; tests without real model downloads.
+- [ ] Соединить `UvInstaller.prepare()` и `PythonBootstrap.prepare()` с пользовательским AI Hub startup: сейчас обе операции — самостоятельные Rust API, не автоматическая цепочка при старте приложения.
+- [ ] Получить/закрепить platform-specific official distribution checksums, mirrors, CI для Windows ZIP; проверить настоящий managed Python download и native wheel install. Сейчас network installer покрыт лишь локальными архивами и mock uv.
+- [ ] Добавить resolver/version lock generation и Python runtime import/file probes. Manifest о наличии backend/overlay означает **файловую установку**, не доказательство inference readiness. Разрешить композиции общих backend layers и активных overlays с проверкой cross-layer distribution conflicts.
+
+**Проверка:** `cargo fmt --check`, `cargo clippy --offline --locked --all-targets -- -D warnings` для default и no-default PASS; полный `cargo test --offline --locked --no-default-features -- --test-threads=1` PASS (199 passed, 2 ignored). Полный default-feature `cargo test` не завершился до инструментального таймаута во время компиляции, не помечать PASS.
+
+### Managed Python bootstrap integration — 2026-11-03
+
+- [x] `ai_runtime::managed::ManagedRuntimeBootstrap`: orchestration `UvInstaller.prepare()` → `PythonBootstrap.prepare()`, returns verified uv and managed Python executable paths; no venv, system Python or second Supervisor.
+- [x] End-to-end mock bootstrap contract test on Linux (local pinned tarball with fake uv; install/find/reuse managed Python); 13 AI Runtime Rust tests and 4 Python SDK tests PASS, Clippy `-D warnings` PASS.
+- [ ] ApplicationLifecycle/AI Hub must invoke the bootstrap before worker availability; no actual internet download or Windows integration has been verified.
+
+### AI Runtime dependency resolution / selected compositions — 2026-11-03
+
+- [x] Новый `ai_runtime::resolver::DependencyResolver`: `uv pip compile` из точных прямых Python pins, с constraints установленного backend; результат — строгий транзитивный `LockedPackage` список, из которого исключаются authoritative backend packages. Несовместимые версии запрещены явно.
+- [x] Новый `ai_runtime::composition::RuntimeComposition`: одна service selection по слотам; `split` включает только её overlays, `shared` проверяет все одновременно активные overlays/backend layers и отказывает при конфликтующих пакетах/версии Python. Неселектированные модели не попадают в `PYTHONPATH`.
+- [x] `AiSupervisor::start_composed` запускает Python worker с проверенными путями выбранных слоёв; разделение ответственности Rust process/IPC и Python model inference сохранено. Contract test: Python module в одном selected overlay доступен worker без установки в системный Python.
+- [x] Python host поддерживает отдельный `installplan.py: InstallContract` для `install_plan/probe_install/settings_schema`, не импортируя потенциально отсутствующие heavyweight inference packages. Устаревший builtin layout временно сохраняет совместимость (fallback `plugin.py`). Новый test демонстрирует отсутствие требуемого runtime-пакета.
+- [ ] Полноценный resolver для wheels с markers/URLs/extras/hashes и динамических Python/OS platform tags, без запуска непроверенных build scripts; текущий парсер сознательно принимает только plain exact pins и отклоняет неподдерживаемый формат.
+- [ ] Контроль согласованности фактического Python ABI с выбранными locks; verify импортов, версии и целостности файлов в опубликованных слоях; ещё нет production installation-to-activation orchestration.
+- [ ] Реальный managed uv/CPython download, PyTorch/ONNX packages, RVC/Silero/F5 TTS, API и UI settings/live lifecycle остаются открытыми. Test fixtures не доказывают production readiness.
+
+**Локальные проверки:** no-default-features full cargo test PASS, `cargo clippy --no-default-features --all-targets -- -D warnings` PASS, Python SDK 5 tests PASS. Реальный dependency download/inference и default-feature full cargo test этого среза отдельно не подтверждены.
+
+
+### AI Runtime implementation checkpoint — 2026-11-03: install evidence and candidate activation
+
+**Source commits:** fb3c971, bf95b39, 61e83ef, 40f85f9, b437553. These are incremental AI Runtime changes in the architecture PR, **not Python parity or production AI readiness**.
+
+- [x] Rust parses Python SDK's typed install plan from an **ephemeral** Python child (not the live inference worker).
+- [x] A model install handler validates backend choice, resolves model pins against backend constraints and publishes an immutable overlay revision.
+- [x] Required/optional model assets are inspected at safe relative paths, with symlink rejection and optional SHA-256; report separates Missing, Present, Verified, HashMismatch. Missing/invalid required files block **ready-for-initialization**, while an installed package overlay can still exist.
+- [x] Supervisor can prepare and initialize a candidate worker and replace the active generation **only after success**. Failure preserves the previous worker; late requests from an old generation return StaleGeneration.
+- [x] Split-mode activation locks are **per worker slot**; preparing TTS does not block ASR calls. Contract tests cover rollback, successful replacement and concurrent ASR access.
+- [ ] **Not done:** actual asset download/installation hooks; verification of Python distributions/imports beyond package-layer manifest; durable active-model selection; real GPU inference / model warmup; persisted readiness; interruption-safe restore across process crashes; OS-level sandbox for arbitrary community Python plugins.
+- [ ] Verify published HEAD through CI on Windows and Linux; local Rust 1.98.1 and Python tests do not substitute for full remote CI or real installed models.
+
+Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin contract), #61 (voice assets) open. Prefer real model probes and installation verification next; do not add a second Python supervisor.
