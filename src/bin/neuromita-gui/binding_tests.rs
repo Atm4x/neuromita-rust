@@ -138,6 +138,23 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
             std::fs::write(PathBuf::from(directory).join(format!("{name}.ppm")), ppm).unwrap();
         }
     }
+    window.set_page(PageId::Home);
+    window.window().take_snapshot().unwrap();
+    window.set_page(PageId::Sandbox);
+    window.set_core_connected(false);
+    window.set_chat_error("Core is not connected".into());
+    let image = window.window().take_snapshot().unwrap();
+    if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+        let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+        for rgba in image.as_bytes().as_chunks::<4>().0 {
+            ppm.extend_from_slice(&rgba[..3]);
+        }
+        std::fs::write(
+            PathBuf::from(directory).join("sandbox-disconnected-error.ppm"),
+            ppm,
+        )
+        .unwrap();
+    }
     window.global::<I18n>().set_locale("en".into());
     window.window().take_snapshot().unwrap();
     window.hide().unwrap();

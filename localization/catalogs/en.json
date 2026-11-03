@@ -411,18 +411,6 @@
     "source": "Напиши что-нибудь Мите…",
     "translation": "Write something to Mita…"
   },
-  "sandbox.runtime.model": {
-    "source": "Модель для запуска Core",
-    "translation": "Model to start Core"
-  },
-  "sandbox.runtime.setup": {
-    "source": "Подключение модели",
-    "translation": "Model connection"
-  },
-  "sandbox.runtime.start": {
-    "source": "Подключить",
-    "translation": "Connect"
-  },
   "sandbox.screenshot": {
     "source": "Сделать скриншот экрана",
     "translation": "Capture screenshot"

@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
-import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Field, Centered } from "controls.slint";
+import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Centered } from "controls.slint";
 import { ActionSurface } from "../components/controls.slint";
 import { I18n } from "../i18n.slint";
 import { Avatar } from "../components/avatar.slint";
@@ -89,9 +89,9 @@ component SessionTab inherits ScrollView {
     callback selected(int);
     callback refresh();
     callback settings();
-    content-width: self.width;
+    content-width: self.visible-width;
     VerticalLayout {
-        padding-left: 2px; padding-right: 2px; padding-top: 12px; padding-bottom: 4px;
+        padding-left: 2px; padding-right: 10px; padding-top: 12px; padding-bottom: 4px;
         spacing: 12px; alignment: start;
         Strip {
             title: I18n.i18n("sandbox.section.session", "Активная сессия"); glyph: Fa.badge;
@@ -99,16 +99,6 @@ component SessionTab inherits ScrollView {
                 character: root.character; model: root.model; preset: root.preset;
                 selected(id) => { root.selected(id); }
                 settings => { root.settings(); }
-            }
-        }
-        if !root.connected: Strip {
-            title: I18n.i18n("sandbox.runtime.setup", "Подключение модели"); glyph: Fa.wave;
-            Caption { text: I18n.i18n("sandbox.runtime.model", "Модель для запуска Core"); font-size: 12px; color: SandboxTheme.muted; }
-            Field { text <=> root.model-input; placeholder: "gemini-2.5-flash"; enabled: !root.connecting; }
-            QuickAction {
-                text: root.connecting ? I18n.i18n("sandbox.connecting", "Подключение…") : I18n.i18n("sandbox.runtime.start", "Подключить");
-                enabled: !root.connecting && root.model-input != "";
-                activated => { root.connect(root.model-input); }
             }
         }
         Strip {
@@ -183,9 +173,9 @@ component StateTab inherits ScrollView {
     in property <string> anchor;
     in property <int> message-count;
     callback settings();
-    content-width: self.width;
+    content-width: self.visible-width;
     VerticalLayout {
-        padding-left: 2px; padding-right: 2px; padding-top: 12px; padding-bottom: 4px; spacing: 12px; alignment: start;
+        padding-left: 2px; padding-right: 10px; padding-top: 12px; padding-bottom: 4px; spacing: 12px; alignment: start;
         Rectangle {
             background: #0e101ff2; border-color: SandboxTheme.border; border-width: 1px; border-radius: 16px;
             VerticalLayout {
@@ -245,7 +235,7 @@ component DebugTab inherits ScrollView {
     callback refresh();
     callback settings();
     callback logs();
-    content-width: self.width;
+    content-width: self.visible-width;
     VerticalLayout {
         padding-left: 2px; padding-right: 10px; padding-top: 12px; padding-bottom: 4px; spacing: 12px; alignment: start;
         Strip {

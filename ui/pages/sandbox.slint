@@ -96,7 +96,7 @@ export component SandboxPage inherits Rectangle {
         border-radius: 12px;
         HorizontalLayout { padding-left: 16px; padding-right: 12px; spacing: 8px;
             Caption { text: root.error; horizontal-stretch: 1; font-size: 12px; }
-            HeaderButton { text: I18n.i18n("sandbox.error.dismiss", "Закрыть"); activated => { root.dismiss-error(); } }
+            Centered { HeaderButton { text: I18n.i18n("sandbox.error.dismiss", "Закрыть"); activated => { root.dismiss-error(); } } }
         }
     }
 }
