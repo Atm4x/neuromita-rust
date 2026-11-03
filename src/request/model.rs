@@ -1,10 +1,12 @@
 use std::{fmt, sync::Arc};
 
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     character::{AcceptedResponse, CharacterId},
+    finetune::SampleId,
     generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
@@ -12,7 +14,7 @@ use crate::{
     voice::VoiceError,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RequestSource {
     Presenter,
     Scheduler,
@@ -248,6 +250,12 @@ pub enum RequestState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DatasetCapture {
+    pub sample_id: Option<SampleId>,
+    pub warning: Option<Arc<str>>,
+}
+
 impl RequestState {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Finished(_) | Self::Cancelled)
@@ -259,6 +267,7 @@ pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
     pub revision: u64,
     pub state: RequestState,
+    pub dataset: DatasetCapture,
     pub cancel_reason: Option<CancelReason>,
 }
 
@@ -287,7 +296,7 @@ impl RequestSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum EffectPhase {
     Working,
     Accepting,

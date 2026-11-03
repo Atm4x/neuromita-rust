@@ -5,7 +5,10 @@ use std::{
 
 use tokio::sync::mpsc;
 
-use super::{GenerationCommand, RequestDiscovery, RequestHandle, RequestRegistry, SubmitError};
+use super::{
+    DiagnosticScope, DiagnosticsAccess, GenerationCommand, RequestDiscovery, RequestHandle,
+    RequestRegistry, SubmitError,
+};
 use crate::{
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
@@ -118,5 +121,18 @@ impl ChatApiState {
             return Err(SubmitError::Stopped);
         }
         Ok(self.registry.get(id).map(|record| record.handle()))
+    }
+
+    pub(crate) fn diagnostics(
+        &self,
+        scope: DiagnosticScope,
+    ) -> Result<DiagnosticsAccess, SubmitError> {
+        if !*self.accepting.lock().expect("admission mutex poisoned") {
+            return Err(SubmitError::Stopped);
+        }
+        if !self.handlers.contains_key(&scope.character_id()) {
+            return Err(SubmitError::CharacterUnavailable);
+        }
+        Ok(self.registry.diagnostics_access(scope))
     }
 }

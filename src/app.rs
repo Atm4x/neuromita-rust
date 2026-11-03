@@ -21,6 +21,8 @@ use crate::{
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
+    finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
+    games::GamePolicy,
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -91,10 +93,14 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub finetune: Option<FineTuneSettings>,
+    /// Explicit gates for the character-owned mini-games.
+    pub games: GamePolicy,
     pub reminders: ReminderConfig,
 }
 
@@ -125,11 +131,14 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
+            ai_hardware: None,
             ai_knowledge: None,
             settings: SettingsConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            finetune: None,
+            games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
         }
     }
@@ -191,6 +200,12 @@ impl ApplicationConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
         };
+        let finetune_path = data_directory.join("finetune.json");
+        config.finetune = match std::fs::metadata(&finetune_path) {
+            Ok(_) => Some(FineTuneSettings::load(&finetune_path)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         Ok(config)
     }
 }
@@ -210,6 +225,8 @@ pub enum ApplicationError {
     #[error(transparent)]
     Presets(#[from] PresetCatalogError),
     #[error(transparent)]
+    FineTune(#[from] FineTuneError),
+    #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error(transparent)]
     Ai(#[from] AiApplicationError),
@@ -228,6 +245,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    finetune: Option<FineTuneCollector>,
     speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     id: Uuid,
     stop: CancellationToken,
@@ -298,6 +316,7 @@ impl RequestIngress for TimelineRequestIngress {
 }
 
 struct ApplicationOwner {
+    finetune: Option<FineTuneCollector>,
     releases_task: Option<JoinHandle<Result<(), std::convert::Infallible>>>,
     bindings: Arc<ApiBindings>,
     reminders_stop: CancellationToken,
@@ -329,12 +348,18 @@ impl ApplicationLifecycle {
             limits,
             voice,
             ai_runtime,
+            ai_hardware,
             ai_knowledge,
             settings,
             timeline,
             server,
+            finetune,
+            games,
             reminders: reminders_config,
         } = config;
+        let finetune = finetune
+            .map(|settings| FineTuneCollector::from_settings(&settings))
+            .transpose()?;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
             startup.register(SettingsStartupMigration(Arc::clone(&settings.repository)))?;
@@ -351,9 +376,22 @@ impl ApplicationLifecycle {
         let settings_owner = settings.owner();
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
-        let ai_runtime = match ai_runtime {
-            Some(configuration) => Some(Box::pin(configuration.activate()).await?),
-            None => None,
+        let ai_runtime = match (ai_runtime, ai_hardware) {
+            (Some(configuration), Some(path)) => {
+                let store = crate::ai_runtime::hardware::HardwareConfigStore::new(path);
+                let selected = store.load().map_err(|error| {
+                    crate::ai_runtime::application::AiApplicationError::Invalid(error.to_string())
+                })?;
+                Some(Box::pin(configuration.activate_with_hardware(&selected, &store)).await?)
+            }
+            (Some(configuration), None) => Some(Box::pin(configuration.activate()).await?),
+            (None, Some(_)) => {
+                return Err(crate::ai_runtime::application::AiApplicationError::Invalid(
+                    "hardware selection requires an explicit AI application plan".into(),
+                )
+                .into());
+            }
+            (None, None) => None,
         };
         let speech = ai_runtime
             .as_ref()
@@ -386,7 +424,10 @@ impl ApplicationLifecycle {
                 KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
             }
         };
-        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
+        let registry = Arc::new(RequestRegistry::new_with_diagnostics(
+            limits.discovery_buffer.get(),
+            crate::request::DiagnosticsLimits::default(),
+        ));
         let selection_updates = timeline
             .lock()
             .expect("timeline lock poisoned")
@@ -410,6 +451,15 @@ impl ApplicationLifecycle {
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
+        let games = Arc::new(games);
+        for id in CharacterId::ALL {
+            characters
+                .get(id)
+                .expect("hardcoded character exists")
+                .configure_game_policy(*games)
+                .await
+                .map_err(|error| ApplicationError::Task(error.to_string()))?;
+        }
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -427,8 +477,10 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
+                finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,
+                games: Arc::clone(&games),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),
@@ -464,9 +516,11 @@ impl ApplicationLifecycle {
             characters,
             settings: settings_owner,
             presets: Arc::clone(&presets),
+            games: Arc::clone(&games),
             reminders,
         });
         let mut owner = ApplicationOwner {
+            finetune: finetune.clone(),
             releases_task: Some(releases_task),
             bindings: Arc::clone(&bindings),
             reminders_stop,
@@ -515,6 +569,7 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            finetune,
             speech,
             id,
             stop,
@@ -544,6 +599,9 @@ impl ApplicationLifecycle {
     }
     pub fn server(&self) -> &ServerHandle {
         &self.server
+    }
+    pub fn finetune(&self) -> Option<&FineTuneCollector> {
+        self.finetune.as_ref()
     }
     pub fn at(&self) -> crate::timeline::ContextAnchor {
         self.timeline
@@ -685,6 +743,7 @@ impl ApplicationLifecycle {
             .expect("timeline lock poisoned")
             .events()
     }
+
     pub fn active_requests(&self) -> usize {
         self.bindings.chat.registry.active_count()
     }
@@ -746,6 +805,17 @@ impl ApplicationOwner {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
         }
+        if let Some(collector) = &self.finetune {
+            let status = collector.drain(crate::finetune::DELIVERY_DRAIN, true).await;
+            if status.pending > 0 || status.errors > 0 || status.dropped > 0 {
+                tracing::warn!(
+                    pending = status.pending,
+                    errors = status.errors,
+                    dropped = status.dropped,
+                    "dataset delivery stopped with incomplete records"
+                );
+            }
+        }
         self.bindings.chat.registry.close();
         self.owners_stop.cancel();
         for owner in self.owners.drain(..) {
@@ -792,6 +862,9 @@ impl Drop for ApplicationLifecycle {
 
 impl Drop for ApplicationOwner {
     fn drop(&mut self) {
+        if let Some(collector) = &self.finetune {
+            collector.stop_delivery();
+        }
         self.bindings.chat.close();
         self.bindings.chat.registry.close();
         self.workers_stop.cancel();

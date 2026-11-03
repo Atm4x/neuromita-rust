@@ -137,6 +137,9 @@ impl GeminiTemplate {
     pub fn settings(&self) -> &GenerationSettings {
         &self.settings
     }
+    pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
+        vec![self.api_key.to_string()]
+    }
     pub(crate) fn request_url(&self) -> Url {
         let mut url = self
             .endpoint

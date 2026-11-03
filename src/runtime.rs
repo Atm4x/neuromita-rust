@@ -4,8 +4,8 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::{
-    character::CharacterRegistry, generation::PresetCatalog, request::ChatApiState,
-    settings::SettingsOwner,
+    character::CharacterRegistry, games::GamePolicy, generation::PresetCatalog,
+    request::ChatApiState, settings::SettingsOwner,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub(crate) struct ApiBindings {
     pub(crate) characters: CharacterRegistry,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
+    pub(crate) games: Arc<GamePolicy>,
     pub(crate) reminders: Arc<crate::reminders::RemindersHandle>,
 }
 

@@ -25,8 +25,38 @@ async fn main() -> ExitCode {
     tracing::debug!("starting application");
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
-    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("launcher")) {
+    let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("dataset")) {
+        let dataset = match arguments
+            .map(|argument| {
+                argument.into_string().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "dataset arguments must be valid Unicode",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(arguments) => arguments,
+            Err(error) => return fail(error),
+        };
+        return match neuromita::finetune::cli::run(dataset) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("launcher")) {
         return match neuromita::launcher::run_cli(arguments.collect::<Vec<_>>()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(error = %error, "application failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("hardware")) {
+        return match neuromita::ai_runtime::hardware::run_cli(arguments.collect::<Vec<_>>()).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(error = %error, "application failed");
@@ -41,6 +71,12 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn fail(error: impl std::fmt::Display) -> ExitCode {
+    tracing::error!(error = %error, "application failed");
+    eprintln!("error: {error}");
+    ExitCode::FAILURE
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
@@ -88,10 +124,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
         options.listen,
         &options.data_dir,
     )?;
+    if let Some(path) = options.finetune_config.as_ref() {
+        config.finetune = Some(neuromita::finetune::FineTuneSettings::load(path)?);
+    }
     config.knowledge = knowledge;
     let app = ApplicationLifecycle::start(config).await?;
     tracing::info!(address = %app.server().address(), "server listening");
-    let result = terminal::run(&app.presenter().chat, options).await;
+    let result = terminal::run(&app.presenter().chat, options, app.finetune()).await;
     let stopped = app.shutdown().await;
     result?;
     stopped?;

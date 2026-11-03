@@ -12,6 +12,9 @@ pub(crate) fn knowledge_change(
     fact: &TimelineFact,
     observer: CharacterId,
 ) -> Option<KnowledgeChange> {
+    if fact.draft.kind == EventKind::GameStateCaptured {
+        return None;
+    }
     fact.draft
         .observers
         .contains(&observer)

@@ -296,8 +296,9 @@ fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineErro
     )?;
     for observer in &fact.draft.observers {
         let character = observer.to_string();
-        let change = crate::timeline::domain::knowledge_change(fact, *observer)
-            .expect("fact observer has knowledge");
+        let Some(change) = crate::timeline::domain::knowledge_change(fact, *observer) else {
+            continue;
+        };
         if change.reset {
             conn.write(
                 "INSERT INTO timeline_resets(branch_id,sequence,character_id) VALUES(?,?,?)",

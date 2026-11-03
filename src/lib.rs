@@ -4,6 +4,8 @@ pub mod api;
 pub mod app;
 pub mod audio;
 pub mod character;
+pub mod finetune;
+pub mod games;
 pub mod generation;
 mod identity;
 mod interaction;
@@ -25,6 +27,7 @@ pub mod timeline;
 pub mod voice;
 
 pub use character::memory;
+pub use interaction::UserInput;
 pub mod turn;
 
 pub mod releases;

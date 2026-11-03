@@ -49,6 +49,12 @@ use domain::{
     CharacterWorkingState, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
 
+#[derive(Debug, Clone)]
+pub(crate) struct AcceptedReplyEvents {
+    pub message: EventId,
+    pub game: Vec<EventId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextAnchor {
     pub branch_id: Uuid,
@@ -108,6 +114,11 @@ pub struct HistoryView {
 
 /// Two read models bound to the same immutable timeline prefix.
 /// The legacy view is retained for clients that have not migrated yet.
+pub(crate) struct GameCommit {
+    pub state: crate::games::GameSlot,
+    pub expected_head: u64,
+}
+
 pub(crate) struct GeneratedReply {
     pub request: RequestId,
     pub intent: TurnIntent,
@@ -123,6 +134,8 @@ pub(crate) struct TimelineContextSnapshot {
     pub(crate) working_state: CharacterWorkingState,
     pub(crate) memories: CharacterMemories,
     pub(crate) known: Vec<domain::KnownEvent>,
+    pub(crate) game: crate::games::GameSlot,
+    pub(crate) game_token: Option<EventId>,
     pub(crate) history: HistoryView,
     pub(crate) view: MitaView,
 }
@@ -537,7 +550,10 @@ impl SessionTimeline {
                 .map_err(|error| error.to_string())?;
         let memories = crate::character::projection::character_memories_at(&facts, character)
             .map_err(|error| error.to_string())?;
+        let (game, game_token) = Self::game_from_facts(character, at, &facts)?;
         Ok(TimelineContextSnapshot {
+            game,
+            game_token,
             history,
             view,
             state,
@@ -545,6 +561,53 @@ impl SessionTimeline {
             memories,
             known,
         })
+    }
+
+    pub(crate) fn game_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<(crate::games::GameSlot, Option<EventId>), String> {
+        let facts = self.read_prefix(at).map_err(|error| error.to_string())?;
+        Self::game_from_facts(character, at, &facts)
+    }
+
+    fn game_from_facts(
+        character: CharacterId,
+        at: ContextAnchor,
+        facts: &[domain::TimelineFact],
+    ) -> Result<(crate::games::GameSlot, Option<EventId>), String> {
+        let mut game = crate::games::GameSlot::default();
+        let mut token = None;
+        for fact in facts.iter().rev() {
+            if fact.draft.kind == EventKind::GameStateCaptured
+                && fact.draft.actor.as_deref() == Some(character.to_string().as_str())
+            {
+                game = serde_json::from_value(fact.draft.payload["game_state"].clone())
+                    .map_err(|error| format!("invalid canonical game: {error}"))?;
+                game.validate().map_err(str::to_owned)?;
+                token = Some(fact.draft.id);
+                break;
+            }
+        }
+        game.bind_branch(BranchId(at.branch_id));
+        Ok((game, token))
+    }
+
+    fn game_state_draft(
+        character: CharacterId,
+        game: crate::games::GameSlot,
+    ) -> Result<EventDraft, domain::TimelineError> {
+        game.validate().map_err(domain::TimelineError::Invalid)?;
+        let mut draft = EventDraft::new(EventKind::GameStateCaptured);
+        draft.actor = Some(character.to_string());
+        draft.observers.insert(character);
+        draft.payload.insert(
+            "game_state".into(),
+            serde_json::to_value(game)
+                .map_err(|_| domain::TimelineError::Invalid("invalid game state"))?,
+        );
+        Ok(draft)
     }
 
     pub(crate) fn character_state_at(
@@ -961,10 +1024,20 @@ impl SessionTimeline {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_reply(
         &mut self,
         reply: GeneratedReply,
     ) -> Result<EventId, domain::TimelineError> {
+        self.append_reply_tracked(reply, None)
+            .map(|accepted| accepted.message)
+    }
+
+    pub(crate) fn append_reply_tracked(
+        &mut self,
+        reply: GeneratedReply,
+        game_state: Option<GameCommit>,
+    ) -> Result<AcceptedReplyEvents, domain::TimelineError> {
         let GeneratedReply {
             request,
             intent,
@@ -1108,6 +1181,25 @@ impl SessionTimeline {
                     );
                     drafts.push(handoff);
                 }
+                AppliedEffect::GameAdvanced(fact) => {
+                    let kind = match &fact {
+                        crate::games::GameFact::Started { .. } => EventKind::GameStarted,
+                        crate::games::GameFact::PhaseChanged { .. }
+                        | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
+                        crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
+                    };
+                    let mut game = EventDraft::new(kind);
+                    game.actor = Some(character.to_string());
+                    game.observers.insert(character);
+                    game.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    for (key, value) in fact.payload() {
+                        game.payload.insert(key, value);
+                    }
+                    drafts.push(game);
+                }
                 AppliedEffect::ReminderChanged(change) => {
                     let reminder = crate::reminders::change_draft(&change, Some(id), occurred_at)
                         .map_err(|_| {
@@ -1127,10 +1219,37 @@ impl SessionTimeline {
                 }
             }
         }
+        let expected_head = game_state
+            .as_ref()
+            .map_or_else(|| self.anchor().through, |commit| commit.expected_head);
+        if let Some(GameCommit {
+            state: mut game, ..
+        }) = game_state
+        {
+            for draft in &drafts {
+                if matches!(
+                    draft.kind,
+                    EventKind::GameStarted | EventKind::GameAction | EventKind::GameEnded
+                ) {
+                    game.record_event(draft.id);
+                }
+            }
+            drafts.push(Self::game_state_draft(character, game)?);
+        }
+        let game_events = drafts
+            .iter()
+            .filter(|draft| {
+                matches!(
+                    draft.kind,
+                    EventKind::GameStarted | EventKind::GameAction | EventKind::GameEnded
+                )
+            })
+            .map(|draft| draft.id)
+            .collect();
         let selected = self.selection();
         self.store.append_guarded(
             self.branch,
-            self.anchor().through,
+            expected_head,
             &format!("reply:{}", request.0),
             json!({}),
             drafts,
@@ -1143,7 +1262,56 @@ impl SessionTimeline {
         if changes_memory {
             self.notify_memory_changed(character);
         }
-        Ok(id)
+        Ok(AcceptedReplyEvents {
+            message: id,
+            game: game_events,
+        })
+    }
+
+    /// Commit an owner command and its private state in one guarded batch.
+    pub(crate) fn append_game_facts(
+        &mut self,
+        character: CharacterId,
+        facts: &[crate::games::GameFact],
+        state: &mut crate::games::GameSlot,
+        expected_head: u64,
+    ) -> Result<Vec<EventId>, domain::TimelineError> {
+        let selected = self.selection();
+        let mut drafts = Vec::with_capacity(facts.len());
+        for fact in facts {
+            let kind = match fact {
+                crate::games::GameFact::Started { .. } => EventKind::GameStarted,
+                crate::games::GameFact::PhaseChanged { .. }
+                | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
+                crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
+            };
+            let mut draft = EventDraft::new(kind);
+            draft.actor = Some(character.to_string());
+            draft.observers.insert(character);
+            for (key, value) in fact.payload() {
+                draft.payload.insert(key, value);
+            }
+            drafts.push(draft);
+        }
+        let ids: Vec<_> = drafts.iter().map(|draft| draft.id).collect();
+        for id in &ids {
+            state.record_event(*id);
+        }
+        drafts.push(Self::game_state_draft(character, state.clone())?);
+        let key = format!("game:{character}:{}", uuid::Uuid::new_v4());
+        self.store.append_guarded(
+            self.branch,
+            expected_head,
+            &key,
+            json!({}),
+            drafts,
+            AppendGuard {
+                selection_generation: selected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(ids)
     }
 
     pub(crate) fn events(&self) -> Vec<TimelineEvent> {

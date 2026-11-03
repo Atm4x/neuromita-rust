@@ -17,6 +17,7 @@ use super::{
     PythonVoiceProvider, composition::RuntimeComposition, voice_profile::VoiceProfileStore,
 };
 
+#[derive(Clone)]
 pub struct AiWorkerSelection {
     pub service: AiService,
     pub composition: RuntimeComposition,
@@ -44,6 +45,7 @@ pub struct RunningAiApplication {
     supervisor: Arc<AiSupervisor>,
     active: Vec<AiService>,
     selected: HashSet<AiService>,
+    worker_services: std::collections::HashMap<AiService, Vec<AiService>>,
     voice_profiles: Option<Arc<VoiceProfileStore>>,
 }
 
@@ -90,6 +92,27 @@ impl AiApplicationConfig {
     }
 
     pub async fn activate(self) -> Result<RunningAiApplication, AiApplicationError> {
+        self.activate_selected(None).await
+    }
+
+    pub async fn activate_with_hardware(
+        self,
+        config: &super::hardware::HardwareConfig,
+        store: &super::hardware::HardwareConfigStore,
+    ) -> Result<RunningAiApplication, AiApplicationError> {
+        config
+            .validate()
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        self.activate_selected(Some((config, store))).await
+    }
+
+    async fn activate_selected(
+        self,
+        hardware: Option<(
+            &super::hardware::HardwareConfig,
+            &super::hardware::HardwareConfigStore,
+        )>,
+    ) -> Result<RunningAiApplication, AiApplicationError> {
         self.validate()?;
         let output = timeout(
             self.host.request_timeout,
@@ -122,11 +145,57 @@ impl AiApplicationConfig {
             .flat_map(|worker| worker.models.iter().map(|model| model.service))
             .collect();
         let supervisor = Arc::new(AiSupervisor::new(self.topology, self.host));
+        let worker_services = self
+            .workers
+            .iter()
+            .flat_map(|worker| {
+                worker
+                    .composition
+                    .services()
+                    .iter()
+                    .map(|service| (*service, worker.composition.services().to_vec()))
+            })
+            .collect();
         let mut active = Vec::new();
+        if let Some((config, _)) = hardware {
+            let worker = self
+                .workers
+                .iter()
+                .find(|worker| {
+                    worker
+                        .models
+                        .iter()
+                        .any(|model| model.service == config.selection.service)
+                })
+                .ok_or_else(|| {
+                    AiApplicationError::Invalid(
+                        "hardware service absent from application plan".into(),
+                    )
+                })?;
+            super::hardware::verify_worker_plan(worker, config)
+                .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+        }
         for worker in self.workers {
-            let activation = supervisor
-                .activate_composed(worker.service, &worker.composition, &worker.models)
-                .await;
+            let activation = if let Some((config, store)) = hardware
+                && worker
+                    .models
+                    .iter()
+                    .any(|model| model.service == config.selection.service)
+            {
+                supervisor
+                    .activate_hardware(
+                        config.selection.service,
+                        &worker.composition,
+                        &worker.models,
+                        &config.selection.profile(),
+                        &|| store.verify_current(config),
+                    )
+                    .await
+            } else {
+                supervisor
+                    .activate_composed(worker.service, &worker.composition, &worker.models)
+                    .await
+            };
             if let Err(error) = activation {
                 for service in active.into_iter().rev() {
                     let _ = supervisor.stop(service).await;
@@ -135,16 +204,36 @@ impl AiApplicationConfig {
             }
             active.push(worker.service);
         }
+        let _selection_guard = if let Some((config, store)) = hardware {
+            match store.verify_current(config) {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    for service in active.into_iter().rev() {
+                        let _ = supervisor.stop(service).await;
+                    }
+                    return Err(error.into());
+                }
+            }
+        } else {
+            None
+        };
         Ok(RunningAiApplication {
             supervisor,
             active,
             selected,
+            worker_services,
             voice_profiles: self.voice_profiles,
         })
     }
 }
 
 impl RunningAiApplication {
+    pub(crate) fn worker_services(&self, service: AiService) -> Option<&[AiService]> {
+        self.worker_services.get(&service).map(Vec::as_slice)
+    }
+    pub(crate) fn supervisor(&self) -> &AiSupervisor {
+        &self.supervisor
+    }
     pub fn has_service(&self, service: AiService) -> bool {
         self.selected.contains(&service)
     }

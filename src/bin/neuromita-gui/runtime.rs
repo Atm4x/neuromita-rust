@@ -245,7 +245,10 @@ async fn observe(
                     let model = administration.chat.snapshot();
                     let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == character).and_then(|r| administration.chat.trace(r.metadata.id));
                     let text = match trace {
-                        Some(trace) => format!("Request: {}\nPreset: {}\nContext: {:?}\nTransitions:\n{}", trace.metadata.id, trace.preset_description, trace.context.as_ref().map(|context| context.anchor), trace.transitions.iter().map(|step| format!("#{} {:?} · {:?}", step.revision, step.phase, step.state)).collect::<Vec<_>>().join("\n")),
+                        Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
+                            Ok(text) => text,
+                            Err(error) => format!("Cannot export request diagnostics: {error}"),
+                        },
                         None => "No retained request trace".into(),
                     };
                     publish(Update::Diagnostics(text));
