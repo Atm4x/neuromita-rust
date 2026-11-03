@@ -1,3 +1,4 @@
+import { SettingsSectionHeading, SettingsToggleRow, SettingsRow, SettingsText, SettingsEntryRow, SettingsChoiceRow, SettingsNumberRow, SettingsButtonRow } from "../components/settings-kit.slint";
 import { CharacterCatalog } from "../characters/catalog.slint";
 import { CharacterPortrait } from "../characters/portrait.slint";
 import { SettingsTheme } from "../settings/theme.slint";
@@ -16,6 +17,10 @@ export struct CharacterPresets { reply: string, react: string, initiate: string,
 export struct PresetItem { id: string, name: string, model: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
 export global SettingsUi {
     in-out property <int> section;
+    in-out property <[bool]> section-visible: [true, true, true, true, true, true, true, true, true, true, true, true];
+    in-out property <bool> hide-private: true;
+    callback section-visibility(int, bool);
+    callback set-hide-private(bool);
     in-out property <[PresetItem]> settings-presets;
     in-out property <string> settings-error;
     in-out property <string> settings-revision;
@@ -77,19 +82,7 @@ component EditorField inherits VerticalLayout {
     SettingsField { text <=> root.text; height: 40px; }
 }
 
-component SectionHeading inherits HorizontalLayout {
-    in property <string> title;
-    in property <string> description;
-    in property <string> glyph;
-    height: 48px; padding: 0px; spacing: 14px;
-    Rectangle { width: 48px; height: 48px; border-radius: 12px; background: SettingsTheme.heading-icon-background;
-        Glyph { text: root.glyph; color: SettingsTheme.accent; width: 100%; height: 100%; font-size: 27px; }
-    }
-    VerticalLayout { padding: 0px; spacing: 2px; alignment: center;
-        SettingsLabel { text: root.title; font-family: SettingsTheme.font-family; font-size: 23px; font-weight: 700; }
-        SettingsLabel { text: root.description; font-size: 12px; color: SettingsTheme.muted; }
-    }
-}
+component SectionHeading inherits SettingsSectionHeading {}
 
 component PresetChoice inherits Rectangle {
     in property <string> value;
@@ -296,6 +289,7 @@ export component SettingsPage inherits Rectangle {
     callback guide();
     callback language-selected(string);
     property <string> delete-id;
+    in-out property <bool> general-sections-expanded: true;
     property <string> voice-draft: SettingsUi.settings-voice-name;
     background: SettingsTheme.canvas;
     VerticalLayout {
@@ -318,7 +312,7 @@ export component SettingsPage inherits Rectangle {
         Rectangle { background: SettingsTheme.workspace; border-radius: SettingsTheme.panel-radius; border-width: 1px; border-color: SettingsTheme.border;
             VerticalLayout { padding: 14px; spacing: 14px;
                 Rectangle { vertical-stretch: 0;
-                FlexboxLayout { padding: 0px; flex-wrap: wrap; spacing-horizontal: 10px; spacing-vertical: 6px; alignment: center; cross-axis-line-alignment: start;
+                FlexboxLayout { padding-left: 26px; padding-right: 0px; flex-wrap: wrap; spacing-horizontal: 5px; spacing-vertical: 6px; alignment: start; cross-axis-line-alignment: start;
                     for item in [
                         {section: 0, name: I18n.i18n("settings.general", "Общие"), icon: Fa.gear},
                         {section: 4, name: I18n.i18n("settings.language", "Язык"), icon: "\u{f0ac}"},
@@ -333,8 +327,9 @@ export component SettingsPage inherits Rectangle {
                         {section: 10, name: I18n.i18n("settings.updates", "Обновления"), icon: "\u{f2f1}"},
                         {section: 11, name: I18n.i18n("settings.data", "Сбор данных"), icon: Fa.database}
                     ]: ActionSurface {
+                        visible: SettingsUi.section-visible[item.section];
                         label: item.name; border-width: 0px; border-radius: 0px; horizontal-stretch: 0; height: 42px;
-                        HorizontalLayout { padding-left: 10px; padding-right: 10px; padding-top: 8px; padding-bottom: 10px; spacing: 6px;
+                        HorizontalLayout { padding-left: 6px; padding-right: 6px; padding-top: 8px; padding-bottom: 10px; spacing: 5px;
                             Glyph { text: item.icon; color: SettingsUi.section == item.section ? white : SettingsTheme.muted; }
                             SettingsLabel { text: item.name; font-family: SandboxTheme.font-family; font-weight: SettingsUi.section == item.section ? 700 : 600; }
                         }
@@ -351,15 +346,84 @@ export component SettingsPage inherits Rectangle {
                         Centered { SettingsButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { SettingsUi.settings-error = ""; } } }
                     }
                 }
-                if SettingsUi.section == 0: ScrollView { content-width: self.visible-width;
-                    VerticalLayout { padding: 2px; padding-right: 10px; spacing: 16px; alignment: start;
-                        SectionHeading { title: I18n.i18n("settings.general.title", "Общие настройки"); description: I18n.i18n("settings.general.description", "Состояние приложения и сохранение параметров."); glyph: Fa.gear; }
-                        Card { VerticalLayout { padding: 18px; spacing: 14px;
-                            SettingsLabel { text: root.connected ? I18n.i18n("settings.core.ready", "Ядро работает") : root.connecting ? I18n.i18n("settings.core.starting", "Ядро запускается") : I18n.i18n("settings.core.unavailable", "Ядро недоступно"); font-size: 15px; font-weight: 700; }
-                            SettingsLabel { text: I18n.i18n("settings.revision", "Версия настроек") + ": " + SettingsUi.settings-revision; }
-                            SettingsLabel { text: SettingsUi.settings-persistence == 1 ? I18n.i18n("settings.saved", "Настройки сохранены") : SettingsUi.settings-persistence == 2 ? I18n.i18n("settings.save-failed", "Ошибка сохранения") : I18n.i18n("settings.saving", "Сохранение…"); color: SettingsTheme.muted; }
-                            SettingsLabel { text: I18n.i18n("settings.preset.active", "Активный пресет") + ": #" + SettingsUi.settings-active; }
-                        } }
+                if SettingsUi.section == 0: SettingsScrollView {
+                    content-height: general-content.preferred-height;
+                    general-content := VerticalLayout {
+                        width: parent.width;
+                        padding: 2px; padding-right: 10px;
+                        spacing: SettingsTheme.section-gap; alignment: start;
+                        SectionHeading {
+                            title: I18n.i18n("settings.general.title", "Общие настройки");
+                            description: I18n.i18n("settings.general.pyqt-description", "Базовые параметры интерфейса, приватности, памяти и языка.");
+                            glyph: Fa.gear;
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.visible-sections", "Видимые разделы");
+                            subtitle: I18n.i18n("settings.general.visible-sections-note", "Включите только те разделы, которыми пользуетесь — остальные спрячутся из настроек и боковой панели.");
+                            glyph: "\u{f0b0}";
+                            expanded <=> root.general-sections-expanded;
+                            for tab in [
+                                {id: 1, label: "API"},
+                                {id: 2, label: I18n.i18n("settings.characters", "Персонажи")},
+                                {id: 3, label: I18n.i18n("settings.voice", "Озвучка")},
+                                {id: 5, label: "ASR"},
+                                {id: 6, label: I18n.i18n("settings.ai-engine", "ИИ-движок")},
+                                {id: 7, label: I18n.i18n("settings.game", "Игра")},
+                                {id: 8, label: I18n.i18n("settings.models", "Модели")},
+                                {id: 9, label: I18n.i18n("settings.images", "Изображения")},
+                                {id: 10, label: I18n.i18n("settings.updates", "Обновления")},
+                                {id: 11, label: I18n.i18n("settings.data", "Сбор данных")},
+                            ]: SettingsToggleRow {
+                                title: tab.label;
+                                checked: SettingsUi.section-visible[tab.id];
+                                changed(value) => { SettingsUi.section-visibility(tab.id, value); }
+                            }
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.sandbox-panels", "Панели песочницы");
+                            subtitle: I18n.i18n("settings.general.sandbox-panels-note", "Показывайте только нужные панели в правой части Песочницы.");
+                            glyph: "\u{f0c3}";
+                            SettingsText { text: I18n.i18n("settings.general.panel-controls-pending", "Управление видимостью панелей пока не предоставлено Rust-ядром."); color: SettingsTheme.muted; wrap: word-wrap; }
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.privacy", "Приватность"); glyph: "\u{f21b}";
+                            SettingsToggleRow {
+                                title: I18n.i18n("settings.general.hide-private", "Скрывать приватные данные");
+                                description: I18n.i18n("settings.general.hide-private-note", "Сохраняет предпочтение маскирования; подключение к отображению секретов ещё требуется.");
+                                checked: SettingsUi.hide-private;
+                                changed(value) => { SettingsUi.set-hide-private(value); }
+                            }
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.ipc", "Локальное IPC-управление");
+                            subtitle: I18n.i18n("settings.general.ipc-note", "Локальный IPC принимает только явно разрешённые команды на 127.0.0.1.");
+                            glyph: "\u{f0ac}";
+                            SettingsText { text: I18n.i18n("settings.general.ipc-pending", "Настройка локального IPC пока недоступна в Rust API."); color: SettingsTheme.muted; wrap: word-wrap; }
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.chat", "Настройки чата"); glyph: "\u{f086}";
+                            SettingsToggleRow {
+                                title: I18n.i18n("settings.voice.launcher", "Озвучивать в лаунчере");
+                                checked: SettingsUi.settings-voice-launcher;
+                                changed(value) => { SettingsUi.voice-launcher(value); }
+                            }
+                            SettingsToggleRow {
+                                title: I18n.i18n("settings.voice.game", "Озвучивать в игре");
+                                checked: SettingsUi.settings-voice-game;
+                                changed(value) => { SettingsUi.voice-game(value); }
+                            }
+                        }
+                        CollapsibleSettingsSection {
+                            title: I18n.i18n("settings.general.state", "Состояние приложения"); glyph: Fa.gear;
+                            SettingsText { text: I18n.i18n("settings.general.description", "Состояние приложения и сохранение параметров."); color: SettingsTheme.muted; }
+                            SettingsRow {
+                                title: I18n.i18n("settings.core.status", "Состояние ядра");
+                                SettingsText { text: root.connected ? I18n.i18n("settings.core.ready", "Ядро работает") : root.connecting ? I18n.i18n("settings.core.starting", "Ядро запускается") : I18n.i18n("settings.core.unavailable", "Ядро недоступно"); }
+                            }
+                            SettingsRow { title: I18n.i18n("settings.revision", "Версия настроек"); SettingsText { text: SettingsUi.settings-revision; } }
+                            SettingsRow { title: I18n.i18n("settings.preset.active", "Активный пресет"); SettingsText { text: "#" + SettingsUi.settings-active; } }
+                            SettingsRow { title: I18n.i18n("settings.saved-state", "Сохранение"); SettingsText { text: SettingsUi.settings-persistence == 1 ? I18n.i18n("settings.saved", "Настройки сохранены") : SettingsUi.settings-persistence == 2 ? I18n.i18n("settings.save-failed", "Ошибка сохранения") : I18n.i18n("settings.saving", "Сохранение…"); } }
+                        }
                     }
                 }
                 if SettingsUi.section == 1: VerticalLayout { padding: 2px; spacing: 16px;
@@ -423,8 +487,8 @@ export component SettingsPage inherits Rectangle {
                     VerticalLayout { padding: 2px; padding-right: 10px; spacing: 16px; alignment: start;
                         SectionHeading { title: I18n.i18n("settings.voice", "Озвучка"); description: I18n.i18n("settings.voice.description", "Параметры голоса и места озвучивания."); glyph: "\u{f028}"; }
                         Card { VerticalLayout { padding: 18px; spacing: 18px;
-                            HorizontalLayout { height: 32px; SettingsLabel { text: I18n.i18n("settings.voice.launcher", "Озвучивать в лаунчере"); horizontal-stretch: 1; } Centered { width: 42px; Toggle { checked: SettingsUi.settings-voice-launcher; enabled: root.connected; activated => { SettingsUi.voice-launcher(!SettingsUi.settings-voice-launcher); } } } }
-                            HorizontalLayout { height: 32px; SettingsLabel { text: I18n.i18n("settings.voice.game", "Озвучивать в игре"); horizontal-stretch: 1; } Centered { width: 42px; Toggle { checked: SettingsUi.settings-voice-game; enabled: root.connected; activated => { SettingsUi.voice-game(!SettingsUi.settings-voice-game); } } } }
+                            SettingsToggleRow { title: I18n.i18n("settings.voice.launcher", "Озвучивать в лаунчере"); checked: SettingsUi.settings-voice-launcher; active: root.connected; changed(v) => { SettingsUi.voice-launcher(v); } }
+                            SettingsToggleRow { title: I18n.i18n("settings.voice.game", "Озвучивать в игре"); checked: SettingsUi.settings-voice-game; active: root.connected; changed(v) => { SettingsUi.voice-game(v); } }
                             SettingsLabel { text: I18n.i18n("settings.voice.volume", "Громкость") + " · " + SettingsUi.settings-volume + "%"; }
                             VolumeSlider { value: SettingsUi.settings-volume; enabled: root.connected; changed(value) => { SettingsUi.volume(round(value)); } }
                             EditorField { title: I18n.i18n("settings.voice.id", "Идентификатор голоса"); text <=> root.voice-draft; }

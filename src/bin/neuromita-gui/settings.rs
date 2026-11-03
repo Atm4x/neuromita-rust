@@ -79,6 +79,24 @@ pub fn execute(
             .in_game
             .set(value)
             .map_err(|e| e.to_string())?,
+        Command::SectionVisibility(index, enabled) => {
+            if index == 0 || index >= 12 {
+                return Err("Invalid settings section index".into());
+            }
+            let mut visible = api.settings.interface.visible_sections.get();
+            visible[index] = enabled;
+            api.settings
+                .interface
+                .visible_sections
+                .set(visible)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::HidePrivate(value) => api
+            .settings
+            .interface
+            .hide_private
+            .set(value)
+            .map_err(|e| e.to_string())?,
         Command::VoiceName(value) => api
             .settings
             .voice
@@ -245,6 +263,14 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    settings.on_section_visibility(move |index, checked| {
+        if let Ok(index) = usize::try_from(index) {
+            send(Command::SectionVisibility(index, checked));
+        }
+    });
+    let send = dispatch.clone();
+    settings.on_set_hide_private(move |checked| send(Command::HidePrivate(checked)));
+    let send = dispatch.clone();
     settings.on_voice_launcher(move |value| send(Command::VoiceInLauncher(value)));
     let send = dispatch.clone();
     settings.on_voice_game(move |value| send(Command::VoiceInGame(value)));
@@ -261,6 +287,10 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     let window = window.global::<SettingsUi>();
     let settings = &model.settings;
     window.set_settings_revision(settings.revision.to_string().into());
+    window.set_section_visible(ModelRc::new(VecModel::from(
+        settings.values.interface.visible_sections.to_vec(),
+    )));
+    window.set_hide_private(settings.values.interface.hide_private);
     window.set_settings_persistence(match settings.persistence {
         PersistenceState::Pending => 0,
         PersistenceState::Saved(_) => 1,

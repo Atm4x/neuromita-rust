@@ -5,9 +5,9 @@ use tokio::sync::watch;
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, CharactersSettings, OperationPresets, PresetId, PresetSelection,
-        PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
-        VoiceSettings, Volume,
+        AppSettings, CharactersSettings, InterfaceSettings, OperationPresets, PresetId,
+        PresetSelection, PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot,
+        SettingsTransfer, VoiceSettings, Volume,
     },
 };
 
@@ -188,8 +188,14 @@ impl CharactersSettingsPresenter {
     }
 }
 
+pub struct InterfaceSettingsPresenter {
+    pub visible_sections: BoundProperty<[bool; 12]>,
+    pub hide_private: BoundProperty<bool>,
+}
+
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
@@ -198,6 +204,26 @@ impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            interface: InterfaceSettingsPresenter {
+                visible_sections: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.visible_sections,
+                    |owner, value| {
+                        owner
+                            .edit::<InterfaceSettings>(|s| s.visible_sections = value)
+                            .map(|_| ())
+                    },
+                ),
+                hide_private: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.hide_private,
+                    |owner, value| {
+                        owner
+                            .edit::<InterfaceSettings>(|s| s.hide_private = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
             presets: PresetsSettingsPresenter {
                 active: BoundProperty::new(
                     Arc::clone(&owner),
