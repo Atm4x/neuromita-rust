@@ -1,0 +1,36 @@
+name: Publish original Character Memory lexical commit
+on:
+  push:
+    branches:
+      - bridge/character-memory-lexical-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify base, bundle, Git identities and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=1aff12412a9da5a748dbe15c8643ce9d03a304b2
+          head=424ff42190171dd872903dadcf600ab9ff2a5460
+          tree=574787c85284134bb8797d93d7a51d6118f620cf
+          ref=refs/heads/codex/character-memory-lexical-dedup-20261103
+          git fetch origin refs/heads/codex/character-memory-seed-island-20261103:refs/remotes/origin/lexical-base
+          test "$(git rev-parse refs/remotes/origin/lexical-base)" = "$base"
+          base64 --decode .github/bridge/character-memory-lexical-20261103.bundle.b64 > /tmp/lexical.bundle
+          echo '6e103109925903c51725be3b03b4227c53c98b55d3da5c5017f2a83e408933ed  /tmp/lexical.bundle' | sha256sum -c -
+          git bundle verify /tmp/lexical.bundle
+          git fetch /tmp/lexical.bundle "$ref:refs/heads/lexical-imported"
+          test "$(git rev-parse refs/heads/lexical-imported)" = "$head"
+          test "$(git rev-parse refs/heads/lexical-imported^)" = "$base"
+          test "$(git rev-parse refs/heads/lexical-imported^{tree})" = "$tree"
+          test "$(git show -s --format='%an <%ae>' "$head")" = 'Atm4x <mrtaktplay@gmail.com>'
+          test "$(git show -s --format='%cn <%ce>' "$head")" = 'Atm4x <mrtaktplay@gmail.com>'
+          git push origin "refs/heads/lexical-imported:$ref"
+          git ls-remote origin "$ref" | grep -q "^$head"
+          echo "Published original commit $head on $ref"
