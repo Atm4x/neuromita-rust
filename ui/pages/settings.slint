@@ -11,6 +11,7 @@ import { Caption, Glyph, HeaderButton, QuickAction, Centered, Field, Toggle, Sty
 import { ActionSurface } from "../components/controls.slint";
 import { CollapsibleSettingsSection } from "../components/collapsible-section.slint";
 import { I18n } from "../i18n.slint";
+import { LanguageSettingsPage } from "../settings/language-page.slint";
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
@@ -496,14 +497,8 @@ export component SettingsPage inherits Rectangle {
                         } }
                     }
                 }
-                if SettingsUi.section == 4: ScrollView { content-width: self.visible-width;
-                    VerticalLayout { padding: 2px; padding-right: 6px; spacing: 12px; alignment: start;
-                        SectionHeading { title: I18n.i18n("settings.language", "Язык"); glyph: "\u{f0ac}"; }
-                        for locale in I18n.languages: SettingsButton {
-                            text: locale.name; selected: I18n.locale == locale.code;
-                            activated => { root.language-selected(locale.code); }
-                        }
-                    }
+                if SettingsUi.section == 4: LanguageSettingsPage {
+                    language-selected(code) => { root.language-selected(code); }
                 }
                 if SettingsUi.section > 4: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }
