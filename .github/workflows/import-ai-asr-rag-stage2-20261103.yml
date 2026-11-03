@@ -1,0 +1,31 @@
+name: Import exact AI ASR RAG stage2 Git objects
+on:
+  push:
+    branches:
+      - bridge/ai-asr-rag-stage2-publish-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate bundle and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ad2d78e342b18e60d63892ff5a7d5a11a571328f
+          HEAD=ec9c219feaaf2378952dbc43bd2ecdb8d1b28443
+          BUNDLE="$RUNNER_TEMP/ai-asr-rag-stage2.bundle"
+          base64 --decode bridge_payload/asr-rag-stage2.bundle.b64 > "$BUNDLE"
+          test "$(stat -c%s "$BUNDLE")" -eq 41854
+          echo "0c7b59adbe33ab0415b1769949ad2fb1617e92800a87f45a8d15770ccc66d34c  $BUNDLE" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify "$BUNDLE"
+          git fetch "$BUNDLE" "refs/heads/codex/ai-engine-install-voice-20261103:refs/heads/stage2-candidate"
+          test "$(git rev-parse refs/heads/stage2-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          test "$(git ls-remote origin refs/heads/codex/ai-engine-install-voice-20261103 | cut -f1)" = "$BASE"
+          git push origin "$HEAD:refs/heads/bridge/ai-asr-rag-stage2-candidate-20261103"
