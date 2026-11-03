@@ -1,0 +1,34 @@
+name: Publish verified AI Silero and backends Git commit
+on:
+  push:
+    branches:
+      - bridge/ai-silero-backends-publish-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact authored bundle and fast-forward AI branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=12f34c7c8ec321492ade28d0027c567c3b158075
+          HEAD=1a0dfdfa0cea965d03ce6b1703f1037b39f66479
+          BUNDLE="$RUNNER_TEMP/silero-backends.bundle"
+          base64 --decode bridge_payload/silero-backends-v2.bundle.b64 > "$BUNDLE"
+          test "$(stat -c%s "$BUNDLE")" -eq 16028
+          echo "fd7dcbb9d17a0b01d99b8b81037f6e24a5857ab0184123aae27fbcd915fbcf8a  $BUNDLE" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify "$BUNDLE"
+          git fetch "$BUNDLE" "refs/heads/codex/audio-pipeline-20261103:refs/heads/verified-silero-candidate"
+          test "$(git rev-parse refs/heads/verified-silero-candidate)" = "$HEAD"
+          test "$(git rev-parse "$HEAD^")" = "$BASE"
+          CURRENT="$(git ls-remote origin refs/heads/codex/ai-engine-install-voice-20261103 | cut -f1)"
+          test "$CURRENT" = "$BASE"
+          git push origin "$HEAD:refs/heads/codex/ai-engine-install-voice-20261103"
+          git fetch origin codex/ai-engine-install-voice-20261103:refs/heads/verified-published-ai
+          test "$(git rev-parse refs/heads/verified-published-ai)" = "$HEAD"
