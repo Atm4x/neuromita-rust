@@ -1,0 +1,30 @@
+name: Export pinned GigaAM reference delta
+on:
+  push:
+    branches:
+      - bridge/gigaam-reference-import-20261103
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export GigaAM source commit
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/heads/bridge/gigaam-reference-import-20261103:refs/heads/gigaam-reference"
+          git bundle create gigaam-reference.bundle refs/heads/gigaam-reference "^ad2d78e342b18e60d63892ff5a7d5a11a571328f"
+          git bundle verify gigaam-reference.bundle
+          sha256sum gigaam-reference.bundle > gigaam-reference.bundle.sha256
+          printf '%s\n' "6f2b7ae043223aa3e139dea0e3bac1c3cbdc025d" > source.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-gigaam-reference
+          path: |
+            gigaam-reference.bundle
+            gigaam-reference.bundle.sha256
+            source.commit
+          retention-days: 3
