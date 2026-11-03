@@ -12,7 +12,7 @@ component ReleaseButton inherits ActionSurface {
     in property <image> symbol;
     in property <bool> primary: false;
     height: 37px;
-    width: root.primary ? 112px : root.caption == I18n.i18n("releases.open-release", "Открыть релиз") ? 131px : 181px;
+    width: root.primary ? 112px : root.caption == I18n.i18n("releases.open-release", "Открыть релиз") ? 169px : 181px;
     label: root.caption;
     background: root.primary ? (root.pressed ? Theme.accent-pressed : root.hovered ? Theme.accent-hover : Theme.accent) : (root.hovered ? #ffffff16 : #ffffff0d);
     border-width: 1px;
@@ -20,7 +20,10 @@ component ReleaseButton inherits ActionSurface {
     border-radius: 14px;
     HorizontalLayout {
         padding-left: 12px; padding-right: 12px; spacing: 7px; alignment: center;
-        Icon { width: 14px; height: 14px; source: root.symbol; colorize: root.primary ? white : Theme.icon; }
+        VerticalLayout {
+            width: 14px; padding: 0px; alignment: center;
+            Icon { width: 14px; height: 14px; source: root.symbol; colorize: root.primary ? white : Theme.icon; }
+        }
         caption-text := Label { horizontal-stretch: 0; text: root.caption; color: root.primary ? white : Theme.text; font-size: 12px; font-weight: 700; }
     }
 }
