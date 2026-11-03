@@ -1,0 +1,36 @@
+name: Publish exact AI Engine Slint commit
+on:
+  push:
+    branches:
+      - bridge/ai-engine-publish-20261104
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish AI Engine Git bundle
+        shell: bash
+        env:
+          BASE_SHA: 8d4652b8423c8956fdbbb941e15083ed284c7970
+          TARGET_SHA: 5f8e6062bdbba96cc8cf166b68e7f3bc762e1eb7
+          TARGET_REF: refs/heads/codex/ai-engine-slint-pyqt-20261104
+        run: |
+          set -euo pipefail
+          base64 -d bridge/ai-engine-20261104.bundle.b64 > ai-engine.bundle
+          printf '%s  %s\n' '8cf75ca27b78765e7e049d8529041dcb3e2116bda75992a21e2afaa1ce0c30b6' ai-engine.bundle | sha256sum -c -
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git bundle verify ai-engine.bundle
+          git fetch ai-engine.bundle "${TARGET_REF}:refs/heads/ai-engine-verified"
+          test "$(git rev-parse refs/heads/ai-engine-verified)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${BASE_SHA}" refs/heads/ai-engine-verified
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Target branch moved: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/ai-engine-verified:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${TARGET_SHA}"
