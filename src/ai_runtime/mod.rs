@@ -1,4 +1,7 @@
 //! Rust-owned process lifecycle and correlated JSON-lines IPC for Python AI plugins.
+//!
+//! Dropping an in-flight IPC request retires and terminates its worker. Shared
+//! topology requires restarting the shared worker; split isolates that service.
 
 pub mod application;
 pub mod assets;
@@ -141,6 +144,20 @@ struct InFlightRequest<'a> {
 }
 
 impl Drop for InFlightRequest<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.worker.failed = true;
+            let _ = self.worker.child.start_kill();
+        }
+    }
+}
+
+struct RequestFlight<'a> {
+    worker: &'a mut WorkerProcess,
+    completed: bool,
+}
+
+impl Drop for RequestFlight<'_> {
     fn drop(&mut self) {
         if !self.completed {
             self.worker.failed = true;
@@ -302,13 +319,24 @@ impl WorkerProcess {
             ));
         }
         let deadline = self.timeout;
+        let mut flight = RequestFlight {
+            worker: self,
+            completed: false,
+        };
         let outcome = async {
-            self.input
+            flight
+                .worker
+                .input
                 .write_all(&request)
                 .await
                 .map_err(AiRuntimeError::Io)?;
-            self.input.flush().await.map_err(AiRuntimeError::Io)?;
-            let frame = self.read_frame().await?;
+            flight
+                .worker
+                .input
+                .flush()
+                .await
+                .map_err(AiRuntimeError::Io)?;
+            let frame = flight.worker.read_frame().await?;
             let response: Response = serde_json::from_str(&frame)
                 .map_err(|e| AiRuntimeError::Protocol(e.to_string()))?;
             if response.id != id {
@@ -326,18 +354,16 @@ impl WorkerProcess {
             Ok(response.result)
         };
         match timeout(deadline, outcome).await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(error @ AiRuntimeError::Plugin { .. })) => Err(error),
-            Ok(Err(error)) => {
-                self.failed = true;
-                let _ = self.child.start_kill();
+            Ok(Ok(result)) => {
+                flight.completed = true;
+                Ok(result)
+            }
+            Ok(Err(error @ AiRuntimeError::Plugin { .. })) => {
+                flight.completed = true;
                 Err(error)
             }
-            Err(_) => {
-                self.failed = true;
-                let _ = self.child.start_kill();
-                Err(AiRuntimeError::Timeout)
-            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(AiRuntimeError::Timeout),
         }
     }
 }
@@ -763,6 +789,95 @@ mod tests {
     fn test_python() -> String {
         std::env::var("NEUROMITA_TEST_PYTHON")
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned())
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_retires_worker_before_a_late_reply_can_be_reused() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let temp = std::env::temp_dir().join(format!("nm-cancel-{}", Uuid::new_v4()));
+        let plugin = temp.join("mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def initialize(self, settings):\n";
+        assert!(code.contains(needle));
+        let code = code.replace(
+            needle,
+            "    def initialize(self, settings):\n        if settings.get('block'):\n            from pathlib import Path\n            import time\n            Path(settings['entered']).write_text('entered', encoding='utf-8')\n            while True:\n                time.sleep(0.01)\n",
+        );
+        tokio::fs::write(plugin.join("plugin.py"), code)
+            .await
+            .unwrap();
+        let config = PythonHostConfig {
+            python_executable: test_python().into(),
+            sdk_root: source,
+            plugins_directory: temp.clone(),
+            request_timeout: Duration::from_secs(10),
+        };
+        let entered = temp.join("entered");
+        let mut worker = WorkerProcess::launch(&config, &[]).await.unwrap();
+        let generation = worker.generation;
+        let args = json!({"plugin_id":"mock_tts", "settings":{"block":true, "entered":entered}});
+        {
+            let pending = worker.request("initialize", &args);
+            tokio::pin!(pending);
+            timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut pending => panic!("blocking fixture returned: {result:?}"),
+                    _ = async {
+                        while !tokio::fs::try_exists(&entered).await.unwrap() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .expect("plugin must enter the in-flight call");
+        }
+        assert!(
+            worker.failed,
+            "dropping an in-flight request must retire its worker"
+        );
+        timeout(Duration::from_secs(5), worker.child.wait())
+            .await
+            .expect("cancelled worker must be terminated")
+            .unwrap();
+        assert!(matches!(
+            worker.request("discover", &json!({})).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        let mut fresh = WorkerProcess::launch(&config, &[]).await.unwrap();
+        assert_ne!(fresh.generation, generation);
+        assert!(matches!(
+            fresh.request("unknown_operation", &json!({})).await,
+            Err(AiRuntimeError::Plugin { .. })
+        ));
+        assert!(!fresh.failed, "a complete plugin error preserves framing");
+        let oversized = json!({"text": "x".repeat(MAX_REQUEST_BYTES)});
+        assert!(matches!(
+            fresh.request("infer", &oversized).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "request exceeds size limit"
+        ));
+        assert!(!fresh.failed, "local validation must not retire the worker");
+        let ready = fresh
+            .request(
+                "initialize",
+                &json!({"plugin_id":"mock_tts", "settings":{}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready["model_ready"], true);
+        fresh.child.start_kill().unwrap();
+        fresh.child.wait().await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
     }
 
     #[test]
