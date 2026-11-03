@@ -4,7 +4,10 @@ mod presets;
 mod sandbox;
 mod settings;
 
-pub use characters::CharactersPresenter;
+pub use characters::{
+    CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
+    MemorySummary,
+};
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
 pub use presets::PresetsPresenter;

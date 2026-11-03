@@ -6,7 +6,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -101,9 +101,14 @@ enum Command {
 #[derive(Clone)]
 pub struct CharacterHandle {
     commands: mpsc::Sender<Command>,
+    memory_updates: watch::Receiver<u64>,
 }
 
 impl CharacterHandle {
+    pub(crate) fn memory_updates(&self) -> watch::Receiver<u64> {
+        self.memory_updates.clone()
+    }
+
     pub async fn memories(&self) -> Result<CharacterMemorySnapshot, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -265,7 +270,17 @@ impl CharacterRegistry {
                 character,
                 timeline: Arc::clone(&timeline),
             };
-            handles.insert(id, CharacterHandle { commands: send });
+            let memory_updates = timeline
+                .lock()
+                .expect("timeline lock poisoned")
+                .observe_memory_changes(id);
+            handles.insert(
+                id,
+                CharacterHandle {
+                    commands: send,
+                    memory_updates,
+                },
+            );
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
         }
         let maintenance_timeline = Arc::clone(&timeline);

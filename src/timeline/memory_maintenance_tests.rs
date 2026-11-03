@@ -301,3 +301,82 @@ fn forgotten_recall_and_ttl_survive_sqlite_reopen_without_duplicate_expiration()
     }
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn committed_expiry_and_selection_invalidate_memory_observers() {
+    let mut timeline = SessionTimeline::new();
+    let id = MemoryId::new();
+    let mut record = MemoryRecord::fact(id, MemoryPriority::Normal, "expires soon");
+    record.expires_at_unix_ms = Some(100);
+    append_memory(&mut timeline, record);
+    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
+    let mut kind = timeline.observe_memory_changes(CharacterId::KindMita);
+    assert!(!mita.has_changed().unwrap());
+    assert_eq!(
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 99),
+        Ok(0)
+    );
+    assert!(!mita.has_changed().unwrap());
+    assert_eq!(
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 100),
+        Ok(1)
+    );
+    assert!(mita.has_changed().unwrap());
+    assert!(!kind.has_changed().unwrap());
+    mita.borrow_and_update();
+    assert_eq!(
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 100),
+        Ok(0)
+    );
+    assert!(!mita.has_changed().unwrap());
+    let selected = timeline.selection();
+    timeline
+        .select_branch(selected.branch_id, selected)
+        .unwrap();
+    assert!(mita.has_changed().unwrap());
+    assert!(kind.has_changed().unwrap());
+    kind.borrow_and_update();
+}
+
+#[test]
+fn accepted_memory_effect_notifies_after_commit_only() {
+    use super::domain::AppliedEffect;
+    use super::{GeneratedReply, conversation::ConversationAudience};
+    use crate::{identity::RequestId, interaction::TurnIntent};
+    let mut timeline = SessionTimeline::new();
+    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
+    let mut other = timeline.observe_memory_changes(CharacterId::KindMita);
+    let turn = timeline
+        .capture_turn(CharacterId::Mita, None, timeline.anchor())
+        .unwrap();
+    timeline
+        .append_reply(GeneratedReply {
+            request: RequestId::new(),
+            intent: TurnIntent::Initiate,
+            turn,
+            expected_revision: 0,
+            content: json!([{"text":"noted"}]),
+            audience: ConversationAudience::private_to(CharacterId::Mita),
+            effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
+                MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, "a fact"),
+            ))],
+        })
+        .unwrap();
+    assert!(mita.has_changed().unwrap());
+    assert!(!other.has_changed().unwrap());
+    mita.borrow_and_update();
+    let failed = timeline.append_reply(GeneratedReply {
+        request: RequestId::new(),
+        intent: TurnIntent::Initiate,
+        turn,
+        expected_revision: 0,
+        content: json!([{"text":"duplicate"}]),
+        audience: ConversationAudience::private_to(CharacterId::Mita),
+        effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
+            MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, "not accepted"),
+        ))],
+    });
+    assert!(failed.is_err());
+    assert!(!mita.has_changed().unwrap());
+    other.borrow_and_update();
+}

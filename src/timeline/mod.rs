@@ -146,6 +146,7 @@ pub(crate) struct SessionTimeline {
     workspace: SessionWorkspace,
     selection_updates: watch::Sender<TimelineSelection>,
     context_updates: HashMap<CharacterId, watch::Sender<u64>>,
+    memory_updates: HashMap<CharacterId, watch::Sender<u64>>,
     #[cfg(feature = "sqlite-system")]
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
@@ -168,6 +169,7 @@ impl SessionTimeline {
             store: Box::new(store),
             selection_updates: watch::channel(workspace.selected().expect("selection set")).0,
             context_updates,
+            memory_updates: Self::memory_channels(),
             workspace,
             #[cfg(feature = "sqlite-system")]
             selection_repository: None,
@@ -220,6 +222,7 @@ impl SessionTimeline {
                     workspace: SessionWorkspace::from_selection(selection),
                     selection_updates: watch::channel(selection).0,
                     context_updates,
+                    memory_updates: Self::memory_channels(),
                     selection_repository: Some(selection_repository),
                 })
             }
@@ -305,6 +308,25 @@ impl SessionTimeline {
             .collect()
     }
 
+    fn memory_channels() -> HashMap<CharacterId, watch::Sender<u64>> {
+        CharacterId::ALL
+            .into_iter()
+            .map(|character| (character, watch::channel(0).0))
+            .collect()
+    }
+
+    /// In-process invalidation hint only. The Timeline remains the sole source of
+    /// memory data, and receivers must read a new character snapshot after waking.
+    pub(crate) fn observe_memory_changes(&self, character: CharacterId) -> watch::Receiver<u64> {
+        self.memory_updates[&character].subscribe()
+    }
+
+    pub(crate) fn notify_memory_changed(&self, character: CharacterId) {
+        self.memory_updates[&character].send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+    }
+
     pub(crate) fn observe_context_epoch(&self, character: CharacterId) -> watch::Receiver<u64> {
         self.context_updates[&character].subscribe()
     }
@@ -387,6 +409,9 @@ impl SessionTimeline {
             self.context_updates[&character].send_replace(epoch);
         }
         self.selection_updates.send_replace(new_selection);
+        for character in CharacterId::ALL {
+            self.notify_memory_changed(character);
+        }
         Ok(new_selection)
     }
 
@@ -443,6 +468,7 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
         )?;
+        self.notify_memory_changed(character);
         Ok(count)
     }
 
@@ -927,6 +953,7 @@ impl SessionTimeline {
         }
         let draft = message.into_draft()?;
         let mut drafts = vec![draft];
+        let mut changes_memory = false;
         for effect in effects {
             match effect {
                 AppliedEffect::CharacterStateChanged(behavior) => {
@@ -952,6 +979,7 @@ impl SessionTimeline {
                     drafts.push(change);
                 }
                 AppliedEffect::CharacterMemoryChanged(memory_change) => {
+                    changes_memory = true;
                     let mut memory = EventDraft::new(EventKind::CharacterMemoryChanged);
                     memory.actor = Some(character.to_string());
                     memory.observers.insert(character);
@@ -999,6 +1027,9 @@ impl SessionTimeline {
                 accepted_reply_revision: Some((character, expected_revision)),
             },
         )?;
+        if changes_memory {
+            self.notify_memory_changed(character);
+        }
         Ok(id)
     }
 
