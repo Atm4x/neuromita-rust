@@ -50,7 +50,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 icon: provider.icon.into(),
                 format: provider.schema_label.into(),
                 documentation: provider.documentation.into(),
-                badge: provider.badge.into(),
+                pricing: provider.pricing.into(),
+                badge_kind: provider.badge_kind.into(),
                 endpoint: if provider.id == "gemini" {
                     neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
                 } else {

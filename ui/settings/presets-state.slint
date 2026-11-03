@@ -1,7 +1,7 @@
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
 export struct PresetItem { id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
-export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, badge: string, available: bool }
+export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, pricing: string, badge-kind: string, available: bool }
 export struct PresetParameterItem { id: string, wire-key: string, title-ru: string, title-en: string, description-ru: string, description-en: string, editable: bool, sent: bool }
 export global SettingsUi {
     in-out property <int> section;

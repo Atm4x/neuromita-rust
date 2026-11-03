@@ -355,7 +355,8 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
                 "".into()
             },
             documentation: provider.documentation.into(),
-            badge: provider.badge.into(),
+            pricing: provider.pricing.into(),
+            badge_kind: provider.badge_kind.into(),
             available: provider.supported,
         })
         .collect::<Vec<_>>();
