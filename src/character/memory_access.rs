@@ -1,7 +1,9 @@
 use crate::{
     identity::CharacterId,
-    memory::{MemoryChange, MemoryRecord},
-    timeline::{ContextAnchor, selection::TimelineSelection},
+    memory::{MemoryChange, MemoryCommand, MemoryRecord},
+    timeline::{
+        ContextAnchor, SessionTimeline, domain::TimelineError, selection::TimelineSelection,
+    },
 };
 
 /// A presenter-facing, immutable view of one character's retained knowledge.
@@ -32,6 +34,62 @@ impl CharacterMemorySnapshot {
 pub struct MemoryEditResult {
     pub applied: Vec<MemoryChange>,
     pub snapshot: CharacterMemorySnapshot,
+}
+
+/// Construct the character-owned projection from the authoritative Timeline snapshot.
+/// The Timeline module itself must not know about presenter-facing character DTOs.
+pub(crate) fn read_memory_snapshot(
+    timeline: &SessionTimeline,
+    character: CharacterId,
+) -> Result<CharacterMemorySnapshot, TimelineError> {
+    let (selection, anchor, world) = timeline.selected_world_snapshot()?;
+    let records = super::projection::character_memories_at(&world, character)?.all();
+    Ok(CharacterMemorySnapshot {
+        character,
+        anchor,
+        records,
+        selection,
+    })
+}
+
+/// Resolve the command inside the character boundary, then atomically persist
+/// the derived changes with Timeline's existing guarded append operation.
+pub(crate) fn edit_memory_snapshot(
+    timeline: &mut SessionTimeline,
+    character: CharacterId,
+    expected: &CharacterMemorySnapshot,
+    commands: &[MemoryCommand],
+) -> Result<MemoryEditResult, TimelineError> {
+    if expected.character != character {
+        return Err(TimelineError::ConcurrentWrite);
+    }
+    if commands.is_empty() || commands.len() > 128 {
+        return Err(TimelineError::Invalid(
+            "memory edit requires 1..128 operations",
+        ));
+    }
+    if commands
+        .iter()
+        .any(|command| matches!(command, MemoryCommand::Delete { .. }))
+    {
+        return Err(TimelineError::Invalid("hard deletion is not a user edit"));
+    }
+    let (selection, anchor, world) = timeline.selected_world_snapshot()?;
+    if selection != expected.selection || anchor.branch_id != expected.anchor.branch_id {
+        return Err(TimelineError::ConcurrentWrite);
+    }
+    let memories = super::projection::character_memories_at(&world, character)?;
+    if memories.all() != expected.records {
+        return Err(TimelineError::ConcurrentWrite);
+    }
+    let changes = memories.resolve(commands).map_err(TimelineError::Invalid)?;
+    if !changes.is_empty() {
+        timeline.append_character_memory_changes(character, selection, anchor, &changes)?;
+    }
+    Ok(MemoryEditResult {
+        applied: changes,
+        snapshot: read_memory_snapshot(timeline, character)?,
+    })
 }
 
 #[cfg(test)]
@@ -133,6 +191,44 @@ mod tests {
             )
             .await;
         assert!(invalid.is_err());
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_timeline_and_other_character_writes_do_not_invalidate_memory_editor() {
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(
+            Arc::new(Mutex::new(SessionTimeline::new())),
+            stop.clone(),
+            16,
+        );
+        let mita = registry.get(CharacterId::Mita).unwrap();
+        let kind = registry.get(CharacterId::KindMita).unwrap();
+        let old_mita = mita.memories().await.unwrap();
+        kind.edit_memories(
+            kind.memories().await.unwrap(),
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "Other character's fact".into(),
+            }],
+        )
+        .await
+        .unwrap();
+        let result = mita
+            .edit_memories(
+                old_mita,
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Own character's fact".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.snapshot.records().len(), 1);
+        assert_eq!(kind.memories().await.unwrap().records().len(), 1);
         stop.cancel();
         for task in tasks {
             task.await.unwrap();
