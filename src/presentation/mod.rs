@@ -17,13 +17,16 @@ pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationPresenter,
     ConversationSnapshot,
 };
-pub use presets::PresetsPresenter;
+pub use presets::{
+    PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
+};
 pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };
 pub use settings::{
-    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter, PresetSlot,
-    PresetsSettingsPresenter, PropertyObserver, SettingsPresenter, VoiceSettingsPresenter,
+    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
+    InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
+    SettingsPresenter, VoiceSettingsPresenter,
 };
 
 pub struct GuiPresenter {

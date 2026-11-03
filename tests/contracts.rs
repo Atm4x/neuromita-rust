@@ -214,7 +214,6 @@ async fn complete_minimal_contracts() {
     assert!(ApplicationLifecycle::start(invalid).await.is_err());
     storage
         .save(&StoredSettings {
-            schema_version: neuromita::settings::SETTINGS_SCHEMA_VERSION,
             revision: 7,
             settings: AppSettings::initial_profile(),
         })
@@ -236,6 +235,27 @@ async fn complete_minimal_contracts() {
         7
     );
     let presenter = app.presenter();
+    std::thread::scope(|scope| {
+        for area in neuromita::settings::SettingsArea::ALL {
+            let interface = &presenter.settings.interface;
+            scope.spawn(move || interface.set_visible(area, false).unwrap());
+        }
+    });
+    let preferences = SettingsApi::snapshot::<neuromita::settings::InterfaceSettings>().unwrap();
+    for area in neuromita::settings::SettingsArea::ALL {
+        assert!(!preferences.value.visibility.is_visible(area));
+        presenter
+            .settings
+            .interface
+            .set_visible(area, true)
+            .unwrap();
+    }
+    let mut incomplete = serde_json::to_value(&preferences.value).unwrap();
+    incomplete["visibility"]
+        .as_object_mut()
+        .unwrap()
+        .remove("characters");
+    assert!(serde_json::from_value::<neuromita::settings::InterfaceSettings>(incomplete).is_err());
 
     let mut volume = presenter.settings.voice.volume.observe();
     assert_eq!(volume.next().await.unwrap().get(), 80);
@@ -296,7 +316,7 @@ async fn complete_minimal_contracts() {
     let observation = presenter
         .characters
         .observe(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("the lamp is blue".into()).unwrap(),
         )
         .await
@@ -304,7 +324,7 @@ async fn complete_minimal_contracts() {
     let observed_at = app.at_event(observation).unwrap();
     let reaction = presenter
         .chat
-        .react(CharacterId::Mita, observation, "react to the lamp".into())
+        .react(CharacterId::Crazy, observation, "react to the lamp".into())
         .unwrap();
     let call = next(&mut generations).await;
     assert!(
@@ -322,7 +342,7 @@ async fn complete_minimal_contracts() {
     assert!(
         presenter
             .characters
-            .context(CharacterId::Mita, origin)
+            .context(CharacterId::Crazy, origin)
             .await
             .unwrap()
             .history
@@ -331,7 +351,7 @@ async fn complete_minimal_contracts() {
     );
     let old = presenter
         .characters
-        .context(CharacterId::Mita, observed_at)
+        .context(CharacterId::Crazy, observed_at)
         .await
         .unwrap();
     assert_eq!(old.state.accepted_replies, 0);
@@ -339,7 +359,7 @@ async fn complete_minimal_contracts() {
     assert!(
         presenter
             .characters
-            .context(CharacterId::KindMita, observed_at)
+            .context(CharacterId::Kind, observed_at)
             .await
             .unwrap()
             .history
@@ -350,7 +370,7 @@ async fn complete_minimal_contracts() {
     assert!(matches!(
         presenter
             .chat
-            .react(CharacterId::KindMita, observation, "unknown".into()),
+            .react(CharacterId::Kind, observation, "unknown".into()),
         Err(neuromita::presentation::PresenterError::Submit(
             neuromita::request::SubmitError::InvalidTargetEvent
         ))
@@ -359,7 +379,7 @@ async fn complete_minimal_contracts() {
 
     let empty = presenter
         .chat
-        .reply(CharacterId::Mita, "provider returns empty text".into())
+        .reply(CharacterId::Crazy, "provider returns empty text".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -373,7 +393,7 @@ async fn complete_minimal_contracts() {
 
     let initiative = presenter
         .chat
-        .initiate(CharacterId::KindMita, "say hello".into())
+        .initiate(CharacterId::Kind, "say hello".into())
         .unwrap();
     let call = next(&mut generations).await;
     assert!(call.context.history.events.is_empty());
@@ -386,7 +406,7 @@ async fn complete_minimal_contracts() {
     let historical = presenter
         .chat
         .reply_at(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             "historical request".into(),
             ContextPosition::At(origin),
         )
@@ -399,7 +419,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -409,7 +429,7 @@ async fn complete_minimal_contracts() {
     presenter.settings.voice.in_launcher.set(true).unwrap();
     let speaking = presenter
         .chat
-        .reply(CharacterId::Mita, "with voice".into())
+        .reply(CharacterId::Crazy, "with voice".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -448,7 +468,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -470,7 +490,7 @@ async fn complete_minimal_contracts() {
 
     let partial = presenter
         .chat
-        .reply(CharacterId::Mita, "voice fails".into())
+        .reply(CharacterId::Crazy, "voice fails".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -488,7 +508,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -497,7 +517,7 @@ async fn complete_minimal_contracts() {
 
     let committed = presenter
         .chat
-        .reply(CharacterId::Mita, "cancel voice".into())
+        .reply(CharacterId::Crazy, "cancel voice".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -514,7 +534,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -540,7 +560,7 @@ async fn complete_minimal_contracts() {
 
     let cancelled = presenter
         .chat
-        .reply(CharacterId::Mita, "cancel before LLM".into())
+        .reply(CharacterId::Crazy, "cancel before LLM".into())
         .unwrap();
     let generation = next(&mut generations).await;
     assert_eq!(cancelled.cancel(), CancelResult::Requested);
@@ -572,7 +592,7 @@ async fn complete_minimal_contracts() {
     presenter.settings.voice.voice.set("panic".into()).unwrap();
     let voice_panic = presenter
         .chat
-        .reply(CharacterId::Mita, "unexpected voice failure".into())
+        .reply(CharacterId::Crazy, "unexpected voice failure".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -585,7 +605,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -680,7 +700,7 @@ async fn complete_minimal_contracts() {
     SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
     let before = presenter
         .characters
-        .state(CharacterId::Mita)
+        .state(CharacterId::Crazy)
         .await
         .unwrap()
         .accepted_replies;
@@ -743,7 +763,7 @@ async fn complete_minimal_contracts() {
     assert_eq!(
         presenter
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -762,7 +782,7 @@ async fn complete_minimal_contracts() {
         Err(SettingsError::Stopped)
     ));
     assert!(matches!(volume.next().await, Err(SettingsError::Stopped)));
-    assert!(CharacterApi::get(CharacterId::Mita).is_err());
+    assert!(CharacterApi::get(CharacterId::Crazy).is_err());
     assert_eq!(storage.load().unwrap().settings.voice.volume.get(), 56);
     drop(write);
 }

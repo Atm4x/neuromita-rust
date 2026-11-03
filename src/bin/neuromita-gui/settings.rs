@@ -1,19 +1,43 @@
 use super::{
     runtime::Command,
-    view::{AppWindow, PresetItem, SettingsUi},
+    view::{
+        AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
+        SettingsUi,
+    },
 };
 use neuromita::{
     character::CharacterId,
     generation::{GeminiPresetDefinition, PresetDefinition, PresetId, PresetRecord},
-    presentation::{GuiPresenter, PresetSlot},
-    settings::{PersistenceState, PresetSelection, SettingsSnapshot},
+    presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
+    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
 
+const GUI_SETTINGS_AREAS: [SettingsArea; 11] = [
+    SettingsArea::Api,
+    SettingsArea::Characters,
+    SettingsArea::Voice,
+    SettingsArea::Language,
+    SettingsArea::Asr,
+    SettingsArea::AiEngine,
+    SettingsArea::Games,
+    SettingsArea::Models,
+    SettingsArea::Images,
+    SettingsArea::Updates,
+    SettingsArea::Datasets,
+];
+
+fn area_for_section(index: i32) -> Option<SettingsArea> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| GUI_SETTINGS_AREAS.get(index).copied())
+}
+
 pub struct AdministrationSnapshot {
     pub settings: Arc<SettingsSnapshot>,
-    pub presets: Vec<(PresetId, PresetRecord)>,
+    pub presets: PresetsView,
 }
 
 pub fn execute(
@@ -79,6 +103,17 @@ pub fn execute(
             .in_game
             .set(value)
             .map_err(|e| e.to_string())?,
+        Command::SectionVisibility(area, enabled) => api
+            .settings
+            .interface
+            .set_visible(area, enabled)
+            .map_err(|e| e.to_string())?,
+        Command::HidePrivate(value) => api
+            .settings
+            .interface
+            .hide_private
+            .set(value)
+            .map_err(|e| e.to_string())?,
         Command::VoiceName(value) => api
             .settings
             .voice
@@ -99,19 +134,45 @@ fn id(value: &str) -> Result<PresetId, String> {
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let settings = window.global::<SettingsUi>();
+    let send = dispatch.clone();
+    settings.on_preset_new(move || send(Command::NewPreset));
     let weak = window.as_weak();
-    settings.on_search_character(move |search| {
-        let Some(window) = weak.upgrade() else {
+    settings.on_preset_template_select(move |id| {
+        if let Some(window) = weak.upgrade() {
+            let ui = window.global::<SettingsUi>();
+            if ui
+                .get_preset_templates()
+                .iter()
+                .any(|item| item.id == id && item.available)
+            {
+                let template = ui.get_preset_templates().iter().find(|item| item.id == id);
+                if let Some(template) = template {
+                    ui.set_preset_template_id(id);
+                    ui.set_preset_template_name(template.name);
+                    ui.set_preset_provider_icon(template.icon);
+                    ui.set_preset_schema_label(template.format);
+                }
+            } else {
+                ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());
+            }
+        }
+    });
+    let weak = window.as_weak();
+    settings.on_preset_documentation(move || {
+        let Some(component) = weak.upgrade() else {
             return;
         };
-        let query = search.trim().to_lowercase();
-        let settings = window.global::<SettingsUi>();
-        settings.set_show_mita("мита".contains(&query) || "mita".contains(&query));
-        settings.set_show_kind(
-            "добрая мита".contains(&query)
-                || "kind-mita".contains(&query)
-                || "kind".contains(&query),
-        );
+        let ui = component.global::<SettingsUi>();
+        let chosen = ui.get_preset_template_id();
+        let trusted = PresetsPresenter::providers()
+            .into_iter()
+            .find(|provider| chosen == provider.id && provider.supported);
+        if let Some(provider) =
+            trusted.filter(|provider| provider.documentation.starts_with("https://"))
+            && let Err(error) = super::binding::open_external_url(provider.documentation)
+        {
+            ui.set_settings_error(error.into());
+        }
     });
     let weak = window.as_weak();
     let send = dispatch.clone();
@@ -121,6 +182,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         };
         let window = component.global::<SettingsUi>();
         let record = (|| -> Result<PresetRecord, String> {
+            if window.get_preset_template_id() != "gemini" {
+                return Err("Unsupported preset provider".into());
+            }
             Ok(PresetRecord {
                 name: window.get_preset_name().into(),
                 definition: PresetDefinition::Gemini(GeminiPresetDefinition {
@@ -162,19 +226,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         };
         let window = component.global::<SettingsUi>();
         window.set_preset_save_token("".into());
-        let record = window
+        if let Some(record) = window
             .get_settings_presets()
             .iter()
-            .find(|r| r.id == selected);
-        if let Some(record) = record {
-            window.set_preset_edit_id(record.id);
-            window.set_preset_name(record.name);
-            window.set_preset_model(record.model);
-            window.set_preset_endpoint(record.endpoint);
-            window.set_preset_key_env(record.key_env);
-            window.set_preset_temperature(record.temperature);
-            window.set_preset_tokens(record.tokens);
-            window.set_preset_timeout(record.timeout);
+            .find(|r| r.id == selected)
+        {
+            select_preset(&window, &record);
         } else {
             window.set_settings_error("Preset is no longer available".into());
         }
@@ -208,10 +265,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let window = component.global::<SettingsUi>();
-        let character = match character {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => {
+        let character = match CharacterId::from_index(character) {
+            Some(id) => id,
+            None => {
                 window.set_settings_error("Unknown character".into());
                 return;
             }
@@ -242,10 +298,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let ui = component.global::<SettingsUi>();
-        let character = match character {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => {
+        let character = match CharacterId::from_index(character) {
+            Some(id) => id,
+            None => {
                 ui.set_settings_error("Unknown character".into());
                 return;
             }
@@ -260,6 +315,14 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             Err(error) => ui.set_settings_error(error.into()),
         }
     });
+    let send = dispatch.clone();
+    settings.on_section_visibility(move |index, checked| {
+        if let Some(area) = area_for_section(index) {
+            send(Command::SectionVisibility(area, checked));
+        }
+    });
+    let send = dispatch.clone();
+    settings.on_set_hide_private(move |checked| send(Command::HidePrivate(checked)));
     let send = dispatch.clone();
     settings.on_voice_launcher(move |value| send(Command::VoiceInLauncher(value)));
     let send = dispatch.clone();
@@ -277,6 +340,16 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     let window = window.global::<SettingsUi>();
     let settings = &model.settings;
     window.set_settings_revision(settings.revision.to_string().into());
+    window.set_section_visible(ModelRc::new(VecModel::from(
+        std::iter::once(true)
+            .chain(
+                GUI_SETTINGS_AREAS
+                    .iter()
+                    .map(|area| settings.values.interface.visibility.is_visible(*area)),
+            )
+            .collect::<Vec<_>>(),
+    )));
+    window.set_hide_private(settings.values.interface.hide_private);
     window.set_settings_persistence(match settings.persistence {
         PersistenceState::Pending => 0,
         PersistenceState::Saved(_) => 1,
@@ -290,63 +363,137 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
-    let mita = settings.values.characters.mita.presets;
-    let kind = settings.values.characters.kind_mita.presets;
+    let previous = window.get_character_presets();
     let encode = |value: PresetSelection| match value {
-        PresetSelection::Active => "active".to_owned(),
-        PresetSelection::Specific(id) => id.0.to_string(),
-    };
-    if [
-        window.get_mita_reply().to_string(),
-        window.get_mita_react().to_string(),
-        window.get_mita_initiate().to_string(),
-    ] != [
-        encode(mita.reply),
-        encode(mita.react),
-        encode(mita.initiate),
-    ] {
-        window.set_split_mita_presets(mita.reply != mita.react || mita.reply != mita.initiate);
-    }
-    if [
-        window.get_kind_reply().to_string(),
-        window.get_kind_react().to_string(),
-        window.get_kind_initiate().to_string(),
-    ] != [
-        encode(kind.reply),
-        encode(kind.react),
-        encode(kind.initiate),
-    ] {
-        window.set_split_kind_presets(kind.reply != kind.react || kind.reply != kind.initiate);
-    }
-    let selection = |value: PresetSelection| match value {
         PresetSelection::Active => "active".into(),
-        PresetSelection::Specific(id) => id.0.to_string(),
+        PresetSelection::Specific(id) => id.0.to_string().into(),
     };
-    window.set_mita_reply(selection(settings.values.characters.mita.presets.reply).into());
-    window.set_mita_react(selection(settings.values.characters.mita.presets.react).into());
-    window.set_mita_initiate(selection(settings.values.characters.mita.presets.initiate).into());
-    window.set_kind_reply(selection(settings.values.characters.kind_mita.presets.reply).into());
-    window.set_kind_react(selection(settings.values.characters.kind_mita.presets.react).into());
-    window
-        .set_kind_initiate(selection(settings.values.characters.kind_mita.presets.initiate).into());
-    let records = model
-        .presets
-        .iter()
-        .map(|(id, record)| {
-            let PresetDefinition::Gemini(definition) = &record.definition;
-            PresetItem {
-                id: id.0.to_string().into(),
-                name: record.name.as_str().into(),
-                model: definition.model.as_str().into(),
-                endpoint: definition.endpoint.as_str().into(),
-                key_env: definition.credential_env.as_str().into(),
-                temperature: definition.temperature.to_string().into(),
-                tokens: definition.max_output_tokens.to_string().into(),
-                timeout: definition.timeout_ms.to_string().into(),
+    let rows = CharacterId::ALL
+        .into_iter()
+        .map(|id| {
+            let presets = settings.values.characters.for_character(id).presets;
+            let mut row = CharacterPresets {
+                reply: encode(presets.reply),
+                react: encode(presets.react),
+                initiate: encode(presets.initiate),
+                split: presets.reply != presets.react || presets.reply != presets.initiate,
+            };
+            if let Some(old) = previous.row_data(id.index())
+                && old.reply == row.reply
+                && old.react == row.react
+                && old.initiate == row.initiate
+            {
+                row.split = old.split;
             }
+            row
         })
         .collect::<Vec<_>>();
+    window.set_character_presets(ModelRc::new(VecModel::from(rows)));
+    let templates = provider_templates(&model.presets.providers);
+    window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
+    let parameters = model
+        .presets
+        .parameters
+        .iter()
+        .map(|parameter| PresetParameterItem {
+            id: parameter.id.into(),
+            wire_key: parameter.wire_key.into(),
+            title: parameter.title.source().into(),
+            title_key: parameter.title.id().into(),
+
+            description: parameter.description.source().into(),
+            description_key: parameter.description.id().into(),
+
+            editable: parameter.editable,
+            sent: parameter.sent,
+        })
+        .collect::<Vec<_>>();
+    window.set_preset_parameters(ModelRc::new(VecModel::from(parameters)));
+    let records = model
+        .presets
+        .records
+        .iter()
+        .map(|record| PresetItem {
+            id: record.id.0.to_string().into(),
+            name: record.name.as_str().into(),
+            model: record.model.as_str().into(),
+            provider: record.provider.into(),
+            endpoint: record.endpoint.as_str().into(),
+            key_env: record.credential_env.as_str().into(),
+            temperature: record.temperature.to_string().into(),
+            tokens: record.max_output_tokens.to_string().into(),
+            timeout: record.timeout_ms.to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    let selected = window.get_preset_edit_id();
+    if !window.get_preset_creating()
+        && (selected.is_empty() || !records.iter().any(|record| record.id == selected))
+    {
+        let active = settings.values.presets.active.0.to_string();
+        let first = records
+            .iter()
+            .find(|record| record.id == active)
+            .or_else(|| records.first());
+        if let Some(record) = first {
+            select_preset(&window, record);
+        }
+    }
     window.set_settings_presets(ModelRc::new(VecModel::from(records)));
+}
+
+fn select_preset(ui: &SettingsUi, record: &PresetItem) {
+    ui.set_preset_creating(false);
+    ui.set_preset_delete_id("".into());
+    ui.set_preset_edit_id(record.id.clone());
+    ui.set_preset_name(record.name.clone());
+    ui.set_preset_model(record.model.clone());
+    ui.set_preset_endpoint(record.endpoint.clone());
+    ui.set_preset_key_env(record.key_env.clone());
+    ui.set_preset_temperature(record.temperature.clone());
+    ui.set_preset_tokens(record.tokens.clone());
+    ui.set_preset_timeout(record.timeout.clone());
+    ui.set_preset_template_id("".into());
+    ui.set_preset_template_name("".into());
+    ui.set_preset_provider_icon("".into());
+    ui.set_preset_schema_label("".into());
+    if let Some(template) = ui
+        .get_preset_templates()
+        .iter()
+        .find(|item| item.id == "gemini")
+    {
+        ui.set_preset_template_id(template.id);
+        ui.set_preset_template_name(template.name);
+        ui.set_preset_provider_icon(record.provider.clone());
+        ui.set_preset_schema_label(template.format);
+    } else {
+        ui.set_settings_error("Provider metadata is unavailable for this preset".into());
+    }
+}
+
+pub fn draft(window: &AppWindow, record: &PresetRecord) {
+    let ui = window.global::<SettingsUi>();
+    let PresetDefinition::Gemini(definition) = &record.definition;
+    ui.set_preset_creating(true);
+    ui.set_preset_edit_id("".into());
+    ui.set_preset_save_token("".into());
+    ui.set_preset_template_id("gemini".into());
+    if let Some(template) = ui
+        .get_preset_templates()
+        .iter()
+        .find(|item| item.id == "gemini")
+    {
+        ui.set_preset_template_name(template.name);
+        ui.set_preset_provider_icon(template.icon);
+        ui.set_preset_schema_label(template.format);
+    }
+    ui.set_preset_name(record.name.as_str().into());
+    ui.set_preset_model(definition.model.as_str().into());
+    ui.set_preset_endpoint(definition.endpoint.as_str().into());
+    ui.set_preset_key_env(definition.credential_env.as_str().into());
+    ui.set_preset_temperature(definition.temperature.to_string().into());
+    ui.set_preset_tokens(definition.max_output_tokens.to_string().into());
+    ui.set_preset_timeout(definition.timeout_ms.to_string().into());
+    ui.set_preset_tab(0);
 }
 
 pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
@@ -356,7 +503,31 @@ pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
             return;
         }
         ui.set_preset_edit_id(id.0.to_string().into());
+        ui.set_preset_creating(false);
         ui.set_preset_save_token("".into());
     }
     ui.set_settings_error("".into());
+}
+
+pub(super) fn provider_templates(
+    providers: &[neuromita::presentation::ProviderOption],
+) -> Vec<PresetTemplateItem> {
+    providers
+        .iter()
+        .map(|provider| PresetTemplateItem {
+            id: provider.id.into(),
+            name: provider.name.into(),
+            icon: provider.icon.into(),
+            format: provider.schema_label.into(),
+            endpoint: if provider.id == "gemini" {
+                neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
+            } else {
+                "".into()
+            },
+            documentation: provider.documentation.into(),
+            pricing: provider.pricing.into(),
+            badge_kind: provider.badge_kind.into(),
+            available: provider.supported,
+        })
+        .collect::<Vec<_>>()
 }

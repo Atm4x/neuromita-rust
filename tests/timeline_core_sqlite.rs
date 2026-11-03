@@ -59,7 +59,7 @@ async fn actual_core_uses_durable_canonical_timeline_after_shutdown_restart() {
     let first = ApplicationLifecycle::start(config(path.clone(), session, branch))
         .await
         .unwrap();
-    let character = first.character(CharacterId::Mita).unwrap();
+    let character = first.character(CharacterId::Crazy).unwrap();
     let event = character
         .observe(UserInput::new("door opened".into()).unwrap())
         .await
@@ -79,7 +79,7 @@ async fn actual_core_uses_durable_canonical_timeline_after_shutdown_restart() {
     ));
     assert!(
         second
-            .character(CharacterId::KindMita)
+            .character(CharacterId::Kind)
             .unwrap()
             .get_context(second.at())
             .await
@@ -128,7 +128,7 @@ async fn core_restores_durable_active_branch_and_character_state() {
     assert_eq!(app.timeline_selection(), selected);
     assert!(app.select_timeline_branch(root, old_selection).is_err());
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -159,7 +159,7 @@ async fn admitted_player_message_survives_cancel_and_sqlite_restart() {
     let app = ApplicationLifecycle::start(config(path.clone(), session, branch))
         .await
         .unwrap();
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
     let source_event = ChatApi::publish_message(
         character,
         UserInput::new("persisted before generation".into()).unwrap(),
@@ -212,19 +212,19 @@ async fn reset_is_durable_and_repeatable_without_erasing_historical_context() {
             .await
             .unwrap();
         ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Before reset".into()).unwrap(),
         )
         .unwrap();
         let before = app.at();
         let selection = app.timeline_selection();
         assert_eq!(
-            app.reset_character_context(selection, CharacterId::Mita, reset),
+            app.reset_character_context(selection, CharacterId::Crazy, reset),
             Ok(reset)
         );
         assert_eq!(app.at().through, before.through + 1);
         assert!(
-            app.character(CharacterId::Mita)
+            app.character(CharacterId::Crazy)
                 .unwrap()
                 .get_context(app.at())
                 .await
@@ -243,11 +243,11 @@ async fn reset_is_durable_and_repeatable_without_erasing_historical_context() {
     let at = reopened.at();
     assert_eq!(at.through, before.through + 1);
     assert_eq!(
-        reopened.reset_character_context(selection, CharacterId::Mita, reset),
+        reopened.reset_character_context(selection, CharacterId::Crazy, reset),
         Ok(reset)
     );
     assert_eq!(reopened.at(), at);
-    let handler = reopened.character(CharacterId::Mita).unwrap();
+    let handler = reopened.character(CharacterId::Crazy).unwrap();
     assert!(
         handler
             .get_context(at)
@@ -261,7 +261,7 @@ async fn reset_is_durable_and_repeatable_without_erasing_historical_context() {
     assert_eq!(original.view.messages()[0].content, "Before reset");
     assert!(
         reopened
-            .character(CharacterId::KindMita)
+            .character(CharacterId::Kind)
             .unwrap()
             .get_context(before)
             .await
@@ -300,7 +300,7 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
         let selection = repo.select_branch(branch, None).unwrap();
         let mut input = EventDraft::new(EventKind::PlayerMessage);
         input.actor = Some("player".into());
-        input.observers.insert(CharacterId::Mita);
+        input.observers.insert(CharacterId::Crazy);
         input.payload.insert("content".into(), json!("question"));
         input
             .payload
@@ -310,8 +310,8 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
             .unwrap();
 
         let mut draft = EventDraft::new(EventKind::CharacterMessage);
-        draft.actor = Some(CharacterId::Mita.to_string());
-        draft.observers.insert(CharacterId::Mita);
+        draft.actor = Some(CharacterId::Crazy.to_string());
+        draft.observers.insert(CharacterId::Crazy);
         draft
             .payload
             .insert("request_id".into(), json!(request.to_string()));
@@ -330,8 +330,8 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
             vec![draft],
             AppendGuard {
                 selection_generation: selection.generation,
-                context: Some((CharacterId::Mita, 0, Some(target))),
-                accepted_reply_revision: Some((CharacterId::Mita, 0)),
+                context: Some((CharacterId::Crazy, 0, Some(target))),
+                accepted_reply_revision: Some((CharacterId::Crazy, 0)),
             },
         )
         .unwrap()
@@ -346,18 +346,18 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
         assert_eq!(at.through, reply.sequence);
         assert_eq!(app.active_requests(), 0);
         assert_eq!(
-            app.accepted_reply_at(CharacterId::Mita, request, at)
+            app.accepted_reply_at(CharacterId::Crazy, request, at)
                 .unwrap(),
             Some(reply.clone())
         );
         assert_eq!(
-            app.request_evidence_at(CharacterId::Mita, request, at)
+            app.request_evidence_at(CharacterId::Crazy, request, at)
                 .unwrap(),
             neuromita::timeline::domain::RequestEvidence::AcceptedReply(reply.clone())
         );
         assert_eq!(
             app.request_evidence_for_input_at(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 reply.draft.links[0].event_id,
                 at,
             )
@@ -369,7 +369,7 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
         );
         assert!(matches!(
             app.request_evidence_at(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 request,
                 neuromita::timeline::ContextAnchor {
                     branch_id: branch.0,
@@ -380,13 +380,13 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
             neuromita::timeline::domain::RequestEvidence::PlayerInput(_)
         ));
         assert_eq!(
-            app.request_evidence_at(CharacterId::KindMita, request, at)
+            app.request_evidence_at(CharacterId::Kind, request, at)
                 .unwrap(),
             neuromita::timeline::domain::RequestEvidence::NoRecord
         );
         assert!(
             app.accepted_reply_at(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 request,
                 neuromita::timeline::ContextAnchor {
                     branch_id: branch.0,
@@ -397,7 +397,7 @@ async fn application_reconciles_accepted_reply_after_restart_without_request_reg
             .is_none()
         );
         assert!(
-            app.accepted_reply_at(CharacterId::KindMita, request, at)
+            app.accepted_reply_at(CharacterId::Kind, request, at)
                 .unwrap()
                 .is_none()
         );

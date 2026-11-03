@@ -100,11 +100,11 @@ fn manual_config(clock: &Arc<ManualClock>) -> ReminderConfig {
 
 fn try_request() -> Result<RequestHandle, SubmitError> {
     let event = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("scheduler fixture".into()).unwrap(),
     )?;
     ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         event,
         RequestSource::Presenter,
     ))
@@ -180,7 +180,7 @@ async fn queue_full_retries_are_bounded_and_preserve_one_fired_occurrence() {
         transport_retry_limit: 2,
     };
     let (app, mut calls) = start(config, 1).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     // Hold one generation open so the transport queue has no spare worker,
     // then schedule the reminder that must hit the full queue.
@@ -274,7 +274,7 @@ async fn global_disable_pauses_firing_and_dispatch_until_reenabled() {
     let _guard = SERIAL.lock().await;
     let clock = manual_clock();
     let (app, mut calls) = start(manual_config(&clock), 4).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,
@@ -319,7 +319,7 @@ async fn user_cancel_is_terminal_and_is_not_redispatched() {
     let _guard = SERIAL.lock().await;
     let clock = manual_clock();
     let (app, mut calls) = start(manual_config(&clock), 4).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,
@@ -362,7 +362,7 @@ async fn delete_while_pending_discards_the_late_reply() {
     let _guard = SERIAL.lock().await;
     let clock = manual_clock();
     let (app, mut calls) = start(manual_config(&clock), 4).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,
@@ -403,7 +403,7 @@ async fn update_while_pending_discards_late_reply_and_keeps_occurrence_index() {
     let _guard = SERIAL.lock().await;
     let clock = manual_clock();
     let (app, mut calls) = start(manual_config(&clock), 4).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,
@@ -455,7 +455,7 @@ async fn tool_delete_while_pending_rejects_the_late_delivery_reply() {
     let _guard = SERIAL.lock().await;
     let clock = manual_clock();
     let (app, mut calls) = start(manual_config(&clock), 8).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,
@@ -523,7 +523,7 @@ async fn automatic_scheduler_fires_immediately_on_manual_clock_advance() {
     let mut config = manual_config(&clock);
     config.start_scheduler = true;
     let (app, mut calls) = start(config, 4).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     RemindersApi::create_timer(CreateTimer::new(
         character,

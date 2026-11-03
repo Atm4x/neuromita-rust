@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::SettingsError;
 use crate::generation::PresetId;
@@ -62,6 +63,84 @@ pub enum Language {
 pub struct InterfaceSettings {
     pub language: Language,
     pub font_size: u16,
+    pub visibility: SettingsVisibility,
+    pub hide_private: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsArea {
+    Api,
+    Characters,
+    Voice,
+    Language,
+    Asr,
+    AiEngine,
+    Games,
+    Models,
+    Images,
+    Updates,
+    Datasets,
+}
+
+impl SettingsArea {
+    pub const ALL: [Self; 11] = [
+        Self::Api,
+        Self::Characters,
+        Self::Voice,
+        Self::Language,
+        Self::Asr,
+        Self::AiEngine,
+        Self::Games,
+        Self::Models,
+        Self::Images,
+        Self::Updates,
+        Self::Datasets,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "BTreeMap<SettingsArea, bool>",
+    into = "BTreeMap<SettingsArea, bool>"
+)]
+pub struct SettingsVisibility(BTreeMap<SettingsArea, bool>);
+
+impl SettingsVisibility {
+    pub fn all_visible() -> Self {
+        Self(
+            SettingsArea::ALL
+                .into_iter()
+                .map(|area| (area, true))
+                .collect(),
+        )
+    }
+    pub fn is_visible(&self, area: SettingsArea) -> bool {
+        self.0[&area]
+    }
+    pub fn set_visible(&mut self, area: SettingsArea, visible: bool) {
+        self.0.insert(area, visible);
+    }
+}
+
+impl TryFrom<BTreeMap<SettingsArea, bool>> for SettingsVisibility {
+    type Error = String;
+    fn try_from(values: BTreeMap<SettingsArea, bool>) -> Result<Self, Self::Error> {
+        if values.len() != SettingsArea::ALL.len()
+            || SettingsArea::ALL
+                .iter()
+                .any(|area| !values.contains_key(area))
+        {
+            return Err("visibility must explicitly contain every settings area".into());
+        }
+        Ok(Self(values))
+    }
+}
+
+impl From<SettingsVisibility> for BTreeMap<SettingsArea, bool> {
+    fn from(value: SettingsVisibility) -> Self {
+        value.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,15 +168,38 @@ pub struct CharacterSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharactersSettings {
-    pub mita: CharacterSettings,
-    pub kind_mita: CharacterSettings,
+    #[serde(rename = "Crazy")]
+    pub crazy: CharacterSettings,
+    #[serde(rename = "Kind")]
+    pub kind: CharacterSettings,
+    #[serde(rename = "Cappie")]
+    pub cappie: CharacterSettings,
+    #[serde(rename = "ShortHair")]
+    pub short_hair: CharacterSettings,
+    #[serde(rename = "Mila")]
+    pub mila: CharacterSettings,
+    #[serde(rename = "Sleepy")]
+    pub sleepy: CharacterSettings,
+    #[serde(rename = "Ghost")]
+    pub ghost: CharacterSettings,
+    #[serde(rename = "Creepy")]
+    pub creepy: CharacterSettings,
+    #[serde(rename = "GameMaster")]
+    pub game_master: CharacterSettings,
 }
 
 impl CharactersSettings {
     pub fn for_character(&self, id: crate::character::CharacterId) -> &CharacterSettings {
         match id {
-            crate::character::CharacterId::Mita => &self.mita,
-            crate::character::CharacterId::KindMita => &self.kind_mita,
+            crate::character::CharacterId::Crazy => &self.crazy,
+            crate::character::CharacterId::Kind => &self.kind,
+            crate::character::CharacterId::Cappie => &self.cappie,
+            crate::character::CharacterId::ShortHair => &self.short_hair,
+            crate::character::CharacterId::Mila => &self.mila,
+            crate::character::CharacterId::Sleepy => &self.sleepy,
+            crate::character::CharacterId::Ghost => &self.ghost,
+            crate::character::CharacterId::Creepy => &self.creepy,
+            crate::character::CharacterId::GameMaster => &self.game_master,
         }
     }
 
@@ -106,8 +208,15 @@ impl CharactersSettings {
         id: crate::character::CharacterId,
     ) -> &mut CharacterSettings {
         match id {
-            crate::character::CharacterId::Mita => &mut self.mita,
-            crate::character::CharacterId::KindMita => &mut self.kind_mita,
+            crate::character::CharacterId::Crazy => &mut self.crazy,
+            crate::character::CharacterId::Kind => &mut self.kind,
+            crate::character::CharacterId::Cappie => &mut self.cappie,
+            crate::character::CharacterId::ShortHair => &mut self.short_hair,
+            crate::character::CharacterId::Mila => &mut self.mila,
+            crate::character::CharacterId::Sleepy => &mut self.sleepy,
+            crate::character::CharacterId::Ghost => &mut self.ghost,
+            crate::character::CharacterId::Creepy => &mut self.creepy,
+            crate::character::CharacterId::GameMaster => &mut self.game_master,
         }
     }
 }
@@ -169,6 +278,8 @@ impl AppSettings {
             interface: InterfaceSettings {
                 language: Language::Russian,
                 font_size: 14,
+                visibility: SettingsVisibility::all_visible(),
+                hide_private: true,
             },
             reminders: RemindersSettings::initial_profile(),
         }

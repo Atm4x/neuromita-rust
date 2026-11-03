@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn late_redaction_configuration_rewrites_ingress_and_preset() {
         let mut trace = RequestTrace::new(
-            metadata(CharacterId::Mita),
+            metadata(CharacterId::Crazy),
             "raw s3cr3t value",
             DiagnosticsLimits::default(),
         );
@@ -1527,7 +1527,7 @@ mod tests {
             ..DiagnosticsLimits::default()
         };
         let mut trace = RequestTrace::new(
-            metadata(CharacterId::Mita),
+            metadata(CharacterId::Crazy),
             "x".repeat(100).as_str(),
             limits,
         );
@@ -1559,7 +1559,7 @@ mod tests {
     #[test]
     fn trace_debug_never_contains_configured_credentials() {
         let mut trace = RequestTrace::new(
-            metadata(CharacterId::Mita),
+            metadata(CharacterId::Crazy),
             "ingress",
             DiagnosticsLimits::default(),
         );
@@ -1578,7 +1578,7 @@ mod tests {
         };
 
         let mut trace = RequestTrace::new(
-            metadata(CharacterId::Mita),
+            metadata(CharacterId::Crazy),
             "ingress",
             DiagnosticsLimits::default(),
         );
@@ -1627,7 +1627,7 @@ mod tests {
     #[test]
     fn missing_artifacts_are_explicit_after_cancellation() {
         let mut trace = RequestTrace::new(
-            metadata(CharacterId::Mita),
+            metadata(CharacterId::Crazy),
             "hello",
             DiagnosticsLimits::default(),
         );
@@ -1647,11 +1647,11 @@ mod tests {
     #[test]
     fn retention_distinguishes_expired_from_never_seen() {
         let mut store = DiagnosticsStore::new(DiagnosticsLimits::default().with_retention(1, 1));
-        let mut first = RequestTrace::new(metadata(CharacterId::Mita), "one", store.limits());
+        let mut first = RequestTrace::new(metadata(CharacterId::Crazy), "one", store.limits());
         first.cancelled();
         first.finished();
         let first_id = first.metadata.id;
-        let mut second = RequestTrace::new(metadata(CharacterId::Mita), "two", store.limits());
+        let mut second = RequestTrace::new(metadata(CharacterId::Crazy), "two", store.limits());
         second.cancelled();
         second.finished();
         let second_id = second.metadata.id;

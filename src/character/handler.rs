@@ -975,7 +975,7 @@ mod turn_tests {
 
     fn handler() -> CharacterHandler {
         CharacterHandler {
-            character: Character::create(CharacterId::Mita),
+            character: Character::create(CharacterId::Crazy),
             timeline: Arc::new(Mutex::new(SessionTimeline::new())),
             policy: GamePolicy::default(),
             reminders: None,
@@ -1009,7 +1009,7 @@ mod turn_tests {
             acceptance(&context),
             TurnProposal::from_structured(response).unwrap(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         );
         assert!(matches!(result, Err(CharacterError::StaleState)));
         assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
@@ -1033,7 +1033,7 @@ mod turn_tests {
             acceptance(&context),
             game_proposal(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         );
         assert!(matches!(result, Err(CharacterError::StaleState)));
         assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
@@ -1042,7 +1042,7 @@ mod turn_tests {
             let mut timeline = handler.timeline.lock().unwrap();
             let selection = timeline.selection();
             timeline
-                .reset_character_context(selection, CharacterId::Mita, EventId::new())
+                .reset_character_context(selection, CharacterId::Crazy, EventId::new())
                 .unwrap();
         }
         let before = handler.timeline.lock().unwrap().anchor();
@@ -1051,7 +1051,7 @@ mod turn_tests {
             acceptance(&context),
             game_proposal(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         );
         assert!(matches!(result, Err(CharacterError::StaleState)));
         assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
@@ -1067,7 +1067,7 @@ mod turn_tests {
             .unwrap();
         let mut timeline = handler.timeline.lock().unwrap();
         let at = timeline.anchor();
-        let (mut next, _) = timeline.game_at(CharacterId::Mita, at).unwrap();
+        let (mut next, _) = timeline.game_at(CharacterId::Crazy, at).unwrap();
         let applied = next
             .apply_user(
                 timeline.selection().branch_id,
@@ -1076,20 +1076,20 @@ mod turn_tests {
             .unwrap();
         timeline
             .publish_player_message(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 EventId::new(),
                 Arc::from("concurrent write"),
             )
             .unwrap();
         let before = timeline.anchor();
         assert!(matches!(
-            timeline.append_game_facts(CharacterId::Mita, &applied.facts, &mut next, at.through),
+            timeline.append_game_facts(CharacterId::Crazy, &applied.facts, &mut next, at.through),
             Err(crate::timeline::domain::TimelineError::ConcurrentWrite)
         ));
         assert_eq!(timeline.anchor(), before);
         assert!(
             !timeline
-                .game_at(CharacterId::Mita, before)
+                .game_at(CharacterId::Crazy, before)
                 .unwrap()
                 .0
                 .auto_reactions()
@@ -1115,7 +1115,7 @@ mod turn_tests {
             .unwrap();
         let timeline = handler.timeline.lock().unwrap();
         let (game, _) = timeline
-            .game_at(CharacterId::Mita, timeline.anchor())
+            .game_at(CharacterId::Crazy, timeline.anchor())
             .unwrap();
         let canonical = serde_json::to_value(game).unwrap();
         let mut store = TimelineStore::new();
@@ -1124,11 +1124,11 @@ mod turn_tests {
         for mode in 0..6 {
             let mut draft = EventDraft::new(EventKind::GameStateCaptured);
             draft.actor = Some("mita".into());
-            draft.observers.insert(CharacterId::Mita);
+            draft.observers.insert(CharacterId::Crazy);
             let mut state = canonical.clone();
             match mode {
                 0 => {
-                    draft.observers.insert(CharacterId::KindMita);
+                    draft.observers.insert(CharacterId::Kind);
                 }
                 1 => {
                     state["unknown"] = json!(true);
@@ -1164,7 +1164,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .publish_player_message(CharacterId::Mita, event, Arc::from("hello"))
+            .publish_player_message(CharacterId::Crazy, event, Arc::from("hello"))
             .unwrap();
         let context = handler
             .context(
@@ -1201,7 +1201,7 @@ mod turn_tests {
             ))
             .unwrap(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         )
     }
 
@@ -1222,7 +1222,7 @@ mod turn_tests {
             context,
             ProposedResponse::from_structured(structured).unwrap(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         )
     }
 
@@ -1258,13 +1258,13 @@ mod turn_tests {
         let timeline = handler.timeline.lock().unwrap();
         assert_ne!(response.event_id, EventId::default());
         assert_eq!(
-            state_at(&timeline, CharacterId::Mita, before)
+            state_at(&timeline, CharacterId::Crazy, before)
                 .unwrap()
                 .attitude,
             60.0
         );
         assert_eq!(
-            state_at(&timeline, CharacterId::KindMita, after)
+            state_at(&timeline, CharacterId::Kind, after)
                 .unwrap()
                 .attitude,
             60.0
@@ -1275,17 +1275,17 @@ mod turn_tests {
             let mut timeline = handler.timeline.lock().unwrap();
             let expected = timeline.selection();
             timeline
-                .reset_character_context(expected, CharacterId::Mita, reset)
+                .reset_character_context(expected, CharacterId::Crazy, reset)
                 .unwrap();
             let now = timeline.anchor();
             assert_eq!(
-                state_at(&timeline, CharacterId::Mita, now)
+                state_at(&timeline, CharacterId::Crazy, now)
                     .unwrap()
                     .attitude,
                 66.0
             );
             assert_eq!(
-                state_at(&timeline, CharacterId::Mita, now)
+                state_at(&timeline, CharacterId::Crazy, now)
                     .unwrap()
                     .accepted_replies,
                 1
@@ -1301,7 +1301,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline
                 .append_test_fact("cancel-before-accept", reset)
                 .unwrap();
@@ -1331,7 +1331,7 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
                 policy: GamePolicy::default(),
                 reminders: None,
@@ -1350,7 +1350,7 @@ mod turn_tests {
             .unwrap();
             let at = timeline.anchor();
             assert_eq!(at.through, 3);
-            let state = state_at(&timeline, CharacterId::Mita, at).unwrap();
+            let state = state_at(&timeline, CharacterId::Crazy, at).unwrap();
             assert_eq!(state.accepted_replies, 1);
             assert_eq!(state.attitude, 63.2);
             assert_eq!(state.boredom, 9.0);
@@ -1398,7 +1398,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline.append_test_fact("reset", reset).unwrap();
         }
         assert!(matches!(
@@ -1416,7 +1416,7 @@ mod turn_tests {
         assert_eq!(
             state_at(
                 &handler.timeline.lock().unwrap(),
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 before_reset
             )
             .unwrap()
@@ -1426,27 +1426,27 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut hidden = EventDraft::new(EventKind::MessageHidden);
-            hidden.observers.insert(CharacterId::Mita);
+            hidden.observers.insert(CharacterId::Crazy);
             hidden.payload.insert(
                 "event_ids".into(),
                 serde_json::json!([reply.event_id.0.to_string()]),
             );
             timeline.append_test_fact("hide-accepted", hidden).unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline
                 .append_test_fact("reset-after-accepted", reset)
                 .unwrap();
             let now = timeline.anchor();
             assert_eq!(
                 timeline
-                    .accepted_replies_at(CharacterId::Mita, now)
+                    .accepted_replies_at(CharacterId::Crazy, now)
                     .unwrap(),
                 1
             );
             assert_eq!(
                 timeline
-                    .accepted_replies_at(CharacterId::KindMita, now)
+                    .accepted_replies_at(CharacterId::Kind, now)
                     .unwrap(),
                 0
             );
@@ -1472,17 +1472,17 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             timeline
-                .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+                .observe(CharacterId::Crazy, cause, Arc::from("door opened"))
                 .unwrap();
             timeline
                 .publish_player_message(
-                    CharacterId::Mita,
+                    CharacterId::Crazy,
                     EventId::new(),
                     Arc::from("later, unrelated user input"),
                 )
                 .unwrap();
             let mut note = EventDraft::new(EventKind::SessionNote);
-            note.observers.insert(CharacterId::Mita);
+            note.observers.insert(CharacterId::Crazy);
             note.payload
                 .insert("content".into(), serde_json::json!("weather became rainy"));
             timeline.append_test_fact("world-note", note).unwrap();
@@ -1512,7 +1512,7 @@ mod turn_tests {
             .lock()
             .unwrap()
             .capture_context(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 ContextPosition::At(ContextAnchor {
                     branch_id: context.anchor.branch_id,
                     through: 1,
@@ -1531,7 +1531,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+            .observe(CharacterId::Crazy, cause, Arc::from("door opened"))
             .unwrap();
         let result = handler.context(
             RequestId::new(),
@@ -1559,7 +1559,7 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
                 policy: GamePolicy::default(),
                 reminders: None,
@@ -1568,7 +1568,7 @@ mod turn_tests {
             accept(&mut handler, request, acceptance(&context)).unwrap();
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline.append_test_fact("persisted-reset", reset).unwrap();
         }
         {
@@ -1579,7 +1579,7 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
                 policy: GamePolicy::default(),
                 reminders: None,
@@ -1602,7 +1602,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             timeline
-                .observe(CharacterId::Mita, original, Arc::from("seen by Mita"))
+                .observe(CharacterId::Crazy, original, Arc::from("seen by Mita"))
                 .unwrap();
         }
         let input_id = EventId::new();
@@ -1610,7 +1610,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .publish_player_message(CharacterId::Mita, input_id, Arc::from("new request"))
+            .publish_player_message(CharacterId::Crazy, input_id, Arc::from("new request"))
             .unwrap();
         let snapshot = handler
             .context(
@@ -1662,7 +1662,7 @@ mod turn_tests {
         })
         .unwrap();
         let mut handler = CharacterHandler {
-            character: Character::create(CharacterId::Mita),
+            character: Character::create(CharacterId::Crazy),
             timeline: Arc::new(Mutex::new(timeline)),
             policy: GamePolicy::default(),
             reminders: None,

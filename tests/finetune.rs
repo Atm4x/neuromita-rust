@@ -329,7 +329,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let first = presenter
         .chat
-        .reply(CharacterId::Mita, "first request".into())
+        .reply(CharacterId::Crazy, "first request".into())
         .unwrap();
     let call = next(&mut generations).await;
     assert_eq!(
@@ -391,7 +391,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let failed = presenter
         .chat
-        .reply(CharacterId::Mita, "provider failure".into())
+        .reply(CharacterId::Crazy, "provider failure".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -407,7 +407,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let empty = presenter
         .chat
-        .reply(CharacterId::Mita, "empty provider text".into())
+        .reply(CharacterId::Crazy, "empty provider text".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -423,7 +423,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let second = presenter
         .chat
-        .reply(CharacterId::Mita, "second request".into())
+        .reply(CharacterId::Crazy, "second request".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -438,7 +438,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
     let stale = presenter
         .chat
         .reply_at(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             "stale context".into(),
             ContextPosition::At(origin),
         )
@@ -453,7 +453,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let rejected = presenter
         .chat
-        .reply(CharacterId::Mita, "unresolvable memory effect".into())
+        .reply(CharacterId::Crazy, "unresolvable memory effect".into())
         .unwrap();
     let mut invalid_effect = fixture_ok("provider response with invalid effect", 9);
     let structured = invalid_effect.result.as_mut().unwrap();
@@ -503,7 +503,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
     presenter.settings.voice.in_launcher.set(true).unwrap();
     let cancelled = presenter
         .chat
-        .reply(CharacterId::Mita, "cancel after provider".into())
+        .reply(CharacterId::Crazy, "cancel after provider".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -533,7 +533,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
 
     let partial = presenter
         .chat
-        .reply(CharacterId::Mita, "partial transport body".into())
+        .reply(CharacterId::Crazy, "partial transport body".into())
         .unwrap();
     let mut partial_fixture = fixture_ok("partial provider text", 9);
     partial_fixture.response.as_mut().unwrap().complete = false;
@@ -556,7 +556,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
     fs::write(&settings.data_dir, b"blocks dataset writes").unwrap();
     let storage_failed = presenter
         .chat
-        .reply(CharacterId::Mita, "dataset storage unavailable".into())
+        .reply(CharacterId::Crazy, "dataset storage unavailable".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -606,7 +606,7 @@ async fn provider_capture_is_delivered_independently_and_records_outcomes() {
     let disabled_request = disabled_app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "disabled collection".into())
+        .reply(CharacterId::Crazy, "disabled collection".into())
         .unwrap();
     next(&mut disabled_generations)
         .await
@@ -730,7 +730,7 @@ async fn actual_wire_request_and_prevalidation_response_are_captured() {
     let accepted = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "actual wire request".into())
+        .reply(CharacterId::Crazy, "actual wire request".into())
         .unwrap();
     let call = next(&mut calls).await;
     assert!(call.path.contains(":generateContent?key=fixture-secret "));
@@ -753,7 +753,7 @@ async fn actual_wire_request_and_prevalidation_response_are_captured() {
     let rejected = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "invalid structured answer".into())
+        .reply(CharacterId::Crazy, "invalid structured answer".into())
         .unwrap();
     let call = next(&mut calls).await;
     let rejected_raw = gemini_body("not-json", 8);
@@ -823,7 +823,7 @@ async fn actual_wire_request_and_prevalidation_response_are_captured() {
 
     let diagnostics =
         neuromita::api::ChatApi::diagnostics_for(neuromita::request::DiagnosticScope::owner(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             neuromita::request::RequestSource::Presenter,
         ))
         .unwrap();
@@ -1461,7 +1461,7 @@ async fn stalled_storage_does_not_block_completion_cancel_or_shutdown() {
     let request = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "storage stalled".into())
+        .reply(CharacterId::Crazy, "storage stalled".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -1487,7 +1487,7 @@ async fn stalled_storage_does_not_block_completion_cancel_or_shutdown() {
     let cancelled = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "cancel while writer stalled".into())
+        .reply(CharacterId::Crazy, "cancel while writer stalled".into())
         .unwrap();
     next(&mut generations)
         .await
@@ -1509,7 +1509,7 @@ async fn stalled_storage_does_not_block_completion_cancel_or_shutdown() {
     let shutdown = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "shutdown while writer stalled".into())
+        .reply(CharacterId::Crazy, "shutdown while writer stalled".into())
         .unwrap();
     next(&mut generations)
         .await

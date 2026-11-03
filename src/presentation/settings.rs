@@ -1,13 +1,13 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::watch;
 
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, CharactersSettings, OperationPresets, PresetId, PresetSelection,
-        PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
-        VoiceSettings, Volume,
+        AppSettings, CharactersSettings, InterfaceSettings, OperationPresets, PresetId,
+        PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
+        SettingsSnapshot, SettingsTransfer, VoiceSettings, Volume,
     },
 };
 
@@ -171,21 +171,39 @@ impl CharacterSettingsPresenter {
 }
 
 pub struct CharactersSettingsPresenter {
-    pub mita: CharacterSettingsPresenter,
-    pub kind_mita: CharacterSettingsPresenter,
+    characters: BTreeMap<CharacterId, CharacterSettingsPresenter>,
 }
 
 impl CharactersSettingsPresenter {
-    pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
-        match character {
-            CharacterId::Mita => &self.mita,
-            CharacterId::KindMita => &self.kind_mita,
+    fn new(owner: Arc<SettingsOwner>) -> Self {
+        Self {
+            characters: CharacterId::ALL
+                .into_iter()
+                .map(|id| (id, CharacterSettingsPresenter::new(Arc::clone(&owner), id)))
+                .collect(),
         }
+    }
+    pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
+        &self.characters[&character]
+    }
+}
+
+pub struct InterfaceSettingsPresenter {
+    owner: Arc<SettingsOwner>,
+    pub hide_private: BoundProperty<bool>,
+}
+
+impl InterfaceSettingsPresenter {
+    pub fn set_visible(&self, area: SettingsArea, visible: bool) -> Result<(), SettingsError> {
+        self.owner
+            .edit::<InterfaceSettings>(|settings| settings.visibility.set_visible(area, visible))
+            .map(|_| ())
     }
 }
 
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
@@ -194,6 +212,18 @@ impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            interface: InterfaceSettingsPresenter {
+                owner: Arc::clone(&owner),
+                hide_private: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.hide_private,
+                    |owner, value| {
+                        owner
+                            .edit::<InterfaceSettings>(|s| s.hide_private = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
             presets: PresetsSettingsPresenter {
                 active: BoundProperty::new(
                     Arc::clone(&owner),
@@ -205,13 +235,7 @@ impl SettingsPresenter {
                     },
                 ),
             },
-            characters: CharactersSettingsPresenter {
-                mita: CharacterSettingsPresenter::new(Arc::clone(&owner), CharacterId::Mita),
-                kind_mita: CharacterSettingsPresenter::new(
-                    Arc::clone(&owner),
-                    CharacterId::KindMita,
-                ),
-            },
+            characters: CharactersSettingsPresenter::new(Arc::clone(&owner)),
             voice: VoiceSettingsPresenter {
                 volume: BoundProperty::new(
                     Arc::clone(&owner),
@@ -280,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn character_preset_bindings_are_independent_and_observable() {
         let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
-            source: SettingsSource::Initial(AppSettings::initial_profile()),
+            source: SettingsSource::initial(AppSettings::initial_profile()),
             repository: Arc::new(MemorySettingsRepository::new()),
         })
         .await
@@ -288,7 +312,7 @@ mod tests {
         let owner = lifecycle.owner();
         let presenter = SettingsPresenter::new(Arc::clone(&owner));
 
-        let react = &presenter.characters.mita.react;
+        let react = &presenter.characters.for_character(CharacterId::Crazy).react;
         let mut updates = react.observe();
         assert_eq!(updates.next().await.unwrap(), PresetSelection::Active);
         react.set(PresetSelection::Specific(PresetId(7))).unwrap();
@@ -298,17 +322,25 @@ mod tests {
         );
         assert_eq!(react.get(), PresetSelection::Specific(PresetId(7)));
         assert_eq!(
-            presenter.characters.kind_mita.react.get(),
+            presenter
+                .characters
+                .for_character(CharacterId::Kind)
+                .react
+                .get(),
             PresetSelection::Active
         );
         assert_eq!(
-            presenter.characters.mita.reply.get(),
+            presenter
+                .characters
+                .for_character(CharacterId::Crazy)
+                .reply
+                .get(),
             PresetSelection::Active
         );
 
         owner
             .edit::<CharactersSettings>(|settings| {
-                settings.mita.presets.react = PresetSelection::Specific(PresetId(9));
+                settings.crazy.presets.react = PresetSelection::Specific(PresetId(9));
             })
             .unwrap();
         assert_eq!(
@@ -325,12 +357,12 @@ mod tests {
                 .snapshot_all()
                 .unwrap()
                 .values
-                .selected_preset(CharacterId::Mita, crate::interaction::TurnIntent::Initiate),
+                .selected_preset(CharacterId::Crazy, crate::interaction::TurnIntent::Initiate),
             PresetId(5)
         );
         assert_eq!(
             owner.snapshot_all().unwrap().values.selected_preset(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 crate::interaction::TurnIntent::React(crate::identity::EventId::new())
             ),
             PresetId(9)

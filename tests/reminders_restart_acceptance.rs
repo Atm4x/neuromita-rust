@@ -128,7 +128,7 @@ async fn shutdown_interrupted_occurrence_resumes_once_and_accepted_reply_survive
     let clock = Arc::new(ManualClock::new(
         UtcInstant::parse_rfc3339("2026-11-03T09:00:00Z").unwrap(),
     ));
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     let (app, mut calls) = start(&database, session, branch, clock.clone()).await;
     let created = RemindersApi::create_timer(CreateTimer::new(

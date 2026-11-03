@@ -31,7 +31,7 @@ The `request_status` projection shares its source `RequestSnapshot` with the San
 - `initiate`: `character`, optional `instruction` and generated-response audience. No target.
 - `cancel`, `settings`, `set_volume` retain their existing meanings. `test` remains a test-protocol convenience, not a production conversation operation.
 
-The wire `speaker`, `targets`, and `participants` are serialized as `"player"` or `{ "character": "mita" }` / `{ "character": "kind-mita" }`. `seen_by` uses character ID strings (`"mita"`, `"kind-mita"`). New Unity roster and scene-witness mapping remain the responsibility of the Unity orchestration layer; the Rust core does not infer them.
+The wire `speaker`, `targets`, and `participants` are serialized as `"player"` or `{ "character": "Crazy" }` / `{ "character": "Kind" }`. `seen_by` uses character ID strings (`"Crazy"`, `"Kind"`). New Unity roster and scene-witness mapping remain the responsibility of the Unity orchestration layer; the Rust core does not infer them.
 
 Both `success` and `voice_error` terminal statuses include the canonical accepted Message's `event_id`. A voice error leaves the accepted text and its identity available for history reconciliation; it does not turn that text back into a provisional or failed generation. Replaying the retained command receipt returns the same `request_id` and terminal `event_id` without another generation.
 

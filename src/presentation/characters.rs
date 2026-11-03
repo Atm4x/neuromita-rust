@@ -2,8 +2,8 @@ use tokio::sync::watch;
 
 use crate::{
     character::{
-        CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot, CharacterRegistry,
-        CharacterState, CharacterView, MemoryEditResult,
+        CharacterDefinition, CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot,
+        CharacterRegistry, CharacterState, CharacterView, MemoryEditResult,
     },
     memory::{MemoryCapacityPlan, MemoryCommand, MemoryKind, MemoryRecord, MemoryState},
     request::{InputError, UserInput},
@@ -282,6 +282,11 @@ impl CharactersPresenter {
     ) -> Result<MemoryEditResult, CharacterError> {
         self.get(id)?.edit_memories(expected, commands).await
     }
+    /// UI receives the same definitions used to instantiate owned characters.
+    pub fn catalog(&self) -> Vec<CharacterDefinition> {
+        crate::character::character_catalog().collect()
+    }
+
     pub fn available(&self) -> &'static [CharacterId] {
         &CharacterId::ALL
     }

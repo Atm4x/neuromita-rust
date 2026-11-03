@@ -13,7 +13,10 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
-    view::{AppWindow, ChatRow, ChatStatus, ConversationUi, MemoryUi, SettingsUi},
+    view::{
+        AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
+        MemoryUi, SettingsUi,
+    },
 };
 
 pub fn attach(
@@ -88,10 +91,8 @@ pub fn attach(
     });
     let send = dispatch.clone();
     window.on_chat_select_character(move |id| {
-        let character = match id {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => return,
+        let Some(character) = CharacterId::from_index(id) else {
+            return;
         };
         send(Command::Select(character));
     });
@@ -121,8 +122,31 @@ pub fn attach(
     Ok(runtime)
 }
 
+pub(super) fn render_catalog(
+    window: &AppWindow,
+    catalog: Vec<neuromita::character::CharacterDefinition>,
+) {
+    let entries = catalog
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| CharacterOption {
+            index: index as i32,
+            id: item.id.as_str().into(),
+            name: item.name.source().into(),
+            name_key: item.name.id().into(),
+            conversation_name: item.conversation_name.source().into(),
+            conversation_key: item.conversation_name.id().into(),
+            initial: item.id.as_str().chars().next().unwrap().to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    window
+        .global::<CharacterCatalog>()
+        .set_entries(ModelRc::new(VecModel::from(entries)));
+}
+
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
@@ -155,6 +179,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_server_running(snapshot.running);
         }
         Update::Administration(snapshot) => super::settings::render(window, &snapshot),
+        Update::PresetDraft(draft) => super::settings::draft(window, &draft),
         Update::AdminError(error) => {
             window
                 .global::<SettingsUi>()
@@ -197,10 +222,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
 }
 
 fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
-    window.set_chat_character(match snapshot.character {
-        CharacterId::Mita => 0,
-        CharacterId::KindMita => 1,
-    });
+    window.set_chat_character(snapshot.character.index() as i32);
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
         Ok(model) => {
@@ -275,6 +297,12 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
                 user: message.speaker.as_deref() == Some("player")
                     || (message.speaker.is_none() && message.role == MessageRole::User),
                 speaker: message.speaker.as_deref().unwrap_or_default().into(),
+                character_index: message
+                    .speaker
+                    .as_deref()
+                    .and_then(CharacterId::parse)
+                    .map(|id| id.index() as i32)
+                    .unwrap_or(-1),
                 sequence: format!("#{}", message.sequence).into(),
                 status: ChatStatus::History,
                 ..Default::default()
@@ -298,6 +326,7 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         }
         let mut row = ChatRow {
             request_id: request.metadata.id.to_string().into(),
+            character_index: request.metadata.character_id.index() as i32,
             can_cancel: request.snapshot.can_cancel(),
             ..Default::default()
         };

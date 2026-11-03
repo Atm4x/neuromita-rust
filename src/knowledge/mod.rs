@@ -50,7 +50,7 @@ impl KnowledgeRetrieval {
         fusion: FusionMode,
     ) -> Result<Self, EmbeddingError> {
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[],
             FusionConfig {
                 mode: fusion,
@@ -166,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn lexical_selection_requires_no_embedding_provider() {
         let selected = KnowledgeRetrieval::lexical()
-            .select(CharacterId::Mita, &[fact()], "чай")
+            .select(CharacterId::Crazy, &[fact()], "чай")
             .await
             .unwrap()
             .unwrap();
@@ -182,7 +182,7 @@ mod tests {
         });
         let retriever = Arc::new(SemanticMemoryRetriever::new(fixture.clone(), 10).unwrap());
         let selected = KnowledgeRetrieval::semantic(retriever)
-            .select(CharacterId::Mita, &[fact()], "чай")
+            .select(CharacterId::Crazy, &[fact()], "чай")
             .await;
         assert!(matches!(selected, Err(EmbeddingError::Transport(_))));
         assert_eq!(fixture.calls.load(Ordering::Relaxed), 1);
@@ -196,7 +196,7 @@ mod tests {
         });
         let retriever = Arc::new(SemanticMemoryRetriever::new(fixture.clone(), 10).unwrap());
         let selected = KnowledgeRetrieval::semantic(retriever)
-            .select(CharacterId::Mita, &[], "чай")
+            .select(CharacterId::Crazy, &[], "чай")
             .await
             .unwrap();
         assert!(selected.is_none());
@@ -216,7 +216,7 @@ mod tests {
             SemanticMemoryRetriever::new(fixture.clone(), 10).unwrap(),
         ));
         let selected = retrieval
-            .select_with_islands(CharacterId::Mita, &[], &[island], "tea")
+            .select_with_islands(CharacterId::Crazy, &[], &[island], "tea")
             .await
             .unwrap()
             .unwrap();

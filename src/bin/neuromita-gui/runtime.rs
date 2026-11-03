@@ -30,6 +30,7 @@ pub enum Command {
     Confirm,
     Abort,
     Diagnostics,
+    NewPreset,
     CreatePreset(PresetRecord, uuid::Uuid),
     UpdatePreset(PresetId, PresetRecord),
     DeletePreset(PresetId),
@@ -39,6 +40,8 @@ pub enum Command {
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
+    SectionVisibility(neuromita::settings::SettingsArea, bool),
+    HidePrivate(bool),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -47,6 +50,7 @@ pub enum Command {
 }
 
 pub enum Update {
+    CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
     ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
@@ -57,6 +61,7 @@ pub enum Update {
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
+    PresetDraft(PresetRecord),
     AdminSaved(Option<(PresetId, uuid::Uuid)>),
     AdminError(String),
     Stopped,
@@ -169,6 +174,9 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(Update::CharacterCatalog(
+        app.presenter().characters.catalog(),
+    ));
     if let Err(error) = observe(app.presenter(), &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
@@ -187,9 +195,9 @@ async fn observe(
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
-    let mut memories = MemoryWatch::start(administration, CharacterId::Mita)?;
+    let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
-    let mut character = CharacterId::Mita;
+    let mut character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();
@@ -205,7 +213,7 @@ async fn observe(
             Ok(settings) => publish(Update::Administration(Box::new(
                 super::settings::AdministrationSnapshot {
                     settings,
-                    presets: administration.presets.list(),
+                    presets: administration.presets.snapshot(),
                 },
             ))),
             Err(error) => publish(Update::AdminError(error.to_string())),
@@ -218,12 +226,13 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
-                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
+                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(id) => publish(Update::AdminSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
+                Some(Command::NewPreset) => publish(Update::PresetDraft(administration.presets.new_draft())),
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },

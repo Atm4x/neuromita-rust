@@ -50,7 +50,7 @@ async fn live_presenter_to_gemini() {
         .presenter()
         .chat
         .reply(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             "Проверка соединения. Ответь одним словом: готово".into(),
         )
         .unwrap();
