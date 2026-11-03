@@ -11,85 +11,10 @@ import { ActionSurface } from "../components/controls.slint";
 import { CollapsibleSettingsSection } from "../components/collapsible-section.slint";
 import { I18n } from "../i18n.slint";
 
-export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
-
-export struct PresetItem { id: string, name: string, model: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
-export global SettingsUi {
-    in-out property <int> section;
-    in-out property <[PresetItem]> settings-presets;
-    in-out property <string> settings-error;
-    in-out property <string> settings-revision;
-    in-out property <int> settings-persistence;
-    in-out property <string> settings-active;
-    in-out property <int> settings-volume;
-    in-out property <bool> settings-voice-launcher;
-    in-out property <bool> settings-voice-game;
-    in-out property <string> settings-voice-name;
-    in-out property <[CharacterPresets]> character-presets;
-    in-out property <int> selected-character;
-    in-out property <bool> character-prompt-expanded: true;
-    in-out property <string> preset-edit-id;
-    in-out property <string> preset-save-token;
-    in-out property <string> preset-name;
-    in-out property <string> preset-model;
-    in-out property <string> preset-endpoint: "https://generativelanguage.googleapis.com/v1beta/";
-    in-out property <string> preset-key-env: "GEMINI_API_KEY";
-    in-out property <string> preset-temperature: "0.7";
-    in-out property <string> preset-tokens: "3000";
-    in-out property <string> preset-timeout: "60000";
-    callback preset-save();
-    callback preset-edit(string);
-    callback preset-delete(string);
-    callback preset-activate(string);
-    callback character-preset(int, int, string);
-    callback character-common(int, string);
-    callback voice-launcher(bool);
-    callback voice-game(bool);
-    callback voice-name(string);
-    callback volume(int);
-}
-
-component Card inherits Rectangle {
-    background: SettingsTheme.canvas; border-radius: 14px; border-width: 1px; border-color: SettingsTheme.border;
-    @children
-}
-
-component SettingsLabel inherits Caption { font-family: SettingsTheme.font-family; }
-component SettingsField inherits Field {
-    font-family: SettingsTheme.font-family;
-    background: SettingsTheme.field;
-    border-color: root.focused ? SettingsTheme.field-focus-border : SettingsTheme.field-border;
-    border-radius: 10px;
-}
-component SettingsButton inherits HeaderButton {
-    font-family: SettingsTheme.font-family;
-    font-weight: 700;
-    horizontal-padding: 16px;
-    background: root.selected ? SettingsTheme.accent : self.pressed ? SettingsTheme.button-pressed : self.hovered ? SettingsTheme.button-hover : SettingsTheme.button;
-    border-color: self.hovered ? SettingsTheme.button-hover-border : SettingsTheme.button-border;
-}
-
-component EditorField inherits VerticalLayout {
-    in property <string> title;
-    in-out property <string> text;
-    height: 64px; spacing: 6px; padding: 0px;
-    SettingsLabel { text: root.title; font-size: 12px; color: SettingsTheme.muted; }
-    SettingsField { text <=> root.text; height: 40px; }
-}
-
-component SectionHeading inherits HorizontalLayout {
-    in property <string> title;
-    in property <string> description;
-    in property <string> glyph;
-    height: 48px; padding: 0px; spacing: 14px;
-    Rectangle { width: 48px; height: 48px; border-radius: 12px; background: SettingsTheme.heading-icon-background;
-        Glyph { text: root.glyph; color: SettingsTheme.accent; width: 100%; height: 100%; font-size: 27px; }
-    }
-    VerticalLayout { padding: 0px; spacing: 2px; alignment: center;
-        SettingsLabel { text: root.title; font-family: SettingsTheme.font-family; font-size: 23px; font-weight: 700; }
-        SettingsLabel { text: root.description; font-size: 12px; color: SettingsTheme.muted; }
-    }
-}
+import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem } from "../settings/presets-state.slint";
+import { ApiPresetsWorkspace } from "../settings/api-presets.slint";
+import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "../settings/form-controls.slint";
+export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem }
 
 component PresetChoice inherits Rectangle {
     in property <string> value;
@@ -318,7 +243,7 @@ export component SettingsPage inherits Rectangle {
         Rectangle { background: SettingsTheme.workspace; border-radius: SettingsTheme.panel-radius; border-width: 1px; border-color: SettingsTheme.border;
             VerticalLayout { padding: 14px; spacing: 14px;
                 Rectangle { vertical-stretch: 0;
-                FlexboxLayout { padding: 0px; flex-wrap: wrap; spacing-horizontal: 10px; spacing-vertical: 6px; alignment: center; cross-axis-line-alignment: start;
+                FlexboxLayout { padding: 0px; flex-wrap: wrap; spacing-horizontal: 5px; spacing-vertical: 6px; alignment: center; cross-axis-line-alignment: start;
                     for item in [
                         {section: 0, name: I18n.i18n("settings.general", "Общие"), icon: Fa.gear},
                         {section: 4, name: I18n.i18n("settings.language", "Язык"), icon: "\u{f0ac}"},
@@ -334,7 +259,7 @@ export component SettingsPage inherits Rectangle {
                         {section: 11, name: I18n.i18n("settings.data", "Сбор данных"), icon: Fa.database}
                     ]: ActionSurface {
                         label: item.name; border-width: 0px; border-radius: 0px; horizontal-stretch: 0; height: 42px;
-                        HorizontalLayout { padding-left: 10px; padding-right: 10px; padding-top: 8px; padding-bottom: 10px; spacing: 6px;
+                        HorizontalLayout { padding-left: 7px; padding-right: 7px; padding-top: 8px; padding-bottom: 10px; spacing: 5px;
                             Glyph { text: item.icon; color: SettingsUi.section == item.section ? white : SettingsTheme.muted; }
                             SettingsLabel { text: item.name; font-family: SandboxTheme.font-family; font-weight: SettingsUi.section == item.section ? 700 : 600; }
                         }
@@ -362,53 +287,9 @@ export component SettingsPage inherits Rectangle {
                         } }
                     }
                 }
-                if SettingsUi.section == 1: VerticalLayout { padding: 2px; spacing: 16px;
-                    SectionHeading { title: I18n.i18n("settings.api.title", "API и модели"); description: I18n.i18n("settings.api.description", "Каталог пресетов генерации и параметры провайдера."); glyph: "\u{f1e6}"; }
-                    HorizontalLayout { spacing: 12px;
-                        Card { width: max(230px, parent.width / 3); VerticalLayout { padding: 14px; spacing: 12px;
-                            SettingsLabel { text: I18n.i18n("settings.presets", "Пресеты"); font-size: 15px; font-weight: 700; }
-                            QuickAction { text: I18n.i18n("settings.preset.new", "Создать пресет"); enabled: root.connected;
-                                activated => { SettingsUi.preset-edit-id = ""; SettingsUi.preset-save-token = ""; SettingsUi.preset-name = ""; SettingsUi.preset-model = ""; SettingsUi.preset-endpoint = "https://generativelanguage.googleapis.com/v1beta/"; SettingsUi.preset-key-env = "GEMINI_API_KEY"; SettingsUi.preset-temperature = "0.7"; SettingsUi.preset-tokens = "3000"; SettingsUi.preset-timeout = "60000"; }
-                            }
-                            ScrollView { content-width: self.visible-width; vertical-stretch: 1;
-                                VerticalLayout { padding: 0px; spacing: 8px; alignment: start;
-                                    for preset in SettingsUi.settings-presets: ActionSurface { height: 64px; selected: SettingsUi.preset-edit-id == preset.id; label: preset.name;
-                                        VerticalLayout { padding: 10px; spacing: 3px;
-                                            SettingsLabel { text: "#" + preset.id + " · " + preset.name; font-weight: 700; }
-                                            SettingsLabel { text: preset.model; color: SettingsTheme.muted; font-size: 11px; }
-                                        }
-                                        activated => { SettingsUi.preset-edit(preset.id); }
-                                    }
-                                }
-                            }
-                        } }
-                        ScrollView { content-width: self.visible-width; horizontal-stretch: 1;
-                            VerticalLayout { padding: 2px; padding-right: 10px; spacing: 12px; alignment: start;
-                                SettingsLabel { text: SettingsUi.preset-edit-id == "" ? I18n.i18n("settings.preset.new", "Создать пресет") : I18n.i18n("settings.preset.edit", "Редактирование пресета") + " #" + SettingsUi.preset-edit-id; font-size: 15px; font-weight: 700; }
-                                EditorField { title: I18n.i18n("settings.preset.name", "Название"); text <=> SettingsUi.preset-name; }
-                                EditorField { title: I18n.i18n("settings.preset.model", "Модель Gemini"); text <=> SettingsUi.preset-model; }
-                                EditorField { title: I18n.i18n("settings.preset.endpoint", "Адрес API"); text <=> SettingsUi.preset-endpoint; }
-                                EditorField { title: I18n.i18n("settings.preset.key-env", "Переменная окружения с ключом"); text <=> SettingsUi.preset-key-env; }
-                                EditorField { title: I18n.i18n("settings.preset.temperature", "Температура"); text <=> SettingsUi.preset-temperature; }
-                                HorizontalLayout { spacing: 10px;
-                                    EditorField { title: I18n.i18n("settings.preset.tokens", "Максимум токенов"); text <=> SettingsUi.preset-tokens; }
-                                    EditorField { title: I18n.i18n("settings.preset.timeout", "Тайм-аут, миллисекунды"); text <=> SettingsUi.preset-timeout; }
-                                }
-                                HorizontalLayout { spacing: 8px;
-                                    SettingsButton { text: I18n.i18n("settings.save", "Сохранить"); enabled: root.connected; background: SettingsTheme.accent; activated => { SettingsUi.preset-save(); } }
-                                    SettingsButton { text: I18n.i18n("settings.preset.use", "Сделать активным"); enabled: root.connected && SettingsUi.preset-edit-id != ""; activated => { SettingsUi.preset-activate(SettingsUi.preset-edit-id); } }
-                                    SettingsButton { text: I18n.i18n("settings.delete", "Удалить"); enabled: root.connected && SettingsUi.preset-edit-id != ""; activated => { root.delete-id = SettingsUi.preset-edit-id; } }
-                                }
-                                if root.delete-id != "": Card { VerticalLayout { padding: 12px; spacing: 10px;
-                                    Text { text: I18n.i18n("settings.delete.confirm", "Удалить пресет? Привязки останутся прежними и потребуют существующий пресет."); font-family: SandboxTheme.font-family; font-size: 12px; color: SettingsTheme.text; wrap: word-wrap; }
-                                    HorizontalLayout { spacing: 8px;
-                                        SettingsButton { text: I18n.i18n("settings.delete", "Удалить"); activated => { SettingsUi.preset-delete(root.delete-id); root.delete-id = ""; } }
-                                        SettingsButton { text: I18n.i18n("sandbox.cancel", "Отменить"); activated => { root.delete-id = ""; } }
-                                    }
-                                } }
-                            }
-                        }
-                    }
+                if SettingsUi.section == 1: ApiPresetsWorkspace {
+                    width: parent.width;
+                    connected: root.connected;
                 }
                 if SettingsUi.section == 2: VerticalLayout {
                     padding-left: 2px; padding-right: 6px; padding-bottom: 2px; spacing: 12px;

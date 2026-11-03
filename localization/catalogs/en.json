@@ -539,53 +539,9 @@
     "source": "Сохранение…",
     "translation": "Saving…"
   },
-  "settings.api.title": {
-    "source": "API и модели",
-    "translation": "API and models"
-  },
-  "settings.api.description": {
-    "source": "Каталог пресетов генерации и параметры провайдера.",
-    "translation": "Generation presets and provider parameters."
-  },
-  "settings.presets": {
-    "source": "Пресеты",
-    "translation": "Presets"
-  },
   "settings.preset.new": {
     "source": "Создать пресет",
     "translation": "Create preset"
-  },
-  "settings.preset.edit": {
-    "source": "Редактирование пресета",
-    "translation": "Edit preset"
-  },
-  "settings.preset.name": {
-    "source": "Название",
-    "translation": "Name"
-  },
-  "settings.preset.model": {
-    "source": "Модель Gemini",
-    "translation": "Gemini model"
-  },
-  "settings.preset.endpoint": {
-    "source": "Адрес API",
-    "translation": "API URL"
-  },
-  "settings.preset.key-env": {
-    "source": "Переменная окружения с ключом",
-    "translation": "Credential environment variable"
-  },
-  "settings.preset.temperature": {
-    "source": "Температура",
-    "translation": "Temperature"
-  },
-  "settings.preset.tokens": {
-    "source": "Максимум токенов",
-    "translation": "Maximum tokens"
-  },
-  "settings.preset.timeout": {
-    "source": "Тайм-аут, миллисекунды",
-    "translation": "Timeout, milliseconds"
   },
   "settings.save": {
     "source": "Сохранить",
@@ -598,10 +554,6 @@
   "settings.delete": {
     "source": "Удалить",
     "translation": "Delete"
-  },
-  "settings.delete.confirm": {
-    "source": "Удалить пресет? Привязки останутся прежними и потребуют существующий пресет.",
-    "translation": "Delete this preset? Assignments remain unchanged and require an existing preset."
   },
   "settings.characters.description": {
     "source": "Профили, шаблоны поведения и история выбранного персонажа.",
@@ -1034,5 +986,129 @@
   "settings.preset.unset": {
     "source": "Не выбран",
     "translation": "Not selected"
+  },
+  "settings.preset.no-template": {
+    "source": "Без шаблона",
+    "translation": "No template"
+  },
+  "settings.api.heading": {
+    "source": "Подключение к моделям",
+    "translation": "Model connections"
+  },
+  "settings.api.subtitle": {
+    "source": "Провайдеры, пресеты, ключи и параметры генерации ответов.",
+    "translation": "Providers, presets, keys, and response generation parameters."
+  },
+  "settings.presets.search": {
+    "source": "Поиск пресетов...",
+    "translation": "Search presets..."
+  },
+  "settings.preset.add": {
+    "source": "+ Добавить пресет",
+    "translation": "+ Add preset"
+  },
+  "settings.preset.empty": {
+    "source": "Нет сохранённых пресетов",
+    "translation": "No saved presets"
+  },
+  "settings.preset.empty-hint": {
+    "source": "Создайте пресет для подключения модели",
+    "translation": "Create a preset to connect a model"
+  },
+  "settings.preset.active-short": {
+    "source": "Активен",
+    "translation": "Active"
+  },
+  "settings.preset.provider-missing": {
+    "source": "Провайдер не выбран",
+    "translation": "Provider not selected"
+  },
+  "settings.preset.check": {
+    "source": "Проверить",
+    "translation": "Check"
+  },
+  "settings.preset.connection": {
+    "source": "Подключение",
+    "translation": "Connection"
+  },
+  "settings.preset.generation": {
+    "source": "Параметры генерации",
+    "translation": "Generation parameters"
+  },
+  "settings.api-preset.name": {
+    "source": "Название пресета",
+    "translation": "Preset name"
+  },
+  "settings.preset.template": {
+    "source": "Шаблон / провайдер",
+    "translation": "Template / provider"
+  },
+  "settings.preset.documentation": {
+    "source": "Документация",
+    "translation": "Documentation"
+  },
+  "settings.preset.url": {
+    "source": "Ссылка API",
+    "translation": "API URL"
+  },
+  "settings.api-preset.model": {
+    "source": "Модель",
+    "translation": "Model"
+  },
+  "settings.api-preset.key-env": {
+    "source": "API ключ (переменная окружения)",
+    "translation": "API key (environment variable)"
+  },
+  "settings.preset.reserve-keys": {
+    "source": "Резервные ключи",
+    "translation": "Backup keys"
+  },
+  "settings.preset.reserve-keys-disabled": {
+    "source": "Резервные ключи пока не поддерживаются текущим API-ядром.",
+    "translation": "Backup keys are not yet supported by the current API core."
+  },
+  "settings.preset.reserve-providers": {
+    "source": "Резервные провайдеры",
+    "translation": "Backup providers"
+  },
+  "settings.preset.reserve-providers-disabled": {
+    "source": "Цепочки провайдеров пока не поддерживаются текущим API-ядром.",
+    "translation": "Provider chains are not yet supported by the current API core."
+  },
+  "settings.preset.delete-confirm": {
+    "source": "Удалить выбранный пресет? Это действие нельзя отменить.",
+    "translation": "Delete the selected preset? This cannot be undone."
+  },
+  "settings.preset.format": {
+    "source": "Формат параметров: ",
+    "translation": "Parameter format: "
+  },
+  "settings.preset.import": {
+    "source": "Импорт JSON",
+    "translation": "Import JSON"
+  },
+  "settings.preset.export": {
+    "source": "Экспорт JSON",
+    "translation": "Export JSON"
+  },
+  "settings.preset.customize": {
+    "source": "Настроить параметры",
+    "translation": "Configure parameters"
+  },
+  "settings.preset.params-limited": {
+    "source": "Параметры принадлежат этому пресету. Ядро передаёт температуру и лимит токенов при каждом запросе.",
+    "translation": "These parameters belong to this preset. The core sends temperature and token limit with every request."
+  },
+  "settings.api-preset.temperature": {
+    "source": "Температура  temperature",
+    "translation": "Temperature  temperature"
+  },
+  "settings.api-preset.tokens": {
+    "source": "Макс. токенов  maxOutputTokens",
+    "translation": "Max tokens  maxOutputTokens"
+  },
+  "settings.api-preset.timeout": {
+    "source": "Тайм-аут, мс",
+    "translation": "Timeout, ms"
   }
 }

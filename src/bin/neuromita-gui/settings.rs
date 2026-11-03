@@ -1,11 +1,11 @@
 use super::{
     runtime::Command,
-    view::{AppWindow, CharacterPresets, PresetItem, SettingsUi},
+    view::{AppWindow, CharacterPresets, PresetItem, PresetTemplateItem, SettingsUi},
 };
 use neuromita::{
     character::CharacterId,
     generation::{GeminiPresetDefinition, PresetDefinition, PresetId, PresetRecord},
-    presentation::{GuiPresenter, PresetSlot},
+    presentation::{GuiPresenter, PresetSlot, PresetsView},
     settings::{PersistenceState, PresetSelection, SettingsSnapshot},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -13,7 +13,7 @@ use std::{rc::Rc, sync::Arc};
 
 pub struct AdministrationSnapshot {
     pub settings: Arc<SettingsSnapshot>,
-    pub presets: Vec<(PresetId, PresetRecord)>,
+    pub presets: PresetsView,
 }
 
 pub fn execute(
@@ -99,6 +99,29 @@ fn id(value: &str) -> Result<PresetId, String> {
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let settings = window.global::<SettingsUi>();
+    let send = dispatch.clone();
+    settings.on_preset_new(move || send(Command::NewPreset));
+    let weak = window.as_weak();
+    settings.on_preset_template_select(move |id| {
+        if let Some(window) = weak.upgrade() {
+            let ui = window.global::<SettingsUi>();
+            if ui
+                .get_preset_templates()
+                .iter()
+                .any(|item| item.id == id && item.available)
+            {
+                let template = ui.get_preset_templates().iter().find(|item| item.id == id);
+                if let Some(template) = template {
+                    ui.set_preset_template_id(id);
+                    ui.set_preset_template_name(template.name);
+                    ui.set_preset_provider_icon(template.icon);
+                    ui.set_preset_schema_label(template.format);
+                }
+            } else {
+                ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());
+            }
+        }
+    });
     let weak = window.as_weak();
     let send = dispatch.clone();
     settings.on_preset_save(move || {
@@ -107,6 +130,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         };
         let window = component.global::<SettingsUi>();
         let record = (|| -> Result<PresetRecord, String> {
+            if window.get_preset_template_id() != "gemini" {
+                return Err("Unsupported preset provider".into());
+            }
             Ok(PresetRecord {
                 name: window.get_preset_name().into(),
                 definition: PresetDefinition::Gemini(GeminiPresetDefinition {
@@ -148,19 +174,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         };
         let window = component.global::<SettingsUi>();
         window.set_preset_save_token("".into());
-        let record = window
+        if let Some(record) = window
             .get_settings_presets()
             .iter()
-            .find(|r| r.id == selected);
-        if let Some(record) = record {
-            window.set_preset_edit_id(record.id);
-            window.set_preset_name(record.name);
-            window.set_preset_model(record.model);
-            window.set_preset_endpoint(record.endpoint);
-            window.set_preset_key_env(record.key_env);
-            window.set_preset_temperature(record.temperature);
-            window.set_preset_tokens(record.tokens);
-            window.set_preset_timeout(record.timeout);
+            .find(|r| r.id == selected)
+        {
+            select_preset(&window, &record);
         } else {
             window.set_settings_error("Preset is no longer available".into());
         }
@@ -300,24 +319,105 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_character_presets(ModelRc::new(VecModel::from(rows)));
-    let records = model
+    let templates = model
         .presets
+        .providers
         .iter()
-        .map(|(id, record)| {
-            let PresetDefinition::Gemini(definition) = &record.definition;
-            PresetItem {
-                id: id.0.to_string().into(),
-                name: record.name.as_str().into(),
-                model: definition.model.as_str().into(),
-                endpoint: definition.endpoint.as_str().into(),
-                key_env: definition.credential_env.as_str().into(),
-                temperature: definition.temperature.to_string().into(),
-                tokens: definition.max_output_tokens.to_string().into(),
-                timeout: definition.timeout_ms.to_string().into(),
-            }
+        .map(|provider| PresetTemplateItem {
+            id: provider.id.into(),
+            name: provider.name.into(),
+            icon: provider.icon.into(),
+            format: provider.schema_label.into(),
+            endpoint: if provider.id == "gemini" {
+                neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
+            } else {
+                "".into()
+            },
+            documentation: provider.documentation.into(),
+            badge: provider.badge.into(),
+            available: provider.supported,
         })
         .collect::<Vec<_>>();
+    window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
+    let records = model
+        .presets
+        .records
+        .iter()
+        .map(|record| PresetItem {
+            id: record.id.0.to_string().into(),
+            name: record.name.as_str().into(),
+            model: record.model.as_str().into(),
+            provider: record.provider.into(),
+            endpoint: record.endpoint.as_str().into(),
+            key_env: record.credential_env.as_str().into(),
+            temperature: record.temperature.to_string().into(),
+            tokens: record.max_output_tokens.to_string().into(),
+            timeout: record.timeout_ms.to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    let selected = window.get_preset_edit_id();
+    if !window.get_preset_creating()
+        && (selected.is_empty() || !records.iter().any(|record| record.id == selected))
+    {
+        let active = settings.values.presets.active.0.to_string();
+        let first = records
+            .iter()
+            .find(|record| record.id == active)
+            .or_else(|| records.first());
+        if let Some(record) = first {
+            select_preset(&window, record);
+        }
+    }
     window.set_settings_presets(ModelRc::new(VecModel::from(records)));
+}
+
+fn select_preset(ui: &SettingsUi, record: &PresetItem) {
+    ui.set_preset_creating(false);
+    ui.set_preset_delete_id("".into());
+    ui.set_preset_edit_id(record.id.clone());
+    ui.set_preset_name(record.name.clone());
+    ui.set_preset_model(record.model.clone());
+    ui.set_preset_endpoint(record.endpoint.clone());
+    ui.set_preset_key_env(record.key_env.clone());
+    ui.set_preset_temperature(record.temperature.clone());
+    ui.set_preset_tokens(record.tokens.clone());
+    ui.set_preset_timeout(record.timeout.clone());
+    if let Some(template) = ui
+        .get_preset_templates()
+        .iter()
+        .find(|item| item.id == "gemini")
+    {
+        ui.set_preset_template_id(template.id);
+        ui.set_preset_template_name(template.name);
+        ui.set_preset_provider_icon(record.provider.clone());
+        ui.set_preset_schema_label(template.format);
+    }
+}
+
+pub fn draft(window: &AppWindow, record: &PresetRecord) {
+    let ui = window.global::<SettingsUi>();
+    let PresetDefinition::Gemini(definition) = &record.definition;
+    ui.set_preset_creating(true);
+    ui.set_preset_edit_id("".into());
+    ui.set_preset_save_token("".into());
+    ui.set_preset_template_id("gemini".into());
+    if let Some(template) = ui
+        .get_preset_templates()
+        .iter()
+        .find(|item| item.id == "gemini")
+    {
+        ui.set_preset_template_name(template.name);
+        ui.set_preset_provider_icon(template.icon);
+        ui.set_preset_schema_label(template.format);
+    }
+    ui.set_preset_name(record.name.as_str().into());
+    ui.set_preset_model(definition.model.as_str().into());
+    ui.set_preset_endpoint(definition.endpoint.as_str().into());
+    ui.set_preset_key_env(definition.credential_env.as_str().into());
+    ui.set_preset_temperature(definition.temperature.to_string().into());
+    ui.set_preset_tokens(definition.max_output_tokens.to_string().into());
+    ui.set_preset_timeout(definition.timeout_ms.to_string().into());
+    ui.set_preset_tab(0);
 }
 
 pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
@@ -327,6 +427,7 @@ pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
             return;
         }
         ui.set_preset_edit_id(id.0.to_string().into());
+        ui.set_preset_creating(false);
         ui.set_preset_save_token("".into());
     }
     ui.set_settings_error("".into());

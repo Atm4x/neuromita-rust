@@ -1,6 +1,7 @@
 use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
 
 use neuromita::localization::{FallbackPolicy, LocaleId, Localizer, i18n};
+use neuromita::presentation::PresetsPresenter;
 use slint::ComponentHandle;
 
 mod view {
@@ -35,7 +36,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     translations.set_locale("ru".into());
     window.set_page(view::PageId::Settings);
     window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
-    window.global::<view::SettingsUi>().set_section(2);
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "characters".into());
+    let settings = window.global::<view::SettingsUi>();
+    settings.set_section(if mode.starts_with("api") { 1 } else { 2 });
+    if mode.starts_with("api") {
+        let templates = PresetsPresenter::providers()
+            .into_iter()
+            .map(|provider| view::PresetTemplateItem {
+                id: provider.id.into(),
+                name: provider.name.into(),
+                icon: provider.icon.into(),
+                format: provider.schema_label.into(),
+                documentation: provider.documentation.into(),
+                badge: provider.badge.into(),
+                endpoint: if provider.id == "gemini" {
+                    neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
+                } else {
+                    "".into()
+                },
+                available: provider.supported,
+            })
+            .collect::<Vec<_>>();
+        settings.set_preset_templates(slint::ModelRc::new(slint::VecModel::from(templates)));
+        settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
+    }
     window.show()?;
     window
         .window()

@@ -30,6 +30,7 @@ pub enum Command {
     Confirm,
     Abort,
     Diagnostics,
+    NewPreset,
     CreatePreset(PresetRecord, uuid::Uuid),
     UpdatePreset(PresetId, PresetRecord),
     DeletePreset(PresetId),
@@ -57,6 +58,7 @@ pub enum Update {
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
+    PresetDraft(PresetRecord),
     AdminSaved(Option<(PresetId, uuid::Uuid)>),
     AdminError(String),
     Stopped,
@@ -205,7 +207,7 @@ async fn observe(
             Ok(settings) => publish(Update::Administration(Box::new(
                 super::settings::AdministrationSnapshot {
                     settings,
-                    presets: administration.presets.list(),
+                    presets: administration.presets.snapshot(),
                 },
             ))),
             Err(error) => publish(Update::AdminError(error.to_string())),
@@ -224,6 +226,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
+                Some(Command::NewPreset) => publish(Update::PresetDraft(administration.presets.new_draft())),
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
