@@ -20,6 +20,16 @@ pub struct LockedOverlay {
     pub revision: String,
     pub python_version: String,
     pub packages: Vec<LockedPackage>,
+    #[serde(default)]
+    pub actions: Vec<InstallerAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InstallerAction {
+    pub id: String,
+    pub kind: String,
+    pub relative_path: String,
 }
 
 pub struct OverlayInstaller {
@@ -36,6 +46,26 @@ impl LockedOverlay {
             return Err(LayerError::Invalid("invalid plugin ID or revision".into()));
         }
         validate_lock(&self.packages, &self.python_version)?;
+        let mut seen = std::collections::HashSet::new();
+        for action in &self.actions {
+            if !valid_segment(&action.id)
+                || action.kind != "create_empty_marker"
+                || action.relative_path.is_empty()
+                || action.relative_path.contains(['\\', ':'])
+                || !action.relative_path.split('/').all(|segment| {
+                    valid_segment(segment)
+                        || segment.starts_with('.')
+                            && segment.len() > 1
+                            && valid_segment(&segment[1..])
+                })
+                || !seen.insert(action.id.clone())
+            {
+                return Err(LayerError::Invalid(
+                    "unsafe or duplicate installer action".into(),
+                ));
+            }
+        }
+
         for package in &self.packages {
             let name = package
                 .name
@@ -83,17 +113,43 @@ impl OverlayInstaller {
 
     pub async fn installed(&self, plan: &LockedOverlay) -> Result<bool, OverlayError> {
         self.layer()
-            .installed(&self.installed_path(plan)?, ".neuromita-overlay.json", plan)
+            .installed(
+                &self.installed_path(plan)?,
+                ".neuromita-overlay.json",
+                plan,
+                &plan.packages,
+                &plan.actions,
+            )
             .await
     }
 
     pub async fn install(&self, plan: &LockedOverlay) -> Result<PathBuf, OverlayError> {
+        self.install_with_approval(plan, &std::collections::HashSet::new())
+            .await
+    }
+
+    pub async fn install_with_approval(
+        &self,
+        plan: &LockedOverlay,
+        approved: &std::collections::HashSet<String>,
+    ) -> Result<PathBuf, OverlayError> {
+        let expected: std::collections::HashSet<String> = plan
+            .actions
+            .iter()
+            .map(|action| action.id.clone())
+            .collect();
+        if !expected.is_subset(approved) || !approved.is_subset(&expected) {
+            return Err(LayerError::Invalid(
+                "installer actions require explicit, exact approval".into(),
+            ));
+        }
         self.layer()
             .publish(
                 &self.installed_path(plan)?,
                 ".neuromita-overlay.json",
                 plan,
                 &plan.packages,
+                &plan.actions,
             )
             .await
     }
@@ -110,6 +166,7 @@ mod tests {
             revision: "rev1".into(),
             python_version: "3.13.5".into(),
             packages: vec![],
+            actions: vec![],
         }
     }
 
@@ -138,6 +195,84 @@ mod tests {
             installer.installed(&changed).await,
             Err(LayerError::Conflict)
         ));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicitly_approved_install_action_runs_only_in_staging_and_is_verified() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("nm-overlay-action-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let uv = root.join("uv");
+        tokio::fs::write(
+            &uv,
+            r#"#!/bin/sh
+[ "$1" = pip ] || exit 2
+target=''
+prev=''
+for arg do
+    if [ "$prev" = --target ]; then target="$arg"; fi
+    prev="$arg"
+done
+mkdir -p "$target/fish_speech_lib" "$target/fish_speech_lib-1.0.dist-info"
+printf 'Name: fish-speech-lib\nVersion: 1.0\n' > "$target/fish_speech_lib-1.0.dist-info/METADATA"
+"#,
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let python = root.join("python");
+        tokio::fs::write(&python, "fake").await.unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(5),
+        };
+        let spec = LockedOverlay {
+            plugin_id: "fish_speech".into(),
+            revision: "rev1".into(),
+            python_version: "3.12.10".into(),
+            packages: vec![LockedPackage {
+                name: "fish-speech-lib".into(),
+                version: "1.0".into(),
+            }],
+            actions: vec![InstallerAction {
+                id: "fish_project_root".into(),
+                kind: "create_empty_marker".into(),
+                relative_path: "fish_speech_lib/.project-root".into(),
+            }],
+        };
+        assert!(installer.install(&spec).await.is_err());
+        let approval = std::collections::HashSet::from(["fish_project_root".into()]);
+        let installed = installer
+            .install_with_approval(&spec, &approval)
+            .await
+            .unwrap();
+        assert!(installed.join("fish_speech_lib/.project-root").is_file());
+        assert!(installer.installed(&spec).await.unwrap());
+        assert_eq!(
+            installer
+                .install_with_approval(&spec, &approval)
+                .await
+                .unwrap(),
+            installed
+        );
+        tokio::fs::remove_file(installed.join("fish_speech_lib/.project-root"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Corrupted(_))
+        ));
+        assert!(
+            installer
+                .install_with_approval(&spec, &approval)
+                .await
+                .is_err()
+        );
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

@@ -6,6 +6,7 @@ use std::{
 use super::{
     embedding::{Embedding, EmbeddingError, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace},
     memory_context::{lexical_ranked, priority_rank, render_ranked_memory_context, tokens},
+    reranking::{RerankPolicy, RerankProvider, rerank_prefix},
     retrieval_fusion::{
         FusionConfig, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey, RetrievalMethod,
         RetrievalSource, fuse,
@@ -117,6 +118,7 @@ pub struct SemanticMemoryRetriever {
     provider: Arc<dyn EmbeddingProvider>,
     cache: Mutex<EmbeddingCache>,
     max_entries: usize,
+    reranker: Option<(Arc<dyn RerankProvider>, RerankPolicy)>,
 }
 
 impl SemanticMemoryRetriever {
@@ -133,7 +135,17 @@ impl SemanticMemoryRetriever {
             provider,
             cache: Mutex::new(EmbeddingCache::new()),
             max_entries,
+            reranker: None,
         })
+    }
+
+    pub fn with_reranker(
+        mut self,
+        provider: Arc<dyn RerankProvider>,
+        policy: RerankPolicy,
+    ) -> Result<Self, EmbeddingError> {
+        self.reranker = Some((provider, policy.validate()?));
+        Ok(self)
     }
 
     pub fn clear_cache(&self) {
@@ -347,8 +359,11 @@ impl SemanticMemoryRetriever {
                 hits: lexical_hits,
             });
         }
-        let fused = fuse(character, &buckets, config)
+        let mut fused = fuse(character, &buckets, config)
             .map_err(|error| EmbeddingError::Response(error.to_string()))?;
+        if let Some((provider, policy)) = &self.reranker {
+            rerank_prefix(provider.as_ref(), &query, &mut fused, *policy).await?;
+        }
         let by_id = memories
             .iter()
             .map(|memory| (memory.id.0.to_string(), memory))

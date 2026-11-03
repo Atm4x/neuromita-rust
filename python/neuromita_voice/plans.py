@@ -6,7 +6,7 @@ import importlib.metadata
 import os
 from pathlib import Path
 
-from neuromita_ai_sdk import AssetRequirement, InstallPlan
+from neuromita_ai_sdk import AssetRequirement, InstallPlan, InstallerAction
 
 RVC_CUDA_ASSETS = ("hubert_base.pt", "rmvpe.pt")
 RVC_ONNX_ASSETS = ("vec-768-layer-12.onnx", "rmvpe.onnx")
@@ -44,6 +44,14 @@ def family(plugin_id: str) -> str:
 def backend(plugin_id: str) -> str:
     return VARIANTS[plugin_id][1]
 
+def supported_backends(plugin_id: str) -> tuple[str, ...]:
+    mode = backend(plugin_id)
+    if mode == "cuda":
+        return ("torch-cuda",)
+    if mode == "onnx":
+        return ("onnx-cpu", "onnx-directml")
+    return ("torch-cpu", "torch-cuda")
+
 
 def models_root() -> Path:
     value = os.environ.get("NEUROMITA_AI_MODELS_DIR")
@@ -51,7 +59,16 @@ def models_root() -> Path:
 
 
 def asset_root(plugin_id: str) -> Path:
-    return models_root() / plugin_id
+    import json
+    value = os.environ.get("NEUROMITA_AI_MODEL_REVISIONS", "{}")
+    revisions = json.loads(value)
+    if not isinstance(revisions, dict):
+        raise ValueError("invalid model revision map")
+    revision = revisions.get(plugin_id)
+    if revision is not None and (not isinstance(revision, str) or not revision.isascii()
+                                 or not revision.replace("-", "").replace("_", "").isalnum()):
+        raise ValueError("invalid selected model revision")
+    return models_root() / plugin_id / revision if revision else models_root() / plugin_id
 
 
 def asset_requirements(plugin_id: str) -> tuple[AssetRequirement, ...]:
@@ -98,8 +115,10 @@ def requirements(plugin_id: str) -> tuple[str, ...]:
 
 
 def plan(plugin_id: str) -> InstallPlan:
+    actions = (InstallerAction("fish_project_root", "create_empty_marker", "fish_speech_lib/.project-root"),) if family(plugin_id) == "fish" else ()
     return InstallPlan(assets=asset_requirements(plugin_id),
-                       backend=backend(plugin_id), requirements=requirements(plugin_id))
+                       supported_backends=supported_backends(plugin_id), requirements=requirements(plugin_id),
+                       supported_python_minors=("3.11", "3.12"), actions=actions)
 
 
 def probe(plugin_id: str) -> dict:
@@ -107,31 +126,38 @@ def probe(plugin_id: str) -> dict:
     missing = [entry.relative_path for entry in asset_requirements(plugin_id)
                if entry.required and not (root / entry.relative_path).is_file()]
     missing_distributions = []
+    wrong_versions = []
     for entry in requirements(plugin_id):
         name = entry.split("[", 1)[0].split("<", 1)[0].split("=", 1)[0]
         if not name:
             continue
         try:
-            importlib.metadata.version(name)
+            installed = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             missing_distributions.append(name)
-    return {"installed": not missing and not missing_distributions,
-            "missing_assets": missing, "missing_distributions": missing_distributions}
+            continue
+        if "==" in entry:
+            exact = entry.split("==", 1)[1].split(",", 1)[0]
+            if installed != exact:
+                wrong_versions.append({"name": name, "expected": exact, "actual": installed})
+    return {"installed": not missing and not missing_distributions and not wrong_versions,
+            "missing_assets": missing, "missing_distributions": missing_distributions,
+            "wrong_versions": wrong_versions}
 
 
 def settings(plugin_id: str) -> dict:
     engine, mode, cross, rvc = VARIANTS[plugin_id]
-    result = {"device": {"type": "string", "default": "cpu"},
+    result = {"device": {"type": "string", "default": "cuda:0" if mode == "cuda" else "cpu"},
               "volume": {"type": "number", "default": 1.0, "min": 0.0, "max": 2.0}}
     if engine in ("edge", "silero") or rvc:
         result.update({
-            "pitch": {"type": "number", "default": 6.0, "min": -24.0, "max": 24.0},
-            "f0_method": {"type": "string", "default": "rmvpe", "choices": ["pm", "dio", "crepe", "rmvpe", "harvest", "fcpe"]},
-            "index_rate": {"type": "number", "default": 0.75, "min": 0.0, "max": 1.0},
-            "protect": {"type": "number", "default": 0.33, "min": 0.0, "max": 0.5},
+            "rvc.pitch_shift_semitones": {"type": "number", "default": 6.0, "min": -24.0, "max": 24.0},
+            "rvc.f0_method": {"type": "string", "default": "rmvpe", "choices": ["pm", "dio", "crepe", "rmvpe", "harvest", "fcpe"]},
+            "rvc.index_rate": {"type": "number", "default": 0.75, "min": 0.0, "max": 1.0},
+            "rvc.protect": {"type": "number", "default": 0.33, "min": 0.0, "max": 0.5},
         })
     if engine == "silero":
-        result.update({"speaker": {"type": "string", "default": "kseniya"},
+        result.update({"silero.speaker_id": {"type": "string", "default": "kseniya"},
                        "language": {"type": "string", "default": "ru", "choices": ["ru", "en"]},
                        "sample_rate": {"type": "integer", "default": 48000, "choices": [8000, 24000, 48000]}})
     if engine == "edge":

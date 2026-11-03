@@ -165,3 +165,14 @@ Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin co
 - [ ] **Не считать TTS port готовой production parity:** реальные model weights и pip packages не загружались; inference на GPU не запускался. RVC native runtimes, Fish Speech compile hooks, platform-specific installs и F5/Omni asset download требуют реальных end-to-end проверок.
 - [ ] Задать/проверить backend lock с `torch` + `torchaudio` + `numpy==1.26.0` и подходящими CUDA wheel indexes, вместо установки одного `torch` с неограниченными transitive deps. Реализовать installer hooks и verified downloads, Python distribution probes, plugin-specific voice profile paths; затем воспроизвести реальный синтез.
 - [ ] Разделить сообщение о наличии каталога/контракта TTS от доказанной работоспособности конкретных моделей; не считать полный аудио pipeline рабочим по mock tests.
+### AI Engine — verified runtime increment (2026-11-03)
+
+The implementation and exact remaining limitations are tracked in [AI Engine implementation increment](future/ai-engine-implementation-20261103.md). Model asset staging with SHA-256, verified package layers, typed install hook approvals, typed Python settings, voice profile references and a Rust-to-mock-Python WAV contract are implemented and tested on the AI Runtime branch. These are infrastructure acceptance slices, **not real model inference**. The default `ApplicationConfig` still uses an unavailable voice provider; AI Hub, full lifecycle integration, production installs, ASR and VAD remain open. Do not close #24/#26/#37/#42/#51/#59/#61 solely on these tests.
+
+
+### AI Engine — explicit application-owned Python worker activation (2026-11-03)
+
+- [x] Optional `ApplicationConfig.ai_runtime` activates resolved Python compositions during `ApplicationLifecycle::start`, after fallible migrations/settings, TCP bind and Timeline setup; the running application owns worker shutdown and injects the selected TTS through the existing `VoiceProvider` port. Absence of explicit AI configuration preserves the previous unavailable-voice behavior without fallback.
+- [x] Reject mismatched locked Python, invalid service topology, missing/duplicate selected models and failed activation before client APIs are exposed.
+- [x] Abort of an in-flight IPC call terminates/poisons the worker; stale results cannot be reused without a new worker generation. Mock tests cover cancel/restart and startup failure paths.
+- [ ] Build the complete production `uv`/CPython/SDK/overlay/weights resolver into the application and persistent settings; implement AI Hub controls and smoke-test actual Silero+RVC inference. See [implementation report](future/ai-engine-implementation-20261103.md). All global AI Runtime issues remain open.
