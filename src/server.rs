@@ -22,8 +22,9 @@ use crate::{
     identity::EventId,
     lifecycle::Lifecycle,
     request::{
-        InitiateRequest, ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId,
-        RequestOutcome, RequestSnapshot, RequestSource, RequestState, SubmitError, UserInput,
+        DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
+        ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
+        RequestSnapshot, RequestSource, RequestState, SubmitError, UserInput,
     },
     runtime::{self, ApiBindings},
     settings::{SettingsError, VoiceSettings, Volume},
@@ -236,6 +237,22 @@ commands! {
     Cancel {
         request_id: Uuid,
     },
+    Diagnostics {
+        character: CharacterId,
+        request_id: Uuid,
+        #[serde(default)]
+        section: Option<String>,
+    },
+    DiagnosticsRecent {
+        character: CharacterId,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    DiagnosticsErrors {
+        character: CharacterId,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Settings {},
     SetVolume {
         value: Volume,
@@ -253,6 +270,9 @@ enum ErrorCode {
     QueueFull,
     ReceiptCapacity,
     OwnershipDenied,
+    DiagnosticsUnavailable,
+    DiagnosticsNotFound,
+    DiagnosticsExpired,
     CoreUnavailable,
     SettingsConflict,
     SettingsStorage,
@@ -310,6 +330,19 @@ fn settings_code(error: &SettingsError) -> ErrorCode {
         SettingsError::Conflict { .. } => ErrorCode::SettingsConflict,
         SettingsError::Storage(_) => ErrorCode::SettingsStorage,
         SettingsError::Uninitialized | SettingsError::Stopped => ErrorCode::CoreUnavailable,
+    }
+}
+
+fn diagnostic_code(error: &DiagnosticLookupError) -> ErrorCode {
+    match error {
+        DiagnosticLookupError::Unavailable | DiagnosticLookupError::Stopped => {
+            ErrorCode::DiagnosticsUnavailable
+        }
+        DiagnosticLookupError::NotFound(_) | DiagnosticLookupError::Empty => {
+            ErrorCode::DiagnosticsNotFound
+        }
+        DiagnosticLookupError::Expired(_) => ErrorCode::DiagnosticsExpired,
+        DiagnosticLookupError::OwnershipDenied(_) => ErrorCode::OwnershipDenied,
     }
 }
 
@@ -562,6 +595,60 @@ async fn client(
                     let response = match receipts.iter().find_map(|receipt| match &receipt.result { ReceiptResult::Generation(handle) if handle.id() == RequestId(request_id) => Some(handle), _ => None }) {
                         Some(handle) => json!({"type":"cancel","command_id":envelope.command_id,"request_id":request_id,"result":format!("{:?}", handle.cancel())}),
                         None => error_response(Some(envelope.command_id), ErrorCode::OwnershipDenied, "request does not belong to this connection"),
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::Diagnostics { character, request_id, section } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => {
+                            let section = match section.as_deref() {
+                                None => Ok(DiagnosticSection::All),
+                                Some(value) => DiagnosticSection::parse(value).ok_or_else(|| {
+                                    error_response(Some(envelope.command_id), ErrorCode::InvalidValue, "unknown diagnostic section")
+                                }),
+                            };
+                            match section {
+                                Err(error) => error,
+                                Ok(section) => match access.request(RequestId(request_id)) {
+                                    Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                                    Ok(record) => match record.export(section) {
+                                        Err(error) => error_response(Some(envelope.command_id), ErrorCode::InvalidValue, error),
+                                        Ok(text) => {
+                                            let content = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+                                            json!({"type":"diagnostics", "command_id":envelope.command_id,
+                                                "request_id":request_id, "section":section.to_string(),
+                                                "content":content})
+                                        }
+                                    },
+                                },
+                            }
+                        }
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::DiagnosticsRecent { character, limit } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => match access.recent(limit.unwrap_or(16).clamp(1, 64)) {
+                            Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                            Ok(rows) => json!({"type":"diagnostics_recent", "command_id":envelope.command_id,
+                                "character":character, "requests":rows}),
+                        },
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::DiagnosticsErrors { character, limit } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => match access.errors(limit.unwrap_or(16).clamp(1, 64)) {
+                            Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                            Ok(errors) => json!({"type":"diagnostics_errors", "command_id":envelope.command_id,
+                                "character":character, "errors":errors}),
+                        },
                     };
                     send(&outbound, response, &stop).await?;
                 }

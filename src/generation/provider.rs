@@ -1,4 +1,10 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use thiserror::Error;
 
@@ -49,6 +55,63 @@ pub struct GenerationInput {
     pub prepared_knowledge: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptMessage {
+    pub role: PromptRole,
+    pub text: Arc<str>,
+}
+
+/// Provider-reported token counts. Missing values stay missing; this type is
+/// never populated from a local estimate or a previous response.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedRequest {
+    pub provider: ProviderKind,
+    pub model: Arc<str>,
+    /// Endpoint without credentials, query or fragment.
+    pub endpoint: Arc<str>,
+    pub temperature: f32,
+    pub max_output_tokens: u32,
+    /// The provider-neutral prompt used to produce `payload_json`.
+    pub prompt: Arc<[PromptMessage]>,
+    /// The exact JSON bytes sent as the request body.
+    pub payload_json: Arc<str>,
+    pub captured_at: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderReply {
+    pub status: Option<u16>,
+    /// Body received before provider decoding or application validation.
+    pub raw_body: Arc<str>,
+    /// False when transport stopped or the bounded response limit was hit.
+    pub complete: bool,
+    pub finish_reason: Option<Arc<str>>,
+    pub usage: Option<ProviderUsage>,
+    pub elapsed: Duration,
+}
+
+/// Best-effort synchronous observation at the provider boundary. Observer
+/// failures are not represented here and cannot change the generation result.
+pub trait GenerationObserver: Send {
+    fn request_prepared(&mut self, _request: PreparedRequest) {}
+    fn response_received(&mut self, _response: ProviderReply) {}
+    fn failed(&mut self, _error: &GenerationError) {}
+}
+
 impl std::ops::Deref for GenerationInput {
     type Target = CharacterContext;
     fn deref(&self) -> &Self::Target {
@@ -72,6 +135,15 @@ pub type ProviderFuture<'a> =
 pub trait GenerationProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
     fn generate(&self, context: GenerationInput, template: ProviderTemplate) -> ProviderFuture<'_>;
+
+    fn generate_observed<'a>(
+        &'a self,
+        context: GenerationInput,
+        template: ProviderTemplate,
+        _observer: &'a mut dyn GenerationObserver,
+    ) -> ProviderFuture<'a> {
+        self.generate(context, template)
+    }
 }
 
 pub struct ResponseGenerator {
@@ -98,6 +170,14 @@ impl ResponseGenerator {
         &self,
         request: GenerationRequest,
     ) -> Result<ProposedResponse, GenerationError> {
+        self.generate_observed(request, &mut NoopObserver).await
+    }
+
+    pub async fn generate_observed(
+        &self,
+        request: GenerationRequest,
+        observer: &mut dyn GenerationObserver,
+    ) -> Result<ProposedResponse, GenerationError> {
         let template = request.preset.template().clone();
         let kind = template.kind();
         let provider = self
@@ -108,7 +188,19 @@ impl ResponseGenerator {
             context: request.context,
             prepared_knowledge: request.prepared_knowledge,
         };
-        let structured = provider.generate(input, template).await?;
-        ProposedResponse::from_structured(structured)
+        let structured = provider
+            .generate_observed(input, template, observer)
+            .await?;
+        match ProposedResponse::from_structured(structured) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                observer.failed(&error);
+                Err(error)
+            }
+        }
     }
 }
+
+struct NoopObserver;
+
+impl GenerationObserver for NoopObserver {}

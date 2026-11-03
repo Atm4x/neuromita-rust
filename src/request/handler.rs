@@ -8,7 +8,8 @@ use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
     generation::{
-        GenerationError, GenerationRequest, LlmConversation, PresetCatalog, ResponseGenerator,
+        GenerationError, GenerationObserver, GenerationRequest, LlmConversation, PreparedRequest,
+        PresetCatalog, ProviderReply, ResponseGenerator,
     },
     knowledge::KnowledgeRetrieval,
     settings::SettingsOwner,
@@ -166,6 +167,7 @@ impl MessageHandler {
             }
         };
         record.set_preset_description(format!("{:?}", preset));
+        record.set_redaction_values(preset.diagnostic_redaction_values());
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
@@ -187,8 +189,12 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")
                     ))?;
+                let mut observer = RecordObserver { record: &record };
                 self.generator
-                    .generate(GenerationRequest::new(context, preset, selected))
+                    .generate_observed(
+                        GenerationRequest::new(context, preset, selected),
+                        &mut observer,
+                    )
                     .await
             } => response,
         };
@@ -204,6 +210,7 @@ impl MessageHandler {
             record.finish_cancelled();
             return;
         }
+        let voice_attempted = voice_options.is_some();
         let voice_result = match voice_options {
             None => Ok(None),
             Some(options) => {
@@ -256,6 +263,9 @@ impl MessageHandler {
                 }
             }
         };
+        if voice_attempted {
+            record.voice_finished();
+        }
         if !record.begin_accepting() {
             record.finish_cancelled();
             return;
@@ -315,6 +325,24 @@ async fn selection_changed(
 }
 
 struct WorkGuard(Arc<RequestRecord>);
+
+struct RecordObserver<'a> {
+    record: &'a RequestRecord,
+}
+
+impl GenerationObserver for RecordObserver<'_> {
+    fn request_prepared(&mut self, request: PreparedRequest) {
+        self.record.provider_requested(request);
+    }
+
+    fn response_received(&mut self, response: ProviderReply) {
+        self.record.provider_replied(response);
+    }
+
+    fn failed(&mut self, error: &GenerationError) {
+        self.record.provider_failed(error);
+    }
+}
 
 impl Drop for WorkGuard {
     fn drop(&mut self) {

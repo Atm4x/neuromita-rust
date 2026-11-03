@@ -17,8 +17,9 @@ pub use structured::{
 };
 
 pub use provider::{
-    GenerationError, GenerationInput, GenerationProvider, GenerationRequest, ProposedResponse,
-    ProviderFuture, ResponseGenerator,
+    GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,
+    PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture, ProviderReply,
+    ProviderUsage, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,5 +51,10 @@ impl GenerationPreset {
     }
     pub fn template(&self) -> &ProviderTemplate {
         &self.template
+    }
+    pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
+        match &self.template {
+            ProviderTemplate::Gemini(template) => template.diagnostic_redaction_values(),
+        }
     }
 }

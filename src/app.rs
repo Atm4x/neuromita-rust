@@ -265,7 +265,10 @@ impl ApplicationLifecycle {
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
-        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
+        let registry = Arc::new(RequestRegistry::new_with_diagnostics(
+            limits.discovery_buffer.get(),
+            crate::request::DiagnosticsLimits::default(),
+        ));
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let selection_updates = timeline
             .lock()
