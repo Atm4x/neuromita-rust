@@ -1584,6 +1584,7 @@ mod tests {
         );
         trace.configure_redaction(["credential-value".to_owned()]);
         trace.text_ready("credential-value response");
+        let audio_bytes: Arc<[u8]> = vec![91u8; 16].into();
         let response = AcceptedResponse {
             game_invite: None,
             text: Arc::from("credential-value response"),
@@ -1603,7 +1604,7 @@ mod tests {
             },
             audio: Some(AudioArtifact {
                 format: AudioFormat::Wave,
-                bytes: Arc::from(vec![91u8; 16].into_boxed_slice()),
+                bytes: Arc::clone(&audio_bytes),
             }),
         };
         trace.push_transition(
@@ -1619,7 +1620,7 @@ mod tests {
         );
         let debug = format!("{trace:?}");
         assert!(!debug.contains("credential-value"));
-        assert!(!debug.contains("91,"));
+        assert_eq!(Arc::strong_count(&audio_bytes), 1);
         assert!(trace.transitions.len() <= trace.limits.max_transitions);
     }
 
