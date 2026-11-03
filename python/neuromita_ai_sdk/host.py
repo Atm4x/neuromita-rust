@@ -32,7 +32,7 @@ class PluginHost:
             raise ValueError("plugin id must match its safe directory name")
         if manifest.get("api_version") != API_VERSION:
             raise ValueError("incompatible plugin API version")
-        if manifest.get("kind") not in ("tts", "asr", "embedding"):
+        if manifest.get("kind") not in ("tts", "asr", "embedding", "reranker"):
             raise ValueError("unsupported plugin kind")
         if not isinstance(manifest.get("name"), str) or not manifest["name"]:
             raise ValueError("plugin name is required")
@@ -109,8 +109,15 @@ class PluginHost:
                       if op in ("install_plan", "probe_install", "settings_schema", "validate_config")
                       else self._load(args["plugin_id"]))
             with contextlib.redirect_stdout(sys.stderr):
-                result = (validate_settings(plugin.settings_schema(), args.get("settings", {}))
-                          if op == "validate_config" else getattr(plugin, op)())
+                if op == "validate_config":
+                    result = validate_settings(plugin.settings_schema(), args.get("settings", {}))
+                elif op in ("install_plan", "probe_install") and args.get("settings"):
+                    operation = getattr(plugin, op + "_for_settings", None)
+                    if not callable(operation):
+                        raise ValueError("plugin does not support model-specific install settings")
+                    result = operation(args["settings"])
+                else:
+                    result = getattr(plugin, op)()
             if op == "install_plan":
                 if not isinstance(result, InstallPlan):
                     raise ValueError("install_plan must return InstallPlan")

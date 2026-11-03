@@ -11,6 +11,7 @@ mod layer;
 pub mod managed;
 pub mod overlay;
 pub mod resolver;
+pub mod speech;
 pub mod uv;
 pub mod voice_profile;
 
@@ -47,6 +48,7 @@ pub enum AiService {
     Tts,
     Asr,
     Embedding,
+    Reranker,
     Beats,
 }
 
@@ -354,6 +356,7 @@ impl AiService {
             Self::Tts => "tts",
             Self::Asr => "asr",
             Self::Embedding => "embedding",
+            Self::Reranker => "reranker",
             Self::Beats => "beats",
         }
     }
@@ -634,12 +637,29 @@ pub async fn fetch_install_plan(
     config: &PythonHostConfig,
     plugin_id: &str,
 ) -> Result<install::PluginInstallPlan, AiRuntimeError> {
+    fetch_install_plan_for(config, plugin_id, Value::Object(serde_json::Map::new())).await
+}
+
+/// Dynamic install plans are resolved against the selected model/settings before staging.
+pub async fn fetch_install_plan_for(
+    config: &PythonHostConfig,
+    plugin_id: &str,
+    settings: Value,
+) -> Result<install::PluginInstallPlan, AiRuntimeError> {
+    if !settings.is_object() {
+        return Err(AiRuntimeError::Protocol(
+            "install settings must be an object".into(),
+        ));
+    }
     if !layer::valid_segment(plugin_id) {
         return Err(AiRuntimeError::Protocol("invalid plugin identifier".into()));
     }
     let mut worker = WorkerProcess::launch(config, &[], &[]).await?;
     let result = worker
-        .request("install_plan", &json!({ "plugin_id": plugin_id }))
+        .request(
+            "install_plan",
+            &json!({ "plugin_id": plugin_id, "settings": settings }),
+        )
         .await;
     let _ = worker.child.start_kill();
     let _ = worker.child.wait().await;

@@ -231,3 +231,112 @@ async fn occupied_port_stops_startup_before_ai_activation() {
     drop(socket);
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+async fn fixture_worker(root: &Path, service: AiService, plugin_id: &str) -> AiWorkerSelection {
+    let overlay = LockedOverlay {
+        plugin_id: plugin_id.into(),
+        revision: "test".into(),
+        python_version: "3.13.5".into(),
+        packages: vec![],
+        actions: vec![],
+    };
+    let backends = BackendInstaller {
+        uv_executable: root.join("uv"),
+        python_executable: root.join("python"),
+        backends_directory: root.join("backends"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(5),
+    };
+    let overlays = OverlayInstaller {
+        uv_executable: root.join("uv"),
+        python_executable: root.join("python"),
+        overlays_directory: root.join("overlays"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(5),
+    };
+    let destination = overlays.installed_path(&overlay).unwrap();
+    tokio::fs::create_dir_all(&destination).await.unwrap();
+    tokio::fs::write(
+        destination.join(".neuromita-overlay.json"),
+        serde_json::to_vec(&overlay).unwrap(),
+    )
+    .await
+    .unwrap();
+    let composition = RuntimeComposition::resolve(
+        ProcessTopology::Split,
+        service,
+        &[ServiceSelection {
+            service,
+            backends: vec![],
+            overlays: vec![overlay],
+        }],
+        &backends,
+        &overlays,
+    )
+    .await
+    .unwrap();
+    AiWorkerSelection {
+        service,
+        composition,
+        models: vec![ModelActivation {
+            service,
+            plugin_id: plugin_id.into(),
+            settings: json!({}),
+            asset_revision: None,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn asr_only_application_does_not_require_a_tts_worker() {
+    let _guard = CORE_TEST_MUTEX.lock().await;
+    let root = std::env::temp_dir().join(format!("nm-app-asr-only-{}", Uuid::new_v4()));
+    let mut ai = runtime(&root, "mock_tts").await;
+    ai.workers = vec![fixture_worker(&root, AiService::Asr, "mock_asr").await];
+    let running = ai.activate().await.unwrap();
+    assert!(running.speech_recognizer().is_some());
+    assert!(!running.has_service(AiService::Tts));
+    running.shutdown().await.unwrap();
+    let mut ai = runtime(&root, "mock_tts").await;
+    ai.workers = vec![fixture_worker(&root, AiService::Asr, "mock_asr").await];
+    let app = ApplicationLifecycle::start(application(ai)).await.unwrap();
+    app.shutdown().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn application_binds_explicit_local_embedding_retriever_without_fallback() {
+    use neuromita::{
+        app::{AiKnowledgeSelection, ApplicationError},
+        knowledge::{embedding::EmbeddingSpace, retrieval_fusion::FusionMode},
+    };
+    let _guard = CORE_TEST_MUTEX.lock().await;
+    let root = std::env::temp_dir().join(format!("nm-app-rag-{}", Uuid::new_v4()));
+    let mut ai = runtime(&root, "mock_tts").await;
+    let embedding = fixture_worker(&root, AiService::Embedding, "mock_embedding").await;
+    ai.workers = vec![embedding];
+    let mut config = application(ai);
+    config.ai_knowledge = Some(AiKnowledgeSelection {
+        space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
+        cache_entries: 32,
+        fusion: FusionMode::VectorOnly,
+    });
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    app.shutdown().await.unwrap();
+    let mut invalid = application(runtime(&root, "mock_tts").await);
+    invalid.ai_knowledge = Some(AiKnowledgeSelection {
+        space: EmbeddingSpace::new("python", "fixture", "fixture-v1", 3).unwrap(),
+        cache_entries: 32,
+        fusion: FusionMode::VectorOnly,
+    });
+    let result = ApplicationLifecycle::start(invalid).await;
+    assert!(matches!(
+        result,
+        Err(ApplicationError::MissingEmbeddingWorker)
+    ));
+    let next = ApplicationLifecycle::start(application(runtime(&root, "mock_tts").await))
+        .await
+        .unwrap();
+    next.shutdown().await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}

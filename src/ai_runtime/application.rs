@@ -6,7 +6,11 @@ use tokio::{process::Command, time::timeout};
 
 use thiserror::Error;
 
-use crate::voice::VoiceProvider;
+use crate::{
+    adapters::{python_embedding::PythonEmbeddingProvider, python_reranker::PythonReranker},
+    knowledge::embedding::EmbeddingSpace,
+    voice::VoiceProvider,
+};
 
 use super::{
     AiRuntimeError, AiService, AiSupervisor, ModelActivation, ProcessTopology, PythonHostConfig,
@@ -39,6 +43,7 @@ pub enum AiApplicationError {
 pub struct RunningAiApplication {
     supervisor: Arc<AiSupervisor>,
     active: Vec<AiService>,
+    selected: HashSet<AiService>,
     voice_profiles: Option<Arc<VoiceProfileStore>>,
 }
 
@@ -48,7 +53,6 @@ impl AiApplicationConfig {
             return Err(AiApplicationError::Invalid("no AI workers selected".into()));
         }
         let mut selected = HashSet::new();
-        let mut tts = false;
         for worker in &self.workers {
             if !worker.composition.services().contains(&worker.service) {
                 return Err(AiApplicationError::Invalid(
@@ -68,7 +72,6 @@ impl AiApplicationConfig {
                         "a service is selected by multiple workers".into(),
                     ));
                 }
-                tts |= service == AiService::Tts;
             }
             if self.topology == ProcessTopology::Split
                 && worker.composition.services() != [worker.service]
@@ -77,11 +80,6 @@ impl AiApplicationConfig {
                     "split workers must contain exactly one service".into(),
                 ));
             }
-        }
-        if !tts {
-            return Err(AiApplicationError::Invalid(
-                "application TTS requires an explicit selected model".into(),
-            ));
         }
         if self.topology == ProcessTopology::Shared && self.workers.len() != 1 {
             return Err(AiApplicationError::Invalid(
@@ -118,6 +116,11 @@ impl AiApplicationConfig {
                 "interpreter reports {reported:?}, which does not match selected locked Python"
             )));
         }
+        let selected: HashSet<_> = self
+            .workers
+            .iter()
+            .flat_map(|worker| worker.models.iter().map(|model| model.service))
+            .collect();
         let supervisor = Arc::new(AiSupervisor::new(self.topology, self.host));
         let mut active = Vec::new();
         for worker in self.workers {
@@ -135,12 +138,36 @@ impl AiApplicationConfig {
         Ok(RunningAiApplication {
             supervisor,
             active,
+            selected,
             voice_profiles: self.voice_profiles,
         })
     }
 }
 
 impl RunningAiApplication {
+    pub fn has_service(&self, service: AiService) -> bool {
+        self.selected.contains(&service)
+    }
+
+    pub fn speech_recognizer(&self) -> Option<super::speech::PythonSpeechRecognizer> {
+        self.has_service(AiService::Asr)
+            .then(|| super::speech::PythonSpeechRecognizer::new(Arc::clone(&self.supervisor)))
+    }
+
+    pub fn embedding_provider(&self, space: EmbeddingSpace) -> Option<PythonEmbeddingProvider> {
+        self.has_service(AiService::Embedding)
+            .then(|| PythonEmbeddingProvider::new(Arc::clone(&self.supervisor), space))
+    }
+
+    pub fn reranker(
+        &self,
+        model_id: String,
+        protocol: String,
+    ) -> Option<Result<PythonReranker, crate::adapters::python_reranker::RerankError>> {
+        self.has_service(AiService::Reranker)
+            .then(|| PythonReranker::new(Arc::clone(&self.supervisor), model_id, protocol))
+    }
+
     pub fn voice_provider(&self) -> Arc<dyn VoiceProvider> {
         let mut provider = PythonVoiceProvider::new(Arc::clone(&self.supervisor));
         if let Some(profiles) = &self.voice_profiles {

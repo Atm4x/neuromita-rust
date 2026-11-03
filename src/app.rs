@@ -16,7 +16,10 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
-    ai_runtime::application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
+    ai_runtime::{
+        AiService,
+        application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
+    },
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
@@ -24,7 +27,12 @@ use crate::{
     },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
-    knowledge::KnowledgeRetrieval,
+    knowledge::{
+        KnowledgeRetrieval,
+        embedding::{EmbeddingError, EmbeddingProvider, EmbeddingSpace},
+        retrieval_fusion::FusionMode,
+        semantic_memory::SemanticMemoryRetriever,
+    },
     lifecycle::Lifecycle,
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
@@ -58,6 +66,12 @@ pub struct RuntimeLimits {
     pub retained_finished: NonZeroUsize,
 }
 
+pub struct AiKnowledgeSelection {
+    pub space: EmbeddingSpace,
+    pub cache_entries: usize,
+    pub fusion: FusionMode,
+}
+
 pub struct ApplicationConfig {
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
@@ -66,6 +80,7 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
@@ -88,6 +103,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
+            ai_knowledge: None,
             settings: SettingsConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
@@ -149,6 +165,10 @@ pub enum ApplicationError {
     Timeline(#[from] TimelineError),
     #[error(transparent)]
     Ai(#[from] AiApplicationError),
+    #[error("AI knowledge selection requires an activated embedding worker")]
+    MissingEmbeddingWorker,
+    #[error(transparent)]
+    Knowledge(#[from] EmbeddingError),
     #[error("server: {0}")]
     Server(#[from] std::io::Error),
 }
@@ -254,6 +274,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             ai_runtime,
+            ai_knowledge,
             settings,
             timeline,
             server,
@@ -278,8 +299,25 @@ impl ApplicationLifecycle {
             None => None,
         };
         let voice = match &ai_runtime {
-            Some(runtime) => runtime.voice_provider(),
-            None => voice,
+            Some(runtime) if runtime.has_service(AiService::Tts) => runtime.voice_provider(),
+            _ => voice,
+        };
+        let knowledge = match ai_knowledge {
+            None => knowledge,
+            Some(selection) => {
+                let runtime = ai_runtime
+                    .as_ref()
+                    .ok_or(ApplicationError::MissingEmbeddingWorker)?;
+                let adapter = runtime
+                    .embedding_provider(selection.space)
+                    .ok_or(ApplicationError::MissingEmbeddingWorker)?;
+                let provider: Arc<dyn EmbeddingProvider> = Arc::new(adapter);
+                let retriever = Arc::new(SemanticMemoryRetriever::new(
+                    provider,
+                    selection.cache_entries,
+                )?);
+                KnowledgeRetrieval::semantic_fusion(retriever, selection.fusion)?
+            }
         };
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let selection_updates = timeline

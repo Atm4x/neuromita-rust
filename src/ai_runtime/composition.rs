@@ -118,7 +118,8 @@ fn order(service: AiService) -> u8 {
         AiService::Tts => 0,
         AiService::Asr => 1,
         AiService::Embedding => 2,
-        AiService::Beats => 3,
+        AiService::Reranker => 3,
+        AiService::Beats => 4,
     }
 }
 
