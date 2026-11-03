@@ -15,13 +15,13 @@ jobs:
       - name: Verify and publish Git Bridge bundle
         shell: bash
         env:
-          SOURCE_SHA: ae046a2be3c788dda67005f7e7b1bf129c04ef8b
-          TARGET_SHA: 6d96c411d9089f10282523d8cd5ed9e35e58fbf5
+          SOURCE_SHA: 6d96c411d9089f10282523d8cd5ed9e35e58fbf5
+          TARGET_SHA: e47c4497f92a1e8defd04cf4090600b14c24a4e3
           TARGET_REF: refs/heads/codex/api-presets-pyqt-slint-parity-20261103
         run: |
           set -euo pipefail
-          base64 -d bridge/api-presets-outgoing.bundle.b64 > api-presets.bundle
-          printf '%s  %s\n' '2b6473ca6aaa5ac14f63abf221a6c00ef27fe86a179e66503f9d2f1187e07675' api-presets.bundle | sha256sum -c -
+          base64 -d bridge/api-presets-outgoing-v2.bundle.b64 > api-presets.bundle
+          printf '%s  %s\n' '4d813eca19ceb15bccf7124d3df115e93e94b7f84e88bd72e2ff3e5fa88e0e92' api-presets.bundle | sha256sum -c -
           git cat-file -e "${SOURCE_SHA}^{commit}"
           git bundle verify api-presets.bundle
           git fetch api-presets.bundle "${TARGET_REF}:refs/heads/api-presets-verified"
