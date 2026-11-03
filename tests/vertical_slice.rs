@@ -28,6 +28,156 @@ use uuid::Uuid;
 
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_queue() {
+    use neuromita::{settings::Volume, timeline::domain::MessageRole};
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let sandbox = &app.presenter().sandbox;
+    assert_eq!(sandbox.characters(), &CharacterId::ALL);
+    assert!(
+        sandbox
+            .snapshot(CharacterId::Mita)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+
+    let first = sandbox
+        .reply(CharacterId::Mita, "sandbox input".into())
+        .unwrap();
+    let call = server.next().await;
+    let queued = sandbox
+        .reply(CharacterId::Mita, "cancel before generation".into())
+        .unwrap();
+    shown(&app.presenter().chat, queued.id(), false).await;
+    assert_eq!(
+        sandbox.cancel(queued.id()).unwrap(),
+        CancelResult::Cancelled
+    );
+    assert!(matches!(
+        finished(&queued).await.state,
+        RequestState::Cancelled
+    ));
+    let before = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    assert!(
+        before
+            .messages
+            .iter()
+            .all(|message| message.role != MessageRole::Assistant)
+    );
+    assert_eq!(before.messages.len(), 2);
+    assert!(
+        sandbox
+            .snapshot(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+
+    call.respond
+        .send(Reply::Text("accepted sandbox answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, first.id(), true).await;
+    let after = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .filter(|m| m.content == "accepted sandbox answer")
+            .count(),
+        1
+    );
+    assert_eq!(after.state.accepted_replies, 1);
+    assert!(
+        after
+            .messages
+            .iter()
+            .any(|m| m.request_id == Some(first.id()))
+    );
+    assert_eq!(after.model, "test-model");
+    assert!(
+        after
+            .messages
+            .iter()
+            .all(|m| m.sequence <= after.at.through)
+    );
+
+    let mut settings = sandbox.observe_settings().unwrap();
+    sandbox.set_volume(Volume::new(27).unwrap()).unwrap();
+    settings.changed().await.unwrap();
+    assert_eq!(
+        sandbox
+            .snapshot(CharacterId::Mita)
+            .await
+            .unwrap()
+            .settings
+            .values
+            .voice
+            .volume
+            .get(),
+        27
+    );
+
+    let external = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        ChatApi::publish_message(
+            CharacterId::KindMita,
+            UserInput::new("external input".into()).unwrap(),
+        )
+        .unwrap(),
+        RequestSource::Client(Uuid::new_v4()),
+    ))
+    .unwrap();
+    let call = server.next().await;
+    shown(&app.presenter().chat, external.id(), false).await;
+    assert!(
+        sandbox
+            .snapshot(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .requests
+            .requests
+            .iter()
+            .any(|r| r.metadata.id == external.id())
+    );
+    call.respond
+        .send(Reply::Text("external accepted answer"))
+        .unwrap();
+    finished(&external).await;
+    let kind = sandbox.snapshot(CharacterId::KindMita).await.unwrap();
+    assert!(
+        kind.messages
+            .iter()
+            .any(|m| m.content == "external accepted answer")
+    );
+    assert!(
+        !kind
+            .messages
+            .iter()
+            .any(|m| m.content == "accepted sandbox answer")
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[derive(Debug)]
 struct Call {
     path: String,
