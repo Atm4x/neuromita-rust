@@ -327,10 +327,14 @@ impl AiSupervisor {
         composition: &composition::RuntimeComposition,
     ) -> Result<Uuid, AiRuntimeError> {
         if !composition.services().contains(&service) {
-            return Err(AiRuntimeError::Protocol("service absent from resolved composition".into()));
+            return Err(AiRuntimeError::Protocol(
+                "service absent from resolved composition".into(),
+            ));
         }
         if self.topology == ProcessTopology::Split && composition.services() != [service] {
-            return Err(AiRuntimeError::Protocol("split worker contains another service".into()));
+            return Err(AiRuntimeError::Protocol(
+                "split worker contains another service".into(),
+            ));
         }
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
@@ -571,6 +575,11 @@ impl VoiceProvider for PythonVoiceProvider {
 mod tests {
     use super::*;
 
+    fn test_python() -> String {
+        std::env::var("NEUROMITA_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned())
+    }
+
     #[test]
     fn slots_follow_topology() {
         assert_eq!(
@@ -597,7 +606,8 @@ mod tests {
                 .unwrap();
             let mut code = tokio::fs::read_to_string(src.join("plugin.py"))
                 .await
-                .unwrap();
+                .unwrap()
+                .replace("\r\n", "\n");
             if id == "mock_tts" {
                 let needle = "    def initialize(self, settings):\n";
                 assert!(code.contains(needle));
@@ -610,8 +620,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let python =
-            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let python = test_python();
         let supervisor = Arc::new(AiSupervisor::new(
             ProcessTopology::Split,
             PythonHostConfig {
@@ -662,8 +671,7 @@ mod tests {
     #[tokio::test]
     async fn candidate_activation_rolls_back_on_failure_and_replaces_on_success() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let python =
-            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let python = test_python();
         let supervisor = AiSupervisor::new(
             ProcessTopology::Split,
             PythonHostConfig {
@@ -737,8 +745,7 @@ mod tests {
     #[tokio::test]
     async fn python_plugin_host_roundtrip() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let python =
-            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let python = test_python();
         let config = PythonHostConfig {
             python_executable: python.into(),
             sdk_root: root.clone(),
@@ -800,8 +807,7 @@ mod tests {
     #[tokio::test]
     async fn shared_host_can_run_tts_and_asr_without_separate_processes() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let python = std::env::var("NEUROMITA_TEST_PYTHON")
-            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned());
+        let python = test_python();
         let supervisor = Arc::new(AiSupervisor::new(
             ProcessTopology::Shared,
             PythonHostConfig {

@@ -1,4 +1,4 @@
-Semantic retrieval implementation update: the prior "NOT implemented" status below describes the base `SomeTests` snapshot. New separate branch implements provider contracts, Gemini 001/2 mock-verified HTTP, async exact-vector ranking with disposable bounded cache, opt-in CLI setting, and synthetic quality/cost fixtures. See src/generation/SEMANTIC_RETRIEVAL.md. Live Gemini benchmark is NOT verified.
+Integration update, 2026-11-03: all fetched origin development heads are consolidated into `codex/slint-gui-20261103` for a PR to main. Read [integration notes](future/integration-20261103.md). This combines GUI/localization, the AI/Python runtime, the complete memory/knowledge branch chain, and provisional request observations. Earlier "NOT implemented" and "separate branch" statements below describe historical checkpoints. Real model parity and live embedding benchmarks remain unverified.
 
 # Handoff: Rust core contracts
 

@@ -1,5 +1,6 @@
 //! Resolve plugin package pins through uv without mutating active environments.
 
+use super::{layer::validate_lock, overlay::LockedPackage};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -8,7 +9,6 @@ use std::{
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use uuid::Uuid;
-use super::{layer::validate_lock, overlay::LockedPackage};
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
@@ -40,14 +40,21 @@ impl DependencyResolver {
         constraints: &[LockedPackage],
         python_version: &str,
     ) -> Result<Vec<LockedPackage>, ResolveError> {
-        if !self.uv_executable.is_absolute() || !self.python_executable.is_absolute()
-            || !self.cache_directory.is_absolute() || self.timeout.is_zero()
+        if !self.uv_executable.is_absolute()
+            || !self.python_executable.is_absolute()
+            || !self.cache_directory.is_absolute()
+            || self.timeout.is_zero()
         {
-            return Err(ResolveError::Invalid("absolute paths and nonzero timeout required".into()));
+            return Err(ResolveError::Invalid(
+                "absolute paths and nonzero timeout required".into(),
+            ));
         }
         validate_lock(direct, python_version).map_err(|e| ResolveError::Invalid(e.to_string()))?;
-        validate_lock(constraints, python_version).map_err(|e| ResolveError::Invalid(e.to_string()))?;
-        if direct.is_empty() { return Ok(Vec::new()); }
+        validate_lock(constraints, python_version)
+            .map_err(|e| ResolveError::Invalid(e.to_string()))?;
+        if direct.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut backend = HashMap::new();
         for package in constraints {
             backend.insert(normalize(&package.name), package.version.as_str());
@@ -57,7 +64,8 @@ impl DependencyResolver {
                 && *version != package.version
             {
                 return Err(ResolveError::Conflict(format!(
-                    "{}: backend {version}, plugin {}", package.name, package.version
+                    "{}: backend {version}, plugin {}",
+                    package.name, package.version
                 )));
             }
         }
@@ -76,13 +84,15 @@ impl DependencyResolver {
                 && package.version != *version
             {
                 return Err(ResolveError::Conflict(format!(
-                    "{}: backend {version}, resolved {}", package.name, package.version
+                    "{}: backend {version}, resolved {}",
+                    package.name, package.version
                 )));
             }
         }
-        Ok(packages.into_iter().filter(|package| {
-            !backend.contains_key(&normalize(&package.name))
-        }).collect())
+        Ok(packages
+            .into_iter()
+            .filter(|package| !backend.contains_key(&normalize(&package.name)))
+            .collect())
     }
 
     async fn compile_in(
@@ -97,10 +107,19 @@ impl DependencyResolver {
         tokio::fs::write(&input, serialize_pins(direct)).await?;
         tokio::fs::write(&bounds, serialize_pins(constraints)).await?;
         let mut command = Command::new(&self.uv_executable);
-        command.args(["pip", "compile", "--no-config", "--no-python-downloads", "--python"])
+        command
+            .args([
+                "pip",
+                "compile",
+                "--no-config",
+                "--no-python-downloads",
+                "--python",
+            ])
             .arg(&self.python_executable)
-            .arg("--output-file").arg(&output)
-            .arg("--constraint").arg(&bounds)
+            .arg("--output-file")
+            .arg(&output)
+            .arg("--constraint")
+            .arg(&bounds)
             .arg("--no-build")
             .arg(&input)
             .env("UV_CACHE_DIR", &self.cache_directory)
@@ -109,14 +128,19 @@ impl DependencyResolver {
             .current_dir(stage)
             .kill_on_drop(true);
         let response = timeout(self.timeout, command.output())
-            .await.map_err(|_| ResolveError::Timeout)??;
+            .await
+            .map_err(|_| ResolveError::Timeout)??;
         if !response.status.success() {
             return Err(ResolveError::Uv(
-                String::from_utf8_lossy(&response.stderr).chars().take(1600).collect()
+                String::from_utf8_lossy(&response.stderr)
+                    .chars()
+                    .take(1600)
+                    .collect(),
             ));
         }
         let packages = parse_lock(&tokio::fs::read_to_string(output).await?)?;
-        let resolved: HashMap<_,_> = packages.iter()
+        let resolved: HashMap<_, _> = packages
+            .iter()
             .map(|package| (normalize(&package.name), package.version.as_str()))
             .collect();
         for direct_pin in direct {
@@ -124,7 +148,8 @@ impl DependencyResolver {
                 != Some(direct_pin.version.as_str())
             {
                 return Err(ResolveError::Unsupported(format!(
-                    "missing direct pin {}=={}", direct_pin.name, direct_pin.version
+                    "missing direct pin {}=={}",
+                    direct_pin.name, direct_pin.version
                 )));
             }
         }
@@ -137,9 +162,9 @@ fn normalize(name: &str) -> String {
 }
 
 fn serialize_pins(pins: &[LockedPackage]) -> String {
-    pins.iter().map(|package| {
-        format!("{}=={}\n", package.name, package.version)
-    }).collect()
+    pins.iter()
+        .map(|package| format!("{}=={}\n", package.name, package.version))
+        .collect()
 }
 
 fn parse_lock(source: &str) -> Result<Vec<LockedPackage>, ResolveError> {
@@ -147,20 +172,30 @@ fn parse_lock(source: &str) -> Result<Vec<LockedPackage>, ResolveError> {
     let mut pins = Vec::new();
     for line in source.lines() {
         let text = line.trim();
-        if text.is_empty() || text.starts_with('#') { continue; }
-        if text.starts_with('-') || text.starts_with('\\')
-            || text.contains(';') || text.contains('@')
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        if text.starts_with('-')
+            || text.starts_with('\\')
+            || text.contains(';')
+            || text.contains('@')
         {
             return Err(ResolveError::Unsupported(text.into()));
         }
-        let (name, version) = text.split_once("==")
+        let (name, version) = text
+            .split_once("==")
             .ok_or_else(|| ResolveError::Unsupported(text.into()))?;
-        if name.is_empty() || version.is_empty()
-            || version.contains('=') || version.contains(char::is_whitespace)
+        if name.is_empty()
+            || version.is_empty()
+            || version.contains('=')
+            || version.contains(char::is_whitespace)
         {
             return Err(ResolveError::Unsupported(text.into()));
         }
-        let pin = LockedPackage {name:name.into(), version:version.into()};
+        let pin = LockedPackage {
+            name: name.into(),
+            version: version.into(),
+        };
         validate_lock(std::slice::from_ref(&pin), "3.13.5")
             .map_err(|_| ResolveError::Unsupported(text.into()))?;
         if !found.insert(normalize(&pin.name)) {
@@ -199,14 +234,25 @@ mod tests {
         let python = root.join("python");
         tokio::fs::write(&python, "fake").await.unwrap();
         let resolver = DependencyResolver {
-            uv_executable:uv, python_executable:python,
-            cache_directory:root.join("cache"), timeout:Duration::from_secs(4),
+            uv_executable: uv,
+            python_executable: python,
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(4),
         };
-        let packages = resolver.resolve(
-            &[LockedPackage {name:"transformers".into(),version:"4.45.0".into()}],
-            &[LockedPackage {name:"torch".into(),version:"2.8.0".into()}],
-            "3.13.5",
-        ).await.unwrap();
+        let packages = resolver
+            .resolve(
+                &[LockedPackage {
+                    name: "transformers".into(),
+                    version: "4.45.0".into(),
+                }],
+                &[LockedPackage {
+                    name: "torch".into(),
+                    version: "2.8.0".into(),
+                }],
+                "3.13.5",
+            )
+            .await
+            .unwrap();
         assert_eq!(packages.len(), 2);
         assert!(packages.iter().any(|package| package.name == "tokenizers"));
         tokio::fs::remove_dir_all(root).await.unwrap();

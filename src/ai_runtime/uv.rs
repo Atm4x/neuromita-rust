@@ -73,7 +73,7 @@ fn hex_digest(digest: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn sha256(bytes: &[u8]) -> String {
     hex_digest(ring::digest::digest(&SHA256, bytes).as_ref())
 }

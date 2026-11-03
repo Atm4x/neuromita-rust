@@ -131,6 +131,7 @@ impl BackendInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use uuid::Uuid;
 
     fn plan() -> LockedBackend {

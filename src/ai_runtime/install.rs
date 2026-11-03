@@ -367,8 +367,8 @@ mod tests {
     #[tokio::test]
     async fn reads_a_plugin_install_contract_without_inference_initialization() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let python =
-            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let python = std::env::var("NEUROMITA_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned());
         let host = crate::ai_runtime::PythonHostConfig {
             python_executable: python.into(),
             sdk_root: root.clone(),

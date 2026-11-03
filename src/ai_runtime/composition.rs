@@ -1,12 +1,15 @@
 //! Verified, selected package layers used to construct each Python worker import path.
 
-use std::{collections::{HashMap, HashSet}, path::PathBuf};
-use thiserror::Error;
 use super::{
     AiService, ProcessTopology,
     backend::{BackendInstaller, LockedBackend},
     overlay::{LockedOverlay, LockedPackage, OverlayInstaller},
 };
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct ServiceSelection {
@@ -37,9 +40,15 @@ pub enum CompositionError {
 }
 
 impl RuntimeComposition {
-    pub fn python_version(&self) -> &str { &self.python_version }
-    pub fn paths(&self) -> &[PathBuf] { &self.paths }
-    pub fn services(&self) -> &[AiService] { &self.services }
+    pub fn python_version(&self) -> &str {
+        &self.python_version
+    }
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+    pub fn services(&self) -> &[AiService] {
+        &self.services
+    }
 
     pub async fn resolve(
         topology: ProcessTopology,
@@ -51,15 +60,22 @@ impl RuntimeComposition {
         let mut unique = HashSet::new();
         for selection in selections {
             if !unique.insert(selection.service) {
-                return Err(CompositionError::Invalid("duplicate service selection".into()));
+                return Err(CompositionError::Invalid(
+                    "duplicate service selection".into(),
+                ));
             }
         }
         if !unique.contains(&requested_service) {
-            return Err(CompositionError::Invalid("requested service not selected".into()));
+            return Err(CompositionError::Invalid(
+                "requested service not selected".into(),
+            ));
         }
-        let mut active: Vec<_> = selections.iter().filter(|selected| {
-            topology == ProcessTopology::Shared || selected.service == requested_service
-        }).collect();
+        let mut active: Vec<_> = selections
+            .iter()
+            .filter(|selected| {
+                topology == ProcessTopology::Shared || selected.service == requested_service
+            })
+            .collect();
         active.sort_by_key(|selection| order(selection.service));
         let mut versions = HashMap::<String, String>::new();
         let mut python_version: Option<String> = None;
@@ -86,9 +102,8 @@ impl RuntimeComposition {
                 add_path(&mut overlay_paths, &mut seen_paths, path)?;
             }
         }
-        let python_version = python_version.ok_or_else(|| {
-            CompositionError::Invalid("no installed layers selected".into())
-        })?;
+        let python_version = python_version
+            .ok_or_else(|| CompositionError::Invalid("no installed layers selected".into()))?;
         backend_paths.extend(overlay_paths);
         Ok(Self {
             python_version,
@@ -109,91 +124,151 @@ fn order(service: AiService) -> u8 {
 
 fn check_python(current: &mut Option<String>, required: &str) -> Result<(), CompositionError> {
     match current {
-        Some(existing) if existing != required => Err(CompositionError::Conflict(
-            format!("Python {existing} vs {required}")
-        )),
+        Some(existing) if existing != required => Err(CompositionError::Conflict(format!(
+            "Python {existing} vs {required}"
+        ))),
         Some(_) => Ok(()),
-        None => { *current = Some(required.into()); Ok(()) }
+        None => {
+            *current = Some(required.into());
+            Ok(())
+        }
     }
 }
 
 fn check_pins(
-    known: &mut HashMap<String, String>, packages: &[LockedPackage],
+    known: &mut HashMap<String, String>,
+    packages: &[LockedPackage],
 ) -> Result<(), CompositionError> {
     for package in packages {
-        let name = package.name.to_ascii_lowercase().replace(['-', '_', '.'], "-");
+        let name = package
+            .name
+            .to_ascii_lowercase()
+            .replace(['-', '_', '.'], "-");
         match known.get(&name) {
-            Some(version) if version != &package.version => return Err(
-                CompositionError::Conflict(format!(
-                    "{name}: {version} vs {}", package.version
-                ))
-            ),
+            Some(version) if version != &package.version => {
+                return Err(CompositionError::Conflict(format!(
+                    "{name}: {version} vs {}",
+                    package.version
+                )));
+            }
             Some(_) => (),
-            None => { known.insert(name, package.version.clone()); }
+            None => {
+                known.insert(name, package.version.clone());
+            }
         }
     }
     Ok(())
 }
 
 fn add_path(
-    target: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf,
+    target: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    path: PathBuf,
 ) -> Result<(), CompositionError> {
     if !path.is_absolute() || !path.is_dir() || path.is_symlink() {
-        return Err(CompositionError::Invalid("layer path must be a real absolute directory".into()));
+        return Err(CompositionError::Invalid(
+            "layer path must be a real absolute directory".into(),
+        ));
     }
     let canonical = std::fs::canonicalize(&path)?;
-    if seen.insert(canonical.clone()) { target.push(canonical); }
+    if seen.insert(canonical.clone()) {
+        target.push(canonical);
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{backend::BackendKind, overlay::LockedPackage};
     use super::*;
     use std::time::Duration;
     use uuid::Uuid;
-    use super::super::{backend::BackendKind, overlay::LockedPackage};
 
     #[tokio::test]
     async fn split_excludes_other_services_while_shared_rejects_collisions() {
         let root = std::env::temp_dir().join(format!("nm-composition-{}", Uuid::new_v4()));
         let b = BackendInstaller {
-            uv_executable: root.join("uv"), python_executable: root.join("python"),
-            backends_directory: root.join("backends"), cache_directory: root.join("cache"),
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            backends_directory: root.join("backends"),
+            cache_directory: root.join("cache"),
             timeout: Duration::from_secs(1),
         };
         let o = OverlayInstaller {
-            uv_executable: root.join("uv"), python_executable: root.join("python"),
-            overlays_directory: root.join("overlays"), cache_directory: root.join("cache"),
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
             timeout: Duration::from_secs(1),
         };
         let backend = LockedBackend {
-            kind: BackendKind::TorchCpu, revision: "base1".into(),
+            kind: BackendKind::TorchCpu,
+            revision: "base1".into(),
             python_version: "3.13.5".into(),
-            packages: vec![LockedPackage {name:"torch".into(), version:"2.8.0".into()}],
+            packages: vec![LockedPackage {
+                name: "torch".into(),
+                version: "2.8.0".into(),
+            }],
         };
-        let f5 = LockedOverlay {plugin_id:"f5".into(), revision:"rev1".into(),
-            python_version:"3.13.5".into(),
-            packages:vec![LockedPackage {name:"transformers".into(), version:"4.45.0".into()}]};
-        let asr = LockedOverlay {plugin_id:"gigaam".into(), revision:"rev1".into(),
-            python_version:"3.13.5".into(),
-            packages:vec![LockedPackage {name:"transformers".into(), version:"4.50.0".into()}]};
+        let f5 = LockedOverlay {
+            plugin_id: "f5".into(),
+            revision: "rev1".into(),
+            python_version: "3.13.5".into(),
+            packages: vec![LockedPackage {
+                name: "transformers".into(),
+                version: "4.45.0".into(),
+            }],
+        };
+        let asr = LockedOverlay {
+            plugin_id: "gigaam".into(),
+            revision: "rev1".into(),
+            python_version: "3.13.5".into(),
+            packages: vec![LockedPackage {
+                name: "transformers".into(),
+                version: "4.50.0".into(),
+            }],
+        };
         for (path, marker, bytes) in [
-            (b.installed_path(&backend).unwrap(), ".neuromita-backend.json", serde_json::to_vec(&backend).unwrap()),
-            (o.installed_path(&f5).unwrap(), ".neuromita-overlay.json", serde_json::to_vec(&f5).unwrap()),
-            (o.installed_path(&asr).unwrap(), ".neuromita-overlay.json", serde_json::to_vec(&asr).unwrap()),
+            (
+                b.installed_path(&backend).unwrap(),
+                ".neuromita-backend.json",
+                serde_json::to_vec(&backend).unwrap(),
+            ),
+            (
+                o.installed_path(&f5).unwrap(),
+                ".neuromita-overlay.json",
+                serde_json::to_vec(&f5).unwrap(),
+            ),
+            (
+                o.installed_path(&asr).unwrap(),
+                ".neuromita-overlay.json",
+                serde_json::to_vec(&asr).unwrap(),
+            ),
         ] {
             tokio::fs::create_dir_all(&path).await.unwrap();
             tokio::fs::write(path.join(marker), bytes).await.unwrap();
         }
         let selected = [
-            ServiceSelection {service:AiService::Tts, backends:vec![backend.clone()], overlays:vec![f5]},
-            ServiceSelection {service:AiService::Asr, backends:vec![backend], overlays:vec![asr]},
+            ServiceSelection {
+                service: AiService::Tts,
+                backends: vec![backend.clone()],
+                overlays: vec![f5],
+            },
+            ServiceSelection {
+                service: AiService::Asr,
+                backends: vec![backend],
+                overlays: vec![asr],
+            },
         ];
-        let split = RuntimeComposition::resolve(ProcessTopology::Split, AiService::Tts, &selected, &b, &o).await.unwrap();
+        let split =
+            RuntimeComposition::resolve(ProcessTopology::Split, AiService::Tts, &selected, &b, &o)
+                .await
+                .unwrap();
         assert_eq!(split.paths.len(), 2);
         assert_eq!(split.services, vec![AiService::Tts]);
         assert!(matches!(
-            RuntimeComposition::resolve(ProcessTopology::Shared, AiService::Tts, &selected, &b, &o).await,
+            RuntimeComposition::resolve(ProcessTopology::Shared, AiService::Tts, &selected, &b, &o)
+                .await,
             Err(CompositionError::Conflict(_))
         ));
         tokio::fs::remove_dir_all(root).await.unwrap();
@@ -203,22 +278,44 @@ mod tests {
     async fn absent_or_duplicate_selection_fails_closed() {
         let root = std::env::temp_dir().join(format!("nm-select-{}", Uuid::new_v4()));
         let b = BackendInstaller {
-            uv_executable:root.join("uv"), python_executable:root.join("python"),
-            backends_directory:root.join("backend"), cache_directory:root.join("cache"),
-            timeout:Duration::from_secs(1),
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            backends_directory: root.join("backend"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(1),
         };
         let o = OverlayInstaller {
-            uv_executable:root.join("uv"), python_executable:root.join("python"),
-            overlays_directory:root.join("overlay"), cache_directory:root.join("cache"),
-            timeout:Duration::from_secs(1),
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            overlays_directory: root.join("overlay"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(1),
         };
-        let selection = ServiceSelection {service:AiService::Tts, backends:vec![], overlays:vec![]};
+        let selection = ServiceSelection {
+            service: AiService::Tts,
+            backends: vec![],
+            overlays: vec![],
+        };
         assert!(matches!(
-            RuntimeComposition::resolve(ProcessTopology::Split, AiService::Tts, &[selection.clone()], &b, &o).await,
+            RuntimeComposition::resolve(
+                ProcessTopology::Split,
+                AiService::Tts,
+                &[selection.clone()],
+                &b,
+                &o
+            )
+            .await,
             Err(CompositionError::Invalid(_))
         ));
         assert!(matches!(
-            RuntimeComposition::resolve(ProcessTopology::Shared, AiService::Tts, &[selection.clone(),selection], &b, &o).await,
+            RuntimeComposition::resolve(
+                ProcessTopology::Shared,
+                AiService::Tts,
+                &[selection.clone(), selection],
+                &b,
+                &o
+            )
+            .await,
             Err(CompositionError::Invalid(_))
         ));
     }

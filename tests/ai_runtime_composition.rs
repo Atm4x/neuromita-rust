@@ -2,7 +2,8 @@ use std::{path::PathBuf, time::Duration};
 
 use neuromita::ai_runtime::{
     AiService, AiSupervisor, ProcessTopology, PythonHostConfig,
-    backend::BackendInstaller, composition::{RuntimeComposition, ServiceSelection},
+    backend::BackendInstaller,
+    composition::{RuntimeComposition, ServiceSelection},
     overlay::{LockedOverlay, OverlayInstaller},
 };
 use serde_json::json;
@@ -31,42 +32,76 @@ class Plugin:
     def infer(self, input_data): return {"text": "ready"}
     def unload(self): pass
 "#,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let overlay = LockedOverlay {
-        plugin_id:"fixture".into(), revision:"rev1".into(),
-        python_version:"3.13.5".into(), packages:vec![],
+        plugin_id: "fixture".into(),
+        revision: "rev1".into(),
+        python_version: "3.13.5".into(),
+        packages: vec![],
     };
     let backends = BackendInstaller {
-        uv_executable:root.join("uv"), python_executable:root.join("python"),
-        backends_directory:root.join("backends"), cache_directory:root.join("cache"),
-        timeout:Duration::from_secs(2),
+        uv_executable: root.join("uv"),
+        python_executable: root.join("python"),
+        backends_directory: root.join("backends"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(2),
     };
     let overlays = OverlayInstaller {
-        uv_executable:root.join("uv"), python_executable:root.join("python"),
-        overlays_directory:root.join("overlays"), cache_directory:root.join("cache"),
-        timeout:Duration::from_secs(2),
+        uv_executable: root.join("uv"),
+        python_executable: root.join("python"),
+        overlays_directory: root.join("overlays"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(2),
     };
     let overlay_dir = overlays.installed_path(&overlay).unwrap();
     tokio::fs::create_dir_all(&overlay_dir).await.unwrap();
-    tokio::fs::write(overlay_dir.join("fixture_overlay_dependency.py"), "VALUE = 'overlay-loaded'\n").await.unwrap();
-    tokio::fs::write(overlay_dir.join(".neuromita-overlay.json"), serde_json::to_vec(&overlay).unwrap()).await.unwrap();
+    tokio::fs::write(
+        overlay_dir.join("fixture_overlay_dependency.py"),
+        "VALUE = 'overlay-loaded'\n",
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        overlay_dir.join(".neuromita-overlay.json"),
+        serde_json::to_vec(&overlay).unwrap(),
+    )
+    .await
+    .unwrap();
     let selected = ServiceSelection {
-        service:AiService::Tts, backends:vec![], overlays:vec![overlay],
+        service: AiService::Tts,
+        backends: vec![],
+        overlays: vec![overlay],
     };
     let composition = RuntimeComposition::resolve(
-        ProcessTopology::Split, AiService::Tts, &[selected], &backends, &overlays,
-    ).await.unwrap();
-    let python = std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) { "python" } else { "python3" }.into()
-    });
-    let supervisor = AiSupervisor::new(ProcessTopology::Split, PythonHostConfig {
-        python_executable:PathBuf::from(python),
-        sdk_root:PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
-        plugins_directory:root.join("plugins"),
-        request_timeout:Duration::from_secs(10),
-    });
-    supervisor.start_composed(AiService::Tts, &composition).await.unwrap();
-    let result = supervisor.initialize(AiService::Tts, "fixture", json!({})).await.unwrap();
+        ProcessTopology::Split,
+        AiService::Tts,
+        &[selected],
+        &backends,
+        &overlays,
+    )
+    .await
+    .unwrap();
+    let python = std::env::var("NEUROMITA_TEST_PYTHON")
+        .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.into());
+    let supervisor = AiSupervisor::new(
+        ProcessTopology::Split,
+        PythonHostConfig {
+            python_executable: PathBuf::from(python),
+            sdk_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
+            plugins_directory: root.join("plugins"),
+            request_timeout: Duration::from_secs(10),
+        },
+    );
+    supervisor
+        .start_composed(AiService::Tts, &composition)
+        .await
+        .unwrap();
+    let result = supervisor
+        .initialize(AiService::Tts, "fixture", json!({}))
+        .await
+        .unwrap();
     assert_eq!(result["value"], "overlay-loaded");
     supervisor.stop(AiService::Tts).await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
