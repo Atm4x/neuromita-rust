@@ -69,3 +69,14 @@ weighted automatic eviction and is intentionally opt-in until parity is decided.
 A full-capacity preview may require 255 Forget changes; character user-edit and
 Timeline batch limits therefore allow up to 256 atomic changes.
 No ML inference, GUI, new storage, or event bus is involved.
+
+## Exact idempotent fact insertion (#21)
+
+`MemoryCommand::EnsureFact { priority, content }` is an explicit action that
+`CharactersPresenter::edit_memories` delegates to the canonical Character
+owner. It matches a retained **fact** by exact text, preserves its `MemoryId`
+when reactivating `Forgotten`/`Deleted`, and returns a no-op if already active.
+Unlike regular `Add`, it never implicitly upgrades an active fact's priority.
+Ambiguous matches, protection and capacity violations fail the entire guarded
+edit without writing Timeline. The stored `expires_at_unix_ms` is preserved.
+This operation does not require any AI Engine integration or GUI changes.

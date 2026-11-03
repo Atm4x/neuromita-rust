@@ -144,6 +144,13 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    /// Idempotent exact-text insertion. A retained forgotten/deleted fact is
+    /// reactivated under its original ID instead of allocating another record.
+    /// Ordinary Add, explicit Restore and island operations are unchanged.
+    EnsureFact {
+        priority: MemoryPriority,
+        content: String,
+    },
     Update {
         id: MemoryId,
         priority: Option<MemoryPriority>,
@@ -464,6 +471,42 @@ impl CharacterMemories {
                     ));
                     next.apply_committed(&change)?;
                     changes.push(change);
+                }
+                MemoryCommand::EnsureFact { priority, content } => {
+                    if content.trim().is_empty() || content.chars().count() > 2000 {
+                        return Err("invalid memory record");
+                    }
+                    // Python skip_if_exists compares exact text, not normalized
+                    // lexical similarity. Ambiguous retained identities must not
+                    // be chosen based on map iteration order.
+                    let mut matches = next.records.values().filter(|record| {
+                        record.kind == MemoryKind::Fact && record.content == *content
+                    });
+                    let existing = matches.next().cloned();
+                    if matches.next().is_some() {
+                        return Err("ambiguous retained exact memory match");
+                    }
+                    if let Some(mut record) = existing {
+                        if record.state == MemoryState::Active {
+                            continue;
+                        }
+                        if record.protected {
+                            return Err("protected memory cannot be restored");
+                        }
+                        record.state = MemoryState::Active;
+                        record.priority = *priority;
+                        let change = MemoryChange::Upsert(record);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    } else {
+                        let change = MemoryChange::Upsert(MemoryRecord::fact(
+                            MemoryId::new(),
+                            *priority,
+                            content.clone(),
+                        ));
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
                 }
                 MemoryCommand::Update {
                     id,
@@ -1078,6 +1121,193 @@ mod tests {
         book.apply_committed(&MemoryChange::Upsert(duplicate))
             .unwrap();
         assert_eq!(book.ensure_unique(), Err("duplicate memory island"));
+    }
+
+    #[test]
+    fn ensure_fact_exact_match_restores_retained_identity_and_priority() {
+        let id = MemoryId(Uuid::from_u128(501));
+        let mut book = CharacterMemories::default();
+        let mut record = MemoryRecord::fact(id, MemoryPriority::Low, "Original Text");
+        record.expires_at_unix_ms = Some(1234);
+        book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+
+        apply(&mut book, &[MemoryCommand::Forget { id }]);
+        assert!(
+            book.resolve(&[MemoryCommand::Add {
+                priority: MemoryPriority::High,
+                content: "Original Text".into(),
+            }])
+            .is_err()
+        );
+        let expected = MemoryCommand::EnsureFact {
+            priority: MemoryPriority::High,
+            content: "Original Text".into(),
+        };
+        let changes = book.resolve(std::slice::from_ref(&expected)).unwrap();
+        assert_eq!(changes.len(), 1);
+        let MemoryChange::Upsert(reactivated) = &changes[0] else {
+            panic!("expected upsert")
+        };
+        assert_eq!(reactivated.id, id);
+        assert_eq!(reactivated.state, MemoryState::Active);
+        assert_eq!(reactivated.priority, MemoryPriority::High);
+        assert_eq!(reactivated.expires_at_unix_ms, Some(1234));
+        book.apply_committed(&changes[0]).unwrap();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Critical,
+                content: "Original Text".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.get(id).unwrap().priority, MemoryPriority::High);
+
+        apply(&mut book, &[MemoryCommand::SoftDelete { id }]);
+        apply(
+            &mut book,
+            &[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "Original Text".into(),
+            }],
+        );
+        assert_eq!(book.all().len(), 1);
+        assert_eq!(book.get(id).unwrap().state, MemoryState::Active);
+        assert_eq!(book.get(id).unwrap().priority, MemoryPriority::Normal);
+    }
+
+    #[test]
+    fn ensure_fact_uses_exact_text_and_refuses_ambiguous_retained_matches() {
+        let mut book = CharacterMemories::default();
+        apply(
+            &mut book,
+            &[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "Tea time".into(),
+            }],
+        );
+        let before = book.clone();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Low,
+                content: "tea time".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book, before);
+
+        let first = MemoryId(Uuid::from_u128(502));
+        let second = MemoryId(Uuid::from_u128(503));
+        for id in [first, second] {
+            let mut record = MemoryRecord::fact(id, MemoryPriority::Low, "duplicated deleted row");
+            record.state = MemoryState::Deleted;
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        assert_eq!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "duplicated deleted row".into(),
+            }]),
+            Err("ambiguous retained exact memory match")
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "  ".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book.get(first).unwrap().state, MemoryState::Deleted);
+        assert_eq!(book.get(second).unwrap().state, MemoryState::Deleted);
+        assert_eq!(book.all().len(), 3);
+    }
+
+    #[test]
+    fn ensure_fact_rejects_protected_reactivation_and_batch_rolls_back() {
+        let mut book = CharacterMemories::default();
+        let id = MemoryId(Uuid::from_u128(504));
+        let mut record = MemoryRecord::fact(id, MemoryPriority::High, "protected forgotten");
+        record.state = MemoryState::Forgotten;
+        record.protected = true;
+        book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        let before = book.clone();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Critical,
+                content: "protected forgotten".into(),
+            }])
+            .is_err()
+        );
+        assert!(
+            book.resolve(&[
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Low,
+                    content: "new fact".into(),
+                },
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Critical,
+                    content: "protected forgotten".into(),
+                },
+            ])
+            .is_err()
+        );
+        assert_eq!(book, before);
+    }
+
+    #[test]
+    fn ensure_fact_batches_are_idempotent_and_capacity_guarded() {
+        let mut book = CharacterMemories::default();
+        let changes = book
+            .resolve(&[
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Low,
+                    content: "one consistent fact".into(),
+                },
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::High,
+                    content: "one consistent fact".into(),
+                },
+            ])
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        let MemoryChange::Upsert(record) = &changes[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(record.priority, MemoryPriority::Low);
+        book.apply_committed(&changes[0]).unwrap();
+        assert_eq!(book.all().len(), 1);
+
+        for n in 1..MAX_ACTIVE_FACTS {
+            let record = MemoryRecord::fact(
+                MemoryId(Uuid::from_u128(1000 + n as u128)),
+                MemoryPriority::Normal,
+                format!("capacity item {n}"),
+            );
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        let mut hidden = MemoryRecord::fact(
+            MemoryId(Uuid::from_u128(2000)),
+            MemoryPriority::Low,
+            "unavailable target",
+        );
+        hidden.state = MemoryState::Forgotten;
+        book.apply_committed(&MemoryChange::Upsert(hidden)).unwrap();
+        let original = book.clone();
+        assert_eq!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "unavailable target".into(),
+            }]),
+            Err("active memory capacity exceeded")
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "new overflow".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book, original);
     }
 
     #[test]

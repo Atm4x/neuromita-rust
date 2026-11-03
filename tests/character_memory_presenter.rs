@@ -659,3 +659,157 @@ async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
     reopened.shutdown().await.unwrap();
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolation() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let initial = presenter.memories(CharacterId::Mita).await.unwrap();
+    let first = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            initial.clone(),
+            vec![MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Low,
+                content: "persistent unique wording".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.applied.len(), 1);
+    let id = first.snapshot.records()[0].id;
+    assert!(matches!(
+        presenter
+            .edit_memories(
+                CharacterId::Mita,
+                initial,
+                vec![MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Low,
+                    content: "persistent unique wording".into(),
+                }],
+            )
+            .await,
+        Err(CharacterError::StaleState)
+    ));
+    let repeated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            first.snapshot,
+            vec![MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Critical,
+                content: "persistent unique wording".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(repeated.applied.is_empty());
+    assert_eq!(repeated.snapshot.records()[0].priority, MemoryPriority::Low);
+    let forgotten = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            repeated.snapshot,
+            vec![MemoryCommand::Forget { id }],
+        )
+        .await
+        .unwrap();
+    let reactivated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            forgotten.snapshot,
+            vec![MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "persistent unique wording".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(reactivated.applied.len(), 1);
+    assert_eq!(reactivated.snapshot.records()[0].id, id);
+    assert_eq!(reactivated.snapshot.records()[0].state, MemoryState::Active);
+    assert_eq!(
+        reactivated.snapshot.records()[0].priority,
+        MemoryPriority::High
+    );
+    assert!(
+        presenter
+            .memories(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn ensure_fact_reactivates_deleted_identity_across_sqlite_reopen() {
+    let _serial = SERIAL.lock().await;
+    let path = std::env::temp_dir().join(format!("neuromita-ensure-fact-{}", uuid::Uuid::new_v4()));
+    let launch = || {
+        let preset = GenerationPreset::new(ProviderTemplate::Gemini(
+            GeminiTemplate::new(
+                "http://127.0.0.1:1/v1beta/",
+                "test-model",
+                "unused-key",
+                GenerationSettings::new(0.7, 128, Duration::from_secs(5)).unwrap(),
+            )
+            .unwrap(),
+        ));
+        ApplicationConfig::persistent(
+            preset,
+            ResponseGenerator::new(Vec::new()).unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &path,
+        )
+        .unwrap()
+    };
+    let app = ApplicationLifecycle::start(launch()).await.unwrap();
+    let presenter = &app.presenter().characters;
+    let first = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Low,
+                content: "survives restarts".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let id = first.snapshot.records()[0].id;
+    presenter
+        .edit_memories(
+            CharacterId::Mita,
+            first.snapshot,
+            vec![MemoryCommand::SoftDelete { id }],
+        )
+        .await
+        .unwrap();
+    app.shutdown().await.unwrap();
+
+    let reopened = ApplicationLifecycle::start(launch()).await.unwrap();
+    let presenter = &reopened.presenter().characters;
+    let restored = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "survives restarts".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.snapshot.records().len(), 1);
+    assert_eq!(restored.snapshot.records()[0].id, id);
+    assert_eq!(restored.snapshot.records()[0].state, MemoryState::Active);
+    assert_eq!(
+        restored.snapshot.records()[0].priority,
+        MemoryPriority::High
+    );
+    reopened.shutdown().await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
