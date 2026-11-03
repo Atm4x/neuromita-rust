@@ -31,6 +31,7 @@ export global SettingsUi {
     in-out property <bool> split-mita-presets;
     in-out property <bool> split-kind-presets;
     in-out property <int> selected-character;
+    in-out property <bool> character-prompt-expanded: true;
     callback search-character(string);
     in-out property <string> preset-edit-id;
     in-out property <string> preset-save-token;
@@ -46,6 +47,7 @@ export global SettingsUi {
     callback preset-delete(string);
     callback preset-activate(string);
     callback character-preset(int, int, string);
+    callback character-common(int, string);
     callback voice-launcher(bool);
     callback voice-game(bool);
     callback voice-name(string);
@@ -191,7 +193,7 @@ VerticalLayout {
                                 enabled: false; height: 38px;
                             }
                             Caption {
-                                text: I18n.i18n("settings.characters.prompt-contract", "Выбор набора будет доступен после интеграции контракта Python PromptPack.");
+                                text: I18n.i18n("settings.characters.prompt-contract", "Настройка наборов промптов появится позже.");
                                 color: SandboxTheme.muted; font-size: 11px; wrap: word-wrap;
                             }
                             Rectangle { height: 1px; background: #ffffff1f; }
@@ -201,11 +203,11 @@ VerticalLayout {
                                 checked: root.character == 0 ? SettingsUi.split-mita-presets : SettingsUi.split-kind-presets;
                                 enabled: root.connected;
                                 toggled(value) => {
-                                    if (root.character == 0) { SettingsUi.split-mita-presets = value; }
-                                    else { SettingsUi.split-kind-presets = value; }
-                                    if (!value && root.connected) {
-                                        SettingsUi.character-preset(root.character, 1, root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply);
-                                        SettingsUi.character-preset(root.character, 2, root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply);
+                                    if (value) { if root.character == 0 { SettingsUi.split-mita-presets = true; } else { SettingsUi.split-kind-presets = true; } }
+                                    else {
+                                        if root.character == 0 && SettingsUi.mita-reply == SettingsUi.mita-react && SettingsUi.mita-reply == SettingsUi.mita-initiate { SettingsUi.split-mita-presets = false; }
+                                        if root.character == 1 && SettingsUi.kind-reply == SettingsUi.kind-react && SettingsUi.kind-reply == SettingsUi.kind-initiate { SettingsUi.split-kind-presets = false; }
+                                        SettingsUi.character-common(root.character, root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply);
                                     }
                                 }
                             }
@@ -216,9 +218,7 @@ VerticalLayout {
                                     value: root.character == 0 ? SettingsUi.mita-reply : SettingsUi.kind-reply;
                                     selected(value) => {
                                         if (root.connected) {
-                                            SettingsUi.character-preset(root.character, 0, value);
-                                            SettingsUi.character-preset(root.character, 1, value);
-                                            SettingsUi.character-preset(root.character, 2, value);
+                                            SettingsUi.character-common(root.character, value);
                                         }
                                     }
                                 }
@@ -245,20 +245,20 @@ VerticalLayout {
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.history", "История персонажа и память"); glyph: "\u{f1da}"; expanded <=> MemoryUi.open;
 VerticalLayout {
                         spacing: 8px;
-                        Caption { text: I18n.i18n("settings.characters.history-actions", "Операции с историей будут подключены к существующему API управления данными."); color: SandboxTheme.muted; wrap: word-wrap; }
+                        Caption { text: I18n.i18n("settings.characters.history-actions", "Управляйте воспоминаниями этого персонажа."); color: SandboxTheme.muted; wrap: word-wrap; }
                         MemoryPanel { width: 100%; }
                      }
                     }
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.maintenance", "Обслуживание"); glyph: Fa.gear; expanded <=> root.maintenance-expanded;
 VerticalLayout {
                             padding: 0px; spacing: 8px;
-                            Caption { text: I18n.i18n("settings.characters.maintenance-note", "Импорт, переиндексация и удаление дублей требуют контракта обслуживания истории."); color: SandboxTheme.muted; wrap: word-wrap; }
+                            Caption { text: I18n.i18n("settings.characters.maintenance-note", "Операции обслуживания пока недоступны."); color: SandboxTheme.muted; wrap: word-wrap; }
                         }
                     }
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.danger", "Опасная зона — все персонажи"); glyph: "\u{f071}"; expanded <=> root.danger-expanded; danger: true;
 VerticalLayout {
                             padding: 0px;
-                            Caption { text: I18n.i18n("settings.characters.danger-note", "Глобальные разрушительные операции здесь не выполняются без отдельного API и подтверждения."); color: #ff8bb3; wrap: word-wrap; }
+                            Caption { text: I18n.i18n("settings.characters.danger-note", "Глобальные операции удаления пока недоступны."); color: #ff8bb3; wrap: word-wrap; }
                         }
                     }
                 }
@@ -377,7 +377,7 @@ export component SettingsPage inherits Rectangle {
                         description: I18n.i18n("settings.characters.description", "Библиотека персонажей, наборы промптов, пресеты генерации и память.");
                         glyph: Fa.badge;
                     }
-                    CharacterWorkspace { character <=> SettingsUi.selected-character; connected: root.connected; }
+                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
                 }
                 if SettingsUi.section == 3: ScrollView { content-width: self.visible-width;
                     VerticalLayout { padding: 2px; padding-right: 10px; spacing: 16px; alignment: start;

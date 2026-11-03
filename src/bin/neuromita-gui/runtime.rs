@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum Command {
+    RefreshReleases,
     MemorySelect(CharacterId),
     MemoryEdit(
         uuid::Uuid,
@@ -34,6 +35,7 @@ pub enum Command {
     DeletePreset(PresetId),
     ActivePreset(PresetId),
     AssignPreset(CharacterId, PresetSlot, PresetSelection),
+    AssignAllPresets(CharacterId, PresetSelection),
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
@@ -45,6 +47,8 @@ pub enum Command {
 }
 
 pub enum Update {
+    Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
+    ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
     MemoryError(String),
     MemorySaved(uuid::Uuid),
@@ -180,6 +184,7 @@ async fn observe(
     stop: &CancellationToken,
     publish: &impl Fn(Update),
 ) -> Result<(), String> {
+    let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Mita)?;
@@ -190,6 +195,7 @@ async fn observe(
     let mut presets = presenter.observe_presets();
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     loop {
+        publish(Update::Releases(releases.borrow_and_update().clone()));
         publish(Update::Connections(connections.borrow_and_update().clone()));
         requests.borrow_and_update();
         settings.borrow_and_update();
@@ -212,12 +218,13 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
-                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
+                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(id) => publish(Update::AdminSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
+                Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
                 Some(Command::MemoryEdit(edit_id, expected, commands)) => {
@@ -261,6 +268,7 @@ async fn observe(
                 },
             },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
+            result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
             result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },

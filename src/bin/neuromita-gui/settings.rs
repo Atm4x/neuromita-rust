@@ -40,6 +40,21 @@ pub fn execute(
                 .set(id)
                 .map_err(|e| e.to_string())?;
         }
+        Command::AssignAllPresets(character, selection) => {
+            if let PresetSelection::Specific(id) = selection {
+                api.presets.require(id).map_err(|e| e.to_string())?;
+            }
+            api.settings
+                .characters
+                .for_character(character)
+                .assignments
+                .set(neuromita::settings::OperationPresets {
+                    reply: selection,
+                    react: selection,
+                    initiate: selection,
+                })
+                .map_err(|e| e.to_string())?;
+        }
         Command::AssignPreset(character, operation, selection) => {
             if let PresetSelection::Specific(id) = selection {
                 api.presets.require(id).map_err(|e| e.to_string())?;
@@ -221,6 +236,31 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_character_common(move |character, value| {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<SettingsUi>();
+        let character = match character {
+            0 => CharacterId::Mita,
+            1 => CharacterId::KindMita,
+            _ => {
+                ui.set_settings_error("Unknown character".into());
+                return;
+            }
+        };
+        let selection = if value == "active" {
+            Ok(PresetSelection::Active)
+        } else {
+            id(&value).map(PresetSelection::Specific)
+        };
+        match selection {
+            Ok(selection) => send(Command::AssignAllPresets(character, selection)),
+            Err(error) => ui.set_settings_error(error.into()),
+        }
+    });
+    let send = dispatch.clone();
     settings.on_voice_launcher(move |value| send(Command::VoiceInLauncher(value)));
     let send = dispatch.clone();
     settings.on_voice_game(move |value| send(Command::VoiceInGame(value)));
@@ -250,6 +290,34 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_settings_voice_launcher(settings.values.voice.in_launcher);
     window.set_settings_voice_game(settings.values.voice.in_game);
     window.set_settings_voice_name(settings.values.voice.voice.as_str().into());
+    let mita = settings.values.characters.mita.presets;
+    let kind = settings.values.characters.kind_mita.presets;
+    let encode = |value: PresetSelection| match value {
+        PresetSelection::Active => "active".to_owned(),
+        PresetSelection::Specific(id) => id.0.to_string(),
+    };
+    if [
+        window.get_mita_reply().to_string(),
+        window.get_mita_react().to_string(),
+        window.get_mita_initiate().to_string(),
+    ] != [
+        encode(mita.reply),
+        encode(mita.react),
+        encode(mita.initiate),
+    ] {
+        window.set_split_mita_presets(mita.reply != mita.react || mita.reply != mita.initiate);
+    }
+    if [
+        window.get_kind_reply().to_string(),
+        window.get_kind_react().to_string(),
+        window.get_kind_initiate().to_string(),
+    ] != [
+        encode(kind.reply),
+        encode(kind.react),
+        encode(kind.initiate),
+    ] {
+        window.set_split_kind_presets(kind.reply != kind.react || kind.reply != kind.initiate);
+    }
     let selection = |value: PresetSelection| match value {
         PresetSelection::Active => "active".into(),
         PresetSelection::Specific(id) => id.0.to_string(),

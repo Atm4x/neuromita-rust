@@ -25,3 +25,5 @@ pub mod voice;
 
 pub use character::memory;
 pub mod turn;
+
+pub mod releases;

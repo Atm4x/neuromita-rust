@@ -9,11 +9,7 @@ use super::{
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
-    releases,
-    view::{
-        AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseEntry,
-        ReleaseItem,
-    },
+    view::{AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem},
 };
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -48,7 +44,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
     }
-    window.set_version("v2026.10.15.3".into());
+    window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
     let releases = presenter
         .borrow()
         .home()
@@ -114,7 +110,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     && window.get_release_releases().row_count() == 0
                     && window.get_release_error().is_empty()
                 {
-                    refresh_releases(&window);
+                    window.invoke_releases_refresh();
                 }
             }
         }
@@ -140,12 +136,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
-    let refresh_window = window.as_weak();
-    window.on_releases_refresh(move || {
-        if let Some(window) = refresh_window.upgrade() {
-            refresh_releases(&window);
-        }
-    });
     let link_window = window.as_weak();
     window.on_external_link(move |url| {
         if let Err(error) = open_project_url(&url) {
@@ -318,59 +308,6 @@ fn to_view(page: Page) -> PageId {
 #[cfg(test)]
 #[path = "binding_tests.rs"]
 mod tests;
-
-fn refresh_releases(window: &AppWindow) {
-    let generation = window.get_release_revision().wrapping_add(1);
-    window.set_release_revision(generation);
-    window.set_release_loading(true);
-    window.set_release_error("".into());
-    let weak = window.as_weak();
-    std::thread::spawn(move || {
-        let result = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime
-                .block_on(releases::fetch_releases())
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-        let _ = weak.upgrade_in_event_loop(move |window| {
-            if window.get_release_revision() != generation {
-                return;
-            }
-            window.set_release_loading(false);
-            match result {
-                Ok(entries) => {
-                    let mut prereleases = Vec::new();
-                    let mut releases = Vec::new();
-                    for entry in entries {
-                        let card = ReleaseEntry {
-                            id: entry.id.into(),
-                            title: entry.title.into(),
-                            date: entry.date.into(),
-                            summary: entry.summary.into(),
-                            details: entry.details.into(),
-                            url: entry.url.into(),
-                            prerelease: entry.prerelease,
-                        };
-                        if card.prerelease {
-                            prereleases.push(card);
-                        } else {
-                            releases.push(card);
-                        }
-                    }
-                    window.set_release_prereleases(ModelRc::new(VecModel::from(prereleases)));
-                    window.set_release_releases(ModelRc::new(VecModel::from(releases)));
-                }
-                Err(error) => {
-                    window
-                        .set_release_error(format!("Не удалось загрузить релизы: {error}").into());
-                }
-            }
-        });
-    });
-}
 
 fn open_project_url(url: &str) -> Result<(), String> {
     let permitted = [

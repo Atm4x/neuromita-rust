@@ -56,7 +56,7 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
 }
 
 fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
-    use super::super::view::{ChatRow, ChatStatus};
+    use super::super::view::{ChatRow, ChatStatus, ReleaseEntry};
     let window = AppWindow::new().unwrap();
     window
         .global::<I18n>()
@@ -322,6 +322,36 @@ fn memory_render_and_contract(window: &AppWindow) {
         ))
         .await
         .unwrap();
+        let initial_revision = app.presenter().settings.snapshot().unwrap().revision;
+        super::super::settings::execute(
+            app.presenter(),
+            Command::AssignAllPresets(
+                CharacterId::Mita,
+                neuromita::settings::PresetSelection::Specific(neuromita::generation::PresetId(0)),
+            ),
+        )
+        .unwrap();
+        let after = app.presenter().settings.snapshot().unwrap();
+        assert_eq!(after.revision, initial_revision + 1);
+        let assignments = after.values.characters.mita.presets;
+        assert_eq!(assignments.reply, assignments.react);
+        assert_eq!(assignments.reply, assignments.initiate);
+        assert!(
+            super::super::settings::execute(
+                app.presenter(),
+                Command::AssignAllPresets(
+                    CharacterId::Mita,
+                    neuromita::settings::PresetSelection::Specific(
+                        neuromita::generation::PresetId(999)
+                    )
+                )
+            )
+            .is_err()
+        );
+        assert_eq!(
+            app.presenter().settings.snapshot().unwrap().revision,
+            after.revision
+        );
         let characters = &app.presenter().characters;
         let initial = characters.memories(CharacterId::Mita).await.unwrap();
         characters
@@ -350,6 +380,12 @@ fn memory_render_and_contract(window: &AppWindow) {
         memory::render(window, &state, &page);
         let ui = window.global::<MemoryUi>();
         ui.set_open(true);
+        window
+            .global::<super::super::view::SettingsUi>()
+            .set_section(2);
+        window
+            .global::<super::super::view::SettingsUi>()
+            .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
         ui.set_content("Изменённый текст".into());
         let snapshot = characters.memories(CharacterId::Mita).await.unwrap();

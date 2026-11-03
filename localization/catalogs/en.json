@@ -755,10 +755,6 @@
     "source": "Защищено",
     "translation": "Protected"
   },
-  "sandbox.action.reset": {
-    "source": "Сбросить персонажа",
-    "translation": "Reset character"
-  },
   "navigation.about": {
     "source": "О приложении",
     "translation": "About"
@@ -854,5 +850,73 @@
   "about.rust-repository": {
     "source": "Rust-версия NeuroMita",
     "translation": "NeuroMita Rust edition"
+  },
+  "settings.characters.library": {
+    "source": "Библиотека персонажей",
+    "translation": "Character library"
+  },
+  "settings.characters.search": {
+    "source": "Поиск персонажей…",
+    "translation": "Search characters…"
+  },
+  "settings.characters.prompt-set": {
+    "source": "Набор промптов",
+    "translation": "Prompt set"
+  },
+  "settings.characters.prompt-unavailable": {
+    "source": "Каталог наборов промптов не подключён",
+    "translation": "Prompt sets are unavailable"
+  },
+  "settings.characters.prompt-contract": {
+    "source": "Настройка наборов промптов появится позже.",
+    "translation": "Prompt set configuration will be available later."
+  },
+  "settings.characters.generation-presets": {
+    "source": "Пресеты генерации",
+    "translation": "Generation presets"
+  },
+  "settings.characters.split-presets": {
+    "source": "Отдельные пресеты для разных видов генерации",
+    "translation": "Separate presets for each generation operation"
+  },
+  "settings.characters.generation-preset": {
+    "source": "Пресет генерации",
+    "translation": "Generation preset"
+  },
+  "settings.characters.provider": {
+    "source": "Провайдер для персонажа",
+    "translation": "Character provider"
+  },
+  "settings.characters.provider-note": {
+    "source": "Провайдер задаётся выбранным пресетом генерации.",
+    "translation": "The provider is selected by the generation preset."
+  },
+  "settings.characters.history": {
+    "source": "История персонажа и память",
+    "translation": "Character history and memory"
+  },
+  "settings.characters.history-actions": {
+    "source": "Управляйте воспоминаниями этого персонажа.",
+    "translation": "Manage this character’s memories."
+  },
+  "settings.characters.maintenance": {
+    "source": "Обслуживание",
+    "translation": "Maintenance"
+  },
+  "settings.characters.maintenance-note": {
+    "source": "Операции обслуживания пока недоступны.",
+    "translation": "Maintenance operations are not available yet."
+  },
+  "settings.characters.danger": {
+    "source": "Опасная зона — все персонажи",
+    "translation": "Danger zone — all characters"
+  },
+  "settings.characters.danger-note": {
+    "source": "Глобальные операции удаления пока недоступны.",
+    "translation": "Global deletion operations are not available yet."
+  },
+  "releases.no-description": {
+    "source": "Без описания.",
+    "translation": "No description."
   }
 }

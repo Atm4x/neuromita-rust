@@ -51,14 +51,14 @@ component ReleaseCard inherits Rectangle {
         Rectangle { height: 1px; background: #ffffff0f; }
         if !root.expanded: ActionSurface {
             height: 20px; label: root.release.summary;
-            Label { width: parent.width; text: root.release.summary; color: Theme.muted; font-size: 13px; overflow: elide; }
+            Label { width: parent.width; text: root.release.summary == "" ? I18n.i18n("releases.no-description", "Без описания.") : root.release.summary; color: Theme.muted; font-size: 13px; overflow: elide; }
             activated => { if root.release.details != "" { root.expanded = true; } }
         }
         if root.expanded: Rectangle {
             height: 267px; background: #0000002e; border-width: 1px; border-color: Theme.border; border-radius: 12px; clip: true;
             Flickable {
                 width: parent.width; height: parent.height;
-                viewport-width: self.width;
+                content-width: self.width;
                 Text {
                     width: parent.width - 24px;
                     x: 12px; y: 10px;
@@ -102,7 +102,7 @@ export component ReleasesPage inherits Rectangle {
     clip: true;
     Flickable {
         width: parent.width; height: parent.height;
-        viewport-width: self.width;
+        content-width: self.width;
         VerticalLayout {
             width: parent.width;
             padding-left: 28px; padding-right: 28px; padding-top: 26px; padding-bottom: 28px;

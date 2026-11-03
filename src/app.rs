@@ -38,7 +38,7 @@ use crate::{
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
         CharactersPresenter, ConnectionsPresenter, ConversationPresenter, GuiPresenter,
-        PresenterRunner, PresetsPresenter, SettingsPresenter,
+        PresenterRunner, PresetsPresenter, ReleasesPresenter, SettingsPresenter,
     },
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
@@ -82,6 +82,7 @@ pub struct AiRerankSelection {
 }
 
 pub struct ApplicationConfig {
+    pub releases: Arc<dyn crate::releases::ReleaseFeed>,
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
@@ -112,6 +113,7 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
     ) -> Self {
         Self {
+            releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
@@ -293,6 +295,7 @@ impl RequestIngress for TimelineRequestIngress {
 }
 
 struct ApplicationOwner {
+    releases_task: Option<JoinHandle<Result<(), std::convert::Infallible>>>,
     bindings: Arc<ApiBindings>,
     workers_stop: CancellationToken,
     owners_stop: CancellationToken,
@@ -313,6 +316,7 @@ impl ApplicationLifecycle {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
+            releases: release_feed,
             migrations,
             presets,
             generator,
@@ -383,6 +387,8 @@ impl ApplicationLifecycle {
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
+        let (releases, release_lifecycle) = ReleasesPresenter::new(release_feed);
+        let releases_task = tokio::spawn(release_lifecycle.run(presenter_stop.child_token()));
         let (characters, owners) = CharacterRegistry::spawn(
             Arc::clone(&timeline),
             owners_stop.clone(),
@@ -439,6 +445,7 @@ impl ApplicationLifecycle {
             presets: Arc::clone(&presets),
         });
         let mut owner = ApplicationOwner {
+            releases_task: Some(releases_task),
             bindings: Arc::clone(&bindings),
             workers_stop,
             owners_stop,
@@ -467,6 +474,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                releases,
                 connections: ConnectionsPresenter::new(server.clone()),
                 conversation: ConversationPresenter::new(
                     chat.clone(),
@@ -714,6 +722,11 @@ impl ApplicationOwner {
             }
         }
         self.presenter_stop.cancel();
+        if let Some(task) = self.releases_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         if let Some(task) = self.presenter_task.take()
             && let Err(error) = task.await
         {
@@ -751,6 +764,9 @@ impl Drop for ApplicationOwner {
         self.bindings.chat.registry.close();
         self.workers_stop.cancel();
         self.presenter_stop.cancel();
+        if let Some(task) = &self.releases_task {
+            task.abort();
+        }
         self.server_stop.cancel();
         self.bindings.settings.close();
         self.settings_stop.cancel();
