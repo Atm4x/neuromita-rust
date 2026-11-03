@@ -1,0 +1,54 @@
+name: Publish verified local Git patches
+on:
+  push:
+    branches:
+      - bridge/request-semantic-publish-20261102
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify patch payload and publish isolated branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/bridge/patches.b64 ]]; then
+            echo "Awaiting verified payload"; exit 0
+          fi
+          base64 --decode .github/bridge/patches.b64 | gzip -dc >/tmp/patches.bin
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          payload=Path("/tmp/patches.bin").read_bytes()
+          provisional,semantic=payload.split(b"\0",1)
+          for name,data,expected in [
+            ("provisional",provisional,"6b28d78886210bb4487a3e6eabff09e44bb83e813b62d41a9b1e1fad6b791c56"),
+            ("semantic",semantic,"8ff832f29bf73cb5f3ac589b0084832442301a5d0504b82a4a11593ef6879d79")]:
+            actual=hashlib.sha256(data).hexdigest()
+            if actual != expected: raise SystemExit(f"{name} payload checksum mismatch")
+            Path(f"/tmp/{name}.patch").write_bytes(data)
+            print(f"{name}: verified {len(data)} bytes")
+          PY
+          git fetch origin refs/heads/codex/semantic-retrieval-from-sometests-20261102:refs/remotes/origin/semantic-publish-base
+          test "$(git rev-parse refs/remotes/origin/semantic-publish-base)" = d1fb35de576ce069f7c64bd09bef8df3c41e82aa
+          git config user.name "ChatGPT"
+          git config user.email "chatgpt@users.noreply.github.com"
+          git switch -C codex/request-provisional-contract-20261102 refs/remotes/origin/semantic-publish-base
+          git apply --check /tmp/provisional.patch
+          git apply /tmp/provisional.patch
+          git add -A
+          git commit -m "feat(request): publish provisional text and acceptance lifecycle to clients"
+          test "$(git rev-parse HEAD^{tree})" = 5b80fdbd464b0e380876680b7407a5105d01d128
+          git push origin HEAD:refs/heads/codex/request-provisional-contract-20261102
+          git switch -C codex/semantic-retrieval-benchmark-20261102 refs/remotes/origin/semantic-publish-base
+          git apply --check /tmp/semantic.patch
+          git apply /tmp/semantic.patch
+          git add -A
+          git commit -m "test(semantic): opt-in live recall and cost benchmark using production rankers"
+          test "$(git rev-parse HEAD^{tree})" = f5c3170b56850fe48c21d823956536f55e924b8f
+          git push origin HEAD:refs/heads/codex/semantic-retrieval-benchmark-20261102
+          echo "Published both verified Git trees without touching main"
