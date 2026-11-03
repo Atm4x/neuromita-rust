@@ -21,18 +21,31 @@ class AssetRequirement:
 
 
 @dataclass(frozen=True)
+class InstallerAction:
+    id: str
+    kind: str
+    relative_path: str
+
+
+@dataclass(frozen=True)
 class InstallPlan:
     packages: tuple[PackageRequirement, ...] = ()
     assets: tuple[AssetRequirement, ...] = ()
     backend: str | None = None
+    supported_backends: tuple[str, ...] = ()
     requirements: tuple[str, ...] = ()
+    supported_python_minors: tuple[str, ...] = ()
+    actions: tuple[InstallerAction, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "packages": [vars(item) for item in self.packages],
             "assets": [vars(item) for item in self.assets],
             "backend": self.backend,
+            "supported_backends": list(self.supported_backends),
             "requirements": list(self.requirements),
+            "supported_python_minors": list(self.supported_python_minors),
+            "actions": [vars(action) for action in self.actions],
         }
 
 
@@ -44,3 +57,5 @@ class AiPlugin(Protocol):
     def initialize(self, settings: dict[str, Any]) -> dict[str, Any]: ...
     def infer(self, input_data: dict[str, Any]) -> dict[str, Any]: ...
     def unload(self) -> None: ...
+
+from .settings import validate_settings

@@ -2,6 +2,8 @@
 
 mod binding;
 mod presenter;
+mod runtime;
+mod sandbox;
 
 mod view {
     slint::include_modules!();

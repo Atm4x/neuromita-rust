@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import array
 import base64
 import importlib
 import io
+import math
 from pathlib import Path
 import tempfile
+import sys
 import wave
 
 from .plans import VARIANTS, asset_root, family, plan, probe, settings
+from neuromita_ai_sdk import validate_settings
 
 
 class VoicePlugin:
@@ -33,26 +37,20 @@ class VoicePlugin:
         return probe(self.plugin_id)
 
     def settings_schema(self):
-        return settings(self.plugin_id)
+        schema = settings(self.plugin_id)
+        if self.initialized and self.engine is not None and family(self.plugin_id) == "silero":
+            speakers = getattr(self.engine, "speakers", None)
+            if speakers is not None:
+                schema["silero.speaker_id"]["choices"] = list(speakers)
+        return schema
 
     def initialize(self, values):
-        schema = self.settings_schema()
-        unknown = set(values) - set(schema)
-        if unknown:
-            raise ValueError(f"unknown TTS settings: {sorted(unknown)}")
-        self.options = {}
-        for key, config in schema.items():
-            value = values.get(key, config["default"])
-            if "choices" in config and value not in config["choices"]:
-                raise ValueError(f"invalid {key}: {value}")
-            if config["type"] in ("number", "integer"):
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    raise ValueError(f"invalid number for {key}")
-                if "min" in config and value < config["min"]:
-                    raise ValueError(f"{key} below minimum")
-                if "max" in config and value > config["max"]:
-                    raise ValueError(f"{key} above maximum")
-            self.options[key] = value
+        self.options = validate_settings(self.settings_schema(), values)
+        _, mode, _, _ = VARIANTS[self.plugin_id]
+        if mode == "cuda" and not self.options["device"].startswith("cuda"):
+            raise ValueError("CUDA TTS variant requires a CUDA device")
+        if mode == "onnx" and self.options["device"].startswith("cuda"):
+            raise ValueError("ONNX TTS variant requires an explicit CPU/DirectML device")
         state = self.probe_install()
         if not state["installed"]:
             raise RuntimeError(f"TTS dependencies/assets missing: {state}")
@@ -68,7 +66,7 @@ class VoicePlugin:
                 self.engine, _ = silero_tts(language=language, speaker=model_id)
                 self.engine.to("cpu" if mode == "onnx" else self.options["device"])
                 speakers = getattr(self.engine, "speakers", None)
-                if speakers is not None and self.options["speaker"] not in speakers:
+                if speakers is not None and self.options["silero.speaker_id"] not in speakers:
                     raise ValueError("Silero speaker is not present in the loaded model")
             elif engine == "f5":
                 from .pipelines.f5_pipeline import F5TTSPipeline
@@ -129,17 +127,17 @@ class VoicePlugin:
         if mode == "onnx" and device.startswith("cuda"):
             raise ValueError("ONNX RVC requires a supported ONNX device")
         runtime = module.TTS_RVC(model_path=str(root / "rvc" / f"voice.{ext}"),
-                                 device=device, f0_method=self.options["f0_method"])
+                                 device=device, f0_method=self.options["rvc.f0_method"])
         index = root / "rvc" / "voice.index"
         runtime.set_index_path(str(index) if index.is_file() else "")
         return runtime
 
-    def _rvc_convert(self, input_file):
+    def _rvc_convert(self, input_file, options):
         output = self.rvc.voiceover_file(
-            input_path=str(input_file), pitch=float(self.options["pitch"]),
-            index_rate=float(self.options["index_rate"]),
-            protect=float(self.options["protect"]),
-            f0method=self.options["f0_method"],
+            input_path=str(input_file), pitch=float(options["rvc.pitch_shift_semitones"]),
+            index_rate=float(options["rvc.index_rate"]),
+            protect=float(options["rvc.protect"]),
+            f0method=options["rvc.f0_method"],
         )
         path = Path(output)
         if not path.is_file() or not path.stat().st_size:
@@ -152,23 +150,26 @@ class VoicePlugin:
         text = input_data.get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("nonempty text is required")
+        request_settings = input_data.get("settings", {})
+        overrides = validate_settings(self.settings_schema(), request_settings, include_defaults=False)
+        options = {**self.options, **overrides}
         engine, mode, cross, rvc = VARIANTS[self.plugin_id]
         with tempfile.TemporaryDirectory(prefix="neuromita-tts-") as tmp:
             path = Path(tmp) / "audio.wav"
             if engine == "silero":
                 import soundfile as sf
                 audio = self.engine.apply_tts(
-                    ssml_text=text, speaker=self.options["speaker"],
-                    sample_rate=self.options["sample_rate"],
+                    ssml_text=text, speaker=options["silero.speaker_id"],
+                    sample_rate=options["sample_rate"],
                     put_accent=True, put_yo=True, put_stress_homo=True, put_yo_homo=True)
-                sf.write(path, audio.cpu().numpy(), self.options["sample_rate"])
+                sf.write(path, audio.cpu().numpy(), options["sample_rate"])
             elif engine == "edge":
-                self.rvc.set_voice(self.options["edge_voice"])
-                output = self.rvc(text=text, pitch=float(self.options["pitch"]),
-                                  index_rate=float(self.options["index_rate"]),
-                                  protect=float(self.options["protect"]),
-                                  f0method=self.options["f0_method"],
-                                  tts_rate=int(self.options["tts_rate"]))
+                self.rvc.set_voice(options["edge_voice"])
+                output = self.rvc(text=text, pitch=float(options["rvc.pitch_shift_semitones"]),
+                                  index_rate=float(options["rvc.index_rate"]),
+                                  protect=float(options["rvc.protect"]),
+                                  f0method=options["rvc.f0_method"],
+                                  tts_rate=int(options["tts_rate"]))
                 path = Path(output)
             elif engine == "f5":
                 ref_audio = input_data.get("reference_audio")
@@ -177,8 +178,8 @@ class VoicePlugin:
                     raise ValueError("F5-TTS requires an explicit reference_audio and reference_text")
                 self.engine.generate(text_to_generate=text, output_path=str(path),
                                      ref_audio=ref_audio, ref_text=ref_text,
-                                     speed=self.options["speed"], nfe_step=self.options["nfe_step"],
-                                     seed=self.options["seed"], remove_silence=True)
+                                     speed=options["speed"], nfe_step=options["nfe_step"],
+                                     seed=options["seed"], remove_silence=True)
             elif engine == "fish":
                 import soundfile as sf
                 ref_audio = input_data.get("reference_audio")
@@ -187,10 +188,10 @@ class VoicePlugin:
                     raise ValueError("Fish Speech reference audio does not exist")
                 sample_rate, data = self.engine(
                     text=text, reference_audio=ref_audio, reference_audio_text=ref_text,
-                    top_p=self.options["top_p"], temperature=self.options["temperature"],
-                    repetition_penalty=self.options["repetition_penalty"],
-                    max_new_tokens=self.options["max_new_tokens"],
-                    chunk_length=self.options["chunk_length"], seed=self.options["seed"],
+                    top_p=options["top_p"], temperature=options["temperature"],
+                    repetition_penalty=options["repetition_penalty"],
+                    max_new_tokens=options["max_new_tokens"],
+                    chunk_length=options["chunk_length"], seed=options["seed"],
                     use_memory_cache=True)
                 sf.write(path, data, sample_rate)
             elif engine == "omni":
@@ -201,17 +202,19 @@ class VoicePlugin:
                     raise ValueError("OmniVoice requires explicit reference_audio and reference_text")
                 prompt = self.engine.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)
                 generated = self.engine.generate(
-                    text=text, voice_clone_prompt=prompt, speed=self.options["speed"],
-                    num_step=self.options["num_step"],
-                    postprocess_output=self.options["postprocess_output"])
+                    text=text, voice_clone_prompt=prompt, speed=options["speed"],
+                    num_step=options["num_step"],
+                    postprocess_output=options["postprocess_output"])
                 if not generated:
                     raise RuntimeError("OmniVoice returned no audio")
                 sf.write(path, generated[0], int(self.engine.sampling_rate), subtype="PCM_16")
             if rvc or engine == "silero":
-                path = self._rvc_convert(path)
+                path = self._rvc_convert(path, options)
             if not path.is_file() or not path.stat().st_size:
                 raise RuntimeError("TTS produced no audio")
             data = path.read_bytes()
+            volume = input_data.get("volume", options["volume"])
+            data = _scale_wave(data, volume)
             if len(data) > 10 * 1024 * 1024:
                 raise RuntimeError("TTS audio exceeds IPC size limit; streaming transport required")
             if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
@@ -222,3 +225,29 @@ class VoicePlugin:
         self.engine = None
         self.rvc = None
         self.initialized = False
+
+
+def _scale_wave(data: bytes, volume: float) -> bytes:
+    if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or not 0 <= volume <= 2:
+        raise ValueError("volume must be a finite number between 0 and 2")
+    if volume == 1:
+        return data
+    with wave.open(io.BytesIO(data), "rb") as source:
+        if source.getcomptype() != "NONE" or source.getsampwidth() != 2:
+            raise ValueError("volume control requires PCM16 WAV")
+        rate, channels, frames = source.getframerate(), source.getnchannels(), source.readframes(source.getnframes())
+    samples = array.array("h")
+    samples.frombytes(frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    for index, sample in enumerate(samples):
+        samples[index] = max(-32768, min(32767, round(sample * volume)))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    output = io.BytesIO()
+    with wave.open(output, "wb") as target:
+        target.setnchannels(channels)
+        target.setsampwidth(2)
+        target.setframerate(rate)
+        target.writeframes(samples.tobytes())
+    return output.getvalue()

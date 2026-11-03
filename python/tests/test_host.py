@@ -85,6 +85,14 @@ class HostTests(unittest.TestCase):
             self.assertTrue(self.request(host, "settings_schema", {"plugin_id": "third_party"})["ok"])
             self.assertFalse(self.request(host, "initialize", {"plugin_id": "third_party"})["ok"])
 
+    def test_validate_config_without_inference_loading(self):
+        process = self.start_host()
+        result = self.request(process, "validate_config", {"plugin_id": "silero_rvc_cuda", "settings": {"silero.speaker_id": "kseniya"}})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"]["rvc.pitch_shift_semitones"], 6.0)
+        self.assertFalse(self.request(process, "validate_config", {"plugin_id": "silero_rvc_cuda", "settings": {"volume": float("nan")}})["ok"])
+        self.assertFalse(self.request(process, "active_settings_schema", {"kind": "tts"})["ok"])
+
     def test_wrong_settings_not_ready(self):
         process = self.start_host()
         self.assertFalse(self.request(process, "initialize", {"plugin_id": "mock_tts", "settings": {"speaker": "unknown"}})["ok"])

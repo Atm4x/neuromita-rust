@@ -28,6 +28,8 @@
 
 ![Песочница и панель сессии](gui-reference/03-sandbox.png)
 
+Перенос интерфейса Sandbox из исходных PyQt/QSS-файлов реализован в `ui/pages/sandbox.slint`, `ui/sandbox/chat.slint`, `ui/sandbox/inspector.slint`, а не из приблизительного макета. Реальные chat/presenter callbacks доступны; отдельные операции Python без Rust-сервисов в UI представлены как недоступные. Статус, снимки headless рендера, ограничения и тесты — [sandbox-ui-port-20261103.md](sandbox-ui-port-20261103.md).
+
 ## 4. Релизы
 
 Вводная карточка с действиями и прокручиваемая лента релизов. В карточке — тип, дата, версия, краткий текст и переход к полной записи.
@@ -54,7 +56,7 @@
 
 ## Граница текущего дополнения
 
-GUI запускается отдельным бинарником `neuromita-gui` с feature `gui`. [ShellPresenter](../src/bin/neuromita-gui/presenter.rs) хранит только состояние оболочки. Home получает явно созданный `HomePreview::python_reference()`: версии и релизы повторяют референс и не являются результатом обнаружения установок. ApplicationLifecycle, LLM, TTS и ServerLifecycle этим макетом не запускаются.
+GUI запускается отдельным бинарником `neuromita-gui` с feature `gui`. [ShellPresenter](../src/bin/neuromita-gui/presenter.rs) хранит состояние оболочки. Home пока использует явно созданный `HomePreview::python_reference()`; версия/релизы остаются данными референса. В отличие от Home, Sandbox использует отдельный runtime с `SandboxPresenter`, ApplicationLifecycle и реальным Gemini-провайдером при настроенных модели и ключе. Python TTS, microphone и capture workers пока не подключены.
 
 Основная компоновка в [ui](../ui/) использует HorizontalLayout/VerticalLayout. Координаты нужны для кадрирования фона, якоря PopupWindow и уведомления. Renderer выбран явно: Winit + FemtoVG/OpenGL; software renderer остаётся в зависимостях, но этот бинарник его не выбирает. Картинки встроены в exe, фоновый JPEG сохранён без изменений, масштабирование — smooth. Шрифт Segoe UI берётся из системы Windows.
 
@@ -62,4 +64,4 @@ GUI запускается отдельным бинарником `neuromita-gu
 
 Выбор пункта передаёт типизированный LauncherMenuAction через binding в ShellPresenter. Настройки ведут на страницу-заглушку; остальные пункты показывают сообщение о неподключённом действии. Открытие popup — локальное состояние view, отдельная команда ядра для него не нужна. GUI с меню собирался в debug. Добавлена [локализация JSON с переключением в реальном времени](localization.md); условные RU/EN-выражения заменены на i18n(ID, source), глобус открывает список языков.
 
-Python QSS, обработчики и зависимости Qt не перенесены. Для иконок, ранее выдаваемых QtAwesome, взяты оригинальные SVG Font Awesome 6.7.2 и Material Design Icons 7.4.47; источники, SHA-256 и лицензии находятся в [shell-sources.json](../assets/icons/shell-sources.json) и соседних каталогах. При подключении настоящих функций frontend будет вызывать команды presenter и наблюдать данные по [контрактам presentation](presentation-and-settings.md). Визуальные референсы не меняют владение персонажами, настройки или жизненный цикл запросов.
+Python QSS не исполняется в Rust; его применимые значения и конструкция виджетов Sandbox перенесены декларативно в Slint без зависимости Qt. Python-обработчики прочих страниц не перенесены. Для иконок, ранее выдаваемых QtAwesome, взяты оригинальные SVG Font Awesome 6.7.2 и Material Design Icons 7.4.47; источники, SHA-256 и лицензии находятся в [shell-sources.json](../assets/icons/shell-sources.json) и соседних каталогах. При подключении настоящих функций frontend будет вызывать команды presenter и наблюдать данные по [контрактам presentation](presentation-and-settings.md). Визуальные референсы не меняют владение персонажами, настройки или жизненный цикл запросов.
