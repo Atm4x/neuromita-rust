@@ -141,6 +141,111 @@ impl<P: VadScoreProvider> ScoreFrames<P> {
 
 pub struct VerifiedSileroAsset(Arc<[u8]>);
 
+/// Initialize ONNX Runtime from one explicit absolute DLL path.
+///
+/// The process-wide environment is created once and reused; there is no library
+/// discovery, version switching or implicit download.
+#[cfg(feature = "vad-silero")]
+pub fn init_onnx_runtime(path: &Path) -> Result<(), ScoreError> {
+    if !path.is_absolute() {
+        return Err(ScoreError::AssetPath);
+    }
+    if !path.is_file() {
+        return Err(ScoreError::Provider(format!(
+            "ONNX Runtime library not found: {}",
+            path.display()
+        )));
+    }
+    ort::init_from(path)
+        .map_err(|error| ScoreError::Provider(error.to_string()))?
+        .with_name("neuromita")
+        .commit();
+    Ok(())
+}
+
+/// Wavekat Earshot backend, used only for the A/B comparison against the direct
+/// detector. Its frame size is 256 samples like the production Earshot path.
+#[cfg(feature = "vad-wavekat")]
+pub struct WavekatEarshotScores(wavekat_vad::backends::earshot::EarshotVad);
+
+#[cfg(feature = "vad-wavekat")]
+impl WavekatEarshotScores {
+    pub fn new() -> Self {
+        Self(wavekat_vad::backends::earshot::EarshotVad::new())
+    }
+}
+
+#[cfg(feature = "vad-wavekat")]
+impl Default for WavekatEarshotScores {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "vad-wavekat")]
+impl VadScoreProvider for WavekatEarshotScores {
+    fn frame_samples(&self) -> usize {
+        FRAME_SAMPLES
+    }
+
+    fn score(&mut self, frame: &[i16]) -> Result<f32, ScoreError> {
+        use wavekat_vad::VoiceActivityDetector;
+
+        if frame.len() != FRAME_SAMPLES {
+            return Err(ScoreError::Framing("wavekat Earshot requires 256 samples"));
+        }
+        self.0
+            .process(frame, SAMPLE_RATE_HZ)
+            .map_err(|error| ScoreError::Provider(error.to_string()))
+    }
+
+    fn reset(&mut self) {
+        use wavekat_vad::VoiceActivityDetector;
+
+        self.0.reset();
+    }
+}
+
+/// Optional Silero backend. Requires a verified local model and an explicitly
+/// initialized ONNX Runtime library; the 512-sample window is bridged onto the
+/// capture grid by `ScoreGate`.
+#[cfg(feature = "vad-silero")]
+pub struct SileroScores(wavekat_vad::backends::silero::SileroVad);
+
+#[cfg(feature = "vad-silero")]
+impl SileroScores {
+    /// Build a detector from model bytes that passed size and SHA-256 checks.
+    pub fn from_verified(asset: &VerifiedSileroAsset) -> Result<Self, ScoreError> {
+        wavekat_vad::backends::silero::SileroVad::from_memory(asset.bytes(), SAMPLE_RATE_HZ)
+            .map(Self)
+            .map_err(|error| ScoreError::Provider(error.to_string()))
+    }
+}
+
+#[cfg(feature = "vad-silero")]
+impl VadScoreProvider for SileroScores {
+    fn frame_samples(&self) -> usize {
+        512
+    }
+
+    fn score(&mut self, frame: &[i16]) -> Result<f32, ScoreError> {
+        use wavekat_vad::VoiceActivityDetector;
+
+        if frame.len() != 512 {
+            return Err(ScoreError::Framing("Silero requires 512 samples"));
+        }
+        self.0
+            .process(frame, SAMPLE_RATE_HZ)
+            .map_err(|error| ScoreError::Provider(error.to_string()))
+    }
+
+    fn reset(&mut self) {
+        use wavekat_vad::VoiceActivityDetector;
+
+        self.0.reset();
+    }
+}
+
 impl VerifiedSileroAsset {
     pub fn open(path: &Path) -> Result<Self, ScoreError> {
         if !path.is_absolute() {
@@ -333,5 +438,70 @@ mod tests {
             Err(ScoreError::Framing(_))
         ));
         assert!(provider.score(&[0; 256]).is_ok());
+    }
+
+    #[cfg(feature = "vad-wavekat")]
+    #[test]
+    fn wavekat_earshot_scores_same_frames_as_direct_detector() {
+        use super::WavekatEarshotScores;
+
+        let mut direct = DirectEarshotScores::default();
+        let mut wavekat = WavekatEarshotScores::new();
+        assert_eq!(wavekat.frame_samples(), direct.frame_samples());
+        for marker in [0i16, 120, 900, -400] {
+            let frame = [marker; FRAME_SAMPLES];
+            let expected = direct.score(&frame).unwrap();
+            let actual = wavekat.score(&frame).unwrap();
+            assert!((expected - actual).abs() < 1e-6);
+            assert!(matches!(
+                wavekat.score(&[0; 255]),
+                Err(ScoreError::Framing(_))
+            ));
+        }
+    }
+
+    #[cfg(feature = "vad-silero")]
+    #[test]
+    fn onnx_runtime_init_requires_absolute_existing_library() {
+        use super::init_onnx_runtime;
+
+        assert!(matches!(
+            init_onnx_runtime(Path::new("onnxruntime.dll")),
+            Err(ScoreError::AssetPath)
+        ));
+        assert!(matches!(
+            init_onnx_runtime(Path::new("C:/definitely/missing/onnxruntime.dll")),
+            Err(ScoreError::Provider(_))
+        ));
+    }
+
+    /// Live check with the pinned model and an explicit ONNX Runtime library.
+    /// Ignored by default: set both variables to run it.
+    #[cfg(feature = "vad-silero")]
+    #[test]
+    #[ignore = "requires NEUROMITA_SILERO_MODEL and NEUROMITA_ORT_DLL"]
+    fn live_silero_scores_silence_and_tone() {
+        use super::{SileroScores, init_onnx_runtime};
+
+        let model = std::env::var("NEUROMITA_SILERO_MODEL").expect("model path");
+        let library = std::env::var("NEUROMITA_ORT_DLL").expect("onnxruntime library path");
+        init_onnx_runtime(Path::new(&library)).unwrap();
+        let asset = VerifiedSileroAsset::open(Path::new(&model)).unwrap();
+        let mut frames = ScoreFrames::new(SileroScores::from_verified(&asset).unwrap()).unwrap();
+
+        let silence: Vec<i16> = vec![0; SAMPLE_RATE_HZ as usize];
+        let quiet = frames.push(&silence).unwrap();
+        let tone: Vec<i16> = (0..SAMPLE_RATE_HZ as usize / 2)
+            .map(|index| {
+                let t = index as f64 / SAMPLE_RATE_HZ as f64;
+                ((2.0 * std::f64::consts::PI * 180.0 * t).sin() * 6000.0) as i16
+            })
+            .collect();
+        let voiced = frames.push(&tone).unwrap();
+
+        let quiet_max = quiet.iter().map(|s| s.probability).fold(0.0, f32::max);
+        let voiced_max = voiced.iter().map(|s| s.probability).fold(0.0, f32::max);
+        assert!(quiet_max < 0.2, "silence scored {quiet_max}");
+        assert!(voiced_max > quiet_max, "tone did not outscore silence");
     }
 }
