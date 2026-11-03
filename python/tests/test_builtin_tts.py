@@ -79,7 +79,7 @@ class BuiltinTtsTests(unittest.TestCase):
                 result = plugin.initialize({})
         self.assertTrue(result["model_ready"])
         importer.assert_called_once()
-        self.assertTrue(str(importer.call_args.args[0]).endswith("silero/v5_ru.pt"))
+        self.assertTrue(Path(importer.call_args.args[0]).parts[-2:] == ("silero", "v5_ru.pt"))
         importer.return_value.load_pickle.assert_called_once_with("tts_models", "model")
         model.to.assert_called_once_with("cpu")
 

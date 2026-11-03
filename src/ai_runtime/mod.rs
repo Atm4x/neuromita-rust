@@ -153,20 +153,6 @@ impl Drop for InFlightRequest<'_> {
     }
 }
 
-struct RequestFlight<'a> {
-    worker: &'a mut WorkerProcess,
-    completed: bool,
-}
-
-impl Drop for RequestFlight<'_> {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.worker.failed = true;
-            let _ = self.worker.child.start_kill();
-        }
-    }
-}
-
 impl WorkerProcess {
     async fn launch(
         config: &PythonHostConfig,
@@ -398,24 +384,13 @@ impl WorkerProcess {
             ));
         }
         let deadline = self.timeout;
-        let mut flight = RequestFlight {
-            worker: self,
-            completed: false,
-        };
         let outcome = async {
-            flight
-                .worker
-                .input
+            self.input
                 .write_all(&request)
                 .await
                 .map_err(AiRuntimeError::Io)?;
-            flight
-                .worker
-                .input
-                .flush()
-                .await
-                .map_err(AiRuntimeError::Io)?;
-            let frame = flight.worker.read_frame().await?;
+            self.input.flush().await.map_err(AiRuntimeError::Io)?;
+            let frame = self.read_frame().await?;
             let response: Response = serde_json::from_str(&frame)
                 .map_err(|e| AiRuntimeError::Protocol(e.to_string()))?;
             if response.id != id {
@@ -433,16 +408,18 @@ impl WorkerProcess {
             Ok(response.result)
         };
         match timeout(deadline, outcome).await {
-            Ok(Ok(result)) => {
-                flight.completed = true;
-                Ok(result)
-            }
-            Ok(Err(error @ AiRuntimeError::Plugin { .. })) => {
-                flight.completed = true;
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error @ AiRuntimeError::Plugin { .. })) => Err(error),
+            Ok(Err(error)) => {
+                self.failed = true;
+                let _ = self.child.start_kill();
                 Err(error)
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(AiRuntimeError::Timeout),
+            Err(_) => {
+                self.failed = true;
+                let _ = self.child.start_kill();
+                Err(AiRuntimeError::Timeout)
+            }
         }
     }
 }
@@ -908,10 +885,11 @@ mod tests {
             python_executable: test_python().into(),
             sdk_root: source,
             plugins_directory: temp.clone(),
+            models_directory: None,
             request_timeout: Duration::from_secs(10),
         };
         let entered = temp.join("entered");
-        let mut worker = WorkerProcess::launch(&config, &[]).await.unwrap();
+        let mut worker = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
         let generation = worker.generation;
         let args = json!({"plugin_id":"mock_tts", "settings":{"block":true, "entered":entered}});
         {
@@ -942,7 +920,7 @@ mod tests {
             worker.request("discover", &json!({})).await,
             Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
         ));
-        let mut fresh = WorkerProcess::launch(&config, &[]).await.unwrap();
+        let mut fresh = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
         assert_ne!(fresh.generation, generation);
         assert!(matches!(
             fresh.request("unknown_operation", &json!({})).await,

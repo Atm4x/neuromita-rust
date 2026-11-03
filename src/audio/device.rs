@@ -5,7 +5,7 @@ use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdout, Command},
 };
 use tokio_util::sync::CancellationToken;
@@ -29,6 +29,7 @@ pub enum DeviceError {
 pub type DeviceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, DeviceError>> + Send + 'a>>;
 
 pub trait AudioCapture: Send {
+    /// Cancellation must preserve any partial PCM frame for the next call.
     fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>>;
 }
 
@@ -59,7 +60,41 @@ impl CaptureBackend {
 
 pub struct FfmpegCapture {
     child: Child,
-    stdout: ChildStdout,
+    stdout: Pcm16Frames<ChildStdout>,
+}
+
+struct Pcm16Frames<R> {
+    reader: R,
+    bytes: [u8; FRAME_SAMPLES * 2],
+    filled: usize,
+}
+
+impl<R: AsyncRead + Unpin> Pcm16Frames<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            bytes: [0; FRAME_SAMPLES * 2],
+            filled: 0,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<MonoPcm16Frame>, DeviceError> {
+        while self.filled < self.bytes.len() {
+            let count = self.reader.read(&mut self.bytes[self.filled..]).await?;
+            if count == 0 {
+                return if self.filled == 0 {
+                    Ok(None)
+                } else {
+                    Err(DeviceError::Invalid("truncated PCM16 frame".into()))
+                };
+            }
+            self.filled += count;
+        }
+        let frame =
+            std::array::from_fn(|i| i16::from_le_bytes([self.bytes[2 * i], self.bytes[2 * i + 1]]));
+        self.filled = 0;
+        Ok(Some(frame))
+    }
 }
 
 impl FfmpegCapture {
@@ -101,29 +136,26 @@ impl FfmpegCapture {
             .stdout
             .take()
             .ok_or_else(|| DeviceError::Invalid("no capture pipe".into()))?;
-        Ok(Self { child, stdout })
+        Ok(Self {
+            child,
+            stdout: Pcm16Frames::new(stdout),
+        })
     }
 }
 
 impl AudioCapture for FfmpegCapture {
     fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>> {
         Box::pin(async move {
-            let mut bytes = [0u8; FRAME_SAMPLES * 2];
-            match self.stdout.read_exact(&mut bytes).await {
-                Ok(_) => {
-                    let frame = std::array::from_fn(|i| {
-                        i16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]])
-                    });
-                    Ok(Some(frame))
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    let status = self.child.try_wait()?;
-                    match status {
-                        Some(exit) if exit.success() => Ok(None),
-                        _ => Err(DeviceError::Stopped(format!("capture ended: {status:?}"))),
+            match self.stdout.next().await? {
+                Some(frame) => Ok(Some(frame)),
+                None => {
+                    let status = self.child.wait().await?;
+                    if status.success() {
+                        Ok(None)
+                    } else {
+                        Err(DeviceError::Stopped(format!("capture ended: {status}")))
                     }
                 }
-                Err(error) => Err(error.into()),
             }
         })
     }
@@ -197,3 +229,41 @@ impl AudioPlayback for SilentPlayback {
 }
 
 pub type SharedPlayback = Arc<dyn AudioPlayback>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn interrupted_pcm_read_preserves_partial_samples() {
+        let frame = std::array::from_fn::<_, FRAME_SAMPLES, _>(|i| (i as i16 - 128) * 73);
+        let bytes: Vec<_> = frame
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let (mut sender, receiver) = tokio::io::duplex(bytes.len());
+        let mut frames = Pcm16Frames::new(receiver);
+        sender.write_all(&bytes[..3]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), frames.next())
+                .await
+                .is_err()
+        );
+        sender.write_all(&bytes[3..]).await.unwrap();
+        sender.shutdown().await.unwrap();
+        assert_eq!(frames.next().await.unwrap(), Some(frame));
+        assert_eq!(frames.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn truncated_pcm_is_an_error() {
+        let (mut sender, receiver) = tokio::io::duplex(8);
+        sender.write_all(&[1, 2, 3]).await.unwrap();
+        sender.shutdown().await.unwrap();
+        assert!(matches!(
+            Pcm16Frames::new(receiver).next().await,
+            Err(DeviceError::Invalid(_))
+        ));
+    }
+}
