@@ -80,3 +80,12 @@ Unlike regular `Add`, it never implicitly upgrades an active fact's priority.
 Ambiguous matches, protection and capacity violations fail the entire guarded
 edit without writing Timeline. The stored `expires_at_unix_ms` is preserved.
 This operation does not require any AI Engine integration or GUI changes.
+
+## One-time memory island seeding (#21)
+
+`MemoryCommand::SeedIsland` creates a High-priority island only if no record
+of its type is retained for that character. Repeated calls are true no-ops,
+including after forgetting, soft deletion or a user edit. `SetIsland` remains
+the intentional update operation. Both resolve through the existing guarded
+character-memory editing boundary and require no new Presenter endpoint, GUI
+component, storage or AI Engine changes.

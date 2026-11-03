@@ -11,7 +11,7 @@ behavioral differences, not a mandate to copy Python implementation details.
 |---|---|---|---|
 | Per-character add/update/delete | `add_memory`, `update_memory`, `delete_memory` filter by `character_id`, and delete sets `is_deleted=1` | Character-owned `MemoryCommand`, guarded Timeline append, soft delete | Core operations implemented; exact user behavior has not been golden-tested against a live Python installation |
 | Merge | `merge_memories` preserves target, soft-deletes source and transfers entities | Source transitions to `Deleted`, target updated | Entity transfer does not have an equivalent typed entity field in Rust `MemoryRecord` |
-| Memory islands | `upsert_island` enforces one active island per subtype; `seed_island` does not overwrite an existing island | Five typed islands, deterministic upsert and identity | Seed and repair of duplicate legacy Python island rows need parity tests/migration policy |
+| Memory islands | `upsert_island` updates the sole active island; DSL `SEED_ISLAND` uses `seed_island`, which refuses overwriting *any* retained island row (including deleted) | `SetIsland` updates an active island; explicit `SeedIsland` is a one-time insertion and preserves forgotten/deleted history | Domain and Presenter fixtures cover one-time seeding, isolation, no-op notifications and protection. Repair/migration of duplicate legacy Python islands and current-runtime parity remain open. |
 | Capacity | `_forget_over_limit_memories` uses configurable `MEMORY_CAPACITY` (default 50), forgets noncritical active facts in priority/age order; optionally uses `access_count` | Hard bounds remain 256 active facts and 1024 retained records; `CharactersPresenter` additionally offers explicit preview/confirm for forgetting by Low→Normal→High, then stable ID | **Not equivalent**. No automatic eviction. Rust lacks Python `date_created` and `access_count` ordering; stable ID is not chronology. |
 | TTL | `apply_ttl_cleanup` uses `MEMORY_TTL_ENABLED`, priority-specific days and `date_created`/`last_accessed`/`access_weighted` modes | Explicit `expires_at_unix_ms` per record plus startup/periodic guarded maintenance | **Not equivalent**. Python metadata, access semantics and settings contract require explicit design |
 | Dedup | `add_memory` optionally uses lexical Jaccard `_find_duplicate_memory`; `skip_if_exists=True` uses **exact** SQL content equality and reactivates a matching forgotten/deleted row | Normal `Add` keeps normalized exact dedup; explicit `EnsureFact` matches exact fact text, reactivates a retained forgotten/deleted ID and assigns the requested priority; already-active matches are no-ops | `EnsureFact` is covered by deterministic Rust fixtures and Presenter/SQLite tests. Ambiguous retained matches fail instead of depending on SQLite row order; normalized-collision inserts remain forbidden. Optional Python lexical Jaccard dedup, settings and current Python runtime parity remain open. |
@@ -43,3 +43,14 @@ Python selects `LIMIT 1` without deterministic ordering and does not
 restrict that SQL query to facts. Rust deliberately rejects ambiguous matches
 and does not allow a fact operation to overwrite a typed island. These are
 recorded safety differences, **not** full behavioral parity claims.
+
+## Initial character-island seeding (implemented)
+
+Python `src/DSL/dsl_engine.py` uses `MemoryManager.seed_island` for the
+`SEED_ISLAND` instruction. Its check includes deleted rows and does not update
+existing islands. Rust `MemoryCommand::SeedIsland` implements that **explicit**
+one-time intent: inserts a `High`-priority island if there is no retained
+island of the specified category, otherwise emits no change. It does not
+reactivate `Forgotten`/`Deleted` islands or overwrite user-modified/protected
+records. `SetIsland` remains the separate upsert operation, preserving its
+previous semantics. No background AI, automatic TTL reset or GUI is involved.
