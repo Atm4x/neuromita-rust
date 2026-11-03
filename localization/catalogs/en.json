@@ -1246,5 +1246,73 @@
   "settings.saved-state": {
     "source": "Сохранение",
     "translation": "Persistence"
+  },
+  "settings.game.start": {
+    "source": "Запустить",
+    "translation": "Start"
+  },
+  "settings.game.beat-backend": {
+    "source": "Режим обработки",
+    "translation": "Processing mode"
+  },
+  "settings.game.beat-status": {
+    "source": "Статус и размер кеша будут доступны после подключения Beat presenter.",
+    "translation": "Status and cache size will be available after the Beat presenter is connected."
+  },
+  "settings.game.open": {
+    "source": "Открыть",
+    "translation": "Open"
+  },
+  "settings.game.rebuild": {
+    "source": "Переиндексировать",
+    "translation": "Reindex"
+  },
+  "settings.images.count-button": {
+    "source": "Подсчитать",
+    "translation": "Count"
+  },
+  "settings.images.find": {
+    "source": "Найти",
+    "translation": "Find"
+  },
+  "settings.language.custom.help": {
+    "source": "Для добавления языка поместите файл <код>.json в каталог локализации. Ключ _name задаёт название языка. Перезапустите приложение.",
+    "translation": "To add a language, place <code>.json in the localization directory. The _name key specifies the language name. Restart the application."
+  },
+  "settings.language.folder.unavailable": {
+    "source": "Открытие внешней папки пока не подключено к presenter.",
+    "translation": "Opening the external directory is not connected to the presenter yet."
+  },
+  "settings.models.history-ttl-enable": {
+    "source": "Включить TTL-архивирование истории",
+    "translation": "Enable history TTL expiration"
+  },
+  "settings.models.time-enable": {
+    "source": "Включить временной контекст",
+    "translation": "Enable time tracking"
+  },
+  "settings.models.compress-enable": {
+    "source": "Включить сжатие истории",
+    "translation": "Enable history compression"
+  },
+  "settings.models.rag.subtitle": {
+    "source": "Поиск по памяти: пресеты пайплайна, эмбеддинги, граф знаний и веса.",
+    "translation": "Memory search: retrieval settings, embeddings, databases and graph."
+  },
+  "settings.models.rag-retrieval": {
+    "source": "Поиск по памяти",
+    "translation": "Memory search"
+  },
+  "settings.models.rag-enabled": {
+    "source": "Включить автоматический RAG",
+    "translation": "Enable automatic RAG"
+  },
+  "settings.models.rag-embeddings": {
+    "source": "Эмбеддинги и индексы",
+    "translation": "Embeddings and storage"
+  },
+  "settings.models.rag-unavailable": {
+    "source": "Статус моделей и индексов будет подключён через presenter.",
+    "translation": "Index management and reindexing will be connected through a presenter."
   }
 }

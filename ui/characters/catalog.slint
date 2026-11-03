@@ -5,8 +5,8 @@ export struct CharacterOption { index: int, id: string, name: string, name-key: 
 export global CharacterCatalog {
     in-out property <[CharacterOption]> entries;
     property <image> empty-avatar;
-    public pure function name(entry: CharacterOption) -> string { return I18n.i18n(entry.name-key, entry.name); }
-    public pure function conversation-name(entry: CharacterOption) -> string { return I18n.i18n(entry.conversation-key, entry.conversation-name); }
+    public pure function name(entry: CharacterOption) -> string { return entry.id == "" ? "" : I18n.i18n(entry.name-key, entry.name); }
+    public pure function conversation-name(entry: CharacterOption) -> string { return entry.id == "" ? "" : I18n.i18n(entry.conversation-key, entry.conversation-name); }
     public pure function has-avatar(id: string) -> bool { return id == "Crazy" || id == "Kind" || id == "Cappie" || id == "ShortHair" || id == "Mila" || id == "Sleepy" || id == "Ghost"; }
     public pure function avatar(id: string) -> image {
         if (id == "Crazy") { return @image-url("../../assets/avatars/crazy.png"); }

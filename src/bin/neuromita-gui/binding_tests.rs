@@ -422,7 +422,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
         window
             .window()
             .set_size(slint::PhysicalSize::new(width, height));
-        for section in 0..4 {
+        for section in [0, 4, 7, 8, 9] {
             settings.set_section(section);
             let image = window.window().take_snapshot().unwrap();
             if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
