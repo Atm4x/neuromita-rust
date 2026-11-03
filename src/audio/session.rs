@@ -8,6 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -29,6 +30,10 @@ use super::{
     device::{AudioCapture, AudioPlayback, DeviceError},
     segment::{SegmentError, SpeechSegment, SpeechSegmenter, VoiceGate},
 };
+
+/// After capture ends, in-flight dispatch may finish within this window; a stuck
+/// ASR or chat provider must not hold shutdown open forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum SpeechSessionError {
@@ -451,10 +456,22 @@ impl SpeechInputHandler {
             stop.cancel();
             worker.abort();
         }
-        let dispatch = match match worker_finished {
+        let drained = match worker_finished {
             Some(result) => result,
-            None => worker.await,
-        } {
+            None => {
+                let abort = worker.abort_handle();
+                tokio::select! {
+                    result = worker => result,
+                    _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
+                        abort.abort();
+                        return Err(SpeechSessionError::Task(
+                            "speech dispatch did not finish before the drain deadline".into(),
+                        ));
+                    }
+                }
+            }
+        };
+        let dispatch = match drained {
             Ok(result) => result,
             Err(error) if stop.is_cancelled() && error.is_cancelled() => Ok(()),
             Err(error) => Err(SpeechSessionError::Task(error.to_string())),
@@ -597,6 +614,47 @@ mod tests {
         .await
         .expect("a provider failure must not hang shutdown");
         assert!(matches!(result, Err(SpeechSessionError::Segment(_))));
+    }
+
+    struct HangingTranscriber;
+    impl SpeechTranscriber for HangingTranscriber {
+        fn transcribe<'a>(&'a self, _: &'a [u8]) -> SpeechFuture<'a, Transcript> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_asr_cannot_hold_shutdown_open() {
+        let session = SpeechInputHandler::new(
+            SpeechRoute {
+                character: CharacterId::Mita,
+                source: RequestSource::Presenter,
+            },
+            Arc::new(HangingTranscriber),
+            Arc::new(Chat(Arc::new(Mutex::new(Vec::new())))),
+            Arc::new(SilentPlayback),
+        );
+        let config = SegmentConfig {
+            mode: SpeechMode::Automatic,
+            pre_roll_samples: 0,
+            start_voice_samples: FRAME_SAMPLES,
+            end_silence_samples: FRAME_SAMPLES,
+            min_segment_samples: FRAME_SAMPLES,
+            max_segment_samples: 8 * FRAME_SAMPLES,
+        };
+        let (_send, controls) = mpsc::channel(2);
+        let result = session
+            .run(
+                Capture(vec![[100; FRAME_SAMPLES]; 2]),
+                SpeechSegmenter::new(Gate, config).unwrap(),
+                controls,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(SpeechSessionError::Task(message)) if message.contains("drain deadline")),
+            "stalled dispatch must hit the drain deadline"
+        );
     }
 
     enum CaptureCommand {
