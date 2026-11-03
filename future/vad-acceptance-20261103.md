@@ -16,4 +16,4 @@
 
 На Windows проверено только перечисление DirectShow устройств: видны USB и виртуальные микрофоны. Записи не делались. В repository assets/tests аудиокорпуса не найдено. Реальные RU/EN результаты, качество микрофона/GUI и optional Silero inference пока не подтверждены.
 
-Найденный кандидат на regression: Reset/PTT отменяет active turn, но очередь SpeechSegment не имеет stream generation; уже поставленный старый сегмент может обрабатываться после reset. Требуется тест и исправление, а не утверждение о готовности по существующим mocks.
+Первый проверенный increment 8d453de9 исправляет queued Reset/PTT: stream generation, utterance identity, неизменяемая маршрутизация и одноразовый admission. Старый speech target остаётся привязан к исходному Core. Onset кадры сохраняются при коротком prebuffer; score framing ограничен и после ошибки требует reset. Полные suites: default438/2ignored, no-default377/2ignored; после финальных правок21audio+1CoreA→B tests, обе Clippy/fmt/diff PASS. Cargo manifest/lock/vendor не изменены. Точные evidence и оставшиеся критерии: issue-60-domain-validation.md и issue-60-vad-dependencies.md. A/B и полный issue #60 пока не приняты.
