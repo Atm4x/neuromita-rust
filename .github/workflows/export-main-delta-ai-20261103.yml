@@ -1,0 +1,36 @@
+name: Export pinned main delta for AI integration
+on:
+  push:
+    branches:
+      - bridge/ai-main-refresh-20261103
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Produce verified delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ec9c219feaaf2378952dbc43bd2ecdb8d1b28443
+          HEAD=302b98ce26bb110d4716aa482a37c1ed1cfceae5
+          git fetch --no-tags origin main:refs/heads/refresh-main
+          test "$(git rev-parse refs/heads/refresh-main)" = "$HEAD"
+          git cat-file -e "$BASE^{commit}"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git bundle create main-delta.bundle refs/heads/refresh-main "^$BASE"
+          git bundle verify main-delta.bundle
+          sha256sum main-delta.bundle > main-delta.bundle.sha256
+          printf '%s\n' "$HEAD" > main.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-main-delta-20261103
+          path: |
+            main-delta.bundle
+            main-delta.bundle.sha256
+            main.commit
+          retention-days: 3
