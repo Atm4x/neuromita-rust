@@ -11,7 +11,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServiceSelection {
     pub service: AiService,
     pub backends: Vec<LockedBackend>,

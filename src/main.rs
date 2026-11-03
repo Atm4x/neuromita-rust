@@ -55,6 +55,15 @@ async fn main() -> ExitCode {
             }
         };
     }
+    if command.as_deref() == Some(std::ffi::OsStr::new("hardware")) {
+        return match neuromita::ai_runtime::hardware::run_cli(arguments.collect::<Vec<_>>()).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(error = %error, "application failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

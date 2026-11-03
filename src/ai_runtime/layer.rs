@@ -19,6 +19,8 @@ use super::{
 pub enum LayerError {
     #[error("invalid package layer: {0}")]
     Invalid(String),
+    #[error("package layer is not installed: {0}")]
+    NotInstalled(String),
     #[error("immutable revision already exists with different contents")]
     Conflict,
     #[error("package layer filesystem failure: {0}")]

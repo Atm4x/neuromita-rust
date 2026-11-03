@@ -9,6 +9,7 @@ pub mod backend;
 pub mod bootstrap;
 pub mod composition;
 mod distribution;
+pub mod hardware;
 pub mod install;
 mod layer;
 pub mod managed;
@@ -36,18 +37,21 @@ use uuid::Uuid;
 use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
+use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcessTopology {
     Shared,
+    #[default]
     Split,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AiService {
     Tts,
     Asr,
@@ -98,6 +102,18 @@ pub enum AiRuntimeError {
     Protocol(String),
     #[error("Python plugin rejected request ({kind}): {message}")]
     Plugin { kind: String, message: String },
+    #[error("worker cannot use device {device}: {reason}")]
+    DeviceUnavailable { device: String, reason: String },
+    #[error("worker device {device} failed its execution probe: {reason}")]
+    DeviceNotExecutable { device: String, reason: String },
+    #[error("plugin {plugin_id} failed to load: {reason}")]
+    ModelLoadFailed { plugin_id: String, reason: String },
+    #[error("selected plugin {plugin_id} did not report the requested runtime profile")]
+    RuntimeProfileNotConfirmed { plugin_id: String },
+    #[error("activation was superseded by a newer selection")]
+    ActivationSuperseded,
+    #[error("activation guard could not read the persisted selection: {0}")]
+    ActivationGuard(String),
 }
 
 #[derive(Deserialize)]
@@ -137,6 +153,7 @@ struct WorkerProcess {
     generation: Uuid,
     failed: bool,
     selections: HashMap<AiService, (String, Option<String>)>,
+    runtime_profiles: HashMap<AiService, RuntimeProfile>,
 }
 
 struct InFlightRequest<'a> {
@@ -234,6 +251,7 @@ impl WorkerProcess {
             generation: Uuid::new_v4(),
             failed: false,
             selections: HashMap::new(),
+            runtime_profiles: HashMap::new(),
         };
         let line = worker.read_frame().await?;
         let hello: Hello =
@@ -424,7 +442,8 @@ impl WorkerProcess {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelActivation {
     pub service: AiService,
     pub plugin_id: String,
@@ -432,8 +451,17 @@ pub struct ModelActivation {
     pub asset_revision: Option<String>,
 }
 
+struct Activation<'a> {
+    service: AiService,
+    services: &'a [AiService],
+    layers: &'a [PathBuf],
+    models: &'a [ModelActivation],
+    profile: Option<&'a RuntimeProfile>,
+    verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+}
+
 impl AiService {
-    fn kind(self) -> &'static str {
+    pub(crate) fn kind(self) -> &'static str {
         match self {
             Self::Tts => "tts",
             Self::Asr => "asr",
@@ -535,6 +563,61 @@ impl AiSupervisor {
             .await
     }
 
+    /// Prepare a candidate worker for an explicit device profile. The candidate
+    /// must prove device execution and loaded-model readiness, and `verify` runs
+    /// immediately before publication so a superseded selection cannot replace
+    /// the working process.
+    pub async fn activate_hardware(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        profile: &RuntimeProfile,
+        verify: &(dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: Some(profile),
+            verify: Some(verify),
+        })
+        .await
+    }
+
+    /// Inventory a backend layer with a one-shot worker that is stopped before
+    /// returning. No inference worker or model is retained.
+    pub async fn inspect_layers(&self, layers: &[PathBuf]) -> Result<Value, AiRuntimeError> {
+        let mut worker = WorkerProcess::launch(&self.config, layers, &[]).await?;
+        let result = worker.request("hardware", &json!({})).await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+        result
+    }
+
+    pub async fn hardware_probe(
+        &self,
+        service: AiService,
+    ) -> Result<HardwareProbe, AiRuntimeError> {
+        let value = self.call(service, "hardware", json!({})).await?;
+        serde_json::from_value(value)
+            .map_err(|error| AiRuntimeError::Protocol(format!("invalid hardware probe: {error}")))
+    }
+
+    /// Loaded-model readiness reported by the published worker, distinct from
+    /// discovery or file availability.
+    pub async fn readiness(&self, service: AiService) -> Result<Value, AiRuntimeError> {
+        self.call(service, "status", json!({})).await
+    }
+
     async fn reconfigure(
         &self,
         service: AiService,
@@ -542,6 +625,26 @@ impl AiSupervisor {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Uuid, AiRuntimeError> {
+        self.activate(Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile: None,
+            verify: None,
+        })
+        .await
+    }
+
+    async fn activate(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
+        let Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile,
+            verify,
+        } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
         let configured: HashSet<_> = models.iter().map(|model| model.service).collect();
@@ -558,8 +661,51 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        let mut runtime_profiles = HashMap::new();
+        if let Some(profile) = profile {
+            let previous = self.workers.lock().await.get(&key).cloned();
+            if let Some(previous) = previous {
+                runtime_profiles = previous.lock().await.runtime_profiles.clone();
+            }
+            runtime_profiles.retain(|service, _| selected.contains(service));
+            runtime_profiles.insert(service, profile.clone());
+        }
         let mut candidate = WorkerProcess::launch(&self.config, layers, models).await?;
         let prepare = async {
+            for (profile_service, profile) in &runtime_profiles {
+                if profile.backend == backend::BackendKind::RemoteApi {
+                    continue;
+                }
+                let probe_value = candidate.request("hardware", &json!({})).await?;
+                let probe: HardwareProbe =
+                    serde_json::from_value(probe_value).map_err(|error| {
+                        AiRuntimeError::Protocol(format!("invalid hardware probe: {error}"))
+                    })?;
+                if let Err(reason) = verify_probe(profile, &probe) {
+                    return Err(AiRuntimeError::DeviceUnavailable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+                let executed = candidate
+                    .request(
+                        "execute",
+                        &json!({
+                            "backend": profile.backend,
+                            "device": profile.device,
+                            "precision": profile.precision,
+                            "model_path": models.iter().find(|model| model.service == *profile_service).and_then(|model| model.settings.get("model_path")),
+                            "tokens": models.iter().find(|model| model.service == *profile_service).and_then(|model| model.settings.get("tokens")),
+                        }),
+                    )
+                    .await?;
+                if let Err(reason) = verify_execution(&executed) {
+                    return Err(AiRuntimeError::DeviceNotExecutable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+            }
             let available = candidate.request("discover", &json!({})).await?;
             let plugins = available
                 .as_array()
@@ -576,23 +722,52 @@ impl AiSupervisor {
                         model.service.kind()
                     )));
                 }
+                let mut args = json!({
+                    "plugin_id": model.plugin_id,
+                    "settings": model.settings,
+                });
+                if let Some(profile) = runtime_profiles.get(&model.service) {
+                    args["runtime"] = serde_json::to_value(profile)
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                }
                 let ready = candidate
-                    .request(
-                        "initialize",
-                        &json!({"plugin_id": model.plugin_id, "settings": model.settings}),
-                    )
-                    .await?;
+                    .request("initialize", &args)
+                    .await
+                    .map_err(|error| match error {
+                        AiRuntimeError::Plugin { kind, message } => {
+                            AiRuntimeError::ModelLoadFailed {
+                                plugin_id: model.plugin_id.clone(),
+                                reason: format!("{kind}: {message}"),
+                            }
+                        }
+                        other => other,
+                    })?;
                 if ready["model_ready"] != true {
-                    return Err(AiRuntimeError::Protocol(format!(
-                        "model {} did not report ready",
-                        model.plugin_id
-                    )));
+                    return Err(AiRuntimeError::ModelLoadFailed {
+                        plugin_id: model.plugin_id.clone(),
+                        reason: "model did not report ready".into(),
+                    });
+                }
+                if let Some(profile) = runtime_profiles.get(&model.service) {
+                    let echoed = ready.get("runtime").ok_or_else(|| {
+                        AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        }
+                    })?;
+                    let confirmed: RuntimeProfile = serde_json::from_value(echoed.clone())
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                    if &confirmed != profile {
+                        return Err(AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        });
+                    }
                 }
                 candidate.selections.insert(
                     model.service,
                     (model.plugin_id.clone(), model.asset_revision.clone()),
                 );
             }
+            candidate.runtime_profiles = runtime_profiles;
             Ok(())
         }
         .await;
@@ -601,12 +776,24 @@ impl AiSupervisor {
             let _ = candidate.child.wait().await;
             return Err(error);
         }
+        let _selection_guard = match verify {
+            Some(verify) => match verify() {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    let _ = candidate.child.start_kill();
+                    let _ = candidate.child.wait().await;
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
         let generation = candidate.generation;
         let old = self
             .workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(candidate)));
+        drop(_selection_guard);
         if let Some(old) = old {
             let mut old = old.lock().await;
             let _ = old.child.start_kill();

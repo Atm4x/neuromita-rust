@@ -93,6 +93,7 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
@@ -130,6 +131,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
+            ai_hardware: None,
             ai_knowledge: None,
             settings: SettingsConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
@@ -346,6 +348,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             ai_runtime,
+            ai_hardware,
             ai_knowledge,
             settings,
             timeline,
@@ -373,9 +376,22 @@ impl ApplicationLifecycle {
         let settings_owner = settings.owner();
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
-        let ai_runtime = match ai_runtime {
-            Some(configuration) => Some(Box::pin(configuration.activate()).await?),
-            None => None,
+        let ai_runtime = match (ai_runtime, ai_hardware) {
+            (Some(configuration), Some(path)) => {
+                let store = crate::ai_runtime::hardware::HardwareConfigStore::new(path);
+                let selected = store.load().map_err(|error| {
+                    crate::ai_runtime::application::AiApplicationError::Invalid(error.to_string())
+                })?;
+                Some(Box::pin(configuration.activate_with_hardware(&selected, &store)).await?)
+            }
+            (Some(configuration), None) => Some(Box::pin(configuration.activate()).await?),
+            (None, Some(_)) => {
+                return Err(crate::ai_runtime::application::AiApplicationError::Invalid(
+                    "hardware selection requires an explicit AI application plan".into(),
+                )
+                .into());
+            }
+            (None, None) => None,
         };
         let speech = ai_runtime
             .as_ref()
