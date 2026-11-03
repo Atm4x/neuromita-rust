@@ -4,7 +4,8 @@ mod presets;
 mod settings;
 
 pub use characters::{
-    CharactersPresenter, MemoryListPage, MemoryListQuery, MemoryObserver, MemorySummary,
+    CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
+    MemorySummary,
 };
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};

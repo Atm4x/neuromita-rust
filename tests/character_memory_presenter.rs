@@ -312,3 +312,350 @@ async fn memory_observer_refreshes_only_on_committed_character_memory_changes() 
         Err(CharacterError::Unavailable)
     ));
 }
+
+#[tokio::test]
+async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_character_apply() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let initial = presenter.memories(CharacterId::Mita).await.unwrap();
+    let added = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            initial,
+            vec![
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Low,
+                    content: "least important".into(),
+                },
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "normal fact".into(),
+                },
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Critical,
+                    content: "critical fact".into(),
+                },
+                MemoryCommand::SetIsland {
+                    island: MemoryIsland::Relationship,
+                    content: "a durable relationship".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let low = added
+        .snapshot
+        .records()
+        .iter()
+        .find(|record| record.priority == MemoryPriority::Low)
+        .unwrap()
+        .id;
+    let preview = presenter
+        .preview_memory_capacity(CharacterId::Mita, 2)
+        .await
+        .unwrap();
+    assert_eq!(preview.plan().active_facts(), 3);
+    assert_eq!(preview.plan().victims(), &[low]);
+    assert_eq!(
+        presenter
+            .memories(CharacterId::Mita)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        4
+    );
+    assert!(matches!(
+        presenter
+            .apply_memory_capacity(CharacterId::KindMita, preview.clone())
+            .await,
+        Err(CharacterError::StaleState)
+    ));
+
+    // A different character's edit does not invalidate Mita's preview.
+    let other = presenter.memories(CharacterId::KindMita).await.unwrap();
+    presenter
+        .edit_memories(
+            CharacterId::KindMita,
+            other,
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "other character's fact".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let committed = presenter
+        .apply_memory_capacity(CharacterId::Mita, preview)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(committed.applied.len(), 1);
+    assert_eq!(
+        committed
+            .snapshot
+            .records()
+            .iter()
+            .find(|record| record.id == low)
+            .unwrap()
+            .state,
+        MemoryState::Forgotten
+    );
+    assert_eq!(
+        presenter
+            .preview_memory_capacity(CharacterId::Mita, 2)
+            .await
+            .unwrap()
+            .plan()
+            .victims()
+            .len(),
+        0
+    );
+    let noop = presenter
+        .preview_memory_capacity(CharacterId::Mita, 2)
+        .await
+        .unwrap();
+    assert!(
+        presenter
+            .apply_memory_capacity(CharacterId::Mita, noop)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let next = presenter
+        .preview_memory_capacity(CharacterId::Mita, 1)
+        .await
+        .unwrap();
+    assert_eq!(next.plan().victims().len(), 1);
+    assert_ne!(next.plan().victims(), &[low]);
+    assert_eq!(
+        presenter
+            .memories(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .records()
+            .len(),
+        1
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let added = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Low,
+                    content: "low fact".into(),
+                },
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "normal fact".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let preview = presenter
+        .preview_memory_capacity(CharacterId::Mita, 1)
+        .await
+        .unwrap();
+    assert_eq!(preview.plan().victims().len(), 1);
+    let low = added
+        .snapshot
+        .records()
+        .iter()
+        .find(|record| record.priority == MemoryPriority::Low)
+        .unwrap()
+        .id;
+    presenter
+        .edit_memories(
+            CharacterId::Mita,
+            added.snapshot,
+            vec![MemoryCommand::SetProtection {
+                id: low,
+                protected: true,
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        presenter
+            .apply_memory_capacity(CharacterId::Mita, preview)
+            .await,
+        Err(CharacterError::StaleState)
+    ));
+    assert_eq!(
+        presenter
+            .memories(CharacterId::Mita)
+            .await
+            .unwrap()
+            .records()
+            .iter()
+            .filter(|record| record.state == MemoryState::Active)
+            .count(),
+        2
+    );
+    let new_plan = presenter
+        .preview_memory_capacity(CharacterId::Mita, 1)
+        .await
+        .unwrap();
+    assert_ne!(new_plan.plan().victims(), &[low]);
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn capacity_preview_can_commit_a_full_255_fact_reduction_atomically() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    for batch in 0..2 {
+        let commands = (0..128)
+            .map(|n| MemoryCommand::Add {
+                priority: MemoryPriority::Low,
+                content: format!("capacity fact {}", batch * 128 + n),
+            })
+            .collect();
+        presenter
+            .edit_memories(
+                CharacterId::Mita,
+                presenter.memories(CharacterId::Mita).await.unwrap(),
+                commands,
+            )
+            .await
+            .unwrap();
+    }
+    let preview = presenter
+        .preview_memory_capacity(CharacterId::Mita, 1)
+        .await
+        .unwrap();
+    assert_eq!(preview.plan().active_facts(), 256);
+    assert_eq!(preview.plan().victims().len(), 255);
+    let result = presenter
+        .apply_memory_capacity(CharacterId::Mita, preview)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.applied.len(), 255);
+    assert_eq!(
+        result
+            .snapshot
+            .records()
+            .iter()
+            .filter(|r| r.state == MemoryState::Active)
+            .count(),
+        1
+    );
+    assert_eq!(
+        result
+            .snapshot
+            .records()
+            .iter()
+            .filter(|r| r.state == MemoryState::Forgotten)
+            .count(),
+        255
+    );
+    assert_eq!(result.snapshot.records().len(), 256);
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
+    let _serial = SERIAL.lock().await;
+    let path = std::env::temp_dir().join(format!("neuromita-capacity-{}", uuid::Uuid::new_v4()));
+    let launch = || {
+        let preset = GenerationPreset::new(ProviderTemplate::Gemini(
+            GeminiTemplate::new(
+                "http://127.0.0.1:1/v1beta/",
+                "test-model",
+                "unused-key",
+                GenerationSettings::new(0.7, 128, Duration::from_secs(5)).unwrap(),
+            )
+            .unwrap(),
+        ));
+        ApplicationConfig::persistent(
+            preset,
+            ResponseGenerator::new(Vec::new()).unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &path,
+        )
+        .unwrap()
+    };
+    let app = ApplicationLifecycle::start(launch()).await.unwrap();
+    let presenter = &app.presenter().characters;
+    presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![
+                MemoryCommand::Add {
+                    priority: MemoryPriority::Low,
+                    content: "durable low fact".into(),
+                },
+                MemoryCommand::Add {
+                    priority: MemoryPriority::High,
+                    content: "durable high fact".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let preview = presenter
+        .preview_memory_capacity(CharacterId::Mita, 1)
+        .await
+        .unwrap();
+    let forgotten_id = preview.plan().victims()[0];
+    presenter
+        .apply_memory_capacity(CharacterId::Mita, preview)
+        .await
+        .unwrap();
+    app.shutdown().await.unwrap();
+
+    let reopened = ApplicationLifecycle::start(launch()).await.unwrap();
+    let records = reopened
+        .presenter()
+        .characters
+        .memories(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert_eq!(records.records().len(), 2);
+    assert_eq!(
+        records
+            .records()
+            .iter()
+            .find(|record| record.id == forgotten_id)
+            .unwrap()
+            .state,
+        MemoryState::Forgotten
+    );
+    assert_eq!(
+        records
+            .records()
+            .iter()
+            .filter(|r| r.state == MemoryState::Active)
+            .count(),
+        1
+    );
+    assert!(
+        reopened
+            .presenter()
+            .characters
+            .memories(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    reopened.shutdown().await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}

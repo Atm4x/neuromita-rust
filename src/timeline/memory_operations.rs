@@ -5,7 +5,10 @@ use super::{
     domain::{AppendGuard, EventDraft, EventKind, TimelineError, TimelineFact},
     selection::TimelineSelection,
 };
-use crate::{identity::CharacterId, memory::MemoryChange};
+use crate::{
+    identity::CharacterId,
+    memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange},
+};
 
 impl SessionTimeline {
     /// Return the pinned raw world and its storage revision. Character projections
@@ -33,9 +36,9 @@ impl SessionTimeline {
         if self.anchor() != expected_anchor {
             return Err(TimelineError::ConcurrentWrite);
         }
-        if changes.is_empty() || changes.len() > 128 {
+        if changes.is_empty() || changes.len() > MAX_MEMORY_EDIT_CHANGES {
             return Err(TimelineError::Invalid(
-                "memory edit requires 1..128 changes",
+                "memory edit requires 1..256 changes",
             ));
         }
         if changes

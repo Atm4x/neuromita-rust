@@ -5,7 +5,7 @@ use crate::{
         CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot, CharacterRegistry,
         CharacterState, CharacterView, MemoryEditResult,
     },
-    memory::{MemoryCommand, MemoryKind, MemoryRecord, MemoryState},
+    memory::{MemoryCapacityPlan, MemoryCommand, MemoryKind, MemoryRecord, MemoryState},
     request::{InputError, UserInput},
     timeline::{ContextAnchor, EventId},
 };
@@ -151,6 +151,33 @@ impl MemoryListPage {
     }
 }
 
+/// A capacity operation tied to exactly one character snapshot.
+/// The preview is immutable; applying it uses the existing guarded character edit.
+#[derive(Debug, Clone)]
+pub struct MemoryCapacityPreview {
+    snapshot: CharacterMemorySnapshot,
+    plan: MemoryCapacityPlan,
+}
+
+impl MemoryCapacityPreview {
+    pub fn from_snapshot(
+        snapshot: CharacterMemorySnapshot,
+        limit: usize,
+    ) -> Result<Self, CharacterError> {
+        let plan = MemoryCapacityPlan::preview(snapshot.records(), limit)
+            .map_err(CharacterError::InvalidMemory)?;
+        Ok(Self { snapshot, plan })
+    }
+
+    pub fn plan(&self) -> &MemoryCapacityPlan {
+        &self.plan
+    }
+
+    pub fn snapshot(&self) -> &CharacterMemorySnapshot {
+        &self.snapshot
+    }
+}
+
 /// Coalescing observer of character memory changes committed by this Core.
 /// The signal contains no memory data: every observation rebuilds its page
 /// from the same authoritative CharacterHandle used for ordinary reads.
@@ -216,6 +243,37 @@ impl CharactersPresenter {
     ) -> Result<MemoryListPage, CharacterError> {
         MemoryListPage::from_snapshot(self.memories(id).await?, query)
     }
+    /// Preview a reduction without mutating Timeline or invoking inference.
+    pub async fn preview_memory_capacity(
+        &self,
+        id: CharacterId,
+        limit: usize,
+    ) -> Result<MemoryCapacityPreview, CharacterError> {
+        MemoryCapacityPreview::from_snapshot(self.memories(id).await?, limit)
+    }
+
+    /// The plan's embedded snapshot enforces branch and character memory CAS.
+    /// No-op plans deliberately produce no event or observer notification.
+    pub async fn apply_memory_capacity(
+        &self,
+        id: CharacterId,
+        preview: MemoryCapacityPreview,
+    ) -> Result<Option<MemoryEditResult>, CharacterError> {
+        if preview.snapshot.character() != id {
+            return Err(CharacterError::StaleState);
+        }
+        if preview.plan.is_noop() {
+            let current = self.memories(id).await?;
+            if !current.matches_version(&preview.snapshot) {
+                return Err(CharacterError::StaleState);
+            }
+            return Ok(None);
+        }
+        self.edit_memories(id, preview.snapshot, preview.plan.forget_commands())
+            .await
+            .map(Some)
+    }
+
     pub async fn edit_memories(
         &self,
         id: CharacterId,

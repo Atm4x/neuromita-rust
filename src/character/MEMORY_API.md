@@ -48,3 +48,24 @@ pushed to this presenter. Such clients must explicitly refresh or use a
 separately coordinated IPC/revision contract. It has no permission to invoke
 administrative purge; that remains internal until a real authenticated client
 boundary exists. No Slint or AI Engine dependency is introduced.
+
+## Explicit capacity reduction (#21)
+
+`CharactersPresenter::preview_memory_capacity(character, limit)` returns an immutable
+`MemoryCapacityPreview` of **active fact** eviction candidates. Valid target limits
+are 1..=256. Only unprotected, noncritical active facts are candidates; islands,
+forgotten/deleted records, protected and Critical records are never selected.
+The candidate sort is Low → Normal → High, then stable `MemoryId`. The ID is a
+deterministic tie-breaker, **not** creation time or RAG access frequency. If the
+requested limit cannot be reached without touching protected/Critical entries,
+preview fails entirely. It never mutates the Timeline.
+
+`apply_memory_capacity(character, preview)` commits explicit `Forget` commands
+using the same `CharacterHandle::edit_memories` snapshot CAS as ordinary edits.
+Stale branch/character changes reject the full batch; a no-op preview produces
+no event. This does **not** alter the existing Add policy: reaching the hard
+capacity still rejects an Add. This behavior differs from Python's age/access
+weighted automatic eviction and is intentionally opt-in until parity is decided.
+A full-capacity preview may require 255 Forget changes; character user-edit and
+Timeline batch limits therefore allow up to 256 atomic changes.
+No ML inference, GUI, new storage, or event bus is involved.
