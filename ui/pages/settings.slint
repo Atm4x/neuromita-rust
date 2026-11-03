@@ -26,6 +26,7 @@ export global SettingsUi {
     in-out property <string> kind-react;
     in-out property <string> kind-initiate;
     in-out property <string> preset-edit-id;
+    in-out property <string> preset-save-token;
     in-out property <string> preset-name;
     in-out property <string> preset-model;
     in-out property <string> preset-endpoint: "https://generativelanguage.googleapis.com/v1beta/";
@@ -154,7 +155,7 @@ export component SettingsPage inherits Rectangle {
                         Card { width: max(230px, parent.width / 3); VerticalLayout { padding: 14px; spacing: 12px;
                             Caption { text: I18n.i18n("settings.presets", "Пресеты"); font-size: 15px; font-weight: 700; }
                             QuickAction { text: I18n.i18n("settings.preset.new", "Создать пресет"); enabled: root.connected;
-                                activated => { SettingsUi.preset-edit-id = ""; SettingsUi.preset-name = ""; SettingsUi.preset-model = ""; SettingsUi.preset-endpoint = "https://generativelanguage.googleapis.com/v1beta/"; SettingsUi.preset-key-env = "GEMINI_API_KEY"; SettingsUi.preset-temperature = "0.7"; SettingsUi.preset-tokens = "3000"; SettingsUi.preset-timeout = "60000"; }
+                                activated => { SettingsUi.preset-edit-id = ""; SettingsUi.preset-save-token = ""; SettingsUi.preset-name = ""; SettingsUi.preset-model = ""; SettingsUi.preset-endpoint = "https://generativelanguage.googleapis.com/v1beta/"; SettingsUi.preset-key-env = "GEMINI_API_KEY"; SettingsUi.preset-temperature = "0.7"; SettingsUi.preset-tokens = "3000"; SettingsUi.preset-timeout = "60000"; }
                             }
                             ScrollView { content-width: self.visible-width; vertical-stretch: 1;
                                 VerticalLayout { padding: 0px; spacing: 8px; alignment: start;

@@ -207,6 +207,14 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
     settings.set_preset_temperature("0.7".into());
+    let previous_save = uuid::Uuid::new_v4();
+    settings.set_preset_save_token(previous_save.to_string().into());
+    settings.invoke_preset_edit("7".into());
+    super::super::settings::saved(
+        window,
+        Some((neuromita::generation::PresetId(99), previous_save)),
+    );
+    assert_eq!(settings.get_preset_edit_id(), "7");
     window.set_page(PageId::Settings);
     window.set_core_connected(true);
     window.global::<I18n>().set_locale("ru".into());
@@ -327,7 +335,7 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert_eq!(ui.get_content(), "Изменённый текст");
         ui.invoke_apply(0);
         let command = commands.borrow_mut().pop().unwrap();
-        let Command::MemoryEdit(expected, edits) = command else {
+        let Command::MemoryEdit(edit_id, expected, edits) = command else {
             panic!("expected typed memory edit")
         };
         assert!(
@@ -336,6 +344,13 @@ fn memory_render_and_contract(window: &AppWindow) {
                 .await
                 .is_err()
         );
+        ui.invoke_edit(page.records()[1].id.0.to_string().into());
+        ui.set_content("new draft after save".into());
+        memory::saved(window, &state, edit_id);
+        assert_eq!(ui.get_content(), "new draft after save");
+        assert!(ui.get_editing());
+        memory::failed(window, &state, edit_id, "old error".into());
+        assert!(ui.get_error().is_empty());
         for (width, height) in [(1560, 918), (1200, 760)] {
             window
                 .window()

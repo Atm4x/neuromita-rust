@@ -19,6 +19,7 @@ use super::{
 pub struct MemoryEditor {
     current: Option<CharacterMemorySnapshot>,
     draft: Option<CharacterMemorySnapshot>,
+    draft_id: Option<uuid::Uuid>,
     offset: usize,
     search: String,
 }
@@ -34,6 +35,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         let mut editor = selected.lock().expect("memory editor mutex");
         editor.current = None;
         editor.draft = None;
+        editor.draft_id = None;
         editor.offset = 0;
         editor.search.clear();
         if let Some(window) = weak.upgrade() {
@@ -98,6 +100,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_content(record.content.as_str().into());
         }
         editor.draft = Some(snapshot);
+        editor.draft_id = Some(uuid::Uuid::new_v4());
         ui.set_editing(true);
         ui.set_error("".into());
     });
@@ -108,7 +111,13 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             return;
         };
         let ui = component.global::<MemoryUi>();
+        if !ui.get_editing() {
+            return;
+        }
         let editor = editor.lock().expect("memory editor mutex");
+        let Some(edit_id) = editor.draft_id else {
+            return;
+        };
         let Some(expected) = editor.draft.clone() else {
             ui.set_error("Select a memory or choose Add first".into());
             return;
@@ -144,7 +153,10 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             })
         })();
         match result {
-            Ok(command) => dispatch(Command::MemoryEdit(expected, vec![command])),
+            Ok(command) => {
+                ui.set_editing(false);
+                dispatch(Command::MemoryEdit(edit_id, expected, vec![command]));
+            }
             Err(error) => ui.set_error(error.into()),
         }
     });
@@ -209,11 +221,25 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
     )));
 }
 
-pub fn saved(window: &AppWindow, state: &EditorState) {
-    state.lock().expect("memory editor mutex").draft = None;
+pub fn saved(window: &AppWindow, state: &EditorState, edit_id: uuid::Uuid) {
+    let mut editor = state.lock().expect("memory editor mutex");
+    if editor.draft_id != Some(edit_id) {
+        return;
+    }
+    editor.draft = None;
+    editor.draft_id = None;
     let ui = window.global::<MemoryUi>();
     ui.set_error("".into());
     ui.set_edit_id("".into());
     ui.set_content("".into());
     ui.set_editing(false);
+}
+
+pub fn failed(window: &AppWindow, state: &EditorState, edit_id: uuid::Uuid, error: String) {
+    if state.lock().expect("memory editor mutex").draft_id != Some(edit_id) {
+        return;
+    }
+    let ui = window.global::<MemoryUi>();
+    ui.set_editing(true);
+    ui.set_error(error.into());
 }
