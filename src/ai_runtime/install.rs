@@ -34,6 +34,15 @@ pub struct PluginInstallPlan {
     pub supported_python_minors: Vec<String>,
     #[serde(default)]
     pub actions: Vec<InstallerAction>,
+    #[serde(default)]
+    pub asset_hooks: Vec<AssetHook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssetHook {
+    pub id: String,
+    pub source_plugin_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +178,21 @@ impl PluginInstallPlan {
             return Err(PluginInstallError::Invalid(
                 "invalid supported backends".into(),
             ));
+        }
+        if self.asset_hooks.len() > 16
+            || self
+                .asset_hooks
+                .iter()
+                .any(|hook| !valid_segment(&hook.id) || !valid_segment(&hook.source_plugin_id))
+            || self
+                .asset_hooks
+                .iter()
+                .map(|hook| &hook.id)
+                .collect::<HashSet<_>>()
+                .len()
+                != self.asset_hooks.len()
+        {
+            return Err(PluginInstallError::Invalid("invalid asset hooks".into()));
         }
         if self.assets.len() > 512 {
             return Err(PluginInstallError::Invalid("too many assets".into()));
@@ -467,6 +491,7 @@ mod tests {
     #[test]
     fn rejects_path_traversal_and_duplicate_assets() {
         let mut plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![asset("rvc", "../voice.pth", true)],
@@ -498,6 +523,7 @@ mod tests {
         let mut present = asset("rvc_weights", "rvc/voice.pth", true);
         present.sha256 = Some(hash_file(&plugin.join("rvc/voice.pth")).await.unwrap());
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             backend: None,
@@ -535,6 +561,7 @@ mod tests {
             .inspect_assets(
                 "mock_tts",
                 &PluginInstallPlan {
+                    asset_hooks: vec![],
                     assets: vec![present],
                     packages: vec![],
                     requirements: vec![],
@@ -632,6 +659,7 @@ exit 3
             assets_directory: root.join("models"),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             backend: Some("torch-cpu".into()),
             supported_backends: vec![],
             supported_python_minors: vec!["3.12".into(), "3.13".into()],
@@ -722,6 +750,7 @@ exit 3
             assets_directory: root.clone(),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![asset("reference", "voice.wav", true)],

@@ -168,3 +168,12 @@ The implementation and exact remaining limitations are tracked in [AI Engine imp
 - [x] Reject mismatched locked Python, invalid service topology, missing/duplicate selected models and failed activation before client APIs are exposed.
 - [x] Abort of an in-flight IPC call terminates/poisons the worker; stale results cannot be reused without a new worker generation. Mock tests cover cancel/restart and startup failure paths.
 - [ ] Build the complete production `uv`/CPython/SDK/overlay/weights resolver into the application and persistent settings; implement AI Hub controls and smoke-test actual Silero+RVC inference. See [implementation report](future/ai-engine-implementation-20261103.md). All global AI Runtime issues remain open.
+
+### AI Runtime implementation — verified generated assets (2026-11-03)
+
+- [x] `AssetHook` is separate from overlay mutations and is returned by the versioned Python SDK.
+- [x] Rust-owned model asset generation requires exact hook approval, a verified source revision, private staging, declared output validation, hash receipts and atomic publication. Failed hooks do not replace an active revision.
+- [x] GigaAM ONNX has an explicit Python export hook and package requirement for `onnx`; the runtime worker no longer needs to export its own checkpoints.
+- [ ] Real GigaAM CTC/RNNT checkpoint export and ORT inference on Windows/CPU/DirectML are **not verified**; production uv/bootstrap/install/activation/AI Hub orchestration is still open.
+
+Implementation and limitations: [AI asset generation](future/ai-asset-hooks-20261103.md).
