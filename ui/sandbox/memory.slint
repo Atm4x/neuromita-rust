@@ -3,9 +3,10 @@ import { Caption, HeaderButton, QuickAction, Field, Centered } from "controls.sl
 import { SandboxTheme } from "theme.slint";
 import { I18n } from "../i18n.slint";
 
-export struct MemoryItem { id: string, text: string, state: string }
+export struct MemoryItem { id: string, text: string, state: int, priority: int, protected: bool }
 export global MemoryUi {
     in-out property <bool> open;
+    in-out property <bool> editing;
     in-out property <int> offset;
     in-out property <int> next: -1;
     in-out property <string> search;
@@ -51,7 +52,7 @@ export component MemoryDialog inherits Rectangle {
                         VerticalLayout { padding: 0px; padding-right: 10px; spacing: 8px; alignment: start;
                             for item in MemoryUi.items: Rectangle { background: MemoryUi.edit-id == item.id ? #b74b7d33 : #080912; border-radius: 10px; border-width: 1px; border-color: SandboxTheme.border;
                                 VerticalLayout { padding: 12px; spacing: 6px;
-                                    Caption { text: item.state; font-size: 11px; color: SandboxTheme.muted; }
+                                    Caption { text: (item.state == 0 ? I18n.i18n("memory.active", "Активно") : item.state == 1 ? I18n.i18n("memory.forgotten", "Забыто") : I18n.i18n("memory.deleted", "Удалено")) + " · " + (item.priority == 0 ? I18n.i18n("memory.priority.low", "Низкий") : item.priority == 1 ? I18n.i18n("memory.priority.normal", "Обычный") : item.priority == 2 ? I18n.i18n("memory.priority.high", "Высокий") : I18n.i18n("memory.priority.critical", "Критический")) + (item.protected ? " · " + I18n.i18n("memory.protected", "Защищено") : ""); font-size: 11px; color: SandboxTheme.muted; }
                                     Text { text: item.text; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap; }
                                 }
                                 TouchArea { mouse-cursor: pointer; clicked => { MemoryUi.edit(item.id); MemoryUi.delete-confirm = false; } }
@@ -68,10 +69,10 @@ export component MemoryDialog inherits Rectangle {
                     Caption { text: I18n.i18n("memory.content", "Содержимое воспоминания"); font-weight: 700; }
                     Rectangle { background: #080912; border-radius: 10px; border-width: 1px; border-color: SandboxTheme.border; min-height: 130px; vertical-stretch: 1;
                         ScrollView { x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px; content-width: self.visible-width;
-                            TextInput { text <=> MemoryUi.content; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap; single-line: false; }
+                            TextInput { enabled: MemoryUi.editing; text <=> MemoryUi.content; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap; single-line: false; }
                         }
                     }
-                    QuickAction { text: I18n.i18n("settings.save", "Сохранить"); activated => { MemoryUi.apply(0); } }
+                    QuickAction { text: I18n.i18n("settings.save", "Сохранить"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(0); } }
                     if MemoryUi.edit-id != "": VerticalLayout { spacing: 8px;
                         QuickAction { text: I18n.i18n("memory.forget", "Забыть"); activated => { MemoryUi.apply(1); } }
                         QuickAction { text: I18n.i18n("memory.restore", "Восстановить"); activated => { MemoryUi.apply(3); } }

@@ -50,7 +50,14 @@ pub enum ModelGenerationError {
 }
 
 impl ModelAssetStore {
-    pub async fn publish_generated(
+    pub fn publish_generated<'a>(
+        &'a self,
+        request: ModelGenerationRequest<'a>,
+    ) -> impl std::future::Future<Output = Result<PathBuf, ModelGenerationError>> + Send + 'a {
+        Box::pin(self.generate(request))
+    }
+
+    async fn generate(
         &self,
         request: ModelGenerationRequest<'_>,
     ) -> Result<PathBuf, ModelGenerationError> {
@@ -141,6 +148,8 @@ impl ModelAssetStore {
                     Command::new(request.python_executable)
                         .arg("-m")
                         .arg("neuromita_ai_sdk.installer")
+                        .arg("--python-version")
+                        .arg(request.python_version)
                         .arg("--plugins-dir")
                         .arg(request.plugins_directory)
                         .arg("--plugin-id")
@@ -343,7 +352,13 @@ class InstallContract:
     assert hook_id == 'convert'
     (output_root / 'converted.onnx').write_bytes(b'onnx:' + (source_root / 'source.ckpt').read_bytes())
 "#).await.unwrap();
-        let python = std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        let python = std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "python".into()
+            } else {
+                "python3".into()
+            }
+        });
         let output = Command::new(&python)
             .arg("-c")
             .arg("import sys;print(sys.executable)")
@@ -352,6 +367,21 @@ class InstallContract:
             .unwrap();
         assert!(output.status.success());
         let python = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let version = Command::new(&python)
+            .arg("--version")
+            .output()
+            .await
+            .unwrap();
+        assert!(version.status.success());
+        let python_version = String::from_utf8_lossy(&version.stdout)
+            .trim()
+            .strip_prefix("Python ")
+            .unwrap()
+            .to_owned();
+        assert!(
+            python_version.starts_with("3.12."),
+            "fixtures require Python 3.12"
+        );
         let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
         let plan = plan("export", "converted.onnx", true);
         let settings = serde_json::json!({"model":"v2_ctc"});
@@ -362,7 +392,7 @@ class InstallContract:
                     plugin_id: "fixture",
                     revision: $rev,
                     plan: &plan,
-                    python_version: "3.12.10",
+                    python_version: &python_version,
                     hook_id: "convert",
                     source_plugin_id: "input_model",
                     source_revision: "r1",
@@ -380,6 +410,12 @@ class InstallContract:
             Err(ModelGenerationError::NotApproved)
         ));
         assert!(!root.join("models/fixture/r1").exists());
+        let mut wrong_python = gen_req!("wrong-python", Some("convert"));
+        wrong_python.python_version = "3.12.999";
+        assert!(
+            matches!(store.publish_generated(wrong_python).await, Err(ModelGenerationError::Hook(message)) if message.contains("locked Python version"))
+        );
+        assert!(!root.join("models/fixture/wrong-python").exists());
         let published = store
             .publish_generated(gen_req!("r1", Some("convert")))
             .await

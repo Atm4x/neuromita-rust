@@ -115,11 +115,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
     match update {
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
         Update::MemoryError(error) => window.global::<MemoryUi>().set_error(error.into()),
-        Update::MemorySaved => {
-            window.global::<MemoryUi>().set_error("".into());
-            window.global::<MemoryUi>().set_edit_id("".into());
-            window.global::<MemoryUi>().set_content("".into());
-        }
+        Update::MemorySaved => super::memory::saved(window, memory_editor),
         Update::Confirmation(preview) => {
             let ui = window.global::<ConversationUi>();
             match preview {

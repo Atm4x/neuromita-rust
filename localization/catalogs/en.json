@@ -722,5 +722,37 @@
   "settings.core.unavailable": {
     "source": "Ядро недоступно",
     "translation": "Core is unavailable"
+  },
+  "memory.active": {
+    "source": "Активно",
+    "translation": "Active"
+  },
+  "memory.forgotten": {
+    "source": "Забыто",
+    "translation": "Forgotten"
+  },
+  "memory.deleted": {
+    "source": "Удалено",
+    "translation": "Deleted"
+  },
+  "memory.priority.low": {
+    "source": "Низкий",
+    "translation": "Low"
+  },
+  "memory.priority.normal": {
+    "source": "Обычный",
+    "translation": "Normal"
+  },
+  "memory.priority.high": {
+    "source": "Высокий",
+    "translation": "High"
+  },
+  "memory.priority.critical": {
+    "source": "Критический",
+    "translation": "Critical"
+  },
+  "memory.protected": {
+    "source": "Защищено",
+    "translation": "Protected"
   }
 }

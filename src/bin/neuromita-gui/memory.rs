@@ -29,12 +29,16 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
     let ui = window.global::<MemoryUi>();
     let send = dispatch.clone();
     let selected = state.clone();
+    let weak = window.as_weak();
     ui.on_select(move |id| {
         let mut editor = selected.lock().expect("memory editor mutex");
         editor.current = None;
         editor.draft = None;
         editor.offset = 0;
         editor.search.clear();
+        if let Some(window) = weak.upgrade() {
+            window.global::<MemoryUi>().set_editing(false);
+        }
         let character = match id {
             0 => neuromita::character::CharacterId::Mita,
             1 => neuromita::character::CharacterId::KindMita,
@@ -94,6 +98,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_content(record.content.as_str().into());
         }
         editor.draft = Some(snapshot);
+        ui.set_editing(true);
         ui.set_error("".into());
     });
     let editor = state.clone();
@@ -187,18 +192,28 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
             .map(|record| MemoryItem {
                 id: record.id.0.to_string().into(),
                 text: record.content.as_str().into(),
-                state: format!(
-                    "{:?} · {:?}{}",
-                    record.state,
-                    record.priority,
-                    if record.protected {
-                        " · protected"
-                    } else {
-                        ""
-                    }
-                )
-                .into(),
+                state: match record.state {
+                    neuromita::memory::MemoryState::Active => 0,
+                    neuromita::memory::MemoryState::Forgotten => 1,
+                    neuromita::memory::MemoryState::Deleted => 2,
+                },
+                priority: match record.priority {
+                    MemoryPriority::Low => 0,
+                    MemoryPriority::Normal => 1,
+                    MemoryPriority::High => 2,
+                    MemoryPriority::Critical => 3,
+                },
+                protected: record.protected,
             })
             .collect::<Vec<_>>(),
     )));
+}
+
+pub fn saved(window: &AppWindow, state: &EditorState) {
+    state.lock().expect("memory editor mutex").draft = None;
+    let ui = window.global::<MemoryUi>();
+    ui.set_error("".into());
+    ui.set_edit_id("".into());
+    ui.set_content("".into());
+    ui.set_editing(false);
 }
