@@ -7,6 +7,7 @@ mod releases;
 mod runtime;
 mod sandbox;
 mod settings;
+mod voice;
 
 mod view {
     slint::include_modules!();
