@@ -74,11 +74,11 @@ export component MemoryDialog inherits Rectangle {
                     }
                     QuickAction { text: I18n.i18n("settings.save", "Сохранить"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(0); } }
                     if MemoryUi.edit-id != "": VerticalLayout { spacing: 8px;
-                        QuickAction { text: I18n.i18n("memory.forget", "Забыть"); activated => { MemoryUi.apply(1); } }
-                        QuickAction { text: I18n.i18n("memory.restore", "Восстановить"); activated => { MemoryUi.apply(3); } }
-                        QuickAction { text: I18n.i18n("memory.protect", "Переключить защиту"); activated => { MemoryUi.apply(4); } }
-                        QuickAction { text: I18n.i18n("settings.delete", "Удалить"); activated => { MemoryUi.delete-confirm = true; } }
-                        if MemoryUi.delete-confirm: QuickAction { text: I18n.i18n("memory.delete.confirm", "Подтвердить перенос в корзину"); activated => { MemoryUi.apply(2); MemoryUi.delete-confirm = false; } }
+                        QuickAction { text: I18n.i18n("memory.forget", "Забыть"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(1); } }
+                        QuickAction { text: I18n.i18n("memory.restore", "Восстановить"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(3); } }
+                        QuickAction { text: I18n.i18n("memory.protect", "Переключить защиту"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(4); } }
+                        QuickAction { text: I18n.i18n("settings.delete", "Удалить"); enabled: MemoryUi.editing; activated => { MemoryUi.delete-confirm = true; } }
+                        if MemoryUi.delete-confirm: QuickAction { text: I18n.i18n("memory.delete.confirm", "Подтвердить перенос в корзину"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(2); MemoryUi.delete-confirm = false; } }
                     }
                 }
             }

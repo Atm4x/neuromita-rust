@@ -20,7 +20,7 @@ Python is pinned to **3.12** per the user's clarification. The incoming applicat
 - [x] Connect history, guarded clear/reset confirmation, retained request diagnostics and live client count/server status. Add memory editor using CharactersPresenter snapshot/CAS, live observer, CRUD/forget/restore/protection, search and paging. External updates do not replace the draft or its edit token.
 - [ ] Remaining: message-specific revise/restore controls, character parameter editing, AI model/install UI and actual microphone/capture/playback integration. Disabled controls must not imply those features work.
 - [x] Verify software-rendered GUI at 1560×918 and 1200×760, error/disconnected states, locale changes and real presenter interactions with local fixtures. Native minimize/restore remains unverified (see below).
-- [ ] Commit/push completed increments and keep handoff current before stopping near the allowance threshold.
+- [x] Commit/push completed increments and keep handoff current before stopping near the allowance threshold. PR #72 merged into main at `c4901f2c`; final save-confirmation fix is published as a follow-up PR.
 
 Earshot reference: https://github.com/pykeio/earshot ; pinned crate 1.2.2 (`c400f15bd232dda30a297eec90235bd09066cab7`). It processes 256-sample / 16 ms frames of 16 kHz mono PCM16 in the native adapter. No microphone capture, ASR, speech-accuracy claim or model download follows from adding this component.
 
@@ -52,3 +52,9 @@ Native UI automation was attempted through the computer-use skill. Both initiali
 Review renders use synthetic/local fixture data: [presets](gui-reference/rust-desktop-20261103/settings-1-1200.png), [characters](gui-reference/rust-desktop-20261103/settings-2-1200.png), [voice](gui-reference/rust-desktop-20261103/settings-3-1560.png), [memory](gui-reference/rust-desktop-20261103/memory-1200.png), [Sandbox](gui-reference/rust-desktop-20261103/sandbox-ru.png).
 
 Next work, in order: native window restore verification; message-specific revise/restore controls and character parameter commands; typed model/install administration for the existing AI lifecycle; then real capture/microphone/ASR/playback wiring. Earshot is ready as a stream-local adapter, but adding it did not wire an audio capture pipeline.
+
+## Save acknowledgement follow-up
+
+Memory save commands carry a draft UUID through success/error acknowledgements. A delayed acknowledgement can only clear/unlock the same draft; switching to a different memory or character invalidates it. The submitted editor is temporarily read-only, and command-queue failure restores it without discarding text. Preset creation likewise carries a form token: opening another preset/new form prevents an older creation acknowledgement from replacing the editor's ID. GUI regression coverage exercises delayed success and error after selecting another memory and delayed preset creation after opening an existing preset. GUI test, GUI all-target Clippy/fmt and offline build pass for this follow-up; core and Python code are unchanged from the full 368/367/36 validation above.
+
+Stopped with the requested reserve approaching 6%. Open checkboxes above are the next increment, not completed features. Native renderer restore verification requires working window automation or a manual run; no application window was controlled during this session because helper initialization failed.

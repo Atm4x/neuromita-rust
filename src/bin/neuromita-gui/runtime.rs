@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 pub enum Command {
     MemorySelect(CharacterId),
     MemoryEdit(
+        uuid::Uuid,
         neuromita::character::CharacterMemorySnapshot,
         Vec<neuromita::memory::MemoryCommand>,
     ),
@@ -28,7 +29,7 @@ pub enum Command {
     Confirm,
     Abort,
     Diagnostics,
-    CreatePreset(PresetRecord),
+    CreatePreset(PresetRecord, uuid::Uuid),
     UpdatePreset(PresetId, PresetRecord),
     DeletePreset(PresetId),
     ActivePreset(PresetId),
@@ -46,12 +47,13 @@ pub enum Command {
 pub enum Update {
     Memory(Box<neuromita::presentation::MemoryListPage>),
     MemoryError(String),
-    MemorySaved,
+    MemorySaved(uuid::Uuid),
+    MemoryEditError(uuid::Uuid, String),
     Confirmation(Option<(ConversationChange, usize)>),
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
-    AdminSaved(Option<PresetId>),
+    AdminSaved(Option<(PresetId, uuid::Uuid)>),
     AdminError(String),
     Stopped,
     Connecting,
@@ -210,7 +212,7 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
-                Some(command @ (Command::CreatePreset(_) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
+                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(id) => publish(Update::AdminSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),
@@ -218,9 +220,9 @@ async fn observe(
                 },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
-                Some(Command::MemoryEdit(expected, commands)) => {
+                Some(Command::MemoryEdit(edit_id, expected, commands)) => {
                     match administration.characters.edit_memories(expected.character(), expected, commands).await {
-                        Ok(_) => publish(Update::MemorySaved), Err(error) => publish(Update::MemoryError(error.to_string())),
+                        Ok(_) => publish(Update::MemorySaved(edit_id)), Err(error) => publish(Update::MemoryEditError(edit_id, error.to_string())),
                     }
                 },
                 Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
