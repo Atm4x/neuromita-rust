@@ -33,8 +33,10 @@ impl Fixture {
     async fn new(topology: ProcessTopology) -> Self {
         let root = std::env::temp_dir().join(format!("nm-production-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
+        let python_command =
+            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
         let actual_python = String::from_utf8(
-            Command::new("python3")
+            Command::new(python_command)
                 .args(["-c", "import sys; print(sys.executable)"])
                 .output()
                 .await
