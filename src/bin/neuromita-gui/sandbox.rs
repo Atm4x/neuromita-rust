@@ -32,10 +32,19 @@ pub fn attach(
     })?;
     let weak = window.as_weak();
     let commands = runtime.commands.clone();
+    let queue_editor = memory_editor.clone();
     let dispatch = std::rc::Rc::new(move |command| {
-        if commands.try_send(command).is_err()
+        if let Err(error) = commands.try_send(command)
             && let Some(window) = weak.upgrade()
         {
+            if let Command::MemoryEdit(edit_id, ..) = error.into_inner() {
+                super::memory::failed(
+                    &window,
+                    &queue_editor,
+                    edit_id,
+                    "Desktop command queue is full or closed".into(),
+                );
+            }
             window.set_chat_sending(false);
             window.set_core_connecting(false);
             window.set_chat_error("Desktop command queue is full or closed".into());
@@ -115,7 +124,10 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
     match update {
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
         Update::MemoryError(error) => window.global::<MemoryUi>().set_error(error.into()),
-        Update::MemorySaved => super::memory::saved(window, memory_editor),
+        Update::MemorySaved(edit_id) => super::memory::saved(window, memory_editor, edit_id),
+        Update::MemoryEditError(edit_id, error) => {
+            super::memory::failed(window, memory_editor, edit_id, error)
+        }
         Update::Confirmation(preview) => {
             let ui = window.global::<ConversationUi>();
             match preview {
@@ -145,14 +157,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .global::<SettingsUi>()
                 .set_settings_error(error.into());
         }
-        Update::AdminSaved(id) => {
-            window.global::<SettingsUi>().set_settings_error("".into());
-            if let Some(id) = id {
-                window
-                    .global::<SettingsUi>()
-                    .set_preset_edit_id(id.0.to_string().into());
-            }
-        }
+        Update::AdminSaved(created) => super::settings::saved(window, created),
         Update::Stopped => {
             window.set_core_connected(false);
             window.set_core_connecting(false);

@@ -16,13 +16,16 @@ pub struct AdministrationSnapshot {
     pub presets: Vec<(PresetId, PresetRecord)>,
 }
 
-pub fn execute(api: &GuiPresenter, command: Command) -> Result<Option<PresetId>, String> {
+pub fn execute(
+    api: &GuiPresenter,
+    command: Command,
+) -> Result<Option<(PresetId, uuid::Uuid)>, String> {
     match command {
-        Command::CreatePreset(record) => {
+        Command::CreatePreset(record, token) => {
             return api
                 .presets
                 .create(record)
-                .map(Some)
+                .map(|id| Some((id, token)))
                 .map_err(|e| e.to_string());
         }
         Command::UpdatePreset(id, record) => {
@@ -112,7 +115,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         })();
         match record {
             Ok(record) if window.get_preset_edit_id().is_empty() => {
-                send(Command::CreatePreset(record))
+                let token = uuid::Uuid::new_v4();
+                window.set_preset_save_token(token.to_string().into());
+                send(Command::CreatePreset(record, token))
             }
             Ok(record) => match id(&window.get_preset_edit_id()) {
                 Ok(id) => send(Command::UpdatePreset(id, record)),
@@ -127,6 +132,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let window = component.global::<SettingsUi>();
+        window.set_preset_save_token("".into());
         let record = window
             .get_settings_presets()
             .iter()
@@ -259,4 +265,16 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_settings_presets(ModelRc::new(VecModel::from(records)));
+}
+
+pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
+    let ui = window.global::<SettingsUi>();
+    if let Some((id, token)) = created {
+        if ui.get_preset_save_token() != token.to_string() {
+            return;
+        }
+        ui.set_preset_edit_id(id.0.to_string().into());
+        ui.set_preset_save_token("".into());
+    }
+    ui.set_settings_error("".into());
 }
