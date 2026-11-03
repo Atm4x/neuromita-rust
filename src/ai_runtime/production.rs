@@ -38,6 +38,10 @@ pub enum ModelAssets {
         revision: String,
         inputs: Vec<AssetInput>,
     },
+    Catalog {
+        revision: String,
+        manifest: PathBuf,
+    },
     Generated {
         revision: String,
         hook_id: String,
@@ -54,6 +58,7 @@ impl ModelAssets {
             Self::None => None,
             Self::Installed { revision }
             | Self::Sources { revision, .. }
+            | Self::Catalog { revision, .. }
             | Self::Generated { revision, .. } => Some(revision),
         }
     }
@@ -161,6 +166,18 @@ impl AssetPreparation {
             }
             ModelAssets::Sources { revision, inputs } => {
                 store.publish(&plugin_id, &revision, &plan, &inputs).await?;
+                store.verified_revision(&plugin_id, &revision).await?;
+                Some(revision)
+            }
+            ModelAssets::Catalog { revision, manifest } => {
+                let sources = super::assets::catalog::ModelSourceCatalog::load(&manifest)
+                    .await
+                    .map_err(|error| AiProductionError::Invalid(error.to_string()))?
+                    .resolve(&plugin_id, &revision, &plan)
+                    .map_err(|error| AiProductionError::Invalid(error.to_string()))?;
+                store
+                    .publish(&plugin_id, &revision, &plan, &sources)
+                    .await?;
                 store.verified_revision(&plugin_id, &revision).await?;
                 Some(revision)
             }

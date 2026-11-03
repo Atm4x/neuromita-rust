@@ -329,3 +329,69 @@ async fn generated_assets_require_explicit_hook_approval() {
     assert!(!fixture.root.join("AIData/models/hook_model/v1").exists());
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn pinned_catalog_is_resolved_by_production_installer_and_fails_on_hash_change() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture
+        .add_plugin(
+            "catalog_weight",
+            "InstallPlan(assets=(AssetRequirement('weight', 'weights.bin'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let source = fixture.root.join("catalog-source.bin");
+    tokio::fs::write(&source, b"approved-catalog-weight")
+        .await
+        .unwrap();
+    let sha256 = ring::digest::digest(&ring::digest::SHA256, b"approved-catalog-weight")
+        .as_ref()
+        .iter()
+        .map(|value| format!("{value:02x}"))
+        .collect::<String>();
+    let manifest = fixture.root.join("approved-sources.json");
+    tokio::fs::write(
+        &manifest,
+        json!({
+            "schema_version": 1,
+            "entries": [{
+                "plugin_id": "catalog_weight",
+                "revision": "v1",
+                "assets": [{
+                    "role": "weight",
+                    "relative_path": "weights.bin",
+                    "sha256": sha256,
+                    "source": {"kind": "local_file", "path": source.to_string_lossy()}
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let mut selected = model(AiService::Tts, "catalog_weight");
+    selected.assets = ModelAssets::Catalog {
+        revision: "v1".into(),
+        manifest: manifest.clone(),
+    };
+    let prepared = fixture.runtime.prepare(&[selected]).await.unwrap();
+    assert_eq!(
+        prepared.workers[0].models[0].asset_revision.as_deref(),
+        Some("v1")
+    );
+    let installed = fixture
+        .root
+        .join("AIData/models/catalog_weight/v1/weights.bin");
+    assert_eq!(
+        tokio::fs::read(&installed).await.unwrap(),
+        b"approved-catalog-weight"
+    );
+    tokio::fs::write(&installed, b"corrupted").await.unwrap();
+    let mut selected = model(AiService::Tts, "catalog_weight");
+    selected.assets = ModelAssets::Catalog {
+        revision: "v1".into(),
+        manifest,
+    };
+    assert!(fixture.runtime.prepare(&[selected]).await.is_err());
+    fixture.close().await;
+}

@@ -223,6 +223,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -343,6 +344,10 @@ impl ApplicationLifecycle {
             Some(configuration) => Some(Box::pin(configuration.activate()).await?),
             None => None,
         };
+        let speech = ai_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.speech_recognizer())
+            .map(Arc::new);
         let voice = match &ai_runtime {
             Some(runtime) if runtime.has_service(AiService::Tts) => runtime.voice_provider(),
             _ => voice,
@@ -478,10 +483,28 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            speech,
             id,
             stop,
             completion: Some(completion),
         })
+    }
+
+    /// An ASR-powered microphone session is available only when ASR was explicitly activated.
+    /// Its cancellation token is a child of the application's lifecycle token.
+    pub fn speech_session(
+        &self,
+        character: CharacterId,
+        source: crate::request::RequestSource,
+        playback: Arc<dyn crate::audio::device::AudioPlayback>,
+    ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
+        let recognizer = self.speech.as_ref()?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>,
+            Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
+            playback,
+        );
+        Some((handler, self.stop.child_token()))
     }
 
     pub fn presenter(&self) -> &GuiPresenter {

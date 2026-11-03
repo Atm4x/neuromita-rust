@@ -22,6 +22,7 @@ use super::{
 
 const RECEIPT: &str = ".neuromita-assets.json";
 
+pub mod catalog;
 mod generation;
 pub use generation::{ModelGenerationError, ModelGenerationRequest};
 
