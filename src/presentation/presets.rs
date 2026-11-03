@@ -14,7 +14,8 @@ pub struct ProviderOption {
     pub icon: &'static str,
     pub schema_label: &'static str,
     pub documentation: &'static str,
-    pub badge: &'static str,
+    pub pricing: &'static str,
+    pub badge_kind: &'static str,
     pub supported: bool,
 }
 
@@ -107,13 +108,14 @@ impl PresetsPresenter {
     }
 
     pub fn providers() -> Vec<ProviderOption> {
-        const CATALOG: &[(&str, &str, &str, &str, &str, bool)] = &[
+        const CATALOG: &[(&str, &str, &str, &str, &str, &str, bool)] = &[
             (
                 "gemini",
                 "Google AI Studio",
                 "google",
                 "https://ai.google.dev/gemini-api/docs",
-                "FREE",
+                "mixed",
+                "",
                 true,
             ),
             (
@@ -121,7 +123,8 @@ impl PresetsPresenter {
                 "OpenRouter",
                 "openrouter",
                 "https://openrouter.ai/docs/quickstart",
-                "FREE",
+                "mixed",
+                "",
                 false,
             ),
             (
@@ -129,17 +132,19 @@ impl PresetsPresenter {
                 "Mistral AI",
                 "mistral",
                 "https://docs.mistral.ai/",
-                "FREE",
+                "mixed",
+                "",
                 false,
             ),
-            ("aiio", "Ai.iO", "aiio", "", "", false),
-            ("proxyapi", "ProxyAPI", "proxyapi", "", "", false),
+            ("aiio", "Ai.iO", "aiio", "", "paid", "", false),
+            ("proxyapi", "ProxyAPI", "proxyapi", "", "paid", "ru", false),
             (
                 "groq",
                 "Groq",
                 "groq",
                 "https://console.groq.com/docs/overview",
-                "FREE",
+                "mixed",
+                "",
                 false,
             ),
             (
@@ -147,17 +152,18 @@ impl PresetsPresenter {
                 "Together AI",
                 "together",
                 "https://docs.together.ai/",
-                "FREE",
+                "mixed",
+                "",
                 false,
             ),
-            ("chutes", "Chutes", "chutes", "", "", false),
-            ("kodikrouter", "KodikRouter", "kodikrouter", "", "", false),
+            ("chutes", "Chutes", "chutes", "", "paid", "", false),
             (
                 "lmstudio",
                 "LM Studio",
                 "lmstudio",
                 "https://lmstudio.ai/docs",
-                "LOCAL",
+                "free",
+                "local",
                 false,
             ),
             (
@@ -165,7 +171,17 @@ impl PresetsPresenter {
                 "Ollama",
                 "ollama",
                 "https://docs.ollama.com/",
-                "LOCAL",
+                "free",
+                "local",
+                false,
+            ),
+            (
+                "kodikrouter",
+                "KodikRouter",
+                "kodikrouter",
+                "",
+                "paid",
+                "ru",
                 false,
             ),
             (
@@ -173,15 +189,24 @@ impl PresetsPresenter {
                 "OpenAI Responses (API key)",
                 "openai",
                 "https://platform.openai.com/docs/api-reference/responses",
+                "paid",
                 "",
                 false,
             ),
-            ("codex", "ChatGPT Plan (Codex)", "openai", "", "", false),
+            (
+                "codex",
+                "ChatGPT Plan (Codex)",
+                "openai",
+                "",
+                "paid",
+                "subscription",
+                false,
+            ),
         ];
         CATALOG
             .iter()
             .map(
-                |&(id, name, icon, documentation, badge, supported)| ProviderOption {
+                |&(id, name, icon, documentation, pricing, badge_kind, supported)| ProviderOption {
                     id,
                     name,
                     icon,
@@ -191,7 +216,8 @@ impl PresetsPresenter {
                         ""
                     },
                     documentation,
-                    badge,
+                    pricing,
+                    badge_kind,
                     supported,
                 },
             )
@@ -405,6 +431,29 @@ mod tests {
                 .records
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn provider_pricing_and_badges_match_python_templates() {
+        let providers = PresetsPresenter::providers();
+        for (id, pricing, kind) in [
+            ("gemini", "mixed", ""),
+            ("openrouter", "mixed", ""),
+            ("mistral", "mixed", ""),
+            ("aiio", "paid", ""),
+            ("proxyapi", "paid", "ru"),
+            ("groq", "mixed", ""),
+            ("together", "mixed", ""),
+            ("chutes", "paid", ""),
+            ("lmstudio", "free", "local"),
+            ("ollama", "free", "local"),
+            ("kodikrouter", "paid", "ru"),
+            ("openai", "paid", ""),
+            ("codex", "paid", "subscription"),
+        ] {
+            let option = providers.iter().find(|option| option.id == id).unwrap();
+            assert_eq!((option.pricing, option.badge_kind), (pricing, kind));
+        }
     }
 
     #[test]

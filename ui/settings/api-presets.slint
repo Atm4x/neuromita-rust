@@ -6,6 +6,7 @@ import { Caption, Glyph, Centered } from "../sandbox/controls.slint";
 import { ActionSurface } from "../components/controls.slint";
 import { CollapsibleSettingsSection } from "../components/collapsible-section.slint";
 import { ScrollView } from "std-widgets.slint";
+import { SettingsScrollView } from "scroll-view.slint";
 
 component ProviderIcon inherits Rectangle {
     in property <string> provider;
@@ -23,7 +24,7 @@ component ProviderIcon inherits Rectangle {
     if root.provider == "lmstudio": Image { width: parent.width; height: parent.height; source: @image-url("../../assets/providers/lmstudio.svg"); image-fit: contain; }
     if root.provider == "ollama": Image { width: parent.width; height: parent.height; source: @image-url("../../assets/providers/ollama.svg"); image-fit: contain; }
     if root.provider == "openai": Image { width: parent.width; height: parent.height; source: @image-url("../../assets/providers/openai.svg"); image-fit: contain; }
-    if root.provider == "": Glyph { text: "\u{f1e6}"; font-size: 23px; color: SettingsTheme.muted; width: 100%; height: 100%; }
+    if root.provider == "": Glyph { text: "\u{f1e6}"; font-size: 23px; color: SettingsTheme.provider-default-icon; width: 100%; height: 100%; }
 }
 
 component ApiFieldRow inherits VerticalLayout {
@@ -124,6 +125,22 @@ component PresetCard inherits ActionSurface {
     }
 }
 
+component ProviderBadge inherits Rectangle {
+    in property <string> kind;
+    height: 14px;
+    width: root.kind == "LOCAL" ? 42px : root.kind == "FREE" ? 30px : root.kind == "RU" ? 23px : 66px;
+    border-radius: 3px;
+    background: root.kind == "LOCAL" ? SettingsTheme.provider-local : root.kind == "RU" ? SettingsTheme.provider-ru : root.kind == "FREE" ? SettingsTheme.provider-free : SettingsTheme.accent;
+    Text {
+        width: 100%; height: 100%;
+        text: root.kind == "SUBSCRIPTION" ? (I18n.locale == "en" ? "Subscription" : "Подписка") : root.kind;
+        color: root.kind == "LOCAL" ? SettingsTheme.canvas : white;
+        font-family: SettingsTheme.font-family;
+        font-size: 9px; font-weight: 700;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+}
+
 component TemplateSelector inherits Rectangle {
     in-out property <bool> opened;
     background: SettingsTheme.canvas;
@@ -136,28 +153,43 @@ component TemplateSelector inherits Rectangle {
     }
     TouchArea { mouse-cursor: pointer; clicked => { if (root.opened) { dropdown.close(); } else { dropdown.show(); } root.opened = !root.opened; } }
     dropdown := PopupWindow {
-        y: root.height + 1px; width: root.width; height: min(335px, 40px + SettingsUi.preset-templates.length * 31px);
+        y: root.height + 1px;
+        width: root.width;
+        height: min(335px, 10px + (SettingsUi.preset-templates.length + 1) * 32px);
         close-policy: close-on-click-outside;
-        Rectangle { width: 100%; height: 100%; border-radius: 8px; border-width: 1px; border-color: SettingsTheme.border; background: SettingsTheme.canvas;
-            ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
-                VerticalLayout { padding: 4px; spacing: 1px; alignment: start;
-                    ActionSurface { height: 32px; label: "Без шаблона"; enabled: false; border-radius: 5px; background: self.hovered ? SettingsTheme.button-hover : transparent;
+        Rectangle {
+            width: 100%; height: 100%; border-radius: 8px;
+            border-width: 1px; border-color: SettingsTheme.border;
+            background: SettingsTheme.canvas;
+            SettingsScrollView { x: 1px; y: 5px; width: parent.width - 2px; height: parent.height - 10px; content-height: (SettingsUi.preset-templates.length + 1) * 32px;
+                VerticalLayout { width: parent.width; padding: 0px; spacing: 0px; alignment: start;
+                    ActionSurface {
+                        height: 32px; label: "Без шаблона"; enabled: false;
+                        border-radius: 0px; background: transparent;
                         HorizontalLayout { padding-left: 9px; spacing: 10px;
-                            Centered { width: 20px; Glyph { text: "\u{f1e6}"; font-size: 16px; color: SettingsTheme.muted; } }
-                            Centered { SettingsLabel { text: I18n.i18n("settings.preset.no-template", "Без шаблона"); } }
+                            Centered { width: 20px; Glyph { text: "\u{f1e6}"; font-size: 16px; color: SettingsTheme.provider-default-icon; } }
+                            Centered { SettingsLabel { text: I18n.i18n("settings.preset.no-template", "Без шаблона"); font-size: 12px; } }
                         }
-                        activated => { dropdown.close(); root.opened = false; }
                     }
                     for template in SettingsUi.preset-templates: ActionSurface {
-                        height: 32px; label: template.name; enabled: template.available;
+                        height: 32px; label: template.name;
+                        enabled: template.available;
                         background: SettingsUi.preset-template-id == template.id ? SettingsTheme.accent : self.hovered ? SettingsTheme.button-hover : transparent;
-                        border-radius: 5px;
-                        HorizontalLayout { padding-left: 9px; padding-right: 8px; spacing: 10px;
+                        border-radius: 0px;
+                        HorizontalLayout { padding-left: 9px; padding-right: 7px; spacing: 0px;
                             Centered { width: 20px; ProviderIcon { provider: template.icon; width: 20px; height: 20px; } }
-                            SettingsLabel { text: template.name; font-size: 12px; horizontal-stretch: 1; color: template.available ? SettingsTheme.text : SettingsTheme.muted; }
-                            if template.badge != "": Centered { Rectangle { height: 18px; border-radius: 4px; background: template.badge == "LOCAL" ? SettingsTheme.provider-local : SettingsTheme.provider-free;
-                                HorizontalLayout { padding-left: 5px; padding-right: 5px; SettingsLabel { text: template.badge; color: white; font-size: 9px; font-weight: 700; } }
-                            } }
+                            Rectangle { width: 10px; }
+                            SettingsLabel { text: template.name; font-size: 12px; color: SettingsTheme.text; horizontal-stretch: 0; overflow: elide; }
+                            Rectangle { width: 6px; }
+                            if template.badge-kind == "local": Centered { ProviderBadge { kind: "LOCAL"; } }
+                            if template.badge-kind == "ru": Centered { ProviderBadge { kind: "RU"; } }
+                            if template.badge-kind == "subscription": Centered { ProviderBadge { kind: "SUBSCRIPTION"; } }
+                            if template.badge-kind != "local" && (template.pricing == "mixed" || template.pricing == "free"): Centered { ProviderBadge { kind: "FREE"; } }
+                            if template.badge-kind != "local" && (template.pricing == "mixed" || template.pricing == "paid"): HorizontalLayout {
+                                width: 14px; padding-left: 5px;
+                                Text { text: "$"; font-family: SettingsTheme.font-family; color: SettingsTheme.provider-price; font-size: 14px; font-weight: 700; vertical-alignment: center; }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
                         }
                         activated => { SettingsUi.preset-template-select(template.id); dropdown.close(); root.opened = false; }
                     }
@@ -231,8 +263,8 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                     if SettingsUi.preset-tab == 0: ScrollView { content-width: self.visible-width;
                         VerticalLayout { padding: 20px; spacing: 16px; alignment: start;
                             HorizontalLayout { spacing: 16px;
-                                ApiFieldRow { title: I18n.i18n("settings.api-preset.name", "Название пресета"); value <=> SettingsUi.preset-name; horizontal-stretch: 1; }
-                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                ApiFieldRow { title: I18n.i18n("settings.api-preset.name", "Название пресета"); value <=> SettingsUi.preset-name; preferred-width: 0px; min-width: 0px; horizontal-stretch: 1; }
+                                VerticalLayout { preferred-width: 0px; min-width: 0px; horizontal-stretch: 1; spacing: 6px;
                                     HorizontalLayout { height: 16px;
                                         SettingsLabel { text: I18n.i18n("settings.preset.template", "Шаблон / провайдер"); font-size: 12px; horizontal-stretch: 1; }
                                         ActionSurface { width: 106px; height: 16px; label: "Документация"; border-width: 0px; enabled: SettingsUi.preset-template-id != "";
