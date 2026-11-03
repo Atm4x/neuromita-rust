@@ -6,6 +6,7 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets } from "pages/settings.slint";
+import { VoiceUi } from "pages/voice.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
@@ -13,7 +14,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { VoiceUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
