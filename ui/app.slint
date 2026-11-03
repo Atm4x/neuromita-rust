@@ -1,4 +1,4 @@
-import { MemoryDialog, MemoryUi, MemoryItem } from "sandbox/memory.slint";
+import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
@@ -108,6 +108,7 @@ export component AppWindow inherits Window {
                 dismiss-error => { root.chat-dismiss-error(); }
                 home => { root.navigate(PageId.home); }
                 settings => { root.navigate(PageId.settings); }
+                open-memory(id) => { SettingsUi.section = 2; SettingsUi.selected-character = id; MemoryUi.open = true; MemoryUi.select(id); root.navigate(PageId.settings); }
             }
             if root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
@@ -119,7 +120,6 @@ export component AppWindow inherits Window {
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
                 home => { root.navigate(PageId.home); }
             }
-            if MemoryUi.open: MemoryDialog { width: 100%; height: 100%; }
             if root.notice != "": Rectangle {
                 x: (parent.width - self.width) / 2; y: 24px; width: min(650px, parent.width - 56px); height: 64px;
                 border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;

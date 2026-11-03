@@ -178,6 +178,7 @@ component StateTab inherits ScrollView {
     in property <string> anchor;
     in property <int> message-count;
     callback settings();
+    callback open-memory(int);
     content-width: self.visible-width;
     VerticalLayout {
         padding-left: 2px; padding-right: 10px; padding-top: 12px; padding-bottom: 4px; spacing: 12px; alignment: start;
@@ -217,7 +218,7 @@ component StateTab inherits ScrollView {
                 ValueRow { title: I18n.i18n("sandbox.state.trash", "Корзина"); value: MemoryUi.character == root.character ? MemoryUi.deleted : "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.last", "Посл. сообщение"); value: "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.db-size", "Размер БД"); value: "—"; }
-                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { MemoryUi.select(root.character); MemoryUi.open = true; } }
+                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { root.open-memory(root.character); } }
             }
         }
     }
@@ -330,6 +331,7 @@ export component SandboxInspector inherits Rectangle {
     callback selected(int);
     callback refresh();
     callback settings();
+    callback open-memory(int);
     callback logs();
     in-out property <bool> collapsed: false;
     in-out property <int> tab: 0;
@@ -371,6 +373,7 @@ export component SandboxInspector inherits Rectangle {
                 width: 100%; height: 100%; attitude: root.attitude; boredom: root.boredom; stress: root.stress;
                 accepted: root.accepted; anchor: root.anchor; message-count: root.message-count;
                 settings => { root.settings(); }
+                open-memory(id) => { root.open-memory(id); }
             }
             if root.tab == 2: DebugTab {
                 width: 100%; height: 100%; character: root.character; model: root.model; preset: root.preset;

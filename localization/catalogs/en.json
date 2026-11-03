@@ -620,8 +620,8 @@
     "translation": "Delete this preset? Assignments remain unchanged and require an existing preset."
   },
   "settings.characters.description": {
-    "source": "Назначение пресетов для разных видов генерации.",
-    "translation": "Preset assignments for each generation operation."
+    "source": "Библиотека персонажей, наборы промптов, пресеты генерации и память.",
+    "translation": "Character library, prompt sets, generation presets and memory."
   },
   "settings.operation.reply": {
     "source": "Ответ на сообщение",
