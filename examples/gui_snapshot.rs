@@ -60,6 +60,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .collect::<Vec<_>>();
         settings.set_preset_templates(slint::ModelRc::new(slint::VecModel::from(templates)));
+        let parameters = PresetsPresenter::parameters()
+            .into_iter()
+            .map(|parameter| view::PresetParameterItem {
+                id: parameter.id.into(),
+                wire_key: parameter.wire_key.into(),
+                title_ru: parameter.title_ru.into(),
+                title_en: parameter.title_en.into(),
+                description_ru: parameter.description_ru.into(),
+                description_en: parameter.description_en.into(),
+                editable: parameter.editable,
+                sent: parameter.sent,
+            })
+            .collect::<Vec<_>>();
+        settings.set_preset_parameters(slint::ModelRc::new(slint::VecModel::from(parameters)));
         settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
     }
     window.show()?;

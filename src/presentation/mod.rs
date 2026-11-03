@@ -17,7 +17,9 @@ pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationPresenter,
     ConversationSnapshot,
 };
-pub use presets::{PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption};
+pub use presets::{
+    PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
+};
 pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };

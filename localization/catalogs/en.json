@@ -1095,20 +1095,8 @@
     "source": "Настроить параметры",
     "translation": "Configure parameters"
   },
-  "settings.preset.params-limited": {
-    "source": "Параметры принадлежат этому пресету. Ядро передаёт температуру и лимит токенов при каждом запросе.",
-    "translation": "These parameters belong to this preset. The core sends temperature and token limit with every request."
-  },
-  "settings.api-preset.temperature": {
-    "source": "Температура  temperature",
-    "translation": "Temperature  temperature"
-  },
-  "settings.api-preset.tokens": {
-    "source": "Макс. токенов  maxOutputTokens",
-    "translation": "Max tokens  maxOutputTokens"
-  },
-  "settings.api-preset.timeout": {
-    "source": "Тайм-аут, мс",
-    "translation": "Timeout, ms"
+  "settings.preset.params-presenter": {
+    "source": "Параметры принадлежат этому пресету. Поддерживаемые поля передаются ядром; остальные недоступны.",
+    "translation": "Parameters belong to this preset. Supported fields are sent by the core; other fields are unavailable."
   }
 }

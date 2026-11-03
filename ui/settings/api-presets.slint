@@ -1,5 +1,5 @@
 import { I18n } from "../i18n.slint";
-import { SettingsUi } from "presets-state.slint";
+import { SettingsUi, PresetParameterItem } from "presets-state.slint";
 import { SettingsTheme } from "theme.slint";
 import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "form-controls.slint";
 import { Caption, Glyph, Centered } from "../sandbox/controls.slint";
@@ -39,6 +39,32 @@ component ApiFieldRow inherits VerticalLayout {
     SettingsField { text <=> root.value; enabled: root.editable; height: 40px; }
 }
 
+component ApiParameterRow inherits HorizontalLayout {
+    in property <PresetParameterItem> parameter;
+    in-out property <string> value;
+    callback edited(string);
+    changed value => { if (root.parameter.editable) { root.edited(root.value); } }
+    height: 60px; vertical-stretch: 0; spacing: 16px;
+    padding-top: 4px; padding-bottom: 4px;
+    VerticalLayout { padding: 0px; spacing: 4px; horizontal-stretch: 1; alignment: center;
+        HorizontalLayout { spacing: 8px;
+            SettingsLabel { text: I18n.locale == "en" ? root.parameter.title-en : root.parameter.title-ru; font-size: 12px; color: SettingsTheme.text; horizontal-stretch: 0; }
+            SettingsLabel { text: root.parameter.wire-key; font-size: 11px; color: SettingsTheme.muted; horizontal-stretch: 1; }
+        }
+        SettingsLabel { text: I18n.locale == "en" ? root.parameter.description-en : root.parameter.description-ru; font-size: 11px; color: SettingsTheme.muted; wrap: word-wrap; }
+    }
+    Centered { width: 20px;
+        Rectangle { width: 18px; height: 18px; border-radius: 4px; border-width: 1px;
+            border-color: root.parameter.sent ? SettingsTheme.accent : SettingsTheme.field-border;
+            background: root.parameter.sent ? SettingsTheme.accent : SettingsTheme.field;
+            if root.parameter.sent: Glyph { text: "\u{f00c}"; font-size: 11px; color: white; width: 100%; height: 100%; }
+        }
+    }
+    Centered { width: 180px;
+        SettingsField { text <=> root.value; height: 40px; width: 180px; enabled: root.parameter.editable; }
+    }
+}
+
 component ApiTab inherits ActionSurface {
     in property <string> title;
     in property <string> glyph;
@@ -73,7 +99,7 @@ component PresetCard inherits ActionSurface {
         VerticalLayout { horizontal-stretch: 1; spacing: 2px; padding: 0px; alignment: center;
             HorizontalLayout { spacing: 5px;
                 SettingsLabel { text: root.name; font-size: 14px; font-weight: 700; overflow: elide; horizontal-stretch: 0; }
-                if root.active: Rectangle { width: 9px; height: 9px; border-radius: 5px; background: #7fe38c; }
+                if root.active: Rectangle { width: 9px; height: 9px; border-radius: 5px; background: SettingsTheme.status-success; }
             }
             SettingsLabel { text: root.model; font-size: 12px; color: SettingsTheme.muted; overflow: elide; }
         }
@@ -129,7 +155,7 @@ component TemplateSelector inherits Rectangle {
                         HorizontalLayout { padding-left: 9px; padding-right: 8px; spacing: 10px;
                             Centered { width: 20px; ProviderIcon { provider: template.icon; width: 20px; height: 20px; } }
                             SettingsLabel { text: template.name; font-size: 12px; horizontal-stretch: 1; color: template.available ? SettingsTheme.text : SettingsTheme.muted; }
-                            if template.badge != "": Centered { Rectangle { height: 18px; border-radius: 4px; background: template.badge == "LOCAL" ? #49bfe5 : #55b862;
+                            if template.badge != "": Centered { Rectangle { height: 18px; border-radius: 4px; background: template.badge == "LOCAL" ? SettingsTheme.provider-local : SettingsTheme.provider-free;
                                 HorizontalLayout { padding-left: 5px; padding-right: 5px; SettingsLabel { text: template.badge; color: white; font-size: 9px; font-weight: 700; } }
                             } }
                         }
@@ -183,7 +209,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                         HorizontalLayout { spacing: 8px;
                             SettingsLabel { text: SettingsUi.preset-name == "" ? I18n.i18n("settings.preset.new", "Создать пресет") : SettingsUi.preset-name; font-size: 18px; font-weight: 700; }
                             if SettingsUi.preset-edit-id != "" && SettingsUi.settings-active == SettingsUi.preset-edit-id: Rectangle { height: 24px; width: 68px; background: SettingsTheme.button; border-color: SettingsTheme.border; border-width: 1px; border-radius: 9px;
-                                Centered { SettingsLabel { text: I18n.i18n("settings.preset.active-short", "Активен"); font-size: 11px; color: #7fe38c; } }
+                                Centered { SettingsLabel { text: I18n.i18n("settings.preset.active-short", "Активен"); font-size: 11px; color: SettingsTheme.status-success; } }
                             }
                         }
                         SettingsLabel { text: SettingsUi.preset-template-name == "" ? I18n.i18n("settings.preset.provider-missing", "Провайдер не выбран") : SettingsUi.preset-template-name; color: SettingsTheme.muted; font-size: 12px; }
@@ -209,7 +235,10 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                                 VerticalLayout { horizontal-stretch: 1; spacing: 6px;
                                     HorizontalLayout { height: 16px;
                                         SettingsLabel { text: I18n.i18n("settings.preset.template", "Шаблон / провайдер"); font-size: 12px; horizontal-stretch: 1; }
-                                        SettingsLabel { text: I18n.i18n("settings.preset.documentation", "Документация"); color: #7bc6ff; font-size: 12px; }
+                                        ActionSurface { width: 106px; height: 16px; label: "Документация"; border-width: 0px; enabled: SettingsUi.preset-template-id != "";
+                                            SettingsLabel { text: I18n.i18n("settings.preset.documentation", "Документация"); color: SettingsTheme.documentation; font-size: 12px; width: 100%; height: 100%; }
+                                            activated => { SettingsUi.preset-documentation(); }
+                                        }
                                     }
                                     TemplateSelector { width: 100%; }
                                 }
@@ -242,10 +271,18 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                                 SettingsButton { text: I18n.i18n("settings.preset.export", "Экспорт JSON"); enabled: false; }
                                 SettingsButton { text: I18n.i18n("settings.preset.customize", "Настроить параметры"); enabled: false; }
                             }
-                            SettingsLabel { text: I18n.i18n("settings.preset.params-limited", "Параметры принадлежат этому пресету. Ядро передаёт температуру и лимит токенов при каждом запросе."); color: SettingsTheme.muted; font-size: 12px; wrap: word-wrap; }
-                            ApiFieldRow { title: I18n.i18n("settings.api-preset.temperature", "Температура  temperature"); hint: "0–2"; value <=> SettingsUi.preset-temperature; }
-                            ApiFieldRow { title: I18n.i18n("settings.api-preset.tokens", "Макс. токенов  maxOutputTokens"); value <=> SettingsUi.preset-tokens; }
-                            ApiFieldRow { title: I18n.i18n("settings.api-preset.timeout", "Тайм-аут, мс"); value <=> SettingsUi.preset-timeout; }
+                            SettingsLabel { text: I18n.i18n("settings.preset.params-presenter", "Параметры принадлежат этому пресету. Поддерживаемые поля передаются ядром; остальные недоступны."); color: SettingsTheme.muted; font-size: 12px; wrap: word-wrap; }
+                            VerticalLayout { spacing: 0px; padding: 0px; alignment: start;
+                                for parameter in SettingsUi.preset-parameters: ApiParameterRow {
+                                    parameter: parameter;
+                                    value: parameter.id == "temperature" ? SettingsUi.preset-temperature : parameter.id == "max_tokens" ? SettingsUi.preset-tokens : parameter.id == "timeout" ? SettingsUi.preset-timeout : "";
+                                    edited(value) => {
+                                        if parameter.id == "temperature" { SettingsUi.preset-temperature = value; }
+                                        if parameter.id == "max_tokens" { SettingsUi.preset-tokens = value; }
+                                        if parameter.id == "timeout" { SettingsUi.preset-timeout = value; }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

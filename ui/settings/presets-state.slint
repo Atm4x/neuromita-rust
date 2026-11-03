@@ -2,10 +2,12 @@ export struct CharacterPresets { reply: string, react: string, initiate: string,
 
 export struct PresetItem { id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
 export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, badge: string, available: bool }
+export struct PresetParameterItem { id: string, wire-key: string, title-ru: string, title-en: string, description-ru: string, description-en: string, editable: bool, sent: bool }
 export global SettingsUi {
     in-out property <int> section;
     in-out property <[PresetItem]> settings-presets;
     in-out property <[PresetTemplateItem]> preset-templates;
+    in-out property <[PresetParameterItem]> preset-parameters;
     in-out property <string> preset-search;
     in-out property <int> preset-tab;
     in-out property <bool> preset-creating;
@@ -41,6 +43,7 @@ export global SettingsUi {
     }
     callback preset-new();
     callback preset-template-select(string);
+    callback preset-documentation();
     callback preset-save();
     callback preset-edit(string);
     callback preset-delete(string);

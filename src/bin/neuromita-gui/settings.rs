@@ -1,11 +1,14 @@
 use super::{
     runtime::Command,
-    view::{AppWindow, CharacterPresets, PresetItem, PresetTemplateItem, SettingsUi},
+    view::{
+        AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
+        SettingsUi,
+    },
 };
 use neuromita::{
     character::CharacterId,
     generation::{GeminiPresetDefinition, PresetDefinition, PresetId, PresetRecord},
-    presentation::{GuiPresenter, PresetSlot, PresetsView},
+    presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
     settings::{PersistenceState, PresetSelection, SettingsSnapshot},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -119,6 +122,24 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 }
             } else {
                 ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());
+            }
+        }
+    });
+    let weak = window.as_weak();
+    settings.on_preset_documentation(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<SettingsUi>();
+        let chosen = ui.get_preset_template_id();
+        let trusted = PresetsPresenter::providers()
+            .into_iter()
+            .find(|provider| chosen == provider.id && provider.supported);
+        if let Some(provider) =
+            trusted.filter(|provider| provider.documentation.starts_with("https://"))
+        {
+            if let Err(error) = super::binding::open_external_url(provider.documentation) {
+                ui.set_settings_error(error.into());
             }
         }
     });
@@ -339,6 +360,22 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
+    let parameters = model
+        .presets
+        .parameters
+        .iter()
+        .map(|parameter| PresetParameterItem {
+            id: parameter.id.into(),
+            wire_key: parameter.wire_key.into(),
+            title_ru: parameter.title_ru.into(),
+            title_en: parameter.title_en.into(),
+            description_ru: parameter.description_ru.into(),
+            description_en: parameter.description_en.into(),
+            editable: parameter.editable,
+            sent: parameter.sent,
+        })
+        .collect::<Vec<_>>();
+    window.set_preset_parameters(ModelRc::new(VecModel::from(parameters)));
     let records = model
         .presets
         .records
