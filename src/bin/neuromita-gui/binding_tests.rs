@@ -360,6 +360,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
     )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
         provider: "google".into(),
+        configured: true,
         id: "7".into(),
         name: "Main".into(),
         model: "fixture-model".into(),
@@ -407,14 +408,29 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
     settings.set_preset_temperature("0.7".into());
-    let previous_save = uuid::Uuid::new_v4();
-    settings.set_preset_save_token(previous_save.to_string().into());
     settings.invoke_preset_edit("7".into());
-    super::super::settings::saved(
-        window,
-        Some((neuromita::generation::PresetId(99), previous_save)),
-    );
+    super::super::settings::saved(window, None);
     assert_eq!(settings.get_preset_edit_id(), "7");
+    settings.invoke_preset_new();
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::NewPreset)
+    ));
+    let before = commands.borrow().len();
+    settings.set_preset_model("modified-before-switch".into());
+    assert!(settings.get_preset_dirty());
+    settings.invoke_preset_new();
+    assert_eq!(commands.borrow().len(), before);
+    assert_eq!(settings.get_preset_pending_id(), "__new__");
+    settings.invoke_preset_confirm_cancel();
+    assert!(settings.get_preset_pending_id().is_empty());
+    settings.invoke_preset_new();
+    settings.invoke_preset_confirm_discard();
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::NewPreset)
+    ));
+
     window.set_page(PageId::Settings);
     window.set_core_connected(true);
     window.global::<I18n>().set_locale("ru".into());

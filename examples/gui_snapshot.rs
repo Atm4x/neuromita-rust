@@ -30,11 +30,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &LocaleId::new(&code).expect("fixture locale"),
                 &i18n(&id, &source),
             )
-            .expect("fixture translation")
+            .unwrap_or_else(|_| source.to_string())
             .into()
     });
     translations.set_locale("ru".into());
     window.set_page(view::PageId::Settings);
+    window.set_core_connected(true);
     window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
     let general = std::env::args().nth(2).as_deref() == Some("general");
     window
@@ -66,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         2
     });
-    if mode.starts_with("api") {
+    if mode.starts_with("api") && mode != "api-empty" {
         let catalog = neuromita::generation::PresetCatalog::new(Default::default());
         let definition = neuromita::generation::GeminiPresetDefinition {
             endpoint: neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into(),
@@ -76,35 +77,113 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_output_tokens: 128,
             timeout_ms: 60_000,
         };
-        let name = "QA preset";
-        let id = catalog.create(neuromita::generation::PresetRecord {
+        let unconfigured = mode == "api-new";
+        let name = if unconfigured {
+            "Пользовательский API 1"
+        } else {
+            "QA preset"
+        };
+        let record = neuromita::generation::PresetRecord {
             name: name.into(),
-            definition: neuromita::generation::PresetDefinition::Gemini(definition.clone()),
-        })?;
+            definition: if unconfigured {
+                neuromita::generation::PresetDefinition::Unconfigured
+            } else {
+                neuromita::generation::PresetDefinition::Gemini(definition.clone())
+            },
+        };
+        let id = catalog.create(record)?;
         let row = view::PresetItem {
             id: id.0.to_string().into(),
             name: name.into(),
-            model: definition.model.clone().into(),
-            provider: "google".into(),
-            endpoint: definition.endpoint.clone().into(),
-            key_env: definition.credential_env.clone().into(),
-            temperature: definition.temperature.to_string().into(),
-            tokens: definition.max_output_tokens.to_string().into(),
-            timeout: definition.timeout_ms.to_string().into(),
+            model: if unconfigured {
+                "".into()
+            } else {
+                definition.model.clone().into()
+            },
+            provider: if unconfigured {
+                "".into()
+            } else {
+                "google".into()
+            },
+            configured: !unconfigured,
+            endpoint: if unconfigured {
+                "".into()
+            } else {
+                definition.endpoint.clone().into()
+            },
+            key_env: if unconfigured {
+                "".into()
+            } else {
+                definition.credential_env.clone().into()
+            },
+            temperature: if unconfigured {
+                "".into()
+            } else {
+                definition.temperature.to_string().into()
+            },
+            tokens: if unconfigured {
+                "".into()
+            } else {
+                definition.max_output_tokens.to_string().into()
+            },
+            timeout: if unconfigured {
+                "".into()
+            } else {
+                definition.timeout_ms.to_string().into()
+            },
         };
         settings.set_settings_presets(slint::ModelRc::new(slint::VecModel::from(vec![row])));
-        settings.set_settings_active(id.0.to_string().into());
+        if !unconfigured {
+            settings.set_settings_active(id.0.to_string().into());
+        }
         settings.set_preset_edit_id(id.0.to_string().into());
+        settings.set_preset_configured(!unconfigured);
         settings.set_preset_name(name.into());
-        settings.set_preset_model(definition.model.into());
-        settings.set_preset_endpoint(definition.endpoint.into());
-        settings.set_preset_key_env(definition.credential_env.into());
-        settings.set_preset_temperature(definition.temperature.to_string().into());
-        settings.set_preset_tokens(definition.max_output_tokens.to_string().into());
-        settings.set_preset_timeout(definition.timeout_ms.to_string().into());
-        settings.set_preset_provider_icon("google".into());
-        settings.set_preset_template_id("gemini".into());
-        settings.set_preset_template_name("Google AI Studio".into());
+        settings.set_preset_model(if unconfigured {
+            "".into()
+        } else {
+            definition.model.into()
+        });
+        settings.set_preset_endpoint(if unconfigured {
+            "".into()
+        } else {
+            definition.endpoint.into()
+        });
+        settings.set_preset_key_env(if unconfigured {
+            "".into()
+        } else {
+            definition.credential_env.into()
+        });
+        settings.set_preset_temperature(if unconfigured {
+            "".into()
+        } else {
+            definition.temperature.to_string().into()
+        });
+        settings.set_preset_tokens(if unconfigured {
+            "".into()
+        } else {
+            definition.max_output_tokens.to_string().into()
+        });
+        settings.set_preset_timeout(if unconfigured {
+            "".into()
+        } else {
+            definition.timeout_ms.to_string().into()
+        });
+        settings.set_preset_provider_icon(if unconfigured {
+            "".into()
+        } else {
+            "google".into()
+        });
+        settings.set_preset_template_id(if unconfigured {
+            "".into()
+        } else {
+            "gemini".into()
+        });
+        settings.set_preset_template_name(if unconfigured {
+            "".into()
+        } else {
+            "Google AI Studio".into()
+        });
         let templates = PresetsPresenter::providers()
             .into_iter()
             .map(|provider| view::PresetTemplateItem {

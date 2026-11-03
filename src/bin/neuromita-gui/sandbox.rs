@@ -179,13 +179,15 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_server_running(snapshot.running);
         }
         Update::Administration(snapshot) => super::settings::render(window, &snapshot),
-        Update::PresetDraft(draft) => super::settings::draft(window, &draft),
+        Update::PresetCreated(id, record) => super::settings::created(window, id, &record),
         Update::AdminError(error) => {
+            window.global::<SettingsUi>().set_preset_pending_save(false);
             window
                 .global::<SettingsUi>()
                 .set_settings_error(error.into());
         }
-        Update::AdminSaved(created) => super::settings::saved(window, created),
+        Update::AdminSaved => super::settings::saved(window, None),
+        Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             window.set_core_connected(false);
             window.set_core_connecting(false);
