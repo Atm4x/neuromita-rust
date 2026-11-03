@@ -1,0 +1,37 @@
+name: Import verified character-memory capacity Git bundle
+on:
+  push:
+    branches:
+      - bridge/memory-capacity-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact original Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=f52ced98a27dd8bc3f0c9490e8b9fea7c5167849
+          EXPECTED=3035ed9538259f58487423a58ba3ea1c6d1cc1d9
+          TREE=78215c6b4622776203839bd86bc7d5e48028c2af
+          DEST=codex/character-memory-capacity-20261103
+          base64 --decode .github/bridge/memory-capacity-20261103.bundle.b64 >/tmp/memory-capacity.bundle
+          echo "6f8764a8a184901b353e59c5a49c129427f655cef7e89df348536afedd32de93  /tmp/memory-capacity.bundle" | sha256sum -c -
+          test "$(git cat-file -t "$BASE")" = commit
+          git bundle verify /tmp/memory-capacity.bundle
+          git fetch /tmp/memory-capacity.bundle "refs/heads/$DEST:refs/heads/memory-capacity-import"
+          test "$(git rev-parse refs/heads/memory-capacity-import)" = "$EXPECTED"
+          test "$(git rev-parse refs/heads/memory-capacity-import^{tree})" = "$TREE"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          EXISTING="$(git ls-remote origin "refs/heads/$DEST" | cut -f1)"
+          if [[ -n "$EXISTING" ]]; then
+            test "$EXISTING" = "$EXPECTED"
+          else
+            git push origin "refs/heads/memory-capacity-import:refs/heads/$DEST"
+          fi
+          echo "published $EXPECTED, tree $TREE, preserving original author and committer"
