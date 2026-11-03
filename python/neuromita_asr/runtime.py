@@ -9,7 +9,7 @@ import io
 import re
 import wave
 
-from neuromita_ai_sdk import AssetRequirement, InstallPlan, validate_settings
+from neuromita_ai_sdk import AssetHook, AssetRequirement, InstallPlan, validate_settings
 from neuromita_ai_sdk.assets import selected_model_root
 from neuromita_ai_sdk.distributions import check_distributions
 
@@ -99,8 +99,9 @@ def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
     if plugin_id == "gigaam_onnx":
         ort = "onnxruntime-directml>=1.18,<2" if options["device"] == "dml" else "onnxruntime>=1.18,<2"
         return InstallPlan(
-            requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", ort, "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
+            requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", "onnx>=1.16,<2", ort, "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
             assets=tuple(AssetRequirement("gigaam_onnx", name) for name in _gigaam_onnx_files(options["model"])),
+            asset_hooks=(AssetHook("export_gigaam_onnx", "gigaam"),),
             supported_python_minors=("3.11", "3.12"),
         )
     if plugin_id == "whisper_onnx":

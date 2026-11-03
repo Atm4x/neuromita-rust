@@ -65,6 +65,7 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.set_page(PageId::Sandbox);
     window.set_version("v0.1.0".into());
     window.set_core_connected(true);
+    window.set_chat_generation_ready(true);
     window.set_chat_model("Gemini · test fixture".into());
     window.set_chat_preset("#0".into());
     window.set_chat_attitude("60.0".into());
@@ -157,5 +158,202 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     }
     window.global::<I18n>().set_locale("en".into());
     window.window().take_snapshot().unwrap();
+    settings_render_and_bindings(&window);
+    memory_render_and_contract(&window);
     window.hide().unwrap();
+}
+
+fn settings_render_and_bindings(window: &AppWindow) {
+    use super::super::view::{PresetItem, SettingsUi};
+    let settings = window.global::<SettingsUi>();
+    settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        id: "7".into(),
+        name: "Main".into(),
+        model: "fixture-model".into(),
+        endpoint: "http://127.0.0.1:12345/v1beta/".into(),
+        key_env: "FIXTURE_KEY".into(),
+        temperature: "0.7".into(),
+        tokens: "3000".into(),
+        timeout: "60".into(),
+    }])));
+    settings.set_settings_active("7".into());
+    settings.set_settings_revision("12".into());
+    settings.set_settings_persistence(1);
+    settings.set_settings_voice_launcher(true);
+    settings.set_settings_volume(65);
+    settings.set_mita_reply("active".into());
+    settings.set_mita_react("7".into());
+    settings.set_mita_initiate("active".into());
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let sent = commands.clone();
+    super::super::settings::bind(
+        window,
+        Rc::new(move |command| sent.borrow_mut().push(command)),
+    );
+    settings.invoke_preset_edit("7".into());
+    assert_eq!(settings.get_preset_model(), "fixture-model");
+    settings.invoke_preset_save();
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::UpdatePreset(
+            neuromita::generation::PresetId(7),
+            _
+        ))
+    ));
+    settings.set_preset_temperature("invalid".into());
+    let count = commands.borrow().len();
+    settings.invoke_preset_save();
+    assert_eq!(commands.borrow().len(), count);
+    assert!(!settings.get_settings_error().is_empty());
+    settings.set_settings_error("".into());
+    settings.set_preset_temperature("0.7".into());
+    window.set_page(PageId::Settings);
+    window.set_core_connected(true);
+    window.global::<I18n>().set_locale("ru".into());
+    for (width, height) in [(1560, 918), (1200, 760)] {
+        window
+            .window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        for section in 0..4 {
+            settings.set_section(section);
+            let image = window.window().take_snapshot().unwrap();
+            if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                for rgba in image.as_bytes().as_chunks::<4>().0 {
+                    ppm.extend_from_slice(&rgba[..3]);
+                }
+                std::fs::write(
+                    PathBuf::from(directory).join(format!("settings-{section}-{width}.ppm")),
+                    ppm,
+                )
+                .unwrap();
+            }
+        }
+    }
+    window.global::<I18n>().set_locale("en".into());
+    window.window().take_snapshot().unwrap();
+}
+
+fn memory_render_and_contract(window: &AppWindow) {
+    use super::super::{memory, runtime::Command, view::MemoryUi};
+    use neuromita::{
+        app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
+        character::CharacterId,
+        generation::{
+            GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
+            gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
+        },
+        memory::{MemoryCommand, MemoryPriority},
+    };
+    use std::{
+        num::NonZeroUsize,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let generator = ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap();
+        let template = GeminiTemplate::google(
+            "fixture",
+            "fixture-key",
+            GenerationSettings::new(0.7, 100, Duration::from_secs(1)).unwrap(),
+        )
+        .unwrap();
+        let limit = NonZeroUsize::new(16).unwrap();
+        let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+            GenerationPreset::new(ProviderTemplate::Gemini(template)),
+            generator,
+            RuntimeLimits {
+                request_queue: limit,
+                discovery_buffer: limit,
+                character_commands: limit,
+                presenter_updates: limit,
+                retained_finished: limit,
+            },
+            "127.0.0.1:0".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        let characters = &app.presenter().characters;
+        let initial = characters.memories(CharacterId::Mita).await.unwrap();
+        characters
+            .edit_memories(
+                CharacterId::Mita,
+                initial,
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Игрок любит зелёный чай.".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(Mutex::new(memory::MemoryEditor::default()));
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let send = commands.clone();
+        memory::bind(
+            window,
+            Rc::new(move |command| send.borrow_mut().push(command)),
+            &state,
+        );
+        let page = characters
+            .list_memories(CharacterId::Mita, Default::default())
+            .await
+            .unwrap();
+        memory::render(window, &state, &page);
+        let ui = window.global::<MemoryUi>();
+        ui.set_open(true);
+        ui.invoke_edit(page.records()[0].id.0.to_string().into());
+        ui.set_content("Изменённый текст".into());
+        let snapshot = characters.memories(CharacterId::Mita).await.unwrap();
+        characters
+            .edit_memories(
+                CharacterId::Mita,
+                snapshot,
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Новое воспоминание от внешнего клиента.".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let page = characters
+            .list_memories(CharacterId::Mita, Default::default())
+            .await
+            .unwrap();
+        memory::render(window, &state, &page);
+        assert_eq!(ui.get_content(), "Изменённый текст");
+        ui.invoke_apply(0);
+        let command = commands.borrow_mut().pop().unwrap();
+        let Command::MemoryEdit(expected, edits) = command else {
+            panic!("expected typed memory edit")
+        };
+        assert!(
+            characters
+                .edit_memories(expected.character(), expected, edits)
+                .await
+                .is_err()
+        );
+        for (width, height) in [(1560, 918), (1200, 760)] {
+            window
+                .window()
+                .set_size(slint::PhysicalSize::new(width, height));
+            let image = window.window().take_snapshot().unwrap();
+            if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+                let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+                for rgba in image.as_bytes().as_chunks::<4>().0 {
+                    ppm.extend_from_slice(&rgba[..3]);
+                }
+                std::fs::write(
+                    PathBuf::from(directory).join(format!("memory-{width}.ppm")),
+                    ppm,
+                )
+                .unwrap();
+            }
+        }
+        ui.set_open(false);
+        app.shutdown().await.unwrap();
+    });
 }

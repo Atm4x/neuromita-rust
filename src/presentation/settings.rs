@@ -98,6 +98,13 @@ pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PresetSlot {
+    Reply,
+    React,
+    Initiate,
+}
+
 pub struct CharacterSettingsPresenter {
     pub reply: BoundProperty<PresetSelection>,
     pub react: BoundProperty<PresetSelection>,

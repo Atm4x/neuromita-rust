@@ -5,7 +5,7 @@ use std::{
 
 use neuromita::{
     character::CharacterId,
-    presentation::SandboxSnapshot,
+    presentation::ConversationSnapshot,
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
     timeline::domain::MessageRole,
 };
@@ -13,7 +13,7 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
-    view::{AppWindow, ChatRow, ChatStatus},
+    view::{AppWindow, ChatRow, ChatStatus, ConversationUi, MemoryUi, SettingsUi},
 };
 
 pub fn attach(
@@ -21,10 +21,14 @@ pub fn attach(
     directory: PathBuf,
     model: Option<String>,
 ) -> std::io::Result<DesktopRuntime> {
+    let memory_editor =
+        std::sync::Arc::new(std::sync::Mutex::new(super::memory::MemoryEditor::default()));
+    let editor = memory_editor.clone();
     window.set_chat_model_input(model.clone().unwrap_or_default().into());
     let weak = window.as_weak();
     let runtime = DesktopRuntime::spawn(directory, model, move |update| {
-        let _ = weak.upgrade_in_event_loop(move |window| apply(&window, update));
+        let editor = editor.clone();
+        let _ = weak.upgrade_in_event_loop(move |window| apply(&window, update, &editor));
     })?;
     let weak = window.as_weak();
     let commands = runtime.commands.clone();
@@ -35,17 +39,35 @@ pub fn attach(
             window.set_chat_sending(false);
             window.set_core_connecting(false);
             window.set_chat_error("Desktop command queue is full or closed".into());
+            window
+                .global::<SettingsUi>()
+                .set_settings_error("Desktop command queue is full or closed".into());
         }
+    });
+    super::settings::bind(window, dispatch.clone());
+    super::memory::bind(window, dispatch.clone(), &memory_editor);
+    let send = dispatch.clone();
+    window.global::<ConversationUi>().on_preview(move |kind| {
+        let operation = match kind {
+            1 => neuromita::presentation::ConversationChange::ClearMessages,
+            2 => neuromita::presentation::ConversationChange::ResetContext,
+            _ => return,
+        };
+        send(Command::Preview(operation));
     });
     let send = dispatch.clone();
-    let weak = window.as_weak();
-    window.on_chat_connect(move |model| {
-        if let Some(window) = weak.upgrade() {
-            window.set_core_connecting(true);
-            window.set_chat_error("".into());
-        }
-        send(Command::Connect(model.into()));
-    });
+    window
+        .global::<ConversationUi>()
+        .on_confirm(move || send(Command::Confirm));
+    let send = dispatch.clone();
+    window
+        .global::<ConversationUi>()
+        .on_abort(move || send(Command::Abort));
+    let send = dispatch.clone();
+    window
+        .global::<ConversationUi>()
+        .on_trace(move || send(Command::Diagnostics));
+
     let send = dispatch.clone();
     let weak = window.as_weak();
     window.on_chat_send(move |text| {
@@ -89,8 +111,48 @@ pub fn attach(
     Ok(runtime)
 }
 
-fn apply(window: &AppWindow, update: Update) {
+fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::Memory(page) => super::memory::render(window, memory_editor, &page),
+        Update::MemoryError(error) => window.global::<MemoryUi>().set_error(error.into()),
+        Update::MemorySaved => super::memory::saved(window, memory_editor),
+        Update::Confirmation(preview) => {
+            let ui = window.global::<ConversationUi>();
+            match preview {
+                Some((operation, count)) => {
+                    ui.set_count(i32::try_from(count).unwrap_or(i32::MAX));
+                    ui.set_confirmation(match operation {
+                        neuromita::presentation::ConversationChange::ClearMessages => 1,
+                        neuromita::presentation::ConversationChange::ResetContext => 2,
+                    });
+                }
+                None => ui.set_confirmation(0),
+            }
+        }
+        Update::Diagnostics(value) => {
+            window.global::<ConversationUi>().set_history(false);
+            window
+                .global::<ConversationUi>()
+                .set_diagnostics(value.into());
+        }
+        Update::Connections(snapshot) => {
+            window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
+            window.set_chat_server_running(snapshot.running);
+        }
+        Update::Administration(snapshot) => super::settings::render(window, &snapshot),
+        Update::AdminError(error) => {
+            window
+                .global::<SettingsUi>()
+                .set_settings_error(error.into());
+        }
+        Update::AdminSaved(id) => {
+            window.global::<SettingsUi>().set_settings_error("".into());
+            if let Some(id) = id {
+                window
+                    .global::<SettingsUi>()
+                    .set_preset_edit_id(id.0.to_string().into());
+            }
+        }
         Update::Stopped => {
             window.set_core_connected(false);
             window.set_core_connecting(false);
@@ -114,6 +176,11 @@ fn apply(window: &AppWindow, update: Update) {
             }
         }
         Update::Error(error) => {
+            if !window.get_core_connected() {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.as_str().into());
+            }
             window.set_core_connecting(false);
             window.set_chat_sending(false);
             window.set_chat_error(error.into());
@@ -121,12 +188,22 @@ fn apply(window: &AppWindow, update: Update) {
     }
 }
 
-fn render(window: &AppWindow, snapshot: &SandboxSnapshot) {
+fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
     window.set_chat_character(match snapshot.character {
         CharacterId::Mita => 0,
         CharacterId::KindMita => 1,
     });
-    window.set_chat_model(snapshot.model.clone().into());
+    window.set_chat_generation_ready(snapshot.model.is_ok());
+    match &snapshot.model {
+        Ok(model) => {
+            window.set_chat_model(model.as_str().into());
+            window.set_chat_generation_error("".into());
+        }
+        Err(error) => {
+            window.set_chat_model("".into());
+            window.set_chat_generation_error(error.to_string().into());
+        }
+    }
     window.set_chat_preset(format!("#{}", snapshot.preset.0).into());
     window.set_chat_anchor(
         format!(
@@ -155,7 +232,7 @@ fn render(window: &AppWindow, snapshot: &SandboxSnapshot) {
     }
 }
 
-fn rows(snapshot: &SandboxSnapshot) -> Vec<ChatRow> {
+fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
     let committed: HashSet<_> = snapshot
         .messages
         .iter()

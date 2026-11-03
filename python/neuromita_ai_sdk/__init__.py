@@ -28,6 +28,12 @@ class InstallerAction:
 
 
 @dataclass(frozen=True)
+class AssetHook:
+    id: str
+    source_plugin_id: str
+
+
+@dataclass(frozen=True)
 class InstallPlan:
     packages: tuple[PackageRequirement, ...] = ()
     assets: tuple[AssetRequirement, ...] = ()
@@ -36,6 +42,7 @@ class InstallPlan:
     requirements: tuple[str, ...] = ()
     supported_python_minors: tuple[str, ...] = ()
     actions: tuple[InstallerAction, ...] = ()
+    asset_hooks: tuple[AssetHook, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -46,6 +53,7 @@ class InstallPlan:
             "requirements": list(self.requirements),
             "supported_python_minors": list(self.supported_python_minors),
             "actions": [vars(action) for action in self.actions],
+            "asset_hooks": [vars(hook) for hook in self.asset_hooks],
         }
 
 

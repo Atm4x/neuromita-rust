@@ -22,6 +22,9 @@ use super::{
 
 const RECEIPT: &str = ".neuromita-assets.json";
 
+mod generation;
+pub use generation::{ModelGenerationError, ModelGenerationRequest};
+
 #[derive(Debug, Clone)]
 pub enum AssetSource {
     LocalFile(PathBuf),
@@ -437,6 +440,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "rvc".into(),
                 relative_path: "rvc/voice.pth".into(),
@@ -508,6 +512,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             backend: None,
@@ -521,6 +526,7 @@ mod tests {
         tokio::fs::write(&input, b"huge payload").await.unwrap();
         let sha = hash_file(&input, 1024).await.unwrap();
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "wav".into(),
                 relative_path: "ref.wav".into(),

@@ -40,8 +40,8 @@ export component GhostButton inherits ActionSurface {
 
 export component HeaderButton inherits GhostButton {
     height: 38px; border-radius: 12px;
-    background: self.pressed ? #b74b7d33 : self.hovered ? #b74b7d1f : #ffffff0a;
-    border-color: self.hovered ? #b74b7d3d : #ffffff14;
+    background: root.selected ? #b74b7d55 : self.pressed ? #b74b7d33 : self.hovered ? #b74b7d1f : #ffffff0a;
+    border-color: root.selected ? #b74b7d : self.hovered ? #b74b7d3d : #ffffff14;
 }
 
 export component QuickAction inherits GhostButton {

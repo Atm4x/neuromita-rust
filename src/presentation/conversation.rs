@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[derive(Debug, Error)]
-pub enum SandboxError {
+pub enum ConversationError {
     #[error(transparent)]
     Character(#[from] CharacterError),
     #[error(transparent)]
@@ -26,9 +26,36 @@ pub enum SandboxError {
     Preset(#[from] PresetCatalogError),
     #[error("timeline is unavailable")]
     TimelineUnavailable,
+    #[error(transparent)]
+    Timeline(#[from] crate::timeline::domain::TimelineError),
+    #[error("conversation changed after confirmation was prepared; review the action again")]
+    StalePreview,
 }
 
-pub struct SandboxSnapshot {
+#[derive(Debug, Clone, Copy)]
+pub enum ConversationChange {
+    ClearMessages,
+    ResetContext,
+}
+
+pub struct ConversationChangePreview {
+    character: CharacterId,
+    at: ContextAnchor,
+    selection: TimelineSelection,
+    operation: ConversationChange,
+    targets: Vec<crate::identity::EventId>,
+}
+
+impl ConversationChangePreview {
+    pub fn operation(&self) -> ConversationChange {
+        self.operation
+    }
+    pub fn message_count(&self) -> usize {
+        self.targets.len()
+    }
+}
+
+pub struct ConversationSnapshot {
     pub character: CharacterId,
     pub at: ContextAnchor,
     pub state: CharacterState,
@@ -36,11 +63,11 @@ pub struct SandboxSnapshot {
     pub requests: Arc<ChatModel>,
     pub settings: Arc<SettingsSnapshot>,
     pub preset: PresetId,
-    pub model: String,
+    pub model: Result<String, PresetCatalogError>,
 }
 
 #[derive(Clone)]
-pub struct SandboxPresenter {
+pub struct ConversationPresenter {
     chat: ChatPresenter,
     characters: CharactersPresenter,
     timeline: Arc<Mutex<SessionTimeline>>,
@@ -49,7 +76,65 @@ pub struct SandboxPresenter {
     volume: BoundProperty<Volume>,
 }
 
-impl SandboxPresenter {
+impl ConversationPresenter {
+    pub async fn preview_change(
+        &self,
+        character: CharacterId,
+        operation: ConversationChange,
+    ) -> Result<ConversationChangePreview, ConversationError> {
+        let (at, selection) = {
+            let timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| ConversationError::TimelineUnavailable)?;
+            (timeline.anchor(), timeline.selection())
+        };
+        let view = self.characters.context(character, at).await?;
+        Ok(ConversationChangePreview {
+            character,
+            at,
+            selection,
+            operation,
+            targets: view
+                .view
+                .messages()
+                .into_iter()
+                .map(|message| message.event_id)
+                .collect(),
+        })
+    }
+
+    pub fn apply_change(
+        &self,
+        preview: ConversationChangePreview,
+    ) -> Result<(), ConversationError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| ConversationError::TimelineUnavailable)?;
+        if timeline.anchor() != preview.at || timeline.selection() != preview.selection {
+            return Err(ConversationError::StalePreview);
+        }
+        let id = crate::identity::EventId(uuid::Uuid::new_v4());
+        match preview.operation {
+            ConversationChange::ClearMessages if !preview.targets.is_empty() => {
+                timeline.change_message(
+                    preview.selection,
+                    preview.character,
+                    id,
+                    crate::timeline::message_actions::MessageAction::Hide {
+                        targets: preview.targets,
+                    },
+                )?;
+            }
+            ConversationChange::ClearMessages => {}
+            ConversationChange::ResetContext => {
+                timeline.reset_character_context(preview.selection, preview.character, id)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         chat: ChatPresenter,
         characters: CharactersPresenter,
@@ -104,22 +189,27 @@ impl SandboxPresenter {
         self.presets.observe()
     }
 
-    pub fn observe_selection(&self) -> Result<watch::Receiver<TimelineSelection>, SandboxError> {
+    pub fn observe_selection(
+        &self,
+    ) -> Result<watch::Receiver<TimelineSelection>, ConversationError> {
         Ok(self
             .timeline
             .lock()
-            .map_err(|_| SandboxError::TimelineUnavailable)?
+            .map_err(|_| ConversationError::TimelineUnavailable)?
             .observe_selection())
     }
 
     /// Returns a fixed-prefix character view and independent request observations.
     /// A terminal request alone does not prove membership in the selected branch.
-    pub async fn snapshot(&self, character: CharacterId) -> Result<SandboxSnapshot, SandboxError> {
+    pub async fn snapshot(
+        &self,
+        character: CharacterId,
+    ) -> Result<ConversationSnapshot, ConversationError> {
         let requests = self.chat.snapshot();
         let at = self
             .timeline
             .lock()
-            .map_err(|_| SandboxError::TimelineUnavailable)?
+            .map_err(|_| ConversationError::TimelineUnavailable)?
             .anchor();
         let view = self.characters.context(character, at).await?;
         let settings = self.settings.snapshot_all()?;
@@ -133,14 +223,14 @@ impl SandboxPresenter {
             PresetSelection::Active => settings.values.presets.active,
             PresetSelection::Specific(id) => id,
         };
-        let resolved = self
+        let model = self
             .presets
-            .get(preset)?
-            .ok_or(PresetCatalogError::NotFound(preset))?;
-        let model = match resolved.template() {
-            ProviderTemplate::Gemini(template) => template.model().to_owned(),
-        };
-        Ok(SandboxSnapshot {
+            .get(preset)
+            .and_then(|value| value.ok_or(PresetCatalogError::NotFound(preset)))
+            .map(|resolved| match resolved.template() {
+                ProviderTemplate::Gemini(template) => template.model().to_owned(),
+            });
+        Ok(ConversationSnapshot {
             character,
             at,
             state: view.state,
