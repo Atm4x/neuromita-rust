@@ -29,6 +29,7 @@ samples»: политика сегментации больше не выраж�
 - `cargo test --lib audio::` — 22 passed, 0 failed (включая новый
   `wide_score_provider_keeps_policy_durations_in_real_time`).
 - `cargo test --test audio_pipeline` — 1 passed.
+- Полный default suite: **441 passed, 0 failed, 2 ignored** (46 test-бинарников).
 - `cargo clippy --all-targets -- -D warnings` — PASS.
 - `cargo fmt --all -- --check` — PASS.
 
