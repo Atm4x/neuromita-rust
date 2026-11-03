@@ -175,7 +175,7 @@ component VoiceAvatarSelector inherits VerticalLayout {
     callback changed-selection(int);
     spacing: 0px; padding: 0px;
     SettingsText { text: I18n.i18n("voice.api.characters", "Голоса персонажей"); height: 27px; font-weight: 700; font-size: 13px; }
-    HorizontalLayout { height: 78px; padding: 0px; spacing: 5px; alignment: center;
+    HorizontalLayout { height: 78px; padding: 0px; spacing: 5px;
         ActionSurface { label: I18n.i18n("voice.api.all", "Все персонажи"); width: 74px; height: 76px; border-radius: 13px;
             background: root.selected == -1 ? SettingsTheme.heading-icon-background : SettingsTheme.field;
             border-width: root.selected == -1 ? 1px : 0px; border-color: SettingsTheme.accent;
