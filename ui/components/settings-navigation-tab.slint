@@ -22,13 +22,18 @@ export component SettingsNavigationTab inherits ActionSurface {
         padding-bottom: 9px;
         spacing: 6px;
 
-        Glyph {
-            text: root.glyph;
+        Rectangle {
             width: 16px;
-            height: 20px;
-            vertical-stretch: 0;
-            font-size: 14px;
-            color: root.active ? #ffffff : SettingsTheme.muted;
+            height: 100%;
+            Glyph {
+                y: (parent.height - self.height) / 2;
+                width: 16px;
+                height: 18px;
+                vertical-stretch: 0;
+                text: root.glyph;
+                font-size: 14px;
+                color: root.active ? #ffffff : SettingsTheme.muted;
+            }
         }
         tab-caption := Text {
             text: root.label;

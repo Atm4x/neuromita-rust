@@ -9,7 +9,7 @@ import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "../sandbox/theme.slint";
 import { Caption, Glyph, HeaderButton, QuickAction, Centered, Field, Toggle, StyledCheckbox } from "../sandbox/controls.slint";
 import { ActionSurface } from "../components/controls.slint";
-import { SettingsNavigationTab } from "../components/settings-navigation-tab.slint";
+import { SettingsTabsStrip } from "../components/settings-tabs-strip.slint";
 import { CollapsibleSettingsSection } from "../components/collapsible-section.slint";
 import { I18n } from "../i18n.slint";
 import { LanguageSettingsPage } from "../settings/language-page.slint";
@@ -249,33 +249,27 @@ export component SettingsPage inherits Rectangle {
         }
         Rectangle { background: SettingsTheme.workspace; border-radius: SettingsTheme.panel-radius; border-width: 1px; border-color: SettingsTheme.border;
             VerticalLayout { padding: 14px; spacing: 14px;
-                Rectangle { vertical-stretch: 0;
-                FlexboxLayout { padding-left: 18px; padding-right: 10px; flex-wrap: wrap; spacing-horizontal: 5px; spacing-vertical: 6px; alignment: start; cross-axis-line-alignment: start;
-                    for item in [
-                        {section: 0, name: I18n.i18n("settings.general", "Общие"), icon: Fa.gear},
-                        {section: 4, name: I18n.i18n("settings.language", "Язык"), icon: "\u{f0ac}"},
-                        {section: 1, name: "API", icon: "\u{f1e6}"},
-                        {section: 2, name: I18n.i18n("settings.characters", "Персонажи"), icon: "\u{f007}"},
-                        {section: 3, name: I18n.i18n("settings.voice", "Озвучка"), icon: "\u{f028}"},
-                        {section: 5, name: "ASR", icon: Fa.microphone},
-                        {section: 6, name: I18n.i18n("settings.ai-engine", "ИИ-движок"), icon: "\u{f2db}"},
-                        {section: 7, name: I18n.i18n("settings.game", "Игра"), icon: "\u{f11b}"},
-                        {section: 8, name: I18n.i18n("settings.models", "Модели"), icon: "\u{f544}"},
-                        {section: 9, name: I18n.i18n("settings.images", "Изображения"), icon: "\u{f03e}"},
-                        {section: 10, name: I18n.i18n("settings.updates", "Обновления"), icon: "\u{f2f1}"},
-                        {section: 11, name: I18n.i18n("settings.data", "Сбор данных"), icon: Fa.database}
-                    ]: SettingsNavigationTab {
-                        visible: SettingsUi.section-visible[item.section];
-                        label: item.name;
-                        glyph: item.icon;
-                        active: SettingsUi.section == item.section;
-                        activated => {
-                            SettingsUi.section = item.section;
-                            if (item.section == 2 && root.connected) { MemoryUi.select(SettingsUi.selected-character); }
-                        }
+                SettingsTabsStrip {
+                    active-section: SettingsUi.section;
+                    visibility: SettingsUi.section-visible;
+                    entries: [
+                        {section: 0, title: I18n.i18n("settings.general", "Общие"), glyph: Fa.gear},
+                        {section: 4, title: I18n.i18n("settings.language", "Язык"), glyph: "\u{f0ac}"},
+                        {section: 1, title: "API", glyph: "\u{f1e6}"},
+                        {section: 2, title: I18n.i18n("settings.characters", "Персонажи"), glyph: "\u{f007}"},
+                        {section: 3, title: I18n.i18n("settings.voice", "Озвучка"), glyph: "\u{f028}"},
+                        {section: 5, title: "ASR", glyph: Fa.microphone},
+                        {section: 6, title: I18n.i18n("settings.ai-engine", "ИИ-движок"), glyph: "\u{f2db}"},
+                        {section: 7, title: I18n.i18n("settings.game", "Игра"), glyph: "\u{f11b}"},
+                        {section: 8, title: I18n.i18n("settings.models", "Модели"), glyph: "\u{f544}"},
+                        {section: 9, title: I18n.i18n("settings.images", "Изображения"), glyph: "\u{f03e}"},
+                        {section: 10, title: I18n.i18n("settings.updates", "Обновления"), glyph: "\u{f2f1}"},
+                        {section: 11, title: I18n.i18n("settings.data", "Сбор данных"), glyph: Fa.database}
+                    ];
+                    selected(section) => {
+                        SettingsUi.section = section;
+                        if (section == 2 && root.connected) { MemoryUi.select(SettingsUi.selected-character); }
                     }
-                }
-                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: SettingsTheme.divider; }
                 }
                 if SettingsUi.settings-error != "": Card {
                     background: SettingsTheme.error-background;
