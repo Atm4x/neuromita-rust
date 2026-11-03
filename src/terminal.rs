@@ -18,6 +18,7 @@ pub struct Options {
     message: Option<String>,
     pub listen: std::net::SocketAddr,
     pub data_dir: PathBuf,
+    pub finetune_config: Option<PathBuf>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -31,14 +32,19 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit\n\n{}",
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
             }
             if !matches!(
                 argument.as_str(),
-                "--model" | "--character" | "--message" | "--listen" | "--data-dir"
+                "--model"
+                    | "--character"
+                    | "--message"
+                    | "--listen"
+                    | "--data-dir"
+                    | "--finetune-config"
             ) {
                 return Err(invalid("unknown argument; use --help"));
             }
@@ -71,6 +77,13 @@ impl Options {
                 Some(path) if path.is_empty() => return Err(invalid("empty data directory")),
                 Some(path) => PathBuf::from(path),
                 None => default_data_dir()?,
+            },
+            finetune_config: match values.remove("--finetune-config") {
+                Some(path) if path.is_empty() => {
+                    return Err(invalid("empty fine-tune configuration path"));
+                }
+                Some(path) => Some(PathBuf::from(path)),
+                None => None,
             },
         }))
     }

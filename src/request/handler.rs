@@ -7,6 +7,9 @@ use tracing::Instrument;
 use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
+    finetune::{
+        CaptureScope, CaptureStatus, FineTuneCaptureObserver, FineTuneCollector, SampleOutcome,
+    },
     generation::{
         GenerationError, GenerationRequest, LlmConversation, PresetCatalog, ResponseGenerator,
     },
@@ -25,6 +28,7 @@ pub(crate) struct MessageHandler {
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
+    pub(crate) finetune: Option<FineTuneCollector>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
 }
@@ -166,18 +170,28 @@ impl MessageHandler {
             }
         };
         record.set_preset_description(format!("{:?}", preset));
+        let mut observer = self
+            .finetune
+            .as_ref()
+            .filter(|collector| collector.enabled())
+            .map(|collector| {
+                collector.observer(CaptureScope {
+                    request_id: id,
+                    character_id: message.character_id().to_string(),
+                    intent: message.intent(),
+                    source: message.source(),
+                })
+            });
         let generated = tokio::select! {
             biased;
-            _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
+            _ = record.cancellation.cancelled() => GenerationRun::Cancelled,
             _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
                 record.cancel();
-                record.finish_cancelled();
-                return;
+                GenerationRun::Cancelled
             }
             _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
                 record.cancel();
-                record.finish_cancelled();
-                return;
+                GenerationRun::Cancelled
             }
             response = async {
                 let query = LlmConversation::memory_query(&context);
@@ -187,20 +201,53 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")
                     ))?;
-                self.generator
-                    .generate(GenerationRequest::new(context, preset, selected))
-                    .await
-            } => response,
+                let request = GenerationRequest::new(context, preset, selected);
+                match observer.as_mut() {
+                    Some(observer) => {
+                        self.generator.generate_observed(request, observer).await
+                    }
+                    None => self.generator.generate(request).await,
+                }
+            } => GenerationRun::Response(response),
         };
+        let capture = self.persist_observation(observer.as_ref()).await;
+        if capture.sample_id.is_some() || capture.warning.is_some() {
+            record.dataset_capture(capture.sample_id, capture.warning.clone());
+        }
         let proposed = match generated {
-            Ok(proposed) => proposed,
-            Err(error) => {
+            GenerationRun::Response(Ok(proposed)) => proposed,
+            GenerationRun::Response(Err(error)) => {
+                self.finish_dataset_outcome(
+                    &record,
+                    &capture,
+                    None,
+                    SampleOutcome::AcceptanceFailed,
+                )
+                .await;
                 record.finish(RequestOutcome::TextGenerationFailed(error));
+                return;
+            }
+            GenerationRun::Cancelled => {
+                self.finish_dataset_outcome(
+                    &record,
+                    &capture,
+                    None,
+                    SampleOutcome::CancelledBeforeAccept,
+                )
+                .await;
+                record.finish_cancelled();
                 return;
             }
         };
         let text = Arc::clone(proposed.text());
         if !record.text_ready(Arc::clone(&text)) {
+            self.finish_dataset_outcome(
+                &record,
+                &capture,
+                None,
+                SampleOutcome::CancelledBeforeAccept,
+            )
+            .await;
             record.finish_cancelled();
             return;
         }
@@ -208,6 +255,13 @@ impl MessageHandler {
             None => Ok(None),
             Some(options) => {
                 if !record.generating_voice() {
+                    self.finish_dataset_outcome(
+                        &record,
+                        &capture,
+                        None,
+                        SampleOutcome::CancelledBeforeAccept,
+                    )
+                    .await;
                     record.finish_cancelled();
                     return;
                 }
@@ -221,12 +275,26 @@ impl MessageHandler {
                     _ = record.cancellation.cancelled() => {
                         voice_task.abort();
                         let _ = voice_task.await;
+                        self.finish_dataset_outcome(
+                            &record,
+                            &capture,
+                            None,
+                            SampleOutcome::CancelledBeforeAccept,
+                        )
+                        .await;
                         record.finish_cancelled();
                         return;
                     }
                     _ = stop.cancelled() => {
                         voice_task.abort();
                         let _ = voice_task.await;
+                        self.finish_dataset_outcome(
+                            &record,
+                            &capture,
+                            None,
+                            SampleOutcome::CancelledBeforeAccept,
+                        )
+                        .await;
                         record.cancel();
                         record.finish_cancelled();
                         return;
@@ -234,6 +302,13 @@ impl MessageHandler {
                     _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
                         voice_task.abort();
                         let _ = voice_task.await;
+                        self.finish_dataset_outcome(
+                            &record,
+                            &capture,
+                            None,
+                            SampleOutcome::CancelledBeforeAccept,
+                        )
+                        .await;
                         record.cancel();
                         record.finish_cancelled();
                         return;
@@ -241,6 +316,13 @@ impl MessageHandler {
                     _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
                         voice_task.abort();
                         let _ = voice_task.await;
+                        self.finish_dataset_outcome(
+                            &record,
+                            &capture,
+                            None,
+                            SampleOutcome::CancelledBeforeAccept,
+                        )
+                        .await;
                         record.cancel();
                         record.finish_cancelled();
                         return;
@@ -257,6 +339,13 @@ impl MessageHandler {
             }
         };
         if !record.begin_accepting() {
+            self.finish_dataset_outcome(
+                &record,
+                &capture,
+                None,
+                SampleOutcome::CancelledBeforeAccept,
+            )
+            .await;
             record.finish_cancelled();
             return;
         }
@@ -269,8 +358,29 @@ impl MessageHandler {
             .accept(id, acceptance, proposed, audio, message.audience().clone())
             .await
         {
-            Ok(response) => response,
+            Ok(response) => {
+                let event_id = response.event_id;
+                self.finish_dataset_outcome(
+                    &record,
+                    &capture,
+                    Some(event_id),
+                    if voice_error.is_some() {
+                        SampleOutcome::AcceptedVoiceFailed
+                    } else {
+                        SampleOutcome::Accepted
+                    },
+                )
+                .await;
+                response
+            }
             Err(error) => {
+                self.finish_dataset_outcome(
+                    &record,
+                    &capture,
+                    None,
+                    SampleOutcome::AcceptanceFailed,
+                )
+                .await;
                 record.finish(RequestOutcome::InternalError(
                     record.failure(error.to_string()),
                 ));
@@ -287,6 +397,57 @@ impl MessageHandler {
         };
         record.finish(outcome);
     }
+
+    async fn finish_dataset_outcome(
+        &self,
+        record: &Arc<RequestRecord>,
+        capture: &CaptureStatus,
+        accepted_event_id: Option<crate::timeline::EventId>,
+        outcome: SampleOutcome,
+    ) {
+        let (Some(collector), Some(sample_id)) = (&self.finetune, capture.sample_id) else {
+            return;
+        };
+        if let Err(error) = collector
+            .record_outcome(
+                sample_id,
+                record.snapshot().metadata.id,
+                accepted_event_id,
+                outcome,
+            )
+            .await
+        {
+            let warning = match capture.warning.as_deref() {
+                Some(warning) => format!("{warning}; dataset outcome: {error}"),
+                None => format!("dataset outcome: {error}"),
+            };
+            record.dataset_capture(Some(sample_id), Some(Arc::from(warning)));
+        }
+    }
+
+    async fn persist_observation(
+        &self,
+        observer: Option<&FineTuneCaptureObserver>,
+    ) -> CaptureStatus {
+        let (Some(collector), Some(observer)) = (&self.finetune, observer) else {
+            return CaptureStatus::default();
+        };
+        let Some(captured) = observer.captured() else {
+            return observer.status().clone();
+        };
+        collector
+            .persist(captured)
+            .await
+            .unwrap_or_else(|error| CaptureStatus {
+                sample_id: None,
+                warning: Some(Arc::from(error.to_string())),
+            })
+    }
+}
+
+enum GenerationRun {
+    Response(Result<crate::generation::ProposedResponse, GenerationError>),
+    Cancelled,
 }
 
 async fn context_epoch_changed(mut updates: watch::Receiver<u64>, captured: u64) {

@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     character::{AcceptedResponse, CharacterId},
+    finetune::SampleId,
     generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
@@ -238,6 +239,12 @@ pub enum RequestState {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DatasetCapture {
+    pub sample_id: Option<SampleId>,
+    pub warning: Option<Arc<str>>,
+}
+
 impl RequestState {
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Finished(_) | Self::Cancelled)
@@ -249,6 +256,7 @@ pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
     pub revision: u64,
     pub state: RequestState,
+    pub dataset: DatasetCapture,
 }
 
 impl RequestSnapshot {

@@ -3,6 +3,7 @@ pub mod ai_runtime;
 pub mod api;
 pub mod app;
 pub mod character;
+pub mod finetune;
 pub mod generation;
 mod identity;
 mod interaction;

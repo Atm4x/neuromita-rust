@@ -591,6 +591,10 @@ async fn client(
 
 pub fn status(snapshot: &RequestSnapshot) -> Value {
     let mut message = json!({"type":"request_status","request_id":snapshot.metadata.id.0,"character":snapshot.metadata.character_id.to_string(),"revision":snapshot.revision,"can_cancel":snapshot.can_cancel()});
+    message["dataset_sample_id"] = json!(snapshot.dataset.sample_id);
+    if let Some(warning) = &snapshot.dataset.warning {
+        message["dataset_warning"] = json!(warning);
+    }
     match &snapshot.state {
         RequestState::Pending => message["state"] = json!("pending"),
         RequestState::Processing(stage) => {

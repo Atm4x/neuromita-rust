@@ -18,6 +18,7 @@ pub(crate) struct RequestRecord {
 
 struct Execution {
     snapshot: Arc<RequestSnapshot>,
+    dataset: DatasetCapture,
     phase: EffectPhase,
     message: Option<Box<dyn GenerationCommand>>,
     trace: Option<RequestTrace>,
@@ -105,6 +106,7 @@ impl RequestRecord {
             },
             revision: 0,
             state: RequestState::Pending,
+            dataset: DatasetCapture::default(),
         });
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         let trace = RequestTrace {
@@ -122,6 +124,7 @@ impl RequestRecord {
         Arc::new(Self {
             inner: Mutex::new(Execution {
                 snapshot,
+                dataset: DatasetCapture::default(),
                 phase: EffectPhase::Working,
                 message: Some(message),
                 trace: Some(trace),
@@ -148,6 +151,7 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state,
+            dataset: inner.dataset.clone(),
         });
         inner.snapshot = Arc::clone(&snapshot);
         let phase = inner.phase;
@@ -288,6 +292,23 @@ impl RequestRecord {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.context = Some(context);
         }
+    }
+    pub(crate) fn dataset_capture(
+        &self,
+        sample_id: Option<crate::finetune::SampleId>,
+        warning: Option<Arc<str>>,
+    ) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        inner.dataset.sample_id = sample_id;
+        inner.dataset.warning = warning;
+        let snapshot = Arc::new(RequestSnapshot {
+            metadata: inner.snapshot.metadata.clone(),
+            revision: inner.snapshot.revision + 1,
+            state: inner.snapshot.state.clone(),
+            dataset: inner.dataset.clone(),
+        });
+        inner.snapshot = Arc::clone(&snapshot);
+        self.updates.send_replace(snapshot);
     }
     pub(crate) fn text_ready(&self, text: Arc<str>) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");

@@ -17,8 +17,9 @@ pub use structured::{
 };
 
 pub use provider::{
-    GenerationError, GenerationInput, GenerationProvider, GenerationRequest, ProposedResponse,
-    ProviderFuture, ResponseGenerator,
+    GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,
+    PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture, ProviderReply,
+    ProviderUsage, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

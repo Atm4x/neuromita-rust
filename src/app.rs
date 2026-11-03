@@ -17,6 +17,7 @@ pub use crate::runtime::ApplicationStatus;
 
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
+    finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -67,6 +68,7 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub finetune: Option<FineTuneSettings>,
 }
 
 impl ApplicationConfig {
@@ -89,6 +91,7 @@ impl ApplicationConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            finetune: None,
         }
     }
 
@@ -124,6 +127,12 @@ impl ApplicationConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
         };
+        let finetune_path = data_directory.join("finetune.json");
+        config.finetune = match std::fs::metadata(&finetune_path) {
+            Ok(_) => Some(FineTuneSettings::load(&finetune_path)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         Ok(config)
     }
 }
@@ -143,6 +152,8 @@ pub enum ApplicationError {
     #[error(transparent)]
     Presets(#[from] PresetCatalogError),
     #[error(transparent)]
+    FineTune(#[from] FineTuneError),
+    #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error("server: {0}")]
     Server(#[from] std::io::Error),
@@ -153,6 +164,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    finetune: Option<FineTuneCollector>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -250,7 +262,11 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            finetune,
         } = config;
+        let finetune = finetune
+            .map(|settings| FineTuneCollector::from_settings(&settings))
+            .transpose()?;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
             startup.register(SettingsStartupMigration(Arc::clone(&settings.repository)))?;
@@ -300,6 +316,7 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
+                finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,
             };
@@ -365,6 +382,7 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            finetune,
             id,
             stop,
             completion: Some(completion),
@@ -376,6 +394,9 @@ impl ApplicationLifecycle {
     }
     pub fn server(&self) -> &ServerHandle {
         &self.server
+    }
+    pub fn finetune(&self) -> Option<&FineTuneCollector> {
+        self.finetune.as_ref()
     }
     pub fn at(&self) -> crate::timeline::ContextAnchor {
         self.timeline
