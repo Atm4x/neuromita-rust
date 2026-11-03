@@ -1,0 +1,30 @@
+name: Export AI Runtime Git bundle
+on:
+  push:
+    branches:
+      - bridge/ai-runtime-bundle-export-20261103
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export verified AI Runtime source
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/codex/slint-ai-runtime-formal-20261103:refs/heads/ai-runtime-snapshot"
+          git bundle create neuromita-ai-runtime.bundle refs/heads/ai-runtime-snapshot
+          git bundle verify neuromita-ai-runtime.bundle
+          sha256sum neuromita-ai-runtime.bundle > neuromita-ai-runtime.bundle.sha256
+          git rev-parse refs/heads/ai-runtime-snapshot > neuromita-ai-runtime.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-ai-runtime-bundle-20261103
+          path: |
+            neuromita-ai-runtime.bundle
+            neuromita-ai-runtime.bundle.sha256
+            neuromita-ai-runtime.commit
+          retention-days: 3
