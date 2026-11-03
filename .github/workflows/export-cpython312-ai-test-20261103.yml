@@ -1,0 +1,32 @@
+name: Export real CPython 3.12 runtime for AI CI
+on:
+  push:
+    branches:
+      - bridge/ai-test-cpython312-20261103
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install pinned test interpreter and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/managed-python"
+          export UV_PYTHON_INSTALL_DIR="$GITHUB_WORKSPACE/managed-python"
+          uv python install 3.12.10 --no-bin
+          INTERPRETER=$(uv python find --managed-python --no-python-downloads 3.12.10)
+          "$INTERPRETER" --version
+          "$INTERPRETER" -I -S -c 'import sys; assert sys.version_info[:3] == (3,12,10)'
+          tar -czf cpython312-test.tar.gz -C "$GITHUB_WORKSPACE/managed-python" .
+          sha256sum cpython312-test.tar.gz > cpython312-test.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-cpython312-test-runtime
+          path: |
+            cpython312-test.tar.gz
+            cpython312-test.tar.gz.sha256
+          retention-days: 1
