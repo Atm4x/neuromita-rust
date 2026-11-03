@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use serde::Serialize;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -13,7 +14,7 @@ use crate::{
     voice::VoiceError,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RequestSource {
     Presenter,
     Client(Uuid),
@@ -284,7 +285,7 @@ impl RequestSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum EffectPhase {
     Working,
     Accepting,

@@ -109,18 +109,16 @@ impl RequestRecord {
             dataset: DatasetCapture::default(),
         });
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
-        let trace = RequestTrace {
-            metadata: snapshot.metadata.clone(),
-            guidance: Arc::from(message.guidance()),
-            preset_description: String::new(),
-            context: None,
-            generated_text: None,
-            transitions: vec![RequestTransition {
-                revision: 0,
-                phase: EffectPhase::Working,
-                state: RequestState::Pending,
-            }],
-        };
+        let diagnostics_limits = registry
+            .upgrade()
+            .map_or_else(DiagnosticsLimits::default, |registry| {
+                registry.diagnostics_limits()
+            });
+        let trace = RequestTrace::new(
+            snapshot.metadata.clone(),
+            message.guidance(),
+            diagnostics_limits,
+        );
         Arc::new(Self {
             inner: Mutex::new(Execution {
                 snapshot,
@@ -156,11 +154,7 @@ impl RequestRecord {
         inner.snapshot = Arc::clone(&snapshot);
         let phase = inner.phase;
         if let Some(trace) = &mut inner.trace {
-            trace.transitions.push(RequestTransition {
-                revision: snapshot.revision,
-                phase,
-                state: snapshot.state.clone(),
-            });
+            trace.push_transition(snapshot.revision, phase, &snapshot.state);
         }
         self.updates.send_replace(snapshot);
     }
@@ -173,7 +167,13 @@ impl RequestRecord {
 
     pub(crate) fn set_preset_description(&self, description: String) {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
-            trace.preset_description = description;
+            trace.set_preset_description(description);
+        }
+    }
+
+    pub(crate) fn set_redaction_values(&self, values: Vec<String>) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.configure_redaction(values);
         }
     }
 
@@ -187,6 +187,9 @@ impl RequestRecord {
             return None;
         }
         let message = inner.message.take()?;
+        if let Some(trace) = &mut inner.trace {
+            trace.mark_started();
+        }
         self.publish(
             &mut inner,
             RequestState::Processing(ProcessingStage::GeneratingText),
@@ -227,6 +230,9 @@ impl RequestRecord {
             return false;
         };
         inner.phase = EffectPhase::Accepting;
+        if let Some(trace) = &mut inner.trace {
+            trace.accepting();
+        }
         self.publish(
             &mut inner,
             RequestState::Processing(ProcessingStage::Accepting { text }),
@@ -240,11 +246,7 @@ impl RequestRecord {
         inner.phase = EffectPhase::Applied;
         let snapshot = Arc::clone(&inner.snapshot);
         if let Some(trace) = &mut inner.trace {
-            trace.transitions.push(RequestTransition {
-                revision: snapshot.revision,
-                phase: EffectPhase::Applied,
-                state: snapshot.state.clone(),
-            });
+            trace.push_transition(snapshot.revision, EffectPhase::Applied, &snapshot.state);
         }
     }
 
@@ -269,6 +271,14 @@ impl RequestRecord {
         } else {
             RequestState::Finished(outcome)
         };
+        if let Some(trace) = &mut inner.trace {
+            match &state {
+                RequestState::Finished(outcome) => trace.outcome(outcome),
+                RequestState::Cancelled => trace.cancelled(),
+                _ => {}
+            }
+            trace.finished();
+        }
         self.publish(&mut inner, state);
         drop(inner);
         self.retire();
@@ -283,6 +293,10 @@ impl RequestRecord {
         }
         inner.phase = EffectPhase::Discarded;
         inner.message.take();
+        if let Some(trace) = &mut inner.trace {
+            trace.cancelled();
+            trace.finished();
+        }
         self.publish(&mut inner, RequestState::Cancelled);
         drop(inner);
         self.retire();
@@ -290,7 +304,7 @@ impl RequestRecord {
 
     pub(crate) fn prepared(&self, context: crate::character::CharacterContext) {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
-            trace.context = Some(context);
+            trace.prepared(&context);
         }
     }
     pub(crate) fn dataset_capture(
@@ -323,7 +337,7 @@ impl RequestRecord {
         }
         inner.draft_text = Some(Arc::clone(&text));
         if let Some(trace) = &mut inner.trace {
-            trace.generated_text = Some(Arc::clone(&text));
+            trace.text_ready(&text);
         }
         self.publish(
             &mut inner,
@@ -372,11 +386,38 @@ impl RequestRecord {
         let Some(text) = inner.draft_text.clone() else {
             return false;
         };
+        if let Some(trace) = &mut inner.trace {
+            trace.voice_started();
+        }
         self.publish(
             &mut inner,
             RequestState::Processing(ProcessingStage::GeneratingVoice { text }),
         );
         true
+    }
+
+    pub(crate) fn voice_finished(&self) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.voice_finished();
+        }
+    }
+
+    pub(crate) fn provider_requested(&self, request: crate::generation::PreparedRequest) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.provider_requested(request);
+        }
+    }
+
+    pub(crate) fn provider_replied(&self, reply: crate::generation::ProviderReply) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.provider_replied(reply);
+        }
+    }
+
+    pub(crate) fn provider_failed(&self, error: &crate::generation::GenerationError) {
+        if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
+            trace.provider_failed(error);
+        }
     }
 }
 

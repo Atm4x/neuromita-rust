@@ -85,7 +85,6 @@ pub struct FineTuneCollector {
     store: FineTuneStore,
     enabled: bool,
     retention: Retention,
-    show_rating_controls: bool,
 }
 
 impl FineTuneCollector {
@@ -95,16 +94,11 @@ impl FineTuneCollector {
             store: FineTuneStore::open(settings.data_dir.clone())?,
             enabled: settings.enabled,
             retention: settings.retention,
-            show_rating_controls: settings.show_rating_controls,
         })
     }
 
     pub fn enabled(&self) -> bool {
         self.enabled
-    }
-
-    pub fn show_rating_controls(&self) -> bool {
-        self.show_rating_controls
     }
 
     pub fn store(&self) -> &FineTuneStore {

@@ -46,13 +46,7 @@ pub fn run(args: Vec<String>) -> Result<(), CliError> {
 
 fn init(parsed: &Parsed) -> Result<(), CliError> {
     parsed.allow(
-        &[
-            "--config",
-            "--dir",
-            "--enabled",
-            "--max",
-            "--rating-controls",
-        ],
+        &["--config", "--dir", "--enabled", "--max"],
         &["--unlimited"],
     )?;
     parsed.expect_positional(0)?;
@@ -73,27 +67,19 @@ fn init(parsed: &Parsed) -> Result<(), CliError> {
     }
     let enabled = on_off(parsed.single("--enabled")?, "--enabled")?;
     let retention = retention(parsed)?;
-    let mut settings = FineTuneSettings::new(data_dir.clone(), enabled, retention)?;
-    if let Some(value) = parsed.single("--rating-controls")? {
-        settings.show_rating_controls = on_off(Some(value), "--rating-controls")?;
-    }
+    let settings = FineTuneSettings::new(data_dir.clone(), enabled, retention)?;
     FineTuneStore::open(data_dir)?;
     FineTuneSettings::create_new(&config, &settings)?;
     println!("Created {}", config.display());
     println!("Data directory: {}", settings.data_dir.display());
     println!(
-        "Collection: {}; retention: {}; rating controls: {}",
+        "Collection: {}; retention: {}",
         if settings.enabled {
             "enabled"
         } else {
             "disabled"
         },
-        describe_retention(settings.retention),
-        if settings.show_rating_controls {
-            "on"
-        } else {
-            "off"
-        }
+        describe_retention(settings.retention)
     );
     Ok(())
 }
@@ -142,11 +128,6 @@ fn config(parsed: &Parsed) -> Result<(), CliError> {
                     .ok_or_else(|| usage("config dir expects a path"))?,
             ))?;
         }
-        "rating-controls" => {
-            parsed.expect_positional(2)?;
-            settings.show_rating_controls =
-                on_off(parsed.positional.get(1).cloned(), "config rating-controls")?;
-        }
         other => return Err(usage(format!("unknown config subcommand: {other}"))),
     }
     settings.save(&path)?;
@@ -166,9 +147,6 @@ fn config(parsed: &Parsed) -> Result<(), CliError> {
         "enable" | "dir" | "max" => println!(
             "Note: a running Core keeps its loaded collection, data directory and retention until restart; start Core again to apply the saved values."
         ),
-        "rating-controls" => {
-            println!("Note: a running Core applies the rating-controls setting after restart.")
-        }
         _ => {}
     }
     Ok(())
@@ -483,8 +461,8 @@ fn usage(message: impl Into<String>) -> CliError {
 fn help() {
     println!(
         "Neuromita dataset management (no provider credentials or network required)\n\n\
-         neuromita dataset init --config PATH --dir ABS_PATH --enabled on|off --max N|--unlimited [--rating-controls on|off]\n\
-         neuromita dataset config --config PATH show|enable on|off|max N|unlimited|dir ABS_PATH|rating-controls on|off\n\
+         neuromita dataset init --config PATH --dir ABS_PATH --enabled on|off --max N|--unlimited\n\
+         neuromita dataset config --config PATH show|enable on|off|max N|unlimited|dir ABS_PATH\n\
          neuromita dataset stats --config PATH\n\
          neuromita dataset list --config PATH [--from DATE|RFC3339] [--to DATE|RFC3339] [--character ID]... [--model NAME]... [--rating all|no-negative|positive] [--outcome all|accepted|not-accepted] [--limit N]\n\
          neuromita dataset rate --config PATH --sample UUID --value 1|-1\n\

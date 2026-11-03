@@ -278,7 +278,7 @@ impl FineTuneStore {
             return Err(FineTuneError::ManagedOutput(output.to_path_buf()));
         }
         let canonical_root =
-            fs::canonicalize(&*self.root).map_err(|error| io_error(&*self.root, error))?;
+            fs::canonicalize(&*self.root).map_err(|error| io_error(&self.root, error))?;
         let canonical_parent = fs::canonicalize(parent).map_err(|error| io_error(parent, error))?;
         if canonical_parent == canonical_root {
             return Err(FineTuneError::ManagedOutput(output.to_path_buf()));
@@ -448,28 +448,29 @@ impl FineTuneStore {
                 return Err(record_too_long(path));
             }
             let payload = trim_line(&line);
-            if !found && !payload.is_empty() {
-                if let Ok(mut value) = serde_json::from_slice::<Value>(payload) {
-                    let wanted = sample_id.to_string();
-                    if value.get("id").and_then(Value::as_str) == Some(wanted.as_str()) {
-                        previous = value
-                            .get("rating")
-                            .and_then(Value::as_i64)
-                            .and_then(|value| i8::try_from(value).ok())
-                            .and_then(|value| Rating::try_from(value).ok());
-                        value["rating"] = json!(rating.as_i8());
-                        serde_json::to_writer(&mut writer, &value).map_err(|error| {
-                            FineTuneError::Io {
-                                path: temporary.clone(),
-                                source: io::Error::other(error.to_string()),
-                            }
-                        })?;
-                        writer
-                            .write_all(b"\n")
-                            .map_err(|error| io_error(&temporary, error))?;
-                        found = true;
-                        continue;
-                    }
+            if !found
+                && !payload.is_empty()
+                && let Ok(mut value) = serde_json::from_slice::<Value>(payload)
+            {
+                let wanted = sample_id.to_string();
+                if value.get("id").and_then(Value::as_str) == Some(wanted.as_str()) {
+                    previous = value
+                        .get("rating")
+                        .and_then(Value::as_i64)
+                        .and_then(|value| i8::try_from(value).ok())
+                        .and_then(|value| Rating::try_from(value).ok());
+                    value["rating"] = json!(rating.as_i8());
+                    serde_json::to_writer(&mut writer, &value).map_err(|error| {
+                        FineTuneError::Io {
+                            path: temporary.clone(),
+                            source: io::Error::other(error.to_string()),
+                        }
+                    })?;
+                    writer
+                        .write_all(b"\n")
+                        .map_err(|error| io_error(&temporary, error))?;
+                    found = true;
+                    continue;
                 }
             }
             writer
@@ -749,7 +750,6 @@ impl FineTuneStore {
         }
         let mut file = OpenOptions::new()
             .read(true)
-            .write(true)
             .append(true)
             .create(true)
             .open(&path)
@@ -790,8 +790,8 @@ impl FineTuneStore {
 
     fn files(&self, prefix: &str) -> Result<Vec<PathBuf>, FineTuneError> {
         let mut files = Vec::new();
-        for entry in fs::read_dir(&*self.root).map_err(|error| io_error(&*self.root, error))? {
-            let entry = entry.map_err(|error| io_error(&*self.root, error))?;
+        for entry in fs::read_dir(&*self.root).map_err(|error| io_error(&self.root, error))? {
+            let entry = entry.map_err(|error| io_error(&self.root, error))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let Some(key) = name
@@ -872,8 +872,7 @@ fn parse_line<T: DeserializeOwned>(line: &[u8]) -> Parsed<T> {
 
 fn trim_line(line: &[u8]) -> &[u8] {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    line
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 fn for_each_line(

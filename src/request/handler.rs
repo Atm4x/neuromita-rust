@@ -11,7 +11,8 @@ use crate::{
         CaptureScope, CaptureStatus, FineTuneCaptureObserver, FineTuneCollector, SampleOutcome,
     },
     generation::{
-        GenerationError, GenerationRequest, LlmConversation, PresetCatalog, ResponseGenerator,
+        GenerationError, GenerationObserver, GenerationRequest, LlmConversation, PreparedRequest,
+        PresetCatalog, ProviderReply, ResponseGenerator,
     },
     knowledge::KnowledgeRetrieval,
     settings::SettingsOwner,
@@ -169,6 +170,7 @@ impl MessageHandler {
                 return;
             }
         };
+        record.set_redaction_values(preset.diagnostic_redaction_values());
         record.set_preset_description(format!("{:?}", preset));
         let mut observer = self
             .finetune
@@ -202,12 +204,11 @@ impl MessageHandler {
                         format!("knowledge retrieval failed: {error}")
                     ))?;
                 let request = GenerationRequest::new(context, preset, selected);
-                match observer.as_mut() {
-                    Some(observer) => {
-                        self.generator.generate_observed(request, observer).await
-                    }
-                    None => self.generator.generate(request).await,
-                }
+                let mut combined = RecordObserver {
+                    record: &record,
+                    capture: observer.as_mut(),
+                };
+                self.generator.generate_observed(request, &mut combined).await
             } => GenerationRun::Response(response),
         };
         let capture = self.persist_observation(observer.as_ref()).await;
@@ -251,6 +252,7 @@ impl MessageHandler {
             record.finish_cancelled();
             return;
         }
+        let voice_attempted = voice_options.is_some();
         let voice_result = match voice_options {
             None => Ok(None),
             Some(options) => {
@@ -338,6 +340,9 @@ impl MessageHandler {
                 }
             }
         };
+        if voice_attempted {
+            record.voice_finished();
+        }
         if !record.begin_accepting() {
             self.finish_dataset_outcome(
                 &record,
@@ -476,6 +481,34 @@ async fn selection_changed(
 }
 
 struct WorkGuard(Arc<RequestRecord>);
+
+struct RecordObserver<'a> {
+    record: &'a RequestRecord,
+    capture: Option<&'a mut FineTuneCaptureObserver>,
+}
+
+impl GenerationObserver for RecordObserver<'_> {
+    fn request_prepared(&mut self, request: PreparedRequest) {
+        if let Some(capture) = &mut self.capture {
+            capture.request_prepared(request.clone());
+        }
+        self.record.provider_requested(request);
+    }
+
+    fn response_received(&mut self, response: ProviderReply) {
+        if let Some(capture) = &mut self.capture {
+            capture.response_received(response.clone());
+        }
+        self.record.provider_replied(response);
+    }
+
+    fn failed(&mut self, error: &GenerationError) {
+        if let Some(capture) = &mut self.capture {
+            capture.failed(error);
+        }
+        self.record.provider_failed(error);
+    }
+}
 
 impl Drop for WorkGuard {
     fn drop(&mut self) {

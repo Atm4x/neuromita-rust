@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -16,21 +16,104 @@ pub(crate) struct RequestRegistry {
 pub(crate) struct RegistryInner {
     records: Mutex<HashMap<RequestId, Arc<RequestRecord>>>,
     accepted: Mutex<Option<broadcast::Sender<RequestHandle>>>,
-    traces: Mutex<VecDeque<Arc<RequestTrace>>>,
-    trace_capacity: usize,
+    diagnostics: Mutex<DiagnosticsStore>,
 }
 
 impl RegistryInner {
     pub(crate) fn complete(&self, record: &RequestRecord) {
         let mut records = self.records.lock().expect("registry mutex poisoned");
         if let Some(trace) = record.take_trace() {
-            let mut traces = self.traces.lock().expect("trace mutex poisoned");
-            if traces.len() == self.trace_capacity {
-                traces.pop_front();
-            }
-            traces.push_back(trace);
+            self.diagnostics
+                .lock()
+                .expect("diagnostics mutex poisoned")
+                .complete(trace);
         }
         records.remove(&record.snapshot().metadata.id);
+    }
+
+    pub(crate) fn diagnostics_limits(&self) -> DiagnosticsLimits {
+        self.diagnostics
+            .lock()
+            .expect("diagnostics mutex poisoned")
+            .limits()
+    }
+
+    pub(crate) fn diagnostic(&self, id: RequestId) -> DiagnosticsLookup {
+        let active = self
+            .records
+            .lock()
+            .expect("registry mutex poisoned")
+            .get(&id)
+            .cloned();
+        if let Some(trace) = active.and_then(|record| record.trace()) {
+            return DiagnosticsLookup::Trace(trace);
+        }
+        self.diagnostics
+            .lock()
+            .expect("diagnostics mutex poisoned")
+            .find(id)
+    }
+
+    pub(crate) fn diagnostic_latest(&self, scope: DiagnosticScope) -> Option<Arc<RequestTrace>> {
+        let active = self
+            .records
+            .lock()
+            .expect("registry mutex poisoned")
+            .values()
+            .filter_map(|record| record.trace())
+            .filter(|trace| scope.allows(trace.metadata.character_id, trace.metadata.source))
+            .max_by_key(|trace| trace.timing.started_at_unix_ms);
+        let completed = self
+            .diagnostics
+            .lock()
+            .expect("diagnostics mutex poisoned")
+            .latest(scope);
+        match (active, completed) {
+            (Some(active), Some(completed)) => Some(
+                if active.timing.started_at_unix_ms >= completed.timing.started_at_unix_ms {
+                    active
+                } else {
+                    completed
+                },
+            ),
+            (active, completed) => active.or(completed),
+        }
+    }
+
+    pub(crate) fn diagnostic_recent(
+        &self,
+        scope: DiagnosticScope,
+        limit: usize,
+    ) -> Vec<RequestTraceSummary> {
+        let mut rows: Vec<_> = self
+            .records
+            .lock()
+            .expect("registry mutex poisoned")
+            .values()
+            .filter_map(|record| record.trace())
+            .filter(|trace| scope.allows(trace.metadata.character_id, trace.metadata.source))
+            .map(|trace| trace.summary())
+            .collect();
+        rows.extend(
+            self.diagnostics
+                .lock()
+                .expect("diagnostics mutex poisoned")
+                .recent(scope, limit),
+        );
+        rows.sort_by_key(|row| std::cmp::Reverse(row.started_at_unix_ms));
+        rows.truncate(limit.max(1));
+        rows
+    }
+
+    pub(crate) fn diagnostic_errors(
+        &self,
+        scope: DiagnosticScope,
+        limit: usize,
+    ) -> Vec<DiagnosticErrorSummary> {
+        self.diagnostics
+            .lock()
+            .expect("diagnostics mutex poisoned")
+            .errors(scope, limit)
     }
 }
 
@@ -69,16 +152,27 @@ impl RequestDiscovery {
 }
 
 impl RequestRegistry {
+    #[cfg(test)]
     pub(crate) fn new(discovery_capacity: usize) -> Self {
+        Self::new_with_diagnostics(discovery_capacity, DiagnosticsLimits::default())
+    }
+
+    pub(crate) fn new_with_diagnostics(
+        discovery_capacity: usize,
+        limits: DiagnosticsLimits,
+    ) -> Self {
         let (accepted, _) = broadcast::channel(discovery_capacity);
         Self {
             inner: Arc::new(RegistryInner {
                 records: Mutex::new(HashMap::new()),
                 accepted: Mutex::new(Some(accepted)),
-                traces: Mutex::new(VecDeque::new()),
-                trace_capacity: discovery_capacity,
+                diagnostics: Mutex::new(DiagnosticsStore::new(limits)),
             }),
         }
+    }
+
+    pub(crate) fn diagnostics_access(&self, scope: DiagnosticScope) -> DiagnosticsAccess {
+        DiagnosticsAccess::new(Arc::downgrade(&self.inner), scope)
     }
 
     pub(crate) fn register(
@@ -112,17 +206,10 @@ impl RequestRegistry {
     }
 
     pub(crate) fn trace(&self, id: RequestId) -> Option<Arc<RequestTrace>> {
-        let records = self.inner.records.lock().expect("registry mutex poisoned");
-        if let Some(record) = records.get(&id) {
-            return record.trace();
+        match self.inner.diagnostic(id) {
+            DiagnosticsLookup::Trace(trace) => Some(trace),
+            DiagnosticsLookup::Expired { .. } | DiagnosticsLookup::Missing => None,
         }
-        self.inner
-            .traces
-            .lock()
-            .expect("trace mutex poisoned")
-            .iter()
-            .find(|trace| trace.metadata.id == id)
-            .cloned()
     }
     pub(crate) fn observe(&self) -> RequestDiscovery {
         let records = self.inner.records.lock().expect("registry mutex poisoned");
@@ -172,5 +259,45 @@ impl RequestRegistry {
             .values()
             .filter(|record| !record.snapshot().state.is_terminal())
             .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        character::CharacterId,
+        identity::EventId,
+        request::{ReactRequest, RequestSource},
+        timeline::selection::TimelineSelection,
+    };
+
+    #[test]
+    fn registry_limits_apply_to_records_created_by_the_registry() {
+        let limits = DiagnosticsLimits {
+            max_text_bytes: 8,
+            ..DiagnosticsLimits::default()
+        };
+        let registry = RequestRegistry::new_with_diagnostics(4, limits);
+        let command = ReactRequest::new(
+            CharacterId::Mita,
+            EventId::new(),
+            "x".repeat(100),
+            RequestSource::Presenter,
+        );
+        let handle = registry.register(
+            Box::new(command),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: TimelineSelection {
+                    branch_id: crate::timeline::domain::BranchId::new(),
+                    generation: 1,
+                },
+                context_epoch: 0,
+            },
+        );
+        let trace = registry.trace(handle.id()).unwrap();
+        assert!(trace.input.truncated);
+        assert!(trace.guidance.len() <= 8);
     }
 }

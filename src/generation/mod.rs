@@ -52,4 +52,9 @@ impl GenerationPreset {
     pub fn template(&self) -> &ProviderTemplate {
         &self.template
     }
+    pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
+        match &self.template {
+            ProviderTemplate::Gemini(template) => template.diagnostic_redaction_values(),
+        }
+    }
 }

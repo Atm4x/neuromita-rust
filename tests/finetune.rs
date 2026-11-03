@@ -532,6 +532,28 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
     assert_eq!(partial_done.dataset.sample_id, None);
     assert_eq!(store.stats().unwrap().total, 5);
 
+    let saved_data = root.path().join("saved-data");
+    fs::rename(&settings.data_dir, &saved_data).unwrap();
+    fs::write(&settings.data_dir, b"blocks dataset writes").unwrap();
+    let storage_failed = presenter
+        .chat
+        .reply(CharacterId::Mita, "dataset storage unavailable".into())
+        .unwrap();
+    next(&mut generations)
+        .await
+        .reply
+        .send(fixture_ok("accepted despite dataset error", 9))
+        .unwrap();
+    let storage_done = done(&storage_failed).await;
+    assert!(matches!(
+        storage_done.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(storage_done.dataset.sample_id, None);
+    assert!(storage_done.dataset.warning.is_some());
+    fs::remove_file(&settings.data_dir).unwrap();
+    fs::rename(&saved_data, &settings.data_dir).unwrap();
+
     let total_before_disabled = store.stats().unwrap().total;
     assert_eq!(total_before_disabled, 5);
     app.shutdown().await.unwrap();
@@ -770,6 +792,36 @@ async fn actual_wire_request_and_prevalidation_response_are_captured() {
     assert_eq!(
         malformed.provider_response.as_deref(),
         Some(rejected_raw.as_str())
+    );
+
+    let diagnostics =
+        neuromita::api::ChatApi::diagnostics_for(neuromita::request::DiagnosticScope::owner(
+            CharacterId::Mita,
+            neuromita::request::RequestSource::Presenter,
+        ))
+        .unwrap();
+    let trace = diagnostics.request(accepted.id()).unwrap().trace;
+    let view = trace.view();
+    assert_eq!(
+        view.provider_request.as_ref().unwrap().body.text,
+        captured.request_payload.as_ref().unwrap().as_str()
+    );
+    assert_eq!(
+        view.provider_response.as_ref().unwrap().raw_body.text,
+        accepted_raw
+    );
+    assert_eq!(view.usage.actual.as_ref().unwrap().total_tokens, Some(12));
+    assert!(!trace.to_json_pretty().unwrap().contains("fixture-secret"));
+    let malformed_trace = diagnostics.request(rejected.id()).unwrap().trace;
+    assert!(malformed_trace.view().provider_error.is_some());
+    assert_eq!(
+        malformed_trace
+            .view()
+            .provider_response
+            .unwrap()
+            .raw_body
+            .text,
+        rejected_raw
     );
 
     app.shutdown().await.unwrap();

@@ -16,7 +16,6 @@ pub struct FineTuneSettings {
     pub data_dir: PathBuf,
     pub enabled: bool,
     pub retention: Retention,
-    pub show_rating_controls: bool,
 }
 
 impl FineTuneSettings {
@@ -30,7 +29,6 @@ impl FineTuneSettings {
             data_dir,
             enabled,
             retention,
-            show_rating_controls: false,
         };
         settings.validate()?;
         Ok(settings)
