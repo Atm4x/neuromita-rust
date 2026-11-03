@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from neuromita_ai_sdk import API_VERSION, InstallPlan
+from neuromita_ai_sdk import API_VERSION, InstallPlan, validate_settings
 
 
 class PluginHost:
@@ -104,12 +104,13 @@ class PluginHost:
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
         if op == "discover":
             return self.discover()
-        if op in ("describe", "install_plan", "probe_install", "settings_schema"):
+        if op in ("describe", "install_plan", "probe_install", "settings_schema", "validate_config"):
             plugin = (self._load_install_contract(args["plugin_id"])
-                      if op in ("install_plan", "probe_install", "settings_schema")
+                      if op in ("install_plan", "probe_install", "settings_schema", "validate_config")
                       else self._load(args["plugin_id"]))
             with contextlib.redirect_stdout(sys.stderr):
-                result = getattr(plugin, op)()
+                result = (validate_settings(plugin.settings_schema(), args.get("settings", {}))
+                          if op == "validate_config" else getattr(plugin, op)())
             if op == "install_plan":
                 if not isinstance(result, InstallPlan):
                     raise ValueError("install_plan must return InstallPlan")
@@ -139,6 +140,13 @@ class PluginHost:
                 raise ValueError("input must be an object")
             with contextlib.redirect_stdout(sys.stderr):
                 return plugin.infer(input_data)
+        if op == "active_settings_schema":
+            kind = args.get("kind")
+            plugin = self.active_by_kind.get(kind)
+            if plugin is None:
+                raise ValueError("requested service is not initialized")
+            with contextlib.redirect_stdout(sys.stderr):
+                return plugin.settings_schema()
         if op == "unload":
             kind = args.get("kind")
             plugin = self.active_by_kind.get(kind)

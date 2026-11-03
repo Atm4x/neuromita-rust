@@ -218,6 +218,7 @@ mod tests {
                 name: "transformers".into(),
                 version: "4.45.0".into(),
             }],
+            actions: vec![],
         };
         let asr = LockedOverlay {
             plugin_id: "gigaam".into(),
@@ -227,6 +228,7 @@ mod tests {
                 name: "transformers".into(),
                 version: "4.50.0".into(),
             }],
+            actions: vec![],
         };
         for (path, marker, bytes) in [
             (
@@ -247,6 +249,23 @@ mod tests {
         ] {
             tokio::fs::create_dir_all(&path).await.unwrap();
             tokio::fs::write(path.join(marker), bytes).await.unwrap();
+            let pins = if marker == ".neuromita-backend.json" {
+                vec![("torch", "2.8.0")]
+            } else if path.to_string_lossy().contains("gigaam") {
+                vec![("transformers", "4.50.0")]
+            } else {
+                vec![("transformers", "4.45.0")]
+            };
+            for (name, version) in pins {
+                let dist = path.join(format!("{name}-{version}.dist-info"));
+                tokio::fs::create_dir_all(&dist).await.unwrap();
+                tokio::fs::write(
+                    dist.join("METADATA"),
+                    format!("Name: {name}\nVersion: {version}\n"),
+                )
+                .await
+                .unwrap();
+            }
         }
         let selected = [
             ServiceSelection {
@@ -300,7 +319,7 @@ mod tests {
             RuntimeComposition::resolve(
                 ProcessTopology::Split,
                 AiService::Tts,
-                &[selection.clone()],
+                std::slice::from_ref(&selection),
                 &b,
                 &o
             )

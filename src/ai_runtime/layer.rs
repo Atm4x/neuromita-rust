@@ -7,10 +7,13 @@ use std::{
 
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
-use tokio::{process::Command, time::timeout};
+use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 use uuid::Uuid;
 
-use super::overlay::LockedPackage;
+use super::{
+    distribution,
+    overlay::{InstallerAction, LockedPackage},
+};
 
 #[derive(Debug, Error)]
 pub enum LayerError {
@@ -24,6 +27,8 @@ pub enum LayerError {
     Timeout,
     #[error("uv package operation failed: {0}")]
     Install(String),
+    #[error("installed package layer is incomplete or corrupted: {0}")]
+    Corrupted(String),
 }
 
 pub struct LayerInstaller<'a> {
@@ -79,6 +84,26 @@ pub fn validate_lock(packages: &[LockedPackage], python_version: &str) -> Result
     Ok(())
 }
 
+fn safe_marker_target(root: &Path, target: &Path) -> bool {
+    let Ok(relative) = target.strip_prefix(root) else {
+        return false;
+    };
+    if !relative
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        current.push(component);
+        if current.is_symlink() {
+            return false;
+        }
+    }
+    true
+}
+
 impl LayerInstaller<'_> {
     pub fn verify_paths(&self, destination: &Path) -> Result<(), LayerError> {
         if !destination.is_absolute()
@@ -99,6 +124,8 @@ impl LayerInstaller<'_> {
         destination: &Path,
         marker: &str,
         plan: &T,
+        packages: &[LockedPackage],
+        actions: &[InstallerAction],
     ) -> Result<bool, LayerError> {
         if !destination.exists() {
             return Ok(false);
@@ -110,6 +137,19 @@ impl LayerInstaller<'_> {
         if saved != *plan {
             return Err(LayerError::Conflict);
         }
+        distribution::inspect(destination, packages).map_err(LayerError::Corrupted)?;
+        for action in actions {
+            let target = destination.join(&action.relative_path);
+            if !safe_marker_target(destination, &target)
+                || !tokio::fs::metadata(&target)
+                    .await
+                    .map_err(|_| LayerError::Corrupted(action.id.clone()))?
+                    .is_file()
+                || tokio::fs::metadata(&target).await?.len() != 0
+            {
+                return Err(LayerError::Corrupted(action.id.clone()));
+            }
+        }
         Ok(true)
     }
 
@@ -119,9 +159,13 @@ impl LayerInstaller<'_> {
         marker: &str,
         plan: &T,
         packages: &[LockedPackage],
+        actions: &[InstallerAction],
     ) -> Result<PathBuf, LayerError> {
         self.verify_paths(destination)?;
-        if self.installed(destination, marker, plan).await? {
+        if self
+            .installed(destination, marker, plan, packages, actions)
+            .await?
+        {
             return Ok(destination.to_owned());
         }
         if !self.uv_executable.is_file() || !self.python_executable.is_file() {
@@ -167,6 +211,27 @@ impl LayerInstaller<'_> {
                             .collect(),
                     ));
                 }
+            }
+            distribution::inspect(&staging, packages).map_err(LayerError::Corrupted)?;
+            for action in actions {
+                if action.kind != "create_empty_marker" {
+                    return Err(LayerError::Invalid("unsupported installer action".into()));
+                }
+                let target = staging.join(&action.relative_path);
+                let parent = target
+                    .parent()
+                    .ok_or_else(|| LayerError::Invalid("invalid marker parent".into()))?;
+                if !parent.is_dir() || !safe_marker_target(&staging, &target) || target.exists() {
+                    return Err(LayerError::Invalid(
+                        "marker location is not a pristine installed package".into(),
+                    ));
+                }
+                let mut file = tokio::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&target)
+                    .await?;
+                file.flush().await?;
             }
             let bytes =
                 serde_json::to_vec_pretty(plan).map_err(|e| LayerError::Invalid(e.to_string()))?;

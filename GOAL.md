@@ -156,3 +156,7 @@ Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin co
 - [ ] Реальные измерения на представительном корпусе с явно предоставленным Gemini API key, точные billing tokens/USD, GUI/пресеты и расширенные RAG/knowledge graph операции.
 
 Технический контракт: [src/generation/SEMANTIC_RETRIEVAL.md](src/generation/SEMANTIC_RETRIEVAL.md).
+
+### AI Engine — verified runtime increment (2026-11-03)
+
+The implementation and exact remaining limitations are tracked in [AI Engine implementation increment](future/ai-engine-implementation-20261103.md). Model asset staging with SHA-256, verified package layers, typed install hook approvals, typed Python settings, voice profile references and a Rust-to-mock-Python WAV contract are implemented and tested on the AI Runtime branch. These are infrastructure acceptance slices, **not real model inference**. The default `ApplicationConfig` still uses an unavailable voice provider; AI Hub, full lifecycle integration, production installs, ASR and VAD remain open. Do not close #24/#26/#37/#42/#51/#59/#61 solely on these tests.

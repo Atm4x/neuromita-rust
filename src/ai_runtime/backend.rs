@@ -113,7 +113,13 @@ impl BackendInstaller {
     }
     pub async fn installed(&self, plan: &LockedBackend) -> Result<bool, BackendError> {
         self.layer()
-            .installed(&self.installed_path(plan)?, ".neuromita-backend.json", plan)
+            .installed(
+                &self.installed_path(plan)?,
+                ".neuromita-backend.json",
+                plan,
+                &plan.packages,
+                &[],
+            )
             .await
     }
     pub async fn install(&self, plan: &LockedBackend) -> Result<PathBuf, BackendError> {
@@ -123,6 +129,7 @@ impl BackendInstaller {
                 ".neuromita-backend.json",
                 plan,
                 &plan.packages,
+                &[],
             )
             .await
     }
@@ -167,7 +174,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nm-backend-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let uv = root.join("uv");
-        tokio::fs::write(&uv, "#!/bin/sh\n[ \"$1\" = pip ] || exit 2\nexit 0\n")
+        tokio::fs::write(&uv, "#!/bin/sh\n[ \"$1\" = pip ] || exit 2\ntarget=''\nprev=''\nfor arg do if [ \"$prev\" = --target ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nmkdir -p \"$target/onnxruntime_directml-1.22.0.dist-info\"\nprintf 'Name: onnxruntime-directml\\nVersion: 1.22.0\\n' > \"$target/onnxruntime_directml-1.22.0.dist-info/METADATA\"\n")
             .await
             .unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
