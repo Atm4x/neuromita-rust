@@ -34,7 +34,7 @@ pub enum ShellCommand {
     TranslationsReloaded,
     ToggleBackend,
     ToggleClient,
-    Play,
+    LauncherFeedback(LocalizedText),
     Launcher(LauncherAction),
     Social(String),
     DismissNotice,
@@ -169,12 +169,7 @@ impl ShellPresenter {
             ShellCommand::SelectLanguage(locale) => self.locale = locale,
             ShellCommand::ToggleBackend => self.backend_selected = !self.backend_selected,
             ShellCommand::ToggleClient => self.client_selected = !self.client_selected,
-            ShellCommand::Play => {
-                self.notice = Some(i18n(
-                    "preview.play.unavailable",
-                    "Макет интерфейса: запуск игры пока не подключён.",
-                ))
-            }
+            ShellCommand::LauncherFeedback(notice) => self.notice = Some(notice),
             ShellCommand::Launcher(LauncherAction::UpdateSettings) => {
                 self.page = Page::Settings;
                 self.notice = None;

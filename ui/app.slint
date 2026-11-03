@@ -28,6 +28,7 @@ export component AppWindow inherits Window {
     in property <[ReleaseItem]> releases;
     in property <bool> backend-selected;
     in property <bool> client-selected;
+    in property <bool> game-running;
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
     in property <int> chat-clients;
@@ -82,7 +83,7 @@ export component AppWindow inherits Window {
             if root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
                 backend: root.backend; client: root.client; releases: root.releases;
-                backend-selected: root.backend-selected; client-selected: root.client-selected;
+                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }
                 play => { root.play(); }

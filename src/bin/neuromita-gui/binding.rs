@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
 
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
@@ -6,6 +6,7 @@ use neuromita::localization::{
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::{
+    launcher_ui::{LauncherUi, load_config},
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
@@ -35,6 +36,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     window
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog.clone()));
+    let launcher = Rc::new(RefCell::new(LauncherUi::new(load_config(
+        options.unity_directory.as_deref(),
+        options.launcher_config.as_deref(),
+    )?)));
     let presenter = Rc::new(RefCell::new(ShellPresenter::new(
         HomePreview::python_reference(),
         options.locale,
@@ -57,8 +62,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     window.set_releases(ModelRc::new(VecModel::from(releases)));
     render(&window, &presenter.borrow(), &catalog.borrow());
+    window.set_game_running(launcher.borrow_mut().owned_running());
 
     let weak = window.as_weak();
+    let launcher_for_dispatch = launcher.clone();
     let dispatch = Rc::new(move |command| {
         let Some(window) = weak.upgrade() else {
             return;
@@ -98,6 +105,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         };
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
+        window.set_game_running(launcher_for_dispatch.borrow_mut().owned_running());
     });
     let handler = dispatch.clone();
     window.on_navigate(move |page| handler(ShellCommand::Navigate(from_view(page))));
@@ -115,13 +123,37 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_toggle_client(move || handler(ShellCommand::ToggleClient));
     let handler = dispatch.clone();
-    window.on_play(move || handler(ShellCommand::Play));
+    let launcher_for_play = launcher.clone();
+    window.on_play(move || {
+        let notice = launcher_for_play.borrow_mut().toggle_play();
+        handler(ShellCommand::LauncherFeedback(notice));
+    });
     let handler = dispatch.clone();
-    window
-        .on_launcher_action(move |action| handler(ShellCommand::Launcher(launcher_action(action))));
+    let launcher_for_action = launcher.clone();
+    window.on_launcher_action(move |action| {
+        let action = launcher_action(action);
+        match action {
+            LauncherAction::OpenUnityFolder => {
+                let notice = launcher_for_action.borrow().open_location();
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            action => handler(ShellCommand::Launcher(action)),
+        }
+    });
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
+    let timer = slint::Timer::default();
+    let weak = window.as_weak();
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_secs(1),
+        move || {
+            if let Some(window) = weak.upgrade() {
+                window.set_game_running(launcher.borrow_mut().owned_running());
+            }
+        },
+    );
     window.run()?;
     Ok(())
 }
@@ -190,6 +222,8 @@ struct Options {
     data_directory: PathBuf,
     model: Option<String>,
     sandbox: bool,
+    unity_directory: Option<PathBuf>,
+    launcher_config: Option<PathBuf>,
 }
 
 impl Options {
@@ -200,11 +234,29 @@ impl Options {
             data_directory: super::runtime::data_directory()?,
             model: None,
             sandbox: false,
+            unity_directory: None,
+            launcher_config: None,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
                 Some("--sandbox") => options.sandbox = true,
+                Some("--unity-dir") => {
+                    options.unity_directory = Some(
+                        arguments
+                            .next()
+                            .ok_or("--unity-dir requires a path")?
+                            .into(),
+                    );
+                }
+                Some("--launcher-config") => {
+                    options.launcher_config = Some(
+                        arguments
+                            .next()
+                            .ok_or("--launcher-config requires a path")?
+                            .into(),
+                    );
+                }
                 Some("--model") => {
                     options.model = Some(
                         arguments

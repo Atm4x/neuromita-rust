@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod binding;
+mod launcher_ui;
 mod memory;
 mod presenter;
 mod runtime;
