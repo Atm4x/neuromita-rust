@@ -1,0 +1,45 @@
+name: Import verified authored Memory rebase
+on:
+  push:
+    branches:
+      - bridge/memory-slint-rebase-import-20261103
+    paths:
+      - transport/memory-slint-rebase.b64
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact Git commit with original author and committer
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=862ad41ed13e9a173fbd671e2d6635a6f9307773
+          HEAD_SHA=b640b17798d315ce4286d75995f8a70763484295
+          TREE=fdbb6ad805d34c5f1e354b26a2a2891d131361fe
+          TARGET=codex/character-memory-slint-rebased-20261103
+          echo '4443b236095c029d7ab6c43b319d88595746d58603db27b4e5640ceedfca4f6c  /tmp/memory.bundle' > /tmp/memory.bundle.sha256
+          base64 --decode transport/memory-slint-rebase.b64 >/tmp/memory.bundle
+          sha256sum --check /tmp/memory.bundle.sha256
+          git fetch origin "refs/heads/codex/slint-gui-20261103:refs/remotes/origin/slint-source"
+          test "$(git rev-parse refs/remotes/origin/slint-source)" = "$BASE"
+          git bundle verify /tmp/memory.bundle
+          git fetch /tmp/memory.bundle "refs/heads/codex/character-memory-slint-rebased-20261103:refs/heads/imported-memory"
+          test "$(git rev-parse refs/heads/imported-memory)" = "$HEAD_SHA"
+          test "$(git rev-parse "$HEAD_SHA^{tree}")" = "$TREE"
+          test "$(git rev-parse "$HEAD_SHA^")" = "$BASE"
+          test "$(git show -s --format=%an "$HEAD_SHA")" = "Atm4x"
+          test "$(git show -s --format=%ae "$HEAD_SHA")" = "mrtaktplay@gmail.com"
+          test "$(git show -s --format=%cn "$HEAD_SHA")" = "Atm4x"
+          test "$(git show -s --format=%ce "$HEAD_SHA")" = "mrtaktplay@gmail.com"
+          if ACTUAL="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" && [[ -n "$ACTUAL" ]]; then
+            test "$ACTUAL" = "$HEAD_SHA"
+            echo "Target already published at expected SHA"
+          else
+            git push origin "refs/heads/imported-memory:refs/heads/$TARGET"
+          fi
+          echo "Exact authored commit published: $HEAD_SHA"
