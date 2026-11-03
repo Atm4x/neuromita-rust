@@ -44,16 +44,19 @@ component ChatComposer inherits VerticalLayout {
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 if root.draft == "": Caption {
+                    x: edit.x; y: edit.y;
                     text: I18n.i18n("sandbox.placeholder", "Напиши что-нибудь Мите…");
-                    color: SandboxTheme.muted; width: parent.width - 8px; height: parent.height;
+                    color: SandboxTheme.muted; width: edit.width; height: edit.height;
+                    font-size: edit.font-size; vertical-alignment: center;
+                    accessible-role: none;
                 }
                 edit := TextInput {
-                    x: 2px; width: parent.width - 4px; height: parent.height;
+                    x: 2px; y: 4px; width: parent.width - 4px; height: parent.height - 8px;
                     text <=> root.draft;
                     enabled: true; font-family: SandboxTheme.font-family; font-size: 13.3333px;
                     color: #f7edf5; selection-background-color: SandboxTheme.accent-alt;
                     selection-foreground-color: white;
-                    single-line: false; wrap: word-wrap;
+                    single-line: false; wrap: word-wrap; vertical-alignment: center;
                     key-pressed(event) => {
                         if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.draft != "" {
                             root.send(root.draft); return accept;

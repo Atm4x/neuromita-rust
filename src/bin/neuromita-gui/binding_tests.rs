@@ -86,6 +86,7 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.set_page(PageId::Home);
     window.set_page(PageId::Sandbox);
     assert_eq!(window.get_chat_draft(), "draft survives navigation");
+    window.set_chat_draft("".into());
     window.show().unwrap();
     for (width, height, name) in [(1560, 918, "sandbox-ru"), (1200, 760, "sandbox-compact")] {
         window
@@ -97,7 +98,7 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
             let directory = PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
             let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-            for rgba in image.as_bytes().chunks_exact(4) {
+            for rgba in image.as_bytes().as_chunks::<4>().0 {
                 ppm.extend_from_slice(&rgba[..3]);
             }
             std::fs::write(directory.join(format!("{name}.ppm")), ppm).unwrap();
@@ -131,7 +132,7 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         let image = window.window().take_snapshot().unwrap();
         if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
             let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
-            for rgba in image.as_bytes().chunks_exact(4) {
+            for rgba in image.as_bytes().as_chunks::<4>().0 {
                 ppm.extend_from_slice(&rgba[..3]);
             }
             std::fs::write(PathBuf::from(directory).join(format!("{name}.ppm")), ppm).unwrap();

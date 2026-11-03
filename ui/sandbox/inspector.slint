@@ -3,6 +3,7 @@ import { SandboxTheme, Fa } from "theme.slint";
 import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Field } from "controls.slint";
 import { ActionSurface } from "../components/controls.slint";
 import { I18n } from "../i18n.slint";
+import { Avatar } from "../components/avatar.slint";
 
 component CharacterSelector inherits Rectangle {
     in property <int> character;
@@ -12,9 +13,9 @@ component CharacterSelector inherits Rectangle {
     height: 32px;
     HorizontalLayout {
         padding-left: 7px; padding-right: 5px; spacing: 5px;
-        Image {
+        Avatar {
             source: root.character == 0 ? @image-url("../../assets/avatars/crazy.png") : @image-url("../../assets/avatars/kind.png");
-            width: 24px; height: 24px; image-fit: contain;
+            width: 24px; height: 24px; surface: SandboxTheme.input;
         }
         Caption {
             text: root.character == 0 ? I18n.i18n("sandbox.character.mita", "Мита") : I18n.i18n("sandbox.character.kind", "Добрая Мита");
