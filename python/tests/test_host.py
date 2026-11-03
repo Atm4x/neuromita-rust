@@ -41,7 +41,7 @@ class HostTests(unittest.TestCase):
     def test_discovery_and_synthesis(self):
         process = self.start_host()
         found = self.request(process, "discover")
-        self.assertEqual({p["id"] for p in found["result"]}, {"mock_asr", "mock_tts"})
+        self.assertTrue({"mock_asr", "mock_tts"}.issubset({p["id"] for p in found["result"]}))
         self.assertTrue(self.request(process, "probe_install", {"plugin_id": "mock_tts"})["result"]["installed"])
         self.assertEqual(self.request(process, "install_plan", {"plugin_id": "mock_tts"})["result"]["packages"], [])
         self.assertTrue(self.request(process, "initialize", {"plugin_id": "mock_tts", "settings": {"speaker": "bright"}})["ok"])

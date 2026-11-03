@@ -23,6 +23,8 @@ pub struct PluginInstallPlan {
     #[serde(default)]
     pub packages: Vec<LockedPackage>,
     #[serde(default)]
+    pub requirements: Vec<String>,
+    #[serde(default)]
     pub assets: Vec<ModelAssetRequirement>,
     #[serde(default)]
     pub backend: Option<String>,
@@ -98,6 +100,15 @@ impl PluginInstallPlan {
     pub fn validate(&self, python_version: &str) -> Result<(), PluginInstallError> {
         validate_lock(&self.packages, python_version)
             .map_err(|error| PluginInstallError::Invalid(error.to_string()))?;
+        if !self.packages.is_empty() && !self.requirements.is_empty() {
+            return Err(PluginInstallError::Invalid(
+                "use either exact packages or requirements".into(),
+            ));
+        }
+        for requirement in &self.requirements {
+            super::resolver::validate_requirement(requirement)
+                .map_err(|error| PluginInstallError::Invalid(error.to_string()))?;
+        }
         if let Some(backend) = &self.backend
             && !valid_segment(backend)
         {
@@ -166,10 +177,15 @@ impl PluginInstallHandler {
                 "absolute model asset root required".into(),
             ));
         }
-        let resolved = self
-            .resolver
-            .resolve(&plan.packages, backend_packages, python_version)
-            .await?;
+        let resolved = if plan.requirements.is_empty() {
+            self.resolver
+                .resolve(&plan.packages, backend_packages, python_version)
+                .await?
+        } else {
+            self.resolver
+                .resolve_requirements(&plan.requirements, backend_packages, python_version)
+                .await?
+        };
         let overlay = LockedOverlay {
             plugin_id: plugin_id.into(),
             revision: revision.into(),
@@ -294,6 +310,7 @@ mod tests {
     fn rejects_path_traversal_and_duplicate_assets() {
         let mut plan = PluginInstallPlan {
             packages: vec![],
+            requirements: vec![],
             assets: vec![asset("rvc", "../voice.pth", true)],
             backend: None,
         };
@@ -321,6 +338,7 @@ mod tests {
         present.sha256 = Some(hash_file(&plugin.join("rvc/voice.pth")).await.unwrap());
         let plan = PluginInstallPlan {
             packages: vec![],
+            requirements: vec![],
             backend: None,
             assets: vec![
                 present.clone(),
@@ -355,6 +373,7 @@ mod tests {
                 &PluginInstallPlan {
                     assets: vec![present],
                     packages: vec![],
+                    requirements: vec![],
                     backend: None,
                 },
             )
@@ -437,6 +456,7 @@ exit 3
                 name: "transformers".into(),
                 version: "4.45.0".into(),
             }],
+            requirements: vec![],
             assets: vec![asset("weights", "model.safetensors", true)],
         };
         let constraints = [LockedPackage {
@@ -503,6 +523,7 @@ exit 3
         };
         let plan = PluginInstallPlan {
             packages: vec![],
+            requirements: vec![],
             assets: vec![asset("reference", "voice.wav", true)],
             backend: None,
         };
