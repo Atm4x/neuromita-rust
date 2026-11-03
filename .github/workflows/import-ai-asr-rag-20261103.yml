@@ -1,0 +1,32 @@
+name: Import verified AI ASR/RAG Git bundle
+on:
+  push:
+    branches:
+      - bridge/ai-engine-asr-rag-import-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and import authored Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=4e1df0422906b6f7889ddb7e9406125637591472
+          HEAD=ad2d78e342b18e60d63892ff5a7d5a11a571328f
+          DIR="$RUNNER_TEMP"
+          base64 --decode bridge_payload/ai-asr-rag.bundle.b64 > "$DIR/ai-asr-rag.bundle"
+          test "$(stat -c%s "$DIR/ai-asr-rag.bundle")" -eq 24339
+          echo "57a7060a67c947881d82305c5d1d7004f9932718205f0c8571c1b6f808bcdaf7  $DIR/ai-asr-rag.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify "$DIR/ai-asr-rag.bundle"
+          git fetch "$DIR/ai-asr-rag.bundle" "refs/heads/codex/ai-engine-install-voice-20261103:refs/heads/asr-rag-candidate"
+          test "$(git rev-parse refs/heads/asr-rag-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          CURRENT=$(git ls-remote origin refs/heads/codex/ai-engine-install-voice-20261103 | cut -f1)
+          test "$CURRENT" = "$BASE"
+          git push origin "$HEAD:refs/heads/bridge/ai-engine-asr-rag-candidate-20261103"
