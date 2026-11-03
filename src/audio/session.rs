@@ -426,7 +426,7 @@ impl SpeechInputHandler {
                                 segmenter.suppress_playback_echo();
                                 continue;
                             }
-                            if let Some(segment) = segmenter.process(frame)
+                            if let Some(segment) = segmenter.process(frame)?
                                 && let Err(error) = queue_segment(&send, &stream, segment) { break Err(error); }
                         }
                         Ok(None) => {
@@ -462,6 +462,7 @@ mod tests {
     use super::*;
     use crate::audio::{
         device::{DeviceFuture, SilentPlayback},
+        score::ScoreError,
         segment::{SegmentConfig, SpeechMode},
         vad::{FRAME_SAMPLES, MonoPcm16Frame, VoiceDecision},
     };
@@ -469,11 +470,11 @@ mod tests {
 
     struct Gate;
     impl VoiceGate for Gate {
-        fn inspect(&mut self, f: &MonoPcm16Frame) -> VoiceDecision {
-            VoiceDecision {
+        fn inspect(&mut self, f: &MonoPcm16Frame) -> Result<VoiceDecision, ScoreError> {
+            Ok(VoiceDecision {
                 probability: f32::from(f[0] != 0),
                 speech: f[0] != 0,
-            }
+            })
         }
         fn reset(&mut self) {}
     }
@@ -525,11 +526,11 @@ mod tests {
         .concat();
         let config = SegmentConfig {
             mode: SpeechMode::Automatic,
-            pre_roll_frames: 3,
-            start_voice_frames: 2,
-            end_silence_frames: 3,
-            min_segment_frames: 2,
-            max_segment_frames: 25,
+            pre_roll_samples: 3 * crate::audio::vad::FRAME_SAMPLES,
+            start_voice_samples: 2 * crate::audio::vad::FRAME_SAMPLES,
+            end_silence_samples: 3 * crate::audio::vad::FRAME_SAMPLES,
+            min_segment_samples: 2 * crate::audio::vad::FRAME_SAMPLES,
+            max_segment_samples: 25 * crate::audio::vad::FRAME_SAMPLES,
         };
         let session = SpeechInputHandler::new(
             SpeechRoute {
@@ -623,11 +624,11 @@ mod tests {
             Gate,
             SegmentConfig {
                 mode: SpeechMode::Automatic,
-                pre_roll_frames: 1,
-                start_voice_frames: 1,
-                end_silence_frames: 1,
-                min_segment_frames: 1,
-                max_segment_frames: 8,
+                pre_roll_samples: crate::audio::vad::FRAME_SAMPLES,
+                start_voice_samples: crate::audio::vad::FRAME_SAMPLES,
+                end_silence_samples: crate::audio::vad::FRAME_SAMPLES,
+                min_segment_samples: crate::audio::vad::FRAME_SAMPLES,
+                max_segment_samples: 8 * crate::audio::vad::FRAME_SAMPLES,
             },
         )
         .unwrap();
