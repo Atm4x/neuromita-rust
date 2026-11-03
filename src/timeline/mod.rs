@@ -1043,7 +1043,12 @@ impl SessionTimeline {
         let mut drafts = vec![draft];
         let mut changes_memory = false;
         let occurred_at = crate::reminders::UtcInstant::from_unix_micros(
-            i64::try_from(drafts[0].occurred_at_unix_ms).ok().and_then(|time| time.checked_mul(1000)).ok_or(domain::TimelineError::Invalid("reply timestamp out of reminder range"))?,
+            i64::try_from(drafts[0].occurred_at_unix_ms)
+                .ok()
+                .and_then(|time| time.checked_mul(1000))
+                .ok_or(domain::TimelineError::Invalid(
+                    "reply timestamp out of reminder range",
+                ))?,
         );
         for effect in effects {
             match effect {

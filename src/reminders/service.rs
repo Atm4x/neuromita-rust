@@ -40,7 +40,7 @@ use crate::{
 /// Static handle published through `ApiBindings`; the owning Core keeps the
 /// single scheduler task alive for the lifetime of the application.
 pub struct RemindersHandle {
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
     snapshot: watch::Receiver<Arc<RemindersSnapshot>>,
 }
 
@@ -58,6 +58,7 @@ impl RemindersHandle {
     ) -> Result<T, ReminderError> {
         self.commands
             .send(command)
+            .await
             .map_err(|_| ReminderError::Stopped)?;
         reply.await.map_err(|_| ReminderError::Stopped)
     }
@@ -247,9 +248,9 @@ pub(crate) struct ReminderService {
     in_flight: HashMap<EventId, RequestHandle>,
     superseded_in_flight: HashSet<EventId>,
     monitors: JoinSet<()>,
-    commands: mpsc::UnboundedReceiver<Command>,
-    events: mpsc::UnboundedReceiver<DeliveryEvent>,
-    events_tx: mpsc::UnboundedSender<DeliveryEvent>,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Receiver<DeliveryEvent>,
+    events_tx: mpsc::Sender<DeliveryEvent>,
     snapshots: watch::Sender<Arc<RemindersSnapshot>>,
 }
 
@@ -262,8 +263,8 @@ impl ReminderService {
         wake: Arc<Notify>,
         stop: CancellationToken,
     ) -> (Arc<RemindersHandle>, tokio::task::JoinHandle<()>) {
-        let (commands, command_rx) = mpsc::unbounded_channel();
-        let (events_tx, events) = mpsc::unbounded_channel();
+        let (commands, command_rx) = mpsc::channel(64);
+        let (events_tx, events) = mpsc::channel(256);
         let (snapshots, snapshot_rx) = watch::channel(Arc::new(RemindersSnapshot {
             closed: false,
             branch_id: BranchId::new(),
@@ -633,12 +634,14 @@ impl ReminderService {
             let Ok(snapshot) = handle.wait().await else {
                 return;
             };
-            let _ = events.send(DeliveryEvent {
-                branch,
-                fired,
-                generation,
-                outcome: TerminalOutcome::of(&snapshot),
-            });
+            let _ = events
+                .send(DeliveryEvent {
+                    branch,
+                    fired,
+                    generation,
+                    outcome: TerminalOutcome::of(&snapshot),
+                })
+                .await;
         });
     }
 
