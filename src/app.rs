@@ -17,6 +17,7 @@ pub use crate::runtime::ApplicationStatus;
 
 use crate::{
     character::{CharacterHandle, CharacterId, CharacterRegistry},
+    games::GamePolicy,
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -67,6 +68,8 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    /// Explicit gates for the character-owned mini-games.
+    pub games: GamePolicy,
 }
 
 impl ApplicationConfig {
@@ -89,6 +92,7 @@ impl ApplicationConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            games: GamePolicy::default(),
         }
     }
 
@@ -250,6 +254,7 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            games,
         } = config;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
@@ -283,6 +288,15 @@ impl ApplicationLifecycle {
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
         let settings_owner = settings.owner();
+        let games = Arc::new(games);
+        for id in CharacterId::ALL {
+            characters
+                .get(id)
+                .expect("hardcoded character exists")
+                .configure_game_policy(*games)
+                .await
+                .map_err(|error| ApplicationError::Task(error.to_string()))?;
+        }
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -302,6 +316,7 @@ impl ApplicationLifecycle {
                 presets: Arc::clone(&presets),
                 selection_updates: selection_updates.clone(),
                 context_updates,
+                games: Arc::clone(&games),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),
@@ -328,6 +343,7 @@ impl ApplicationLifecycle {
             characters,
             settings: settings_owner,
             presets: Arc::clone(&presets),
+            games: Arc::clone(&games),
         });
         let mut owner = ApplicationOwner {
             bindings: Arc::clone(&bindings),
@@ -517,6 +533,7 @@ impl ApplicationLifecycle {
             .expect("timeline lock poisoned")
             .events()
     }
+
     pub fn active_requests(&self) -> usize {
         self.bindings.chat.registry.active_count()
     }

@@ -81,6 +81,8 @@ pub enum AppliedEffect {
     CharacterStateChanged(CharacterBehavior),
     CharacterWorkingStateReplaced(CharacterWorkingState),
     CharacterMemoryChanged(MemoryChange),
+    /// Sanitized public match fact committed together with the reply.
+    GameAdvanced(crate::games::GameFact),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

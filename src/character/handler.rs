@@ -19,6 +19,10 @@ use crate::{
     character::memory_access::{
         CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
     },
+    games::{
+        GameError, GameKey, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause,
+        PendingInvite, ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
+    },
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     memory::MemoryCommand,
@@ -43,6 +47,8 @@ pub enum CharacterError {
     InvalidMemory(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
+    #[error("invalid mini-game command: {0}")]
+    InvalidGame(GameError),
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +60,8 @@ pub struct AcceptedResponse {
     pub event_id: EventId,
     pub context: ContextAnchor,
     pub audio: Option<AudioArtifact>,
+    /// Follow-up reaction requested by an accepted match action.
+    pub game_invite: Option<ReactionInvite>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,6 +70,7 @@ pub(crate) struct AcceptanceContext {
     pub intent: TurnIntent,
     pub state_revision: u64,
     pub turn: TimelineTurn,
+    pub game: Option<GameKey>,
 }
 
 enum Command {
@@ -75,7 +84,7 @@ enum Command {
     },
     Accept {
         request: RequestId,
-        context: AcceptanceContext,
+        context: Box<AcceptanceContext>,
         proposed: TurnProposal,
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
@@ -96,6 +105,14 @@ enum Command {
         input: UserInput,
         reply: oneshot::Sender<Result<EventId, CharacterError>>,
     },
+    Game {
+        command: UserGameCommand,
+        reply: oneshot::Sender<Result<GameReply, CharacterError>>,
+    },
+    GameView {
+        reply: oneshot::Sender<Result<GameReceipt, CharacterError>>,
+    },
+    GamePolicy(GamePolicy),
 }
 
 #[derive(Clone)]
@@ -155,6 +172,37 @@ impl CharacterHandle {
             .map_err(|_| CharacterError::Unavailable)?;
         receive.await.map_err(|_| CharacterError::Unavailable)?
     }
+
+    /// Typed owner command for the character's own mini-game.
+    pub async fn game(&self, command: UserGameCommand) -> Result<GameReply, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::Game { command, reply })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    /// Read-only snapshot of the character's own match, if it still belongs
+    /// to the selected timeline branch.
+    pub async fn game_view(&self) -> Result<GameReceipt, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::GameView { reply })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub(crate) async fn configure_game_policy(
+        &self,
+        policy: GamePolicy,
+    ) -> Result<(), CharacterError> {
+        self.commands
+            .send(Command::GamePolicy(policy))
+            .await
+            .map_err(|_| CharacterError::Unavailable)
+    }
     pub(crate) async fn prepare(
         &self,
         request: RequestId,
@@ -190,7 +238,7 @@ impl CharacterHandle {
         self.commands
             .send(Command::Accept {
                 request,
-                context,
+                context: Box::new(context),
                 proposed,
                 audio,
                 audience,
@@ -264,6 +312,8 @@ impl CharacterRegistry {
             let handler = CharacterHandler {
                 character,
                 timeline: Arc::clone(&timeline),
+                game: GameSlot::default(),
+                policy: GamePolicy::default(),
             };
             handles.insert(id, CharacterHandle { commands: send });
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
@@ -300,6 +350,8 @@ impl CharacterRegistry {
 struct CharacterHandler {
     character: Character,
     timeline: Arc<Mutex<SessionTimeline>>,
+    game: GameSlot,
+    policy: GamePolicy,
 }
 
 impl CharacterHandler {
@@ -330,7 +382,7 @@ impl CharacterHandler {
                     audience,
                     reply,
                 } => {
-                    let _ = reply.send(self.accept(request, context, proposed, audio, audience));
+                    let _ = reply.send(self.accept(request, *context, proposed, audio, audience));
                 }
                 Command::MemorySnapshot(reply) => {
                     let result = self
@@ -403,6 +455,13 @@ impl CharacterHandler {
                         });
                     let _ = reply.send(result);
                 }
+                Command::Game { command, reply } => {
+                    let _ = reply.send(self.game_command(command));
+                }
+                Command::GameView { reply } => {
+                    let _ = reply.send(self.game_view());
+                }
+                Command::GamePolicy(policy) => self.policy = policy,
             }
         }
     }
@@ -439,6 +498,19 @@ impl CharacterHandler {
         timeline
             .assert_admission(self.character.id, admission)
             .map_err(|_| CharacterError::StaleState)?;
+        let current_head = timeline.anchor();
+        self.game.bind_branch(timeline.selection().branch_id);
+        // The authoritative match is in-memory only, so a historical prefix
+        // cannot be paired with the current board without inventing history.
+        let historical = match at {
+            ContextPosition::Latest => false,
+            ContextPosition::At(anchor) => anchor != current_head,
+        };
+        if historical && !self.game.is_empty() {
+            return Err(CharacterError::Internal(
+                "historical context generation is unavailable while a match is active".into(),
+            ));
+        }
         let captured =
             timeline
                 .capture_context(self.character.id, at)
@@ -499,10 +571,16 @@ impl CharacterHandler {
             memory_islands,
             history: captured.history,
             view: captured.view,
+            game: if historical {
+                None
+            } else {
+                self.game.projection(GameSide::Mita)
+            },
             current_input: guidance,
             focus: GenerationFocus { intent, reaction },
             anchor,
             turn,
+            game_key: self.game.key(),
         })
     }
 
@@ -528,6 +606,29 @@ impl CharacterHandler {
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
+        let branch = timeline.selection().branch_id;
+        self.game.bind_branch(branch);
+        let mut next_game = self.game.clone();
+        let mut game_effects = Vec::new();
+        let mut pending_invite = None;
+        if let Some(actions) = proposed.effects().iter().find_map(|effect| match effect {
+            ResponseEffect::Game(actions) => Some(actions.as_slice()),
+            _ => None,
+        }) {
+            if !self.policy.enabled && actions.contains(&crate::games::ModelGameAction::Start) {
+                return Err(CharacterError::InvalidGame(GameError::Disabled));
+            }
+            if context.game != self.game.key() {
+                return Err(CharacterError::StaleState);
+            }
+            let applied = next_game
+                .apply_model(branch, actions, uuid::Uuid::new_v4().as_u128() as u64)
+                .map_err(CharacterError::InvalidGame)?;
+            for fact in applied.facts {
+                game_effects.push(AppliedEffect::GameAdvanced(fact));
+            }
+            pending_invite = applied.invite;
+        }
         let current_behavior = CharacterBehavior {
             attitude: self.character.state.attitude,
             boredom: self.character.state.boredom,
@@ -556,15 +657,22 @@ impl CharacterHandler {
                             .map(AppliedEffect::CharacterMemoryChanged),
                     );
                 }
+                ResponseEffect::Game(_) => {}
             }
         }
-        let event_id = timeline
-            .append_reply(GeneratedReply {
+        effects.extend(game_effects);
+        let persisted_segments = proposed
+            .segments()
+            .iter()
+            .map(|segment| segment.sanitized_for_persistence())
+            .collect::<Vec<_>>();
+        let accepted = timeline
+            .append_reply_tracked(GeneratedReply {
                 request,
                 intent: context.intent,
                 turn: context.turn,
                 expected_revision: context.state_revision,
-                content: serde_json::to_value(proposed.segments()).map_err(|error| {
+                content: serde_json::to_value(&persisted_segments).map_err(|error| {
                     CharacterError::Internal(format!("invalid accepted message segments: {error}"))
                 })?,
                 audience,
@@ -576,16 +684,99 @@ impl CharacterHandler {
                 }
                 other => CharacterError::Internal(other.to_string()),
             })?;
+        for event in &accepted.game {
+            next_game.record_event(*event);
+        }
+        let game_invite = pending_invite.and_then(|pending| {
+            Self::resolve_invite(pending, &accepted.game, next_game.last_event())
+        });
+        self.game = next_game;
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         Ok(AcceptedResponse {
             state_after: self.character.state.clone(),
             text: Arc::clone(proposed.text()),
             segments: Arc::from(proposed.segments()),
             effects: effects.into(),
-            event_id,
+            event_id: accepted.message,
             context: context.anchor,
             audio,
+            game_invite,
         })
+    }
+
+    fn resolve_invite(
+        pending: PendingInvite,
+        events: &[EventId],
+        last_event: Option<EventId>,
+    ) -> Option<ReactionInvite> {
+        let event_id = match pending.cause {
+            InviteCause::Fact(index) => events.get(index).copied(),
+            InviteCause::LastEvent => last_event,
+        }?;
+        Some(ReactionInvite {
+            event_id,
+            instruction: pending.instruction,
+            auto_gated: pending.auto_gated,
+        })
+    }
+
+    fn game_command(&mut self, command: UserGameCommand) -> Result<GameReply, CharacterError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        let branch = timeline.selection().branch_id;
+        let had_match = !self.game.is_empty();
+        if !self.policy.enabled && matches!(command, UserGameCommand::Start { .. }) {
+            return Err(CharacterError::InvalidGame(GameError::Disabled));
+        }
+        self.game.bind_branch(branch);
+        if had_match && self.game.is_empty() {
+            return Err(CharacterError::InvalidGame(GameError::StaleState));
+        }
+        let mut next = self.game.clone();
+        let applied = next
+            .apply_user(branch, command)
+            .map_err(CharacterError::InvalidGame)?;
+        let events = timeline
+            .append_game_facts(self.character.id, &applied.facts)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        for event in &events {
+            next.record_event(*event);
+        }
+        let invite = applied
+            .invite
+            .and_then(|pending| Self::resolve_invite(pending, &events, next.last_event()));
+        let receipt = Self::game_receipt(&next, next.projection(GameSide::Player), events);
+        self.game = next;
+        Ok(GameReply { receipt, invite })
+    }
+
+    fn game_view(&mut self) -> Result<GameReceipt, CharacterError> {
+        let timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        self.game.bind_branch(timeline.selection().branch_id);
+        Ok(Self::game_receipt(
+            &self.game,
+            self.game.projection(GameSide::Player),
+            Vec::new(),
+        ))
+    }
+
+    fn game_receipt(
+        slot: &GameSlot,
+        view: Option<crate::games::GameProjection>,
+        events: Vec<EventId>,
+    ) -> GameReceipt {
+        GameReceipt {
+            game: crate::games::GameId::SeaBattle,
+            key: slot.key(),
+            view,
+            events,
+            auto_reactions: slot.auto_reactions(),
+        }
     }
     fn view(&self, at: ContextAnchor) -> Result<CharacterView, CharacterError> {
         let timeline = self
@@ -629,6 +820,8 @@ mod turn_tests {
         CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(SessionTimeline::new())),
+            game: GameSlot::default(),
+            policy: GamePolicy::default(),
         }
     }
 
@@ -658,6 +851,7 @@ mod turn_tests {
             intent: context.focus.intent,
             state_revision: context.state.revision,
             turn: context.turn,
+            game: context.game_key,
         }
     }
 
@@ -806,6 +1000,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                game: GameSlot::default(),
+                policy: GamePolicy::default(),
             };
             let (request, context) = prepare(&mut handler);
             accept_with_state_change(&mut handler, request, acceptance(&context), 3.2, -1.0, 2.0)
@@ -1032,6 +1228,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                game: GameSlot::default(),
+                policy: GamePolicy::default(),
             };
             let (request, context) = prepare(&mut handler);
             accept(&mut handler, request, acceptance(&context)).unwrap();
@@ -1050,6 +1248,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                game: GameSlot::default(),
+                policy: GamePolicy::default(),
             };
             let (request, context) = prepare(&mut handler);
             assert_eq!(context.state.accepted_replies, 1);
@@ -1131,6 +1331,8 @@ mod turn_tests {
         let mut handler = CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(timeline)),
+            game: GameSlot::default(),
+            policy: GamePolicy::default(),
         };
         let (request, context) = prepare(&mut handler);
         let token = acceptance(&context);

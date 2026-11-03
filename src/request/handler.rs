@@ -7,6 +7,7 @@ use tracing::Instrument;
 use super::*;
 use crate::{
     character::{AcceptanceContext, CharacterError, CharacterHandle},
+    games::GamePolicy,
     generation::{
         GenerationError, GenerationRequest, LlmConversation, PresetCatalog, ResponseGenerator,
     },
@@ -27,6 +28,7 @@ pub(crate) struct MessageHandler {
     pub(crate) presets: Arc<PresetCatalog>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
+    pub(crate) games: Arc<GamePolicy>,
 }
 
 impl MessageHandler {
@@ -145,6 +147,7 @@ impl MessageHandler {
             intent: context.focus.intent,
             state_revision: context.state.revision,
             turn: context.turn,
+            game: context.game_key,
         };
         record.prepared(context.clone());
         let preset_id = settings
@@ -278,6 +281,19 @@ impl MessageHandler {
             }
         };
         record.mark_applied();
+        if let Some(invite) = accepted.game_invite.clone()
+            && (!invite.auto_gated || self.games.auto_reactions)
+        {
+            let request = crate::request::ReactRequest::new(
+                message.character_id(),
+                invite.event_id,
+                invite.instruction,
+                RequestSource::Presenter,
+            );
+            if let Err(error) = crate::api::ChatApi::react(request) {
+                tracing::warn!(%error, "game follow-up reaction was not admitted");
+            }
+        }
         let outcome = match voice_error {
             Some(error) => RequestOutcome::VoiceGenerationFailed {
                 response: accepted,

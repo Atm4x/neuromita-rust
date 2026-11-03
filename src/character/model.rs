@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
+    games::{GameKey, GameProjection},
     identity::CharacterId,
     interaction::TurnIntent,
     timeline::{
@@ -78,10 +79,13 @@ pub struct CharacterContext {
     pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
+    /// Role-limited board projection for this character only.
+    pub game: Option<GameProjection>,
     pub current_input: Arc<str>,
     pub focus: GenerationFocus,
     pub anchor: ContextAnchor,
     pub(crate) turn: TimelineTurn,
+    pub(crate) game_key: Option<GameKey>,
 }
 
 #[derive(Debug, Clone)]

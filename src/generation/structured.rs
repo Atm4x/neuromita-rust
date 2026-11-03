@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::{GenerationError, ResponseEffect};
+use crate::games::ModelGameAction;
 pub use crate::timeline::domain::CharacterWorkingState as WorkingState;
 use crate::timeline::domain::{CharacterStateDelta, MemoryCommand, MemoryId, MemoryPriority};
 use uuid::Uuid;
@@ -204,7 +205,43 @@ impl StructuredResponse {
         if !memory.is_empty() {
             effects.push(ResponseEffect::MutateMemory(memory));
         }
+        let game = self.game_actions()?;
+        if !game.is_empty() {
+            effects.push(ResponseEffect::Game(game));
+        }
         Ok(effects)
+    }
+
+    /// Parse the executable game subset of a response. The order is the order
+    /// in which the owner will validate and apply the actions.
+    pub fn game_actions(&self) -> Result<Vec<ModelGameAction>, GenerationError> {
+        let mut actions = Vec::new();
+        for segment in &self.segments {
+            if let Some(start) = &segment.start_game {
+                actions.push(ModelGameAction::parse_start(start).ok_or_else(|| {
+                    GenerationError::Response("unsupported start_game identifier".into())
+                })?);
+            }
+            if let Some(end) = &segment.end_game {
+                actions.push(ModelGameAction::parse_end(end).ok_or_else(|| {
+                    GenerationError::Response("unsupported end_game identifier".into())
+                })?);
+            }
+            for command in &segment.commands {
+                actions.push(ModelGameAction::parse_command(command).ok_or_else(|| {
+                    GenerationError::Response(format!(
+                        "unsupported structured command: {}",
+                        command.chars().take(64).collect::<String>()
+                    ))
+                })?);
+            }
+        }
+        if actions.len() > 24 {
+            return Err(GenerationError::Response(
+                "too many game commands in one response".into(),
+            ));
+        }
+        Ok(actions)
     }
 
     pub fn full_text(&self) -> Arc<str> {
@@ -222,7 +259,7 @@ impl StructuredResponse {
         if self
             .segments
             .iter()
-            .any(ResponseSegment::has_unsupported_content)
+            .any(ResponseSegment::has_unsupported_non_game_content)
             || self.image_description.is_some()
             || self.secret_exposed.is_some()
             || self.reminder_add.is_some()
@@ -237,6 +274,7 @@ impl StructuredResponse {
                 "structured response contains fields without an enabled executor".into(),
             ));
         }
+        self.game_actions()?;
         Ok(())
     }
 }
@@ -372,12 +410,33 @@ mod tests {
                 .get("tool_call")
                 .is_none()
         );
-        assert!(
-            schema["properties"]["segments"]["items"]["properties"]
-                .as_object()
-                .unwrap()
-                .get("commands")
-                .is_none()
-        );
+        let segment = &schema["properties"]["segments"]["items"]["properties"];
+        assert_eq!(segment["commands"]["type"], "array");
+        assert_eq!(segment["start_game"]["type"], "string");
+        assert_eq!(segment["end_game"]["type"], "string");
+        assert!(segment.as_object().unwrap().get("animations").is_none());
+    }
+
+    #[test]
+    fn accepted_segments_never_persist_executable_game_fields() {
+        let parsed = StructuredResponse::parse(
+            r#"{"segments":[{"text":"your move","start_game":"seabattle","commands":["PlaceShip,D5,4,H"]}]}"#,
+        )
+        .unwrap();
+        let proposal = crate::generation::ProposedResponse::from_structured(parsed).unwrap();
+        assert!(proposal.segments()[0].commands.is_empty());
+        assert!(proposal.segments()[0].start_game.is_none());
+        assert!(matches!(
+            proposal.effects(),
+            [ResponseEffect::Game(actions)] if actions.len() == 2
+        ));
+        let unknown =
+            StructuredResponse::parse(r#"{"segments":[{"text":"hi","commands":["DeleteSave"]}]}"#)
+                .unwrap();
+        assert!(crate::generation::ProposedResponse::from_structured(unknown).is_err());
+        let foreign_game =
+            StructuredResponse::parse(r#"{"segments":[{"text":"hi","start_game":"chess"}]}"#)
+                .unwrap();
+        assert!(crate::generation::ProposedResponse::from_structured(foreign_game).is_err());
     }
 }

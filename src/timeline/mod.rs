@@ -49,6 +49,12 @@ use domain::{
     CharacterWorkingState, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
 
+#[derive(Debug, Clone)]
+pub(crate) struct AcceptedReplyEvents {
+    pub message: EventId,
+    pub game: Vec<EventId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextAnchor {
     pub branch_id: Uuid,
@@ -847,10 +853,19 @@ impl SessionTimeline {
             .map_err(|error| error.to_string())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn append_reply(
         &mut self,
         reply: GeneratedReply,
     ) -> Result<EventId, domain::TimelineError> {
+        self.append_reply_tracked(reply)
+            .map(|accepted| accepted.message)
+    }
+
+    pub(crate) fn append_reply_tracked(
+        &mut self,
+        reply: GeneratedReply,
+    ) -> Result<AcceptedReplyEvents, domain::TimelineError> {
         let GeneratedReply {
             request,
             intent,
@@ -984,8 +999,37 @@ impl SessionTimeline {
                     );
                     drafts.push(handoff);
                 }
+                AppliedEffect::GameAdvanced(fact) => {
+                    let kind = match &fact {
+                        crate::games::GameFact::Started { .. } => EventKind::GameStarted,
+                        crate::games::GameFact::PhaseChanged { .. }
+                        | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
+                        crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
+                    };
+                    let mut game = EventDraft::new(kind);
+                    game.actor = Some(character.to_string());
+                    game.observers.insert(character);
+                    game.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    for (key, value) in fact.payload() {
+                        game.payload.insert(key, value);
+                    }
+                    drafts.push(game);
+                }
             }
         }
+        let game_events = drafts
+            .iter()
+            .filter(|draft| {
+                matches!(
+                    draft.kind,
+                    EventKind::GameStarted | EventKind::GameAction | EventKind::GameEnded
+                )
+            })
+            .map(|draft| draft.id)
+            .collect();
         let selected = self.selection();
         self.store.append_guarded(
             self.branch,
@@ -999,7 +1043,71 @@ impl SessionTimeline {
                 accepted_reply_revision: Some((character, expected_revision)),
             },
         )?;
-        Ok(id)
+        Ok(AcceptedReplyEvents {
+            message: id,
+            game: game_events,
+        })
+    }
+
+    /// Commit owner actions as sanitized public match facts on the active
+    /// branch. The revision-scoped key rejects a duplicated command.
+    pub(crate) fn append_game_facts(
+        &mut self,
+        character: CharacterId,
+        facts: &[crate::games::GameFact],
+    ) -> Result<Vec<EventId>, domain::TimelineError> {
+        let Some(first) = facts.first() else {
+            return Ok(Vec::new());
+        };
+        let selected = self.selection();
+        let mut drafts = Vec::with_capacity(facts.len());
+        for fact in facts {
+            let kind = match fact {
+                crate::games::GameFact::Started { .. } => EventKind::GameStarted,
+                crate::games::GameFact::PhaseChanged { .. }
+                | crate::games::GameFact::Shot { .. } => EventKind::GameAction,
+                crate::games::GameFact::Ended { .. } => EventKind::GameEnded,
+            };
+            let mut draft = EventDraft::new(kind);
+            draft.actor = Some(character.to_string());
+            draft.observers.insert(character);
+            for (key, value) in fact.payload() {
+                draft.payload.insert(key, value);
+            }
+            drafts.push(draft);
+        }
+        let ids = drafts.iter().map(|draft| draft.id).collect();
+        let operation = match first {
+            crate::games::GameFact::Started { .. } => "started".to_owned(),
+            crate::games::GameFact::PhaseChanged { .. } => "phase".to_owned(),
+            crate::games::GameFact::Shot { .. } => "shot".to_owned(),
+            crate::games::GameFact::Ended { reason, .. } => {
+                format!("ended:{}", reason.code())
+            }
+        };
+        let key = format!(
+            "game:{character}:{}:{}:{}:{operation}",
+            first.session(),
+            first.generation(),
+            drafts
+                .first()
+                .and_then(|draft| draft.payload.get("revision"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        );
+        self.store.append_guarded(
+            self.branch,
+            self.anchor().through,
+            &key,
+            json!({}),
+            drafts,
+            AppendGuard {
+                selection_generation: selected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(ids)
     }
 
     pub(crate) fn events(&self) -> Vec<TimelineEvent> {

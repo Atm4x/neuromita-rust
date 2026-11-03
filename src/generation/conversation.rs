@@ -305,6 +305,12 @@ impl LlmConversation {
                 text,
             });
         }
+        if let Some(game) = &context.game {
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text: game.prompt_block(),
+            });
+        }
 
         let task = match context.focus.intent {
             TurnIntent::Reply(_) if target_present => None,
