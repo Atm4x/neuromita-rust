@@ -1,0 +1,32 @@
+name: Import verified AI asset generation Git bundle
+on:
+  push:
+    branches:
+      - bridge/ai-asset-generation-publish-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and import original Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ec9c219feaaf2378952dbc43bd2ecdb8d1b28443
+          HEAD=be712a8782bca528d0bf1260b300e80670129e7e
+          BUNDLE="$RUNNER_TEMP/ai_asset_generation.bundle"
+          base64 --decode transport/ai_asset_generation.bundle.b64 > "$BUNDLE"
+          test "$(stat -c%s "$BUNDLE")" -eq 12017
+          echo "45c819c55acb4667e1e6c98b2f74d2947708d2035f120f1a527592ccab889cd1  $BUNDLE" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify "$BUNDLE"
+          git fetch "$BUNDLE" "refs/heads/codex/ai-engine-install-voice-20261103:refs/heads/ai-assets-candidate"
+          test "$(git rev-parse refs/heads/ai-assets-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          CURRENT=$(git ls-remote origin refs/heads/codex/ai-engine-install-voice-20261103 | cut -f1)
+          test "$CURRENT" = "$BASE"
+          git push origin "$HEAD:refs/heads/bridge/ai-asset-generation-candidate-20261103"
