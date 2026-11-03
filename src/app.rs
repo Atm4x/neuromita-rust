@@ -21,6 +21,7 @@ use crate::{
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
+    finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -95,6 +96,7 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub finetune: Option<FineTuneSettings>,
     pub reminders: ReminderConfig,
 }
 
@@ -130,6 +132,7 @@ impl ApplicationConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            finetune: None,
             reminders: ReminderConfig::system(),
         }
     }
@@ -191,6 +194,12 @@ impl ApplicationConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
         };
+        let finetune_path = data_directory.join("finetune.json");
+        config.finetune = match std::fs::metadata(&finetune_path) {
+            Ok(_) => Some(FineTuneSettings::load(&finetune_path)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         Ok(config)
     }
 }
@@ -210,6 +219,8 @@ pub enum ApplicationError {
     #[error(transparent)]
     Presets(#[from] PresetCatalogError),
     #[error(transparent)]
+    FineTune(#[from] FineTuneError),
+    #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error(transparent)]
     Ai(#[from] AiApplicationError),
@@ -228,6 +239,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    finetune: Option<FineTuneCollector>,
     speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     id: Uuid,
     stop: CancellationToken,
@@ -298,6 +310,7 @@ impl RequestIngress for TimelineRequestIngress {
 }
 
 struct ApplicationOwner {
+    finetune: Option<FineTuneCollector>,
     releases_task: Option<JoinHandle<Result<(), std::convert::Infallible>>>,
     bindings: Arc<ApiBindings>,
     reminders_stop: CancellationToken,
@@ -333,8 +346,12 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            finetune,
             reminders: reminders_config,
         } = config;
+        let finetune = finetune
+            .map(|settings| FineTuneCollector::from_settings(&settings))
+            .transpose()?;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
             startup.register(SettingsStartupMigration(Arc::clone(&settings.repository)))?;
@@ -386,7 +403,10 @@ impl ApplicationLifecycle {
                 KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
             }
         };
-        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
+        let registry = Arc::new(RequestRegistry::new_with_diagnostics(
+            limits.discovery_buffer.get(),
+            crate::request::DiagnosticsLimits::default(),
+        ));
         let selection_updates = timeline
             .lock()
             .expect("timeline lock poisoned")
@@ -427,6 +447,7 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
+                finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,
             };
@@ -467,6 +488,7 @@ impl ApplicationLifecycle {
             reminders,
         });
         let mut owner = ApplicationOwner {
+            finetune: finetune.clone(),
             releases_task: Some(releases_task),
             bindings: Arc::clone(&bindings),
             reminders_stop,
@@ -515,6 +537,7 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            finetune,
             speech,
             id,
             stop,
@@ -544,6 +567,9 @@ impl ApplicationLifecycle {
     }
     pub fn server(&self) -> &ServerHandle {
         &self.server
+    }
+    pub fn finetune(&self) -> Option<&FineTuneCollector> {
+        self.finetune.as_ref()
     }
     pub fn at(&self) -> crate::timeline::ContextAnchor {
         self.timeline
@@ -746,6 +772,17 @@ impl ApplicationOwner {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
         }
+        if let Some(collector) = &self.finetune {
+            let status = collector.drain(crate::finetune::DELIVERY_DRAIN, true).await;
+            if status.pending > 0 || status.errors > 0 || status.dropped > 0 {
+                tracing::warn!(
+                    pending = status.pending,
+                    errors = status.errors,
+                    dropped = status.dropped,
+                    "dataset delivery stopped with incomplete records"
+                );
+            }
+        }
         self.bindings.chat.registry.close();
         self.owners_stop.cancel();
         for owner in self.owners.drain(..) {
@@ -792,6 +829,9 @@ impl Drop for ApplicationLifecycle {
 
 impl Drop for ApplicationOwner {
     fn drop(&mut self) {
+        if let Some(collector) = &self.finetune {
+            collector.stop_delivery();
+        }
         self.bindings.chat.close();
         self.bindings.chat.registry.close();
         self.workers_stop.cancel();

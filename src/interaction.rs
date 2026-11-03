@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::identity::EventId;
@@ -45,7 +46,7 @@ impl UserInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TurnIntent {
     Reply(EventId),
     React(EventId),

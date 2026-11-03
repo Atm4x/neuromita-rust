@@ -1,14 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, BufRead},
+    io::{self, BufRead, Write},
     path::PathBuf,
     sync::Arc,
 };
 
 use neuromita::{
+    api::ChatApi,
     character::CharacterId,
     presentation::ChatPresenter,
-    request::{RequestId, RequestOutcome, RequestSnapshot, RequestState},
+    request::{
+        DiagnosticScope, DiagnosticSection, RequestId, RequestOutcome, RequestSnapshot,
+        RequestSource, RequestState,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -18,6 +22,7 @@ pub struct Options {
     message: Option<String>,
     pub listen: std::net::SocketAddr,
     pub data_dir: PathBuf,
+    pub finetune_config: Option<PathBuf>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -31,14 +36,19 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /diagnostics ..., /dataset status, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
             }
             if !matches!(
                 argument.as_str(),
-                "--model" | "--character" | "--message" | "--listen" | "--data-dir"
+                "--model"
+                    | "--character"
+                    | "--message"
+                    | "--listen"
+                    | "--data-dir"
+                    | "--finetune-config"
             ) {
                 return Err(invalid("unknown argument; use --help"));
             }
@@ -71,6 +81,13 @@ impl Options {
                 Some(path) if path.is_empty() => return Err(invalid("empty data directory")),
                 Some(path) => PathBuf::from(path),
                 None => default_data_dir()?,
+            },
+            finetune_config: match values.remove("--finetune-config") {
+                Some(path) if path.is_empty() => {
+                    return Err(invalid("empty fine-tune configuration path"));
+                }
+                Some(path) => Some(PathBuf::from(path)),
+                None => None,
             },
         }))
     }
@@ -279,9 +296,40 @@ fn display(snapshot: &RequestSnapshot) {
             );
         }
     }
+    if snapshot.state.is_terminal() {
+        if let Some(sample_id) = snapshot.dataset.sample_id {
+            println!("[{id}] dataset sample: {sample_id}");
+        }
+        if let Some(warning) = &snapshot.dataset.warning {
+            eprintln!("[{id}] dataset warning: {warning}");
+        }
+    }
 }
 
-pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> {
+fn dataset_status(dataset: Option<&neuromita::finetune::FineTuneCollector>) -> String {
+    let Some(dataset) = dataset else {
+        return "Dataset collection is not configured".into();
+    };
+    let status = dataset.delivery_status();
+    format!(
+        "Dataset enabled={} closed={} admitted={} completed={} pending={} dropped={} rejected={} errors={}\nLast delivery error: {}",
+        dataset.enabled(),
+        status.closed,
+        status.admitted,
+        status.completed,
+        status.pending,
+        status.dropped,
+        status.rejected,
+        status.errors,
+        status.last_error.as_deref().unwrap_or("none")
+    )
+}
+
+pub async fn run(
+    presenter: &ChatPresenter,
+    options: Options,
+    dataset: Option<&neuromita::finetune::FineTuneCollector>,
+) -> io::Result<()> {
     let mut character = options.character;
     let mut updates = presenter.observe();
     let mut printed: HashMap<RequestId, u64> = HashMap::new();
@@ -358,6 +406,12 @@ pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> 
                                 }
                                 Err(_) => eprintln!("Invalid request UUID"),
                             }
+                        } else if line == "/dataset status" {
+                            println!("{}", dataset_status(dataset));
+                        } else if let Some(value) = line.strip_prefix("/diagnostics") {
+                            if let Err(error) = diagnostics_command(character, value.trim()) {
+                                eprintln!("{error}");
+                            }
                         } else if line.starts_with("/reminder") {
                             match reminder_command(character, line.trim()).await {
                                 Ok(text) => println!("{text}"),
@@ -373,5 +427,260 @@ pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> 
                 }
             }
         }
+    }
+}
+
+fn diagnostics_command(character: CharacterId, arguments: &str) -> io::Result<()> {
+    let access =
+        ChatApi::diagnostics_for(DiagnosticScope::owner(character, RequestSource::Presenter))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut parts = Arguments::new(arguments);
+    match parts.next() {
+        None | Some("help") => {
+            println!(
+                "/diagnostics latest [section]              exact latest trace in this scope\n\
+                 /diagnostics list [limit]                  recent trace summaries\n\
+                 /diagnostics errors [limit]                bounded error history\n\
+                 /diagnostics ID [section]                  exact trace; no fallback\n\
+                 /diagnostics view ID [section]             print JSON for copying\n\
+                 /diagnostics export ID [section] PATH      write section JSON to PATH\n\
+                 sections: all|ingress|prompt|request|response|usage|error|lifecycle"
+            );
+            Ok(())
+        }
+        Some("latest") => {
+            let section = section(parts.next())?;
+            let record = access
+                .latest()
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            println!(
+                "{}",
+                record
+                    .export(section)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+            );
+            Ok(())
+        }
+        Some("list") => {
+            let limit = limit(parts.next())?;
+            let rows = access
+                .recent(limit)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            for row in rows {
+                println!(
+                    "{} {} {:?} {:?} {}ms",
+                    row.request_id,
+                    row.character,
+                    row.outcome.unwrap_or("incomplete"),
+                    row.source,
+                    row.elapsed_ms
+                );
+            }
+            Ok(())
+        }
+        Some("errors") => {
+            let limit = limit(parts.next())?;
+            for error in access
+                .errors(limit)
+                .map_err(|error| io::Error::other(error.to_string()))?
+            {
+                println!(
+                    "{} {} {:?} {:?} {}{}",
+                    error.request_id,
+                    error.character,
+                    error.stage,
+                    error.source,
+                    error.message.as_str(),
+                    if error.malformed { " (malformed)" } else { "" }
+                );
+            }
+            Ok(())
+        }
+        Some("view") => print_exact(&access, parts.next(), parts.next()),
+        Some("export") => {
+            let id = parse_id(parts.next())?;
+            let section = section(parts.next())?;
+            let path = unquote(parts.rest());
+            if path.is_empty() {
+                return Err(invalid("export requires a path"));
+            }
+            let record = access
+                .request(id)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let text = record
+                .export(section)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            write_export(path, &text)?;
+            println!(
+                "Exported {section} for {id} to {path} ({} bytes)",
+                text.len()
+            );
+            Ok(())
+        }
+        Some(id) => {
+            let id = parse_id(Some(id))?;
+            let section = section(parts.next())?;
+            let record = access
+                .request(id)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            println!(
+                "{}",
+                record
+                    .copy_text(section)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn print_exact(
+    access: &neuromita::request::DiagnosticsAccess,
+    id: Option<&str>,
+    section_value: Option<&str>,
+) -> io::Result<()> {
+    let id = parse_id(id)?;
+    let section = section(section_value)?;
+    let record = access
+        .request(id)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    println!(
+        "{}",
+        record
+            .copy_text(section)
+            .map_err(|error| io::Error::other(error.to_string()))?
+    );
+    Ok(())
+}
+
+fn parse_id(value: Option<&str>) -> io::Result<RequestId> {
+    value
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .map(RequestId)
+        .ok_or_else(|| invalid("a request UUID is required"))
+}
+
+fn section(value: Option<&str>) -> io::Result<DiagnosticSection> {
+    match value {
+        None => Ok(DiagnosticSection::All),
+        Some(value) => DiagnosticSection::parse(value).ok_or_else(|| {
+            invalid("unknown diagnostic section; use all|ingress|prompt|request|response|usage|error|lifecycle")
+        }),
+    }
+}
+
+fn limit(value: Option<&str>) -> io::Result<usize> {
+    match value {
+        None => Ok(16),
+        Some(value) => value
+            .parse::<usize>()
+            .map(|limit| limit.clamp(1, 64))
+            .map_err(|_| invalid("limit must be a positive integer")),
+    }
+}
+
+fn write_export(path: &str, text: &str) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+struct Arguments<'a> {
+    value: &'a str,
+    offset: usize,
+}
+
+impl<'a> Arguments<'a> {
+    fn new(value: &'a str) -> Self {
+        Self { value, offset: 0 }
+    }
+
+    fn next(&mut self) -> Option<&'a str> {
+        let rest = self.value[self.offset..].trim_start();
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        self.offset = self.value.len() - rest.len() + end;
+        Some(&rest[..end])
+    }
+
+    fn rest(&mut self) -> &'a str {
+        let rest = self.value[self.offset..].trim_start();
+        self.offset = self.value.len();
+        rest
+    }
+}
+
+fn unquote(value: &str) -> &str {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_never_overwrites_and_paths_may_contain_spaces() {
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-terminal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let existing = directory.join("existing.json");
+        std::fs::write(&existing, b"keep").unwrap();
+        assert!(write_export(existing.to_str().unwrap(), "replace").is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+
+        let spaced = directory.join("trace with space.json");
+        write_export(spaced.to_str().unwrap(), "{}").unwrap();
+        assert_eq!(std::fs::read(&spaced).unwrap(), b"{}");
+
+        let mut arguments = Arguments::new("request usage \"C:/tmp/trace with space.json\"");
+        assert_eq!(arguments.next(), Some("request"));
+        assert_eq!(arguments.next(), Some("usage"));
+        assert_eq!(unquote(arguments.rest()), "C:/tmp/trace with space.json");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dataset_delivery_tests {
+    use super::*;
+    use neuromita::finetune::{
+        FineTuneCollector, FineTuneSettings, Retention, SampleId, SampleOutcome,
+    };
+    #[tokio::test]
+    async fn runtime_dataset_status_reports_late_writer_failure() {
+        let root = std::env::temp_dir().join(format!("pr67-status-{}", uuid::Uuid::new_v4()));
+        let collector = FineTuneCollector::from_settings(
+            &FineTuneSettings::new(root.clone(), true, Retention::Unlimited).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir(root.join(".neuromita-finetune.lock")).unwrap();
+        let request = RequestId(uuid::Uuid::new_v4());
+        collector
+            .enqueue_outcome(
+                SampleId::for_request(request),
+                request,
+                None,
+                SampleOutcome::Accepted,
+            )
+            .unwrap();
+        collector
+            .drain(std::time::Duration::from_secs(2), true)
+            .await;
+        let output = dataset_status(Some(&collector));
+        assert!(output.contains("errors=1"), "{output}");
+        assert!(output.contains("pending=0"), "{output}");
+        assert!(output.contains(".neuromita-finetune.lock"), "{output}");
+        drop(collector);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

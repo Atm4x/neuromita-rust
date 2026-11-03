@@ -7,8 +7,8 @@ use crate::{
     generation::{PresetCatalogError, PresetId, PresetRecord},
     interaction::UserInput,
     request::{
-        GenerationCommand, InitiateRequest, ReactRequest, ReplyRequest, RequestDiscovery,
-        RequestHandle, RequestId, SubmitError,
+        DiagnosticScope, DiagnosticsAccess, GenerationCommand, InitiateRequest, ReactRequest,
+        ReplyRequest, RequestDiscovery, RequestHandle, RequestId, SubmitError,
     },
     runtime::{self, ApiUnavailable},
     settings::{
@@ -109,6 +109,20 @@ impl ChatApi {
             .chat
             .registry
             .trace(id))
+    }
+
+    /// Read diagnostics for one character. Pass an owner scope when caller
+    /// identity matters; a missing request is reported, never replaced by a
+    /// different trace.
+    pub fn diagnostics(character: CharacterId) -> Result<DiagnosticsAccess, SubmitError> {
+        Self::diagnostics_for(DiagnosticScope::character(character))
+    }
+
+    pub fn diagnostics_for(scope: DiagnosticScope) -> Result<DiagnosticsAccess, SubmitError> {
+        runtime::current()
+            .map_err(SubmitError::from)?
+            .chat
+            .diagnostics(scope)
     }
 }
 

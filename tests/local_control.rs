@@ -349,6 +349,9 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "react",
         "initiate",
         "cancel",
+        "diagnostics",
+        "diagnostics_recent",
+        "diagnostics_errors",
         "settings",
         "set_volume",
     ];
@@ -387,6 +390,18 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 client.terminal(uuid(&accepted["request_id"])).await;
                 drop(call);
                 continue;
+            }
+            "diagnostics" => {
+                cmd["character"] = json!("mita");
+                cmd["request_id"] = json!(Uuid::new_v4());
+                client.send(cmd.clone()).await;
+                let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
+                assert_eq!(response["type"], "error");
+                assert_eq!(response["code"], "diagnostics_not_found");
+                continue;
+            }
+            "diagnostics_recent" | "diagnostics_errors" => {
+                cmd["character"] = json!("mita");
             }
             "set_volume" => cmd["value"] = json!(42),
             _ => {}

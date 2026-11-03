@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
 
 use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::{
-        GenerationError,
+        GenerationError, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
         structured::{StructuredResponse, gemini_message_schema},
     },
@@ -82,13 +84,39 @@ pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> Ge
     encode_with_memory(context, template, &selected)
 }
 
+#[cfg(test)]
 pub(super) fn encode_with_memory(
     context: CharacterContext,
     template: &GeminiTemplate,
     memory: &Option<String>,
 ) -> GenerateContent {
+    encode_observed(context, template, memory).body
+}
+
+pub(super) struct EncodedRequest {
+    pub(super) body: GenerateContent,
+    pub(super) prompt: Vec<PromptMessage>,
+}
+
+pub(super) fn encode_observed(
+    context: CharacterContext,
+    template: &GeminiTemplate,
+    memory: &Option<String>,
+) -> EncodedRequest {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
-    GenerateContent {
+    let mut prompt = Vec::with_capacity(conversation.messages.len() + 1);
+    prompt.push(PromptMessage {
+        role: PromptRole::System,
+        text: Arc::from(conversation.system_instruction.as_str()),
+    });
+    prompt.extend(conversation.messages.iter().map(|message| PromptMessage {
+        role: match message.role {
+            LlmRole::User => PromptRole::User,
+            LlmRole::Assistant => PromptRole::Assistant,
+        },
+        text: Arc::from(message.text.as_str()),
+    }));
+    let body = GenerateContent {
         system_instruction: content(None, &conversation.system_instruction),
         contents: conversation
             .messages
@@ -108,7 +136,8 @@ pub(super) fn encode_with_memory(
             response_mime_type: "application/json".into(),
             response_schema: gemini_message_schema(),
         },
-    }
+    };
+    EncodedRequest { body, prompt }
 }
 
 #[derive(Deserialize)]
@@ -175,6 +204,29 @@ pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError
         ));
     }
     StructuredResponse::parse(&text)
+}
+
+pub(super) fn observation_metadata(bytes: &[u8]) -> (Option<Arc<str>>, Option<ProviderUsage>) {
+    let Ok(Value::Object(root)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return (None, None);
+    };
+    let finish_reason = root
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("finishReason"))
+        .and_then(serde_json::Value::as_str)
+        .map(Arc::from);
+    let usage = root.get("usageMetadata").and_then(|usage| {
+        let field = |name| usage.get(name).and_then(serde_json::Value::as_u64);
+        let parsed = ProviderUsage {
+            input_tokens: field("promptTokenCount"),
+            output_tokens: field("candidatesTokenCount"),
+            total_tokens: field("totalTokenCount"),
+        };
+        (parsed != ProviderUsage::default()).then_some(parsed)
+    });
+    (finish_reason, usage)
 }
 
 #[cfg(test)]
