@@ -1,5 +1,6 @@
 //! Rust-owned process lifecycle and correlated JSON-lines IPC for Python AI plugins.
 
+pub mod application;
 pub mod assets;
 pub mod backend;
 pub mod bootstrap;
@@ -132,6 +133,20 @@ struct WorkerProcess {
     selections: HashMap<AiService, (String, Option<String>)>,
 }
 
+struct InFlightRequest<'a> {
+    worker: &'a mut WorkerProcess,
+    completed: bool,
+}
+
+impl Drop for InFlightRequest<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.worker.failed = true;
+            let _ = self.worker.child.start_kill();
+        }
+    }
+}
+
 impl WorkerProcess {
     async fn launch(
         config: &PythonHostConfig,
@@ -254,6 +269,20 @@ impl WorkerProcess {
     }
 
     async fn request(&mut self, operation: &str, args: &Value) -> Result<Value, AiRuntimeError> {
+        let mut in_flight = InFlightRequest {
+            worker: self,
+            completed: false,
+        };
+        let outcome = in_flight.worker.request_inner(operation, args).await;
+        in_flight.completed = true;
+        outcome
+    }
+
+    async fn request_inner(
+        &mut self,
+        operation: &str,
+        args: &Value,
+    ) -> Result<Value, AiRuntimeError> {
         if self.failed {
             return Err(AiRuntimeError::Protocol("worker requires restart".into()));
         }

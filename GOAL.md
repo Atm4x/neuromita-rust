@@ -160,3 +160,11 @@ Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin co
 ### AI Engine — verified runtime increment (2026-11-03)
 
 The implementation and exact remaining limitations are tracked in [AI Engine implementation increment](future/ai-engine-implementation-20261103.md). Model asset staging with SHA-256, verified package layers, typed install hook approvals, typed Python settings, voice profile references and a Rust-to-mock-Python WAV contract are implemented and tested on the AI Runtime branch. These are infrastructure acceptance slices, **not real model inference**. The default `ApplicationConfig` still uses an unavailable voice provider; AI Hub, full lifecycle integration, production installs, ASR and VAD remain open. Do not close #24/#26/#37/#42/#51/#59/#61 solely on these tests.
+
+
+### AI Engine — explicit application-owned Python worker activation (2026-11-03)
+
+- [x] Optional `ApplicationConfig.ai_runtime` activates resolved Python compositions during `ApplicationLifecycle::start`, after fallible migrations/settings, TCP bind and Timeline setup; the running application owns worker shutdown and injects the selected TTS through the existing `VoiceProvider` port. Absence of explicit AI configuration preserves the previous unavailable-voice behavior without fallback.
+- [x] Reject mismatched locked Python, invalid service topology, missing/duplicate selected models and failed activation before client APIs are exposed.
+- [x] Abort of an in-flight IPC call terminates/poisons the worker; stale results cannot be reused without a new worker generation. Mock tests cover cancel/restart and startup failure paths.
+- [ ] Build the complete production `uv`/CPython/SDK/overlay/weights resolver into the application and persistent settings; implement AI Hub controls and smoke-test actual Silero+RVC inference. See [implementation report](future/ai-engine-implementation-20261103.md). All global AI Runtime issues remain open.

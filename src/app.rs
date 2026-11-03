@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
+    ai_runtime::application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
     character::{CharacterHandle, CharacterId, CharacterRegistry},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
@@ -64,6 +65,7 @@ pub struct ApplicationConfig {
     pub knowledge: KnowledgeRetrieval,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
+    pub ai_runtime: Option<AiApplicationConfig>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
@@ -85,6 +87,7 @@ impl ApplicationConfig {
             knowledge: KnowledgeRetrieval::lexical(),
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
+            ai_runtime: None,
             settings: SettingsConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
@@ -144,6 +147,8 @@ pub enum ApplicationError {
     Presets(#[from] PresetCatalogError),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
+    #[error(transparent)]
+    Ai(#[from] AiApplicationError),
     #[error("server: {0}")]
     Server(#[from] std::io::Error),
 }
@@ -234,6 +239,7 @@ struct ApplicationOwner {
     server_stop: CancellationToken,
     server_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
+    ai_runtime: Option<RunningAiApplication>,
 }
 
 impl ApplicationLifecycle {
@@ -247,6 +253,7 @@ impl ApplicationLifecycle {
             knowledge,
             limits,
             voice,
+            ai_runtime,
             settings,
             timeline,
             server,
@@ -265,8 +272,16 @@ impl ApplicationLifecycle {
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
-        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
+        let ai_runtime = match ai_runtime {
+            Some(configuration) => Some(Box::pin(configuration.activate()).await?),
+            None => None,
+        };
+        let voice = match &ai_runtime {
+            Some(runtime) => runtime.voice_provider(),
+            None => voice,
+        };
+        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let selection_updates = timeline
             .lock()
             .expect("timeline lock poisoned")
@@ -342,6 +357,7 @@ impl ApplicationLifecycle {
             server_stop,
             server_task: None,
             lease,
+            ai_runtime,
         };
         owner.lease.publish(Arc::clone(&bindings));
         owner.server_task = Some(tokio::spawn(
@@ -582,6 +598,11 @@ impl ApplicationOwner {
             && let Err(error) = task.await
         {
             failure = Some(ApplicationError::Task(error.to_string()));
+        }
+        if let Some(runtime) = self.ai_runtime.take()
+            && let Err(error) = runtime.shutdown().await
+        {
+            failure = Some(ApplicationError::Ai(error));
         }
         self.settings_stop.cancel();
         if let Some(task) = self.settings_task.take() {
