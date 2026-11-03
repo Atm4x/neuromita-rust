@@ -32,6 +32,7 @@ pub struct InstallerAction {
     pub relative_path: String,
 }
 
+#[derive(Clone)]
 pub struct OverlayInstaller {
     pub uv_executable: PathBuf,
     pub python_executable: PathBuf,

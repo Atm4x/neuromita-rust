@@ -105,6 +105,7 @@ pub enum PluginInstallError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct PluginInstallHandler {
     pub resolver: DependencyResolver,
     pub overlays: OverlayInstaller,

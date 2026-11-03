@@ -49,6 +49,7 @@ pub struct LockedBackend {
     pub packages: Vec<LockedPackage>,
 }
 
+#[derive(Clone)]
 pub struct BackendInstaller {
     pub uv_executable: PathBuf,
     pub python_executable: PathBuf,

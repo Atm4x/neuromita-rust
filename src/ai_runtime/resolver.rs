@@ -29,6 +29,7 @@ pub enum ResolveError {
     Unsupported(String),
 }
 
+#[derive(Clone)]
 pub struct DependencyResolver {
     pub uv_executable: PathBuf,
     pub python_executable: PathBuf,

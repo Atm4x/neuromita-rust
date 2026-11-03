@@ -10,6 +10,7 @@ pub mod install;
 mod layer;
 pub mod managed;
 pub mod overlay;
+pub mod production;
 pub mod resolver;
 pub mod speech;
 pub mod uv;
