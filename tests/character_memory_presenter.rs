@@ -39,7 +39,7 @@ async fn presenter_uses_the_same_character_owner_and_timeline_transaction() {
     .unwrap();
     let presenter = &app.presenter().characters;
     let snapshot = presenter.memories(CharacterId::Mita).await.unwrap();
-    assert!(snapshot.records.is_empty());
+    assert!(snapshot.records().is_empty());
     let after = presenter
         .edit_memories(
             CharacterId::Mita,
@@ -52,16 +52,16 @@ async fn presenter_uses_the_same_character_owner_and_timeline_transaction() {
         .await
         .unwrap();
     assert_eq!(after.applied.len(), 1);
-    assert_eq!(after.snapshot.records.len(), 1);
-    assert_eq!(after.snapshot.records[0].content, "A user-managed fact");
+    assert_eq!(after.snapshot.records().len(), 1);
+    assert_eq!(after.snapshot.records()[0].content, "A user-managed fact");
     assert_eq!(
         CharacterApi::get(CharacterId::Mita)
             .unwrap()
             .memories()
             .await
             .unwrap()
-            .records,
-        after.snapshot.records
+            .records(),
+        after.snapshot.records()
     );
     assert!(matches!(
         presenter
@@ -69,7 +69,7 @@ async fn presenter_uses_the_same_character_owner_and_timeline_transaction() {
                 CharacterId::Mita,
                 snapshot,
                 vec![MemoryCommand::Forget {
-                    id: after.snapshot.records[0].id
+                    id: after.snapshot.records()[0].id
                 }],
             )
             .await,
@@ -92,13 +92,16 @@ async fn presenter_uses_the_same_character_owner_and_timeline_transaction() {
         )
         .await
         .unwrap();
-    assert_eq!(forgotten.snapshot.records[0].state, MemoryState::Forgotten);
+    assert_eq!(
+        forgotten.snapshot.records()[0].state,
+        MemoryState::Forgotten
+    );
     assert!(
         presenter
             .memories(CharacterId::KindMita)
             .await
             .unwrap()
-            .records
+            .records()
             .is_empty()
     );
     app.shutdown().await.unwrap();

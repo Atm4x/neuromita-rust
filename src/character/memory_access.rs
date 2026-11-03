@@ -8,10 +8,24 @@ use crate::{
 /// Its private selection token prevents edits after switching Timeline branches.
 #[derive(Debug, Clone)]
 pub struct CharacterMemorySnapshot {
-    pub character: CharacterId,
-    pub anchor: ContextAnchor,
-    pub records: Vec<MemoryRecord>,
+    pub(crate) character: CharacterId,
+    pub(crate) anchor: ContextAnchor,
+    pub(crate) records: Vec<MemoryRecord>,
     pub(crate) selection: TimelineSelection,
+}
+
+impl CharacterMemorySnapshot {
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn anchor(&self) -> ContextAnchor {
+        self.anchor
+    }
+
+    pub fn records(&self) -> &[MemoryRecord] {
+        &self.records
+    }
 }
 
 #[derive(Debug, Clone)]
