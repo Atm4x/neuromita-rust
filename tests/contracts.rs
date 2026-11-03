@@ -423,6 +423,28 @@ async fn complete_minimal_contracts() {
         speaking.snapshot().state,
         RequestState::Processing(neuromita::request::ProcessingStage::GeneratingVoice { .. })
     ));
+    let preliminary = speaking.snapshot();
+    assert_eq!(preliminary.provisional_text(), Some("spoken answer"));
+    assert!(preliminary.can_cancel());
+    let network_projection = neuromita::server::status(&preliminary);
+    assert_eq!(network_projection["stage"], "voice");
+    assert_eq!(network_projection["text"], "spoken answer");
+    assert_eq!(network_projection["provisional"], true);
+    assert_eq!(network_projection["can_cancel"], true);
+    timeout(Duration::from_secs(5), async {
+        let mut observer = presenter.chat.observe();
+        loop {
+            if observer.borrow_and_update().requests.iter().any(|row| {
+                row.metadata.id == speaking.id()
+                    && row.snapshot.provisional_text() == Some("spoken answer")
+            }) {
+                break;
+            }
+            observer.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
         presenter
             .characters
@@ -440,6 +462,8 @@ async fn complete_minimal_contracts() {
         }))
         .unwrap();
     let response = done(&speaking).await;
+    assert_eq!(response.provisional_text(), None);
+    assert!(!response.can_cancel());
     assert!(
         matches!(&response.state, RequestState::Finished(RequestOutcome::Success(response)) if response.audio.is_some())
     );
@@ -670,18 +694,50 @@ async fn complete_minimal_contracts() {
         .send(Ok(Arc::from("provisional network answer")))
         .unwrap();
     let speech = next(&mut voices).await;
+    let provisional_frame = frame(&mut reader, |value| {
+        value["type"] == "request_status"
+            && value["request_id"] == id.0.to_string()
+            && value["stage"] == "voice"
+    })
+    .await;
+    assert_eq!(provisional_frame["text"], "provisional network answer");
+    assert_eq!(provisional_frame["provisional"], true);
+    assert_eq!(provisional_frame["can_cancel"], true);
+    assert_eq!(
+        network_request.snapshot().provisional_text(),
+        Some("provisional network answer")
+    );
     shown(&presenter.chat, id, false).await;
     let command = json!({"command_id":Uuid::new_v4(),"command":"cancel","request_id":id.0});
     write
         .write_all(format!("{command}\n").as_bytes())
         .await
         .unwrap();
-    let cancellation = frame(&mut reader, |value| value["type"] == "cancel").await;
-    assert_eq!(cancellation["result"], "Requested");
+    let mut cancellation = None;
+    let mut cancelled_frame = None;
+    while cancellation.is_none() || cancelled_frame.is_none() {
+        let message = frame(&mut reader, |value| {
+            value["type"] == "cancel"
+                || (value["type"] == "request_status"
+                    && value["request_id"] == id.0.to_string()
+                    && value["state"] == "cancelled")
+        })
+        .await;
+        if message["type"] == "cancel" {
+            cancellation = Some(message);
+        } else {
+            cancelled_frame = Some(message);
+        }
+    }
+    assert_eq!(cancellation.unwrap()["result"], "Requested");
     assert!(matches!(
         done(&network_request).await.state,
         RequestState::Cancelled
     ));
+    let cancelled_frame = cancelled_frame.unwrap();
+    assert_eq!(cancelled_frame["can_cancel"], false);
+    assert!(cancelled_frame.get("provisional").is_none());
+    assert!(cancelled_frame.get("text").is_none());
     shown(&presenter.chat, id, true).await;
     assert!(speech.reply.is_closed());
     assert_eq!(
