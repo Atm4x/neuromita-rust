@@ -8,6 +8,10 @@ use std::{
 use neuromita::{
     api::ChatApi,
     character::CharacterId,
+    games::{
+        GameApi, GameReceipt,
+        seabattle::{Coordinate, Orientation, Side},
+    },
     presentation::ChatPresenter,
     request::{
         DiagnosticScope, DiagnosticSection, RequestId, RequestOutcome, RequestSnapshot,
@@ -36,7 +40,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /diagnostics ..., /dataset status, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -375,7 +379,11 @@ pub async fn run(
                 return Err(io::Error::other(error.to_string()));
             }
         }
-        if eof && pending.is_empty() {
+        let observed_active = model
+            .requests
+            .iter()
+            .any(|row| !row.snapshot.state.is_terminal());
+        if eof && pending.is_empty() && !observed_active {
             return if failed {
                 Err(io::Error::other("one or more requests did not succeed"))
             } else {
@@ -411,6 +419,11 @@ pub async fn run(
                         } else if let Some(value) = line.strip_prefix("/diagnostics") {
                             if let Err(error) = diagnostics_command(character, value.trim()) {
                                 eprintln!("{error}");
+                            }
+                        } else if line == "/game" || line.starts_with("/game ") {
+                            let value = line.strip_prefix("/game").unwrap_or("");
+                            if let Some(id) = game_command(character, value.trim()).await {
+                                pending.insert(id);
                             }
                         } else if line.starts_with("/reminder") {
                             match reminder_command(character, line.trim()).await {
@@ -682,5 +695,220 @@ mod dataset_delivery_tests {
         assert!(output.contains(".neuromita-finetune.lock"), "{output}");
         drop(collector);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn print_board(label: &str, board: &[String]) {
+    println!("{label}");
+    println!(
+        "  {}",
+        ('A'..='J')
+            .map(|letter| letter.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    for (index, row) in board.iter().enumerate() {
+        println!(
+            "{:<2}{}",
+            index + 1,
+            row.chars()
+                .map(|cell| cell.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+}
+
+fn show_game(receipt: &GameReceipt) {
+    match (&receipt.view, receipt.key) {
+        (Some(view), Some(key)) => {
+            println!(
+                "Sea Battle: {} | {} | сессия {} rev {} | авто: {}",
+                view.phase.code(),
+                view.status_line_for(Side::Player),
+                key.session,
+                key.revision,
+                receipt.auto_reactions
+            );
+            if !view.remaining.is_empty() {
+                println!(
+                    "Корабли к расстановке: {}",
+                    view.remaining
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+            print_board("Твоё поле:", &view.own_board);
+            print_board("Поле противника:", &view.opponent_board);
+            if let Some(last) = view.last_shot {
+                println!(
+                    "Последний выстрел: {} по {} — {}.",
+                    last.attacker.label(),
+                    last.coord,
+                    last.result.code()
+                );
+            }
+            if let Some(winner) = view.winner {
+                let winner = if winner == Side::Player {
+                    "игрок"
+                } else {
+                    "Мита"
+                };
+                println!("Победитель: {winner}");
+            }
+        }
+        _ => println!("Активной партии нет."),
+    }
+}
+
+fn parse_coord(value: Option<&str>) -> Result<Coordinate, String> {
+    value
+        .and_then(Coordinate::parse)
+        .ok_or_else(|| "координата должна быть в виде A1..J10".to_owned())
+}
+
+fn no_extra_args(parts: &mut std::str::SplitWhitespace, usage: &str) -> bool {
+    if parts.next().is_some() {
+        eprintln!("usage: {usage}");
+        false
+    } else {
+        true
+    }
+}
+
+async fn game_command(character: CharacterId, rest: &str) -> Option<RequestId> {
+    let mut parts = rest.split_whitespace();
+    let command = parts.next().unwrap_or("view");
+    let result = match command {
+        "start" => {
+            let auto = match parts.next() {
+                None | Some("auto") => true,
+                Some("manual") => false,
+                Some(_) => {
+                    eprintln!("usage: /game start [auto|manual]");
+                    return None;
+                }
+            };
+            if !no_extra_args(&mut parts, "/game start [auto|manual]") {
+                return None;
+            }
+            GameApi::start(character, auto).await
+        }
+        "place" => {
+            let coord = match parse_coord(parts.next()) {
+                Ok(coord) => coord,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return None;
+                }
+            };
+            let length = match parts.next().and_then(|value| value.parse::<u8>().ok()) {
+                Some(length @ 1..=4) => length,
+                _ => {
+                    eprintln!("длина корабля должна быть 1..4");
+                    return None;
+                }
+            };
+            let orientation = match Orientation::parse(parts.next().unwrap_or("H")) {
+                Some(orientation) => orientation,
+                None => {
+                    eprintln!("ориентация должна быть H или V");
+                    return None;
+                }
+            };
+            if !no_extra_args(&mut parts, "/game place COORD LENGTH [H|V]") {
+                return None;
+            }
+            GameApi::place_ship(character, coord, length, orientation).await
+        }
+        "random" => {
+            if !no_extra_args(&mut parts, "/game random") {
+                return None;
+            }
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(1);
+            GameApi::place_fleet_randomly(character, seed).await
+        }
+        "fire" => {
+            let coord = match parse_coord(parts.next()) {
+                Ok(coord) => coord,
+                Err(message) => {
+                    eprintln!("{message}");
+                    return None;
+                }
+            };
+            if !no_extra_args(&mut parts, "/game fire COORD") {
+                return None;
+            }
+            GameApi::fire(character, coord).await
+        }
+        "turn" => {
+            if !no_extra_args(&mut parts, "/game turn") {
+                return None;
+            }
+            GameApi::request_mita_turn(character).await
+        }
+        "auto" => {
+            let enabled = match parts.next() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => {
+                    eprintln!("usage: /game auto on|off");
+                    return None;
+                }
+            };
+            if !no_extra_args(&mut parts, "/game auto on|off") {
+                return None;
+            }
+            GameApi::set_auto_reactions(character, enabled).await
+        }
+        "close" => {
+            if !no_extra_args(&mut parts, "/game close") {
+                return None;
+            }
+            GameApi::close(character).await
+        }
+        "view" => {
+            if !no_extra_args(&mut parts, "/game view") {
+                return None;
+            }
+            match GameApi::view(character).await {
+                Ok(receipt) => {
+                    show_game(&receipt);
+                    return None;
+                }
+                Err(error) => {
+                    eprintln!("Игра: {error}");
+                    return None;
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "Неизвестная команда '{other}'. Используй start/place/random/fire/turn/auto/close/view."
+            );
+            return None;
+        }
+    };
+    match result {
+        Ok(outcome) => {
+            show_game(&outcome.receipt);
+            match outcome.reaction {
+                None => None,
+                Some(Ok(handle)) => Some(handle.id()),
+                Some(Err(error)) => {
+                    eprintln!("Реакция Миты не принята: {error}");
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("Игра: {error}");
+            None
+        }
     }
 }

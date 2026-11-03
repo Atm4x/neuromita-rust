@@ -125,7 +125,12 @@ impl ProposedResponse {
         structured.ensure_supported_effects()?;
         let text = structured.full_text();
         let effects = structured.proposed_effects()?;
-        Ok(Self::validated(text, structured.segments, effects))
+        let segments = structured
+            .segments
+            .iter()
+            .map(crate::turn::ResponseSegment::sanitized_for_persistence)
+            .collect();
+        Ok(Self::validated(text, segments, effects))
     }
 }
 

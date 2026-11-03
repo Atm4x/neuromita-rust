@@ -443,6 +443,8 @@ mod tests {
                 context_epoch: 0,
                 trigger: Some(ids[0]),
             },
+            game: None,
+            game_key: None,
         };
         let template = GeminiTemplate::google(
             "test-model",
@@ -559,6 +561,8 @@ mod tests {
                 context_epoch: 0,
                 trigger: None,
             },
+            game: None,
+            game_key: None,
         };
         let template = GeminiTemplate::google(
             "test-model",

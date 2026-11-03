@@ -305,6 +305,12 @@ impl LlmConversation {
                 text,
             });
         }
+        if let Some(game) = &context.game {
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text: game.prompt_block(),
+            });
+        }
         if !context.reminders.is_empty() {
             let mut block = vec![
                 "[PENDING REMINDERS]".to_owned(),
