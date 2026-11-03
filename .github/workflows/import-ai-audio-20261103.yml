@@ -1,0 +1,32 @@
+name: Import verified AI audio pipeline Git bundle
+on:
+  push:
+    branches:
+      - bridge/ai-audio-streaming-publish-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact Git objects and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6881d59716f13e49ec37289b3625fcaa0934d37b
+          HEAD=12f34c7c8ec321492ade28d0027c567c3b158075
+          BUNDLE="$RUNNER_TEMP/ai-audio-pipeline.bundle"
+          base64 --decode bridge_payload/ai-audio-pipeline-20261103.bundle.b64 > "$BUNDLE"
+          test "$(stat -c%s "$BUNDLE")" -eq 25292
+          echo "03d092f7be53ea854feab4fedbaf9c11c259704077c661c8da2b5fc017e0f78b  $BUNDLE" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify "$BUNDLE"
+          git fetch --no-tags "$BUNDLE" "HEAD:refs/heads/ai-audio-candidate-local"
+          test "$(git rev-parse refs/heads/ai-audio-candidate-local)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          CURRENT=$(git ls-remote origin refs/heads/codex/ai-engine-install-voice-20261103 | cut -f1)
+          test "$CURRENT" = "$BASE"
+          git push origin "$HEAD:refs/heads/bridge/ai-audio-candidate-20261103"
