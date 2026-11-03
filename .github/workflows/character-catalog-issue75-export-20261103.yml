@@ -1,0 +1,36 @@
+name: Export character catalog issue 75 pinned Git bundle
+on:
+  push:
+    branches:
+      - bridge/character-catalog-issue75-export-20261103
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle pinned source
+        env:
+          TARGET_SHA: ae046a2be3c788dda67005f7e7b1bf129c04ef8b
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "${TARGET_SHA}^{commit}"
+          git update-ref refs/heads/character-source "${TARGET_SHA}"
+          git bundle create character-source.bundle refs/heads/character-source
+          git bundle verify character-source.bundle
+          sha256sum character-source.bundle > character-source.bundle.sha256
+          printf '%s\n' "${TARGET_SHA}" > character-source.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: character-catalog-issue75-source
+          path: |
+            character-source.bundle
+            character-source.bundle.sha256
+            character-source.commit
+          retention-days: 2
+          if-no-files-found: error
