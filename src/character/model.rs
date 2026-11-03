@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    games::{GameKey, GameProjection},
+    games::GameProjection,
     identity::CharacterId,
     interaction::TurnIntent,
     timeline::{
@@ -81,15 +81,18 @@ pub struct CharacterContext {
     pub view: MitaView,
     /// Role-limited board projection for this character only.
     pub game: Option<GameProjection>,
+    /// Own active reminders of the selected branch; never another character's.
+    pub reminders: Vec<crate::reminders::ReminderPrompt>,
     pub current_input: Arc<str>,
     pub focus: GenerationFocus,
     pub anchor: ContextAnchor,
     pub(crate) turn: TimelineTurn,
-    pub(crate) game_key: Option<GameKey>,
+    pub(crate) game_key: Option<crate::identity::EventId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CharacterView {
+    pub game: Option<GameProjection>,
     pub character_id: CharacterId,
     pub description: Arc<str>,
     pub prompt: Arc<str>,

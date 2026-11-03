@@ -40,23 +40,26 @@ Rust не копирует их GUI.
 
 ## Владение и границы
 
-`CharacterHandler` — единственный владелец авторитетного `GameSlot`. Публичный
-`GameApi` отправляет типизированные `UserGameCommand` в mailbox персонажа;
-`CharacterApi::get` выдаёт handle через runtime-привязки. Уже выданный handle
-может пережить shutdown до остановки владельца и его задач, а `GameApi` после
-shutdown возвращает `Unavailable`.
-Принятая модель ответа разбирается из `commands`, `start_game` и `end_game` в
-приватный `TurnProposal`/`ResponseEffect`. Действия модели валидируются на
-клоне игрового состояния; события Timeline добавляются одним пакетом, и
-только после успешного commit владелец заменяет состояние. Ошибка, паника,
-отмена или stale-поколение не применяют ни одного хода.
+`CharacterHandler` последовательно обслуживает типизированные команды через mailbox.
+Единственный канонический источник игры — owner-private `GameStateCaptured` в Timeline;
+в handler нет изменяемого поля с авторитетным матчем. Временная копия `GameSlot`
+восстанавливается для подготовки команды и отбрасывается после коммита.
 
-Партия привязана к runtime-сессии, выбранной ветке Timeline и revision
-принятых действий. Смена ветки сбрасывает партию по документированному
-правилу; контекст другой ветки не видит и не меняет чужую игру. Пока партия
-активна, генерация по историческому префиксу отклоняется: нельзя показать
-модели старую доску, выдав её за текущую. В контекст генерации попадает
-только проекция Миты: её флот и уже наблюдаемые клетки соперника.
+Запись содержит версионированный Timeline-факт с одним типизированным payload;
+десериализация отклоняет неизвестные поля, неверные координаты, флот, фазу,
+очередность и повторные выстрелы посредством replay чистого движка. Проверка
+Timeline требует actor персонажа и ровно одного совпадающего observer.
+Каждая успешная команда сохраняет снимок, включая placement и переключение
+автореакций, которые не обязаны порождать публичный игровой факт.
+
+Контекст читает состояние персонажа и игру из одного префикса. Исторические
+`get_context` и генерация доступны во время игры. Fork наследует матч на
+checkpoint; следующие изменения принадлежат выбранной ветке. Принятие игровых
+эффектов сверяет ID приватной записи игры, revision персонажа и selection/context
+epoch. Старое предложение не применяется после изменения игры, close/recreate,
+переключения auto, reset или выбора ветки. Исторический reply с неизменившейся
+игрой и revision может успешно примениться. Сообщение, игровой снимок,
+санитизированные факты, память и reminders записываются одним guarded batch.
 
 ## Приватность
 
@@ -90,14 +93,15 @@ revision, факт выстрела/фазы и результат. Скрыты
 
 ## Хранение и честные границы
 
-Партия существует только в памяти `CharacterHandler` и не переживает restart
-процесса. Rust не реализует GUI/снимок для продолжения партии: issue #34 не
-содержит критериев persistence, а перенос Python snapshot/restore в timeline и
-session integration — отдельная задача. Python-движок при этом уже умеет
-snapshot/restore, а GUI имеет paused-снимок; это не обязательство Rust.
-Отсутствие resume — осознанное ограничение, а не скрытая гарантия. При
-закрытии приложения владелец освобождает состояние; незавершённая партия не
-восстанавливается.
+При persistent-конфигурации SQLite партия, флот обеих сторон и режим автореакций
+переживают штатный shutdown/start Core. Transient Timeline остаётся только в памяти.
+Приватный снимок исключён из KnownEvent, in-memory/SQLite индексов знания,
+provider/UI world projection и публичных AcceptedResponse.effects; генерация получает
+только собственное поле Миты и наблюдаемые ею клетки противника. ID снимка
+не может быть причиной reply/react; тест проверяет отказ для обоих персонажей. Это дополнение
+к изученному Python-поведению: исторические чтения и ветки теперь имеют явную
+каноническую семантику. GUI Sea Battle и восстановление незавершённых запросов
+после crash остаются за пределами реализации; терминальный игровой путь доступен.
 
 Известное отличие от Python GUI: подсказка «твой ход» после попадания игрока
 иногда ошибочна. Rust строит статус из фактического `turn`/`phase` и стороны
@@ -109,8 +113,47 @@ snapshot/restore, а GUI имеет paused-снимок; это не обяза�
 
 `tests/seabattle.rs` проходит полный HTTP-fixture сценарий: старт, известная
 расстановка Миты, оба поля, легальный выстрел, hit-follow-up, close, новый
-старт, ручной placement при auto=false, отмена и historical rejection.
+старт, ручной placement при auto=false, отмена и историческая генерация до старта матча.
 `tests/seabattle_reference_acceptance.rs` (независимый golden) проверяет 63
 выстрела и грамматику координат; родительский
 `tests/seabattle_core_acceptance.rs` проверяет атомарность, stale, отмену и
 gates через настоящие runtime APIs.
+
+`tests/seabattle_history_restart.rs` запускает настоящий Core с SQLite: private
+placement, historical get_context/reply, принятие неизменившейся истории,
+отклонение старых mixed effects, fork с независимым продолжением, shutdown/start,
+историческое чтение после close и отсутствие чужого флота в контексте.
+Boundary unit tests отклоняют чужих observers/actor, unknown fields, некорректный
+replay и generation; отдельный тест проверяет auto-toggle/context-epoch CAS.
+
+## Acceptance after upstream integration, 2026-11-03
+
+Reviewed baseline: `upstream/main` `15710db73adea787e9ddb23a3ea2550ded96d260`,
+also verified against the remote main before final validation. The merge retains
+upstream AI, reminders and other application changes. No dependency or vendor
+changes relative to upstream were needed.
+
+| Check | Result | Wall time |
+|---|---|---|
+| Focused actual Core / SQLite history, fork, restart and privacy | 1 passed | 20.05 s build, 1.69 s execution |
+| `cargo test --locked --offline` | 458 passed, 2 ignored | 67.37 s |
+| `cargo test --locked --offline --no-default-features` | 396 passed, 2 ignored | 58.40 s |
+| Default all-target Clippy, `-D warnings` | passed | 12.59 s |
+| No-default all-target Clippy, `-D warnings` | passed | 12.68 s |
+| `cargo fmt --all -- --check` | passed | |
+| `git diff upstream/main --check` | passed | |
+
+All Cargo compilation commands use the same vendor override:
+`--config source.vendored-sources.directory="C:/Development/NeuromitaRust/.worktrees/issue-51-current/vendor"`.
+Shared target: `C:/Development/NeuromitaRust/target`; development/test debug info
+and incremental compilation disabled. Python fixture interpreter is explicitly
+`C:/Users/Dmitry/AppData/Local/Programs/Python/Python312/python.exe` via
+`NEUROMITA_TEST_PYTHON` and `PYO3_PYTHON`; NASM comes from `C:/Program Files/NASM`.
+Test execution and Clippy runs were serialized after the PR #67 slot release.
+The final lint-only normalization is followed by a library/SQLite regression rerun.
+
+Full logs are local under the shared target: `pr68-default-test.log`,
+`pr68-nodefault-test.log`, `pr68-default-clippy.log`, `pr68-nodefault-clippy.log`,
+`pr68-final-regression.log`, `pr68-final-nodefault-regression.log` and
+`pr68-timings.txt`; they are not committed. No GUI build, live provider call,
+push or publication is claimed by this acceptance record.

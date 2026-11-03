@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use super::coordinate::{BOARD_SIZE, Coordinate};
@@ -5,7 +6,7 @@ use super::coordinate::{BOARD_SIZE, Coordinate};
 /// The verified Python fleet: 4,3,3,2,2,2,1,1,1,1 ships.
 pub const FLEET: [u8; 10] = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Player,
     Mita,
@@ -60,7 +61,7 @@ impl Phase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Orientation {
     Horizontal,
     Vertical,
@@ -245,7 +246,7 @@ impl LastShot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Ship {
     coords: Vec<Coordinate>,
     hits: Vec<bool>,
@@ -258,7 +259,7 @@ impl Ship {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct Board {
     cells: [[Cell; BOARD_SIZE]; BOARD_SIZE],
     ships: Vec<Ship>,
@@ -395,8 +396,10 @@ impl Board {
 /// Pure, deterministic Sea Battle rules. It performs no I/O and knows nothing
 /// about characters, timelines or the model; the owner applies it to a clone
 /// and commits only after validation.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "GameRecord", into = "GameRecord")]
 pub struct SeaBattle {
+    record: Vec<RecordedAction>,
     player: Board,
     mita: Board,
     phase: Phase,
@@ -423,6 +426,7 @@ impl fmt::Debug for SeaBattle {
 impl SeaBattle {
     pub fn new() -> Self {
         Self {
+            record: Vec::new(),
             player: Board::new(),
             mita: Board::new(),
             phase: Phase::Placement,
@@ -488,6 +492,12 @@ impl SeaBattle {
             return Err(PlacementError::WrongPhase);
         }
         self.board_mut(side).place(start, length, orientation)?;
+        self.record.push(RecordedAction::Place {
+            side,
+            start: start.to_string(),
+            length,
+            orientation,
+        });
         self.revision += 1;
         self.status = None;
         if self.player.remaining.is_empty() && self.mita.remaining.is_empty() {
@@ -506,6 +516,7 @@ impl SeaBattle {
         if self.phase != Phase::Placement {
             return Err(PlacementError::WrongPhase);
         }
+        let initial_rng = rng.clone();
         let mut working = self.board(side).clone();
         for length in working.remaining.clone() {
             let mut placed = false;
@@ -527,6 +538,10 @@ impl SeaBattle {
             }
         }
         *self.board_mut(side) = working;
+        self.record.push(RecordedAction::Random {
+            side,
+            rng: initial_rng,
+        });
         self.revision += 1;
         self.status = None;
         if self.player.remaining.is_empty() && self.mita.remaining.is_empty() {
@@ -556,6 +571,10 @@ impl SeaBattle {
             attacker,
             coord,
             result,
+        });
+        self.record.push(RecordedAction::Shot {
+            side: attacker,
+            coord: coord.to_string(),
         });
         self.revision += 1;
         Ok(result)
@@ -644,7 +663,8 @@ impl Default for SeaBattle {
 }
 
 /// Small deterministic generator so placement fixtures are reproducible.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeterministicRng {
     state: u64,
     script: Vec<u8>,
@@ -693,6 +713,81 @@ impl DeterministicRng {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", deny_unknown_fields)]
+enum RecordedAction {
+    Place {
+        side: Side,
+        start: String,
+        length: u8,
+        orientation: Orientation,
+    },
+    Random {
+        side: Side,
+        rng: DeterministicRng,
+    },
+    Shot {
+        side: Side,
+        coord: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GameRecord {
+    actions: Vec<RecordedAction>,
+}
+
+impl From<SeaBattle> for GameRecord {
+    fn from(game: SeaBattle) -> Self {
+        Self {
+            actions: game.record,
+        }
+    }
+}
+
+impl TryFrom<GameRecord> for SeaBattle {
+    type Error = &'static str;
+    fn try_from(record: GameRecord) -> Result<Self, Self::Error> {
+        if record.actions.len() > 220 {
+            return Err("too many game actions");
+        }
+        let mut game = Self::new();
+        for action in record.actions {
+            match action {
+                RecordedAction::Place {
+                    side,
+                    start,
+                    length,
+                    orientation,
+                } => {
+                    let coord = Coordinate::parse(&start).ok_or("invalid coordinate")?;
+                    if coord.to_string() != start {
+                        return Err("noncanonical coordinate");
+                    }
+                    game.place(side, coord, length, orientation)
+                        .map_err(|_| "invalid placement")?;
+                }
+                RecordedAction::Random { side, mut rng } => {
+                    if rng.state == 0 || !rng.script.is_empty() || rng.cursor != 0 {
+                        return Err("invalid random generator");
+                    }
+                    game.place_random_fleet(side, &mut rng)
+                        .map_err(|_| "invalid random placement")?;
+                }
+                RecordedAction::Shot { side, coord } => {
+                    let cell = Coordinate::parse(&coord).ok_or("invalid coordinate")?;
+                    if cell.to_string() != coord {
+                        return Err("noncanonical coordinate");
+                    }
+                    game.shot(side, cell).map_err(|_| "invalid shot")?;
+                }
+            }
+        }
+        Ok(game)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +823,43 @@ mod tests {
         place_fleet(&mut game, Side::Mita, &LAYOUT);
         assert_eq!(game.phase(), Phase::Battle);
         game
+    }
+
+    fn assert_replay_roundtrip(game: &SeaBattle) {
+        let record = serde_json::to_value(game).unwrap();
+        let restored: SeaBattle = serde_json::from_value(record.clone()).unwrap();
+        assert_eq!(&restored, game);
+        assert_eq!(serde_json::to_value(restored).unwrap(), record);
+    }
+
+    #[test]
+    fn canonical_replay_restores_random_fleet_turn_hits_sunk_and_game_over() {
+        let mut random = SeaBattle::new();
+        random
+            .place_random_fleet(Side::Player, &mut DeterministicRng::new(42))
+            .unwrap();
+        random
+            .place_random_fleet(Side::Mita, &mut DeterministicRng::new(43))
+            .unwrap();
+        assert_replay_roundtrip(&random);
+        let mut game = battle();
+        assert_replay_roundtrip(&game);
+        game.shot(Side::Player, Coordinate::parse("J10").unwrap())
+            .unwrap();
+        assert_replay_roundtrip(&game);
+        game.shot(Side::Mita, Coordinate::parse("J10").unwrap())
+            .unwrap();
+        for (start, length, orientation) in LAYOUT {
+            for cell in orientation
+                .cells(Coordinate::parse(start).unwrap(), length as usize)
+                .unwrap()
+            {
+                game.shot(Side::Player, cell).unwrap();
+                assert_replay_roundtrip(&game);
+            }
+        }
+        assert_eq!(game.phase(), Phase::GameOver);
+        assert_eq!(game.winner(), Some(Side::Player));
     }
 
     #[test]

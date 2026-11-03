@@ -51,12 +51,21 @@ pub enum EventKind {
     CharacterStateChanged,
     CharacterWorkingStateReplaced,
     CharacterMemoryChanged,
+    ReminderScheduled,
+    ReminderUpdated,
+    ReminderDeleted,
+    ReminderFired,
+    ReminderDeliveryFailed,
+    ReminderDeliverySettled,
+    ReminderDeliveryRetried,
+    ReminderToolResult,
     CharacterJoined,
     CharacterLeft,
     UnityEvent,
     GameStarted,
     GameAction,
     GameEnded,
+    GameStateCaptured,
     PlayerInactive,
     ProactiveOpportunity,
     SessionNote,
@@ -83,6 +92,8 @@ pub enum AppliedEffect {
     CharacterMemoryChanged(MemoryChange),
     /// Sanitized public match fact committed together with the reply.
     GameAdvanced(crate::games::GameFact),
+    ReminderChanged(crate::reminders::ReminderChange),
+    ReminderToolResult(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

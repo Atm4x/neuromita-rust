@@ -431,9 +431,9 @@ async fn cancelled_model_turn_applies_no_move() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn historical_generation_is_rejected_while_a_match_is_active() {
+async fn historical_generation_before_match_remains_available_while_match_is_active() {
     let _guard = CORE_TEST_MUTEX.lock().await;
-    let server = GeminiServer::start().await;
+    let mut server = GeminiServer::start().await;
     let app = start_app(&server.endpoint, GamePolicy::default()).await;
 
     let input = UserInput::new("старое сообщение".into()).unwrap();
@@ -449,11 +449,25 @@ async fn historical_generation_is_rejected_while_a_match_is_active() {
             .at(ContextPosition::At(old)),
     )
     .unwrap();
-    let snapshot = handle.wait().await.unwrap();
-    assert!(matches!(
-        snapshot.state,
-        RequestState::Finished(neuromita::request::RequestOutcome::InternalError(_))
-    ));
+    let call = server.next().await;
+    call.respond.send(GREETING).unwrap();
+    assert_accepted(wait_done(handle).await);
+    assert!(
+        CharacterApi::get(CharacterId::Mita)
+            .unwrap()
+            .get_context(old)
+            .await
+            .unwrap()
+            .game
+            .is_none()
+    );
+    assert!(
+        GameApi::view(CharacterId::Mita)
+            .await
+            .unwrap()
+            .view
+            .is_some()
+    );
 
     app.shutdown().await.unwrap();
     server.shutdown().await;

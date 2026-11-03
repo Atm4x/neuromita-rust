@@ -86,7 +86,7 @@ impl MessageHandler {
         queue.close();
         while let Some(id) = queue.recv().await {
             if let Some(record) = self.registry.get(id) {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::QueueDrain);
                 record.finish_cancelled();
             }
         }
@@ -113,7 +113,7 @@ impl MessageHandler {
         let context = match prepared {
             Ok(context) => context,
             Err(CharacterError::StaleState) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::ContextChanged);
                 record.finish_cancelled();
                 return;
             }
@@ -135,7 +135,7 @@ impl MessageHandler {
         };
         let voice_settings = settings.values.voice.clone();
         let voice_enabled = match message.source() {
-            RequestSource::Presenter => voice_settings.in_launcher,
+            RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
         let voice_options = voice_enabled.then_some(VoiceOptions {
@@ -173,12 +173,12 @@ impl MessageHandler {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
             _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::SelectionChanged);
                 record.finish_cancelled();
                 return;
             }
             _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::ContextChanged);
                 record.finish_cancelled();
                 return;
             }
@@ -230,21 +230,21 @@ impl MessageHandler {
                     _ = stop.cancelled() => {
                         voice_task.abort();
                         let _ = voice_task.await;
-                        record.cancel();
+                        record.cancel_with_reason(CancelReason::Shutdown);
                         record.finish_cancelled();
                         return;
                     }
                     _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
                         voice_task.abort();
                         let _ = voice_task.await;
-                        record.cancel();
+                        record.cancel_with_reason(CancelReason::SelectionChanged);
                         record.finish_cancelled();
                         return;
                     }
                     _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
                         voice_task.abort();
                         let _ = voice_task.await;
-                        record.cancel();
+                        record.cancel_with_reason(CancelReason::ContextChanged);
                         record.finish_cancelled();
                         return;
                     }

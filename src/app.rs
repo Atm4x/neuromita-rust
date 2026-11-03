@@ -16,7 +16,11 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
-    character::{CharacterHandle, CharacterId, CharacterRegistry},
+    ai_runtime::{
+        AiService,
+        application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
+    },
+    character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     games::GamePolicy,
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
@@ -24,12 +28,20 @@ use crate::{
     },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
-    knowledge::KnowledgeRetrieval,
+    knowledge::{
+        KnowledgeRetrieval,
+        embedding::{EmbeddingError, EmbeddingProvider, EmbeddingSpace},
+        reranking::{RerankPolicy, RerankProvider},
+        retrieval_fusion::FusionMode,
+        semantic_memory::SemanticMemoryRetriever,
+    },
     lifecycle::Lifecycle,
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
-        CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SettingsPresenter,
+        CharactersPresenter, ConnectionsPresenter, ConversationPresenter, GuiPresenter,
+        PresenterRunner, PresetsPresenter, ReleasesPresenter, SettingsPresenter,
     },
+    reminders::{ReminderConfig, ReminderService},
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
@@ -58,18 +70,35 @@ pub struct RuntimeLimits {
     pub retained_finished: NonZeroUsize,
 }
 
+pub struct AiKnowledgeSelection {
+    pub space: EmbeddingSpace,
+    pub cache_entries: usize,
+    pub fusion: FusionMode,
+    pub reranker: Option<AiRerankSelection>,
+}
+
+pub struct AiRerankSelection {
+    pub model_id: String,
+    pub protocol: String,
+    pub policy: RerankPolicy,
+}
+
 pub struct ApplicationConfig {
+    pub releases: Arc<dyn crate::releases::ReleaseFeed>,
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
     pub knowledge: KnowledgeRetrieval,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
+    pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
     /// Explicit gates for the character-owned mini-games.
     pub games: GamePolicy,
+    pub reminders: ReminderConfig,
 }
 
 impl ApplicationConfig {
@@ -79,25 +108,65 @@ impl ApplicationConfig {
         limits: RuntimeLimits,
         bind: std::net::SocketAddr,
     ) -> Self {
+        Self::with_catalog(PresetCatalog::single(preset), generator, limits, bind)
+    }
+
+    fn with_catalog(
+        presets: PresetCatalog,
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+    ) -> Self {
         Self {
+            releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
-            presets: PresetCatalog::single(preset),
+            presets,
             generator,
             knowledge: KnowledgeRetrieval::lexical(),
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
+            ai_runtime: None,
+            ai_knowledge: None,
             settings: SettingsConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
             games: GamePolicy::default(),
+            reminders: ReminderConfig::system(),
         }
     }
 
     pub fn persistent(
         preset: GenerationPreset,
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
+        Self::persistent_catalog(
+            BTreeMap::from([(PresetId(0), preset)]),
+            generator,
+            limits,
+            bind,
+            data_directory,
+        )
+    }
+
+    /// Starts administration/history without inventing a generation preset.
+    /// Submitting generation before selecting a valid preset remains an error.
+    pub fn persistent_unconfigured(
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
+        Self::persistent_catalog(BTreeMap::new(), generator, limits, bind, data_directory)
+    }
+
+    fn persistent_catalog(
+        runtime: BTreeMap<PresetId, GenerationPreset>,
         generator: ResponseGenerator,
         limits: RuntimeLimits,
         bind: std::net::SocketAddr,
@@ -112,18 +181,16 @@ impl ApplicationConfig {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut config = Self::minimal(preset.clone(), generator, limits, bind);
+        let mut config =
+            Self::with_catalog(PresetCatalog::new(BTreeMap::new()), generator, limits, bind);
         config.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
-        config.presets = PresetCatalog::open(
-            BTreeMap::from([(PresetId(0), preset)]),
-            repository,
-            Arc::new(EnvironmentPresetCredentials),
-        )?;
+        config.presets =
+            PresetCatalog::open(runtime, repository, Arc::new(EnvironmentPresetCredentials))?;
         config.settings = SettingsConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
@@ -148,6 +215,14 @@ pub enum ApplicationError {
     Presets(#[from] PresetCatalogError),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
+    #[error(transparent)]
+    Ai(#[from] AiApplicationError),
+    #[error("AI knowledge selection requires an activated embedding worker")]
+    MissingEmbeddingWorker,
+    #[error("AI reranking selection requires an activated reranker worker")]
+    MissingRerankerWorker,
+    #[error(transparent)]
+    Knowledge(#[from] EmbeddingError),
     #[error("server: {0}")]
     Server(#[from] std::io::Error),
 }
@@ -157,6 +232,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -226,7 +302,10 @@ impl RequestIngress for TimelineRequestIngress {
 }
 
 struct ApplicationOwner {
+    releases_task: Option<JoinHandle<Result<(), std::convert::Infallible>>>,
     bindings: Arc<ApiBindings>,
+    reminders_stop: CancellationToken,
+    reminders_task: Option<JoinHandle<()>>,
     workers_stop: CancellationToken,
     owners_stop: CancellationToken,
     presenter_stop: CancellationToken,
@@ -238,6 +317,7 @@ struct ApplicationOwner {
     server_stop: CancellationToken,
     server_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
+    ai_runtime: Option<RunningAiApplication>,
 }
 
 impl ApplicationLifecycle {
@@ -245,16 +325,20 @@ impl ApplicationLifecycle {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
+            releases: release_feed,
             migrations,
             presets,
             generator,
             knowledge,
             limits,
             voice,
+            ai_runtime,
+            ai_knowledge,
             settings,
             timeline,
             server,
             games,
+            reminders: reminders_config,
         } = config;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
@@ -269,9 +353,45 @@ impl ApplicationLifecycle {
         .map_err(|error| ApplicationError::Task(error.to_string()))?;
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
+        let settings_owner = settings.owner();
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
-        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
+        let ai_runtime = match ai_runtime {
+            Some(configuration) => Some(Box::pin(configuration.activate()).await?),
+            None => None,
+        };
+        let speech = ai_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.speech_recognizer())
+            .map(Arc::new);
+        let voice = match &ai_runtime {
+            Some(runtime) if runtime.has_service(AiService::Tts) => runtime.voice_provider(),
+            _ => voice,
+        };
+        let knowledge = match ai_knowledge {
+            None => knowledge,
+            Some(selection) => {
+                let runtime = ai_runtime
+                    .as_ref()
+                    .ok_or(ApplicationError::MissingEmbeddingWorker)?;
+                let adapter = runtime
+                    .embedding_provider(selection.space)
+                    .ok_or(ApplicationError::MissingEmbeddingWorker)?;
+                let provider: Arc<dyn EmbeddingProvider> = Arc::new(adapter);
+                let mut retriever =
+                    SemanticMemoryRetriever::new(provider, selection.cache_entries)?;
+                if let Some(reranker) = selection.reranker {
+                    let adapter = runtime
+                        .reranker(reranker.model_id, reranker.protocol)
+                        .ok_or(ApplicationError::MissingRerankerWorker)?
+                        .map_err(|error| EmbeddingError::Configuration(error.to_string()))?;
+                    let scorer: Arc<dyn RerankProvider> = Arc::new(adapter);
+                    retriever = retriever.with_reranker(scorer, reranker.policy)?;
+                }
+                KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
+            }
+        };
+        let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let selection_updates = timeline
             .lock()
             .expect("timeline lock poisoned")
@@ -279,15 +399,22 @@ impl ApplicationLifecycle {
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
-        let (characters, owners) = CharacterRegistry::spawn(
+        let (releases, release_lifecycle) = ReleasesPresenter::new(release_feed);
+        let releases_task = tokio::spawn(release_lifecycle.run(presenter_stop.child_token()));
+        let reminders_wake = Arc::new(tokio::sync::Notify::new());
+        let (characters, owners) = CharacterRegistry::spawn_with_reminders(
             Arc::clone(&timeline),
             owners_stop.clone(),
             limits.character_commands.get(),
+            ReminderBridge {
+                settings: Arc::clone(&settings_owner),
+                wake: Arc::clone(&reminders_wake),
+                clock: Arc::clone(&reminders_config.clock),
+            },
         );
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
-        let settings_owner = settings.owner();
         let games = Arc::new(games);
         for id in CharacterId::ALL {
             characters
@@ -326,6 +453,15 @@ impl ApplicationLifecycle {
             timeline: Arc::clone(&timeline),
         });
         let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
+        let reminders_stop = CancellationToken::new();
+        let (reminders, reminders_task) = ReminderService::start(
+            Arc::clone(&timeline),
+            Arc::clone(&api),
+            Arc::clone(&settings_owner),
+            reminders_config,
+            reminders_wake,
+            reminders_stop.clone(),
+        );
         let discovery = api.registry.observe();
         let (chat, runner) = PresenterRunner::new(
             Arc::clone(&api),
@@ -344,9 +480,13 @@ impl ApplicationLifecycle {
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),
+            reminders,
         });
         let mut owner = ApplicationOwner {
+            releases_task: Some(releases_task),
             bindings: Arc::clone(&bindings),
+            reminders_stop,
+            reminders_task: Some(reminders_task),
             workers_stop,
             owners_stop,
             presenter_stop,
@@ -358,6 +498,7 @@ impl ApplicationLifecycle {
             server_stop,
             server_task: None,
             lease,
+            ai_runtime,
         };
         owner.lease.publish(Arc::clone(&bindings));
         owner.server_task = Some(tokio::spawn(
@@ -373,6 +514,15 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                releases,
+                connections: ConnectionsPresenter::new(server.clone()),
+                conversation: ConversationPresenter::new(
+                    chat.clone(),
+                    CharactersPresenter::new(bindings.characters.clone()),
+                    Arc::clone(&timeline),
+                    Arc::clone(&bindings.settings),
+                    Arc::clone(&presets),
+                ),
                 chat,
                 settings: settings_presenter,
                 presets: PresetsPresenter::new(Arc::clone(&presets)),
@@ -381,10 +531,28 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            speech,
             id,
             stop,
             completion: Some(completion),
         })
+    }
+
+    /// An ASR-powered microphone session is available only when ASR was explicitly activated.
+    /// Its cancellation token is a child of the application's lifecycle token.
+    pub fn speech_session(
+        &self,
+        character: CharacterId,
+        source: crate::request::RequestSource,
+        playback: Arc<dyn crate::audio::device::AudioPlayback>,
+    ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
+        let recognizer = self.speech.as_ref()?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>,
+            Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
+            playback,
+        );
+        Some((handler, self.stop.child_token()))
     }
 
     pub fn presenter(&self) -> &GuiPresenter {
@@ -581,6 +749,14 @@ impl ApplicationOwner {
                 Err(error) => failure = Some(ApplicationError::Task(error.to_string())),
             }
         }
+        // Stop the reminder scheduler before character workers so an in-flight
+        // delivery is interrupted with the Shutdown cause and stays pending.
+        self.reminders_stop.cancel();
+        if let Some(task) = self.reminders_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         self.workers_stop.cancel();
         for worker in self.workers.drain(..) {
             if let Err(error) = worker.await {
@@ -595,10 +771,20 @@ impl ApplicationOwner {
             }
         }
         self.presenter_stop.cancel();
+        if let Some(task) = self.releases_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         if let Some(task) = self.presenter_task.take()
             && let Err(error) = task.await
         {
             failure = Some(ApplicationError::Task(error.to_string()));
+        }
+        if let Some(runtime) = self.ai_runtime.take()
+            && let Err(error) = runtime.shutdown().await
+        {
+            failure = Some(ApplicationError::Ai(error));
         }
         self.settings_stop.cancel();
         if let Some(task) = self.settings_task.take() {
@@ -627,7 +813,11 @@ impl Drop for ApplicationOwner {
         self.bindings.chat.registry.close();
         self.workers_stop.cancel();
         self.presenter_stop.cancel();
+        if let Some(task) = &self.releases_task {
+            task.abort();
+        }
         self.server_stop.cancel();
+        self.reminders_stop.cancel();
         self.bindings.settings.close();
         self.settings_stop.cancel();
         self.owners_stop.cancel();
@@ -640,6 +830,9 @@ impl Drop for ApplicationOwner {
             task.abort();
         }
         if let Some(task) = &self.server_task {
+            task.abort();
+        }
+        if let Some(task) = &self.reminders_task {
             task.abort();
         }
         if let Some(task) = &self.settings_task {

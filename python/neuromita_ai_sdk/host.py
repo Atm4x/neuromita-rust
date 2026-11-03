@@ -1,6 +1,8 @@
 """Single-process plugin executor; OS process ownership and IPC are Rust responsibilities."""
 
 import argparse
+import base64
+import uuid
 import contextlib
 import importlib.util
 import json
@@ -9,7 +11,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from neuromita_ai_sdk import API_VERSION, InstallPlan
+from neuromita_ai_sdk import API_VERSION, InstallPlan, validate_settings
 
 
 class PluginHost:
@@ -17,6 +19,7 @@ class PluginHost:
         self.plugins_dir = plugins_dir.resolve()
         self.active_by_kind: dict[str, Any] = {}
         self.active_ids_by_kind: dict[str, str] = {}
+        self.audio_streams: dict[str, tuple[bytes, int]] = {}
 
     def _manifest(self, directory: Path) -> dict[str, Any]:
         if directory.is_symlink() or not directory.is_dir():
@@ -32,7 +35,7 @@ class PluginHost:
             raise ValueError("plugin id must match its safe directory name")
         if manifest.get("api_version") != API_VERSION:
             raise ValueError("incompatible plugin API version")
-        if manifest.get("kind") not in ("tts", "asr", "embedding"):
+        if manifest.get("kind") not in ("tts", "asr", "embedding", "reranker"):
             raise ValueError("unsupported plugin kind")
         if not isinstance(manifest.get("name"), str) or not manifest["name"]:
             raise ValueError("plugin name is required")
@@ -104,12 +107,20 @@ class PluginHost:
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
         if op == "discover":
             return self.discover()
-        if op in ("describe", "install_plan", "probe_install", "settings_schema"):
+        if op in ("describe", "install_plan", "probe_install", "settings_schema", "validate_config"):
             plugin = (self._load_install_contract(args["plugin_id"])
-                      if op in ("install_plan", "probe_install", "settings_schema")
+                      if op in ("install_plan", "probe_install", "settings_schema", "validate_config")
                       else self._load(args["plugin_id"]))
             with contextlib.redirect_stdout(sys.stderr):
-                result = getattr(plugin, op)()
+                if op == "validate_config":
+                    result = validate_settings(plugin.settings_schema(), args.get("settings", {}))
+                elif op in ("install_plan", "probe_install") and args.get("settings"):
+                    operation = getattr(plugin, op + "_for_settings", None)
+                    if not callable(operation):
+                        raise ValueError("plugin does not support model-specific install settings")
+                    result = operation(args["settings"])
+                else:
+                    result = getattr(plugin, op)()
             if op == "install_plan":
                 if not isinstance(result, InstallPlan):
                     raise ValueError("install_plan must return InstallPlan")
@@ -129,6 +140,53 @@ class PluginHost:
             self.active_by_kind[kind] = plugin
             self.active_ids_by_kind[kind] = plugin_id
             return result
+        if op == "infer_stream_start":
+            if self.audio_streams:
+                raise ValueError("another audio stream has not been drained or cancelled")
+            if args.get("kind") != "tts":
+                raise ValueError("audio streaming requires initialized TTS")
+            plugin = self.active_by_kind.get("tts")
+            if plugin is None:
+                raise ValueError("TTS is not initialized")
+            input_data = args.get("input", {})
+            if not isinstance(input_data, dict):
+                raise ValueError("input must be an object")
+            with contextlib.redirect_stdout(sys.stderr):
+                value = plugin.infer(input_data)
+            if not isinstance(value, dict) or value.get("format") != "wav":
+                raise ValueError("stream source must return WAV")
+            encoded = value.get("audio_base64")
+            if not isinstance(encoded, str) or len(encoded) > 90_000_000:
+                raise ValueError("stream source exceeds maximum size")
+            try:
+                audio = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error) as error:
+                raise ValueError("stream source returned invalid base64") from error
+            if len(audio) < 44 or len(audio) > 64 * 1024 * 1024 or audio[:4] != b"RIFF" or audio[8:12] != b"WAVE":
+                raise ValueError("stream source returned invalid WAV")
+            token = uuid.uuid4().hex
+            self.audio_streams[token] = (audio, 0)
+            return {"stream_id": token, "length": len(audio), "format": "wav"}
+        if op == "infer_stream_next":
+            token = args.get("stream_id")
+            if not isinstance(token, str) or token not in self.audio_streams:
+                raise ValueError("unknown audio stream")
+            audio, offset = self.audio_streams[token]
+            size = 48 * 1024
+            chunk = audio[offset:offset + size]
+            offset += len(chunk)
+            done = offset == len(audio)
+            if done:
+                del self.audio_streams[token]
+            else:
+                self.audio_streams[token] = (audio, offset)
+            return {"stream_id": token, "chunk_base64": base64.b64encode(chunk).decode("ascii"), "done": done}
+        if op == "infer_stream_cancel":
+            token = args.get("stream_id")
+            if not isinstance(token, str) or token not in self.audio_streams:
+                raise ValueError("unknown audio stream")
+            del self.audio_streams[token]
+            return {"cancelled": True}
         if op == "infer":
             kind = args.get("kind")
             plugin = self.active_by_kind.get(kind)
@@ -139,7 +197,16 @@ class PluginHost:
                 raise ValueError("input must be an object")
             with contextlib.redirect_stdout(sys.stderr):
                 return plugin.infer(input_data)
+        if op == "active_settings_schema":
+            kind = args.get("kind")
+            plugin = self.active_by_kind.get(kind)
+            if plugin is None:
+                raise ValueError("requested service is not initialized")
+            with contextlib.redirect_stdout(sys.stderr):
+                return plugin.settings_schema()
         if op == "unload":
+            if self.audio_streams:
+                raise ValueError("cancel the active stream before unloading")
             kind = args.get("kind")
             plugin = self.active_by_kind.get(kind)
             if plugin is not None:

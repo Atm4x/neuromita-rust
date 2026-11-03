@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::reminders::{MAX_TEXT_BYTES, ReminderRequest, ReminderToolCommand, parse_repeat};
 use crate::turn::object_or_json_string;
 pub use crate::turn::{ResponseSegment, SegmentIntent};
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,69 @@ impl StructuredResponse {
         }
         self.memory_commands()?;
         Ok(())
+    }
+
+    pub(crate) fn reminder_requests(&self) -> Result<Vec<ReminderRequest>, GenerationError> {
+        let invalid = |reason: &str| {
+            GenerationError::Response(format!("invalid reminder operation: {reason}"))
+        };
+        let mut requests = Vec::new();
+        for raw in self.reminder_add.iter().flatten() {
+            let (due, text) = raw
+                .split_once('|')
+                .ok_or_else(|| invalid("reminder_add requires due_iso|text"))?;
+            let due = due.trim();
+            let text = text.trim();
+            if due.is_empty() || text.is_empty() || text.len() > MAX_TEXT_BYTES {
+                return Err(invalid(
+                    "reminder_add requires nonempty due and bounded text",
+                ));
+            }
+            requests.push(ReminderRequest::StructuredAdd {
+                due_iso: due.to_owned(),
+                text: text.to_owned(),
+            });
+        }
+        for raw in self.timer_add.iter().flatten() {
+            let (delay, instruction) = raw
+                .split_once('|')
+                .ok_or_else(|| invalid("timer_add requires delay_seconds|instruction"))?;
+            let delay = delay
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| invalid("timer_add delay is not a number"))?;
+            let instruction = instruction.trim();
+            if !delay.is_finite() || delay <= 0.0 || instruction.is_empty() {
+                return Err(invalid("timer_add requires positive delay and instruction"));
+            }
+            if instruction.len() > MAX_TEXT_BYTES {
+                return Err(invalid("timer_add instruction is too large"));
+            }
+            requests.push(ReminderRequest::StructuredTimer {
+                delay_seconds: delay,
+                instruction: instruction.to_owned(),
+            });
+        }
+        for raw in self.reminder_delete.iter().flatten() {
+            let number = raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| invalid("reminder_delete requires a positive numeric N"))?;
+            if number == 0 {
+                return Err(invalid("reminder_delete requires a positive numeric N"));
+            }
+            requests.push(ReminderRequest::StructuredDelete { number });
+        }
+        if let Some(tool) = &self.tool_call {
+            if tool.name.trim() != "reminder" {
+                return Err(invalid("only the reminder tool is supported"));
+            }
+            requests.push(ReminderRequest::Tool(parse_reminder_tool_args(&tool.args)?));
+        }
+        if requests.len() > 32 {
+            return Err(invalid("too many reminder operations in one response"));
+        }
+        Ok(requests)
     }
 
     fn memory_commands(&self) -> Result<Vec<MemoryCommand>, GenerationError> {
@@ -209,6 +273,10 @@ impl StructuredResponse {
         if !game.is_empty() {
             effects.push(ResponseEffect::Game(game));
         }
+        let reminders = self.reminder_requests()?;
+        if !reminders.is_empty() {
+            effects.push(ResponseEffect::MutateReminders(reminders));
+        }
         Ok(effects)
     }
 
@@ -262,12 +330,8 @@ impl StructuredResponse {
             .any(ResponseSegment::has_unsupported_non_game_content)
             || self.image_description.is_some()
             || self.secret_exposed.is_some()
-            || self.reminder_add.is_some()
-            || self.reminder_delete.is_some()
-            || self.timer_add.is_some()
             || self.entities.is_some()
             || self.relations.is_some()
-            || self.tool_call.is_some()
             || self.custom_fields.is_some()
         {
             return Err(GenerationError::Response(
@@ -275,7 +339,88 @@ impl StructuredResponse {
             ));
         }
         self.game_actions()?;
+        self.reminder_requests()?;
         Ok(())
+    }
+}
+
+fn parse_reminder_tool_args(
+    args: &Map<String, Value>,
+) -> Result<ReminderToolCommand, GenerationError> {
+    let invalid =
+        |reason: &str| GenerationError::Response(format!("invalid reminder tool call: {reason}"));
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("action is required"))?
+        .trim()
+        .to_ascii_lowercase();
+    let string = |key: &str| -> Result<Option<String>, GenerationError> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(_) => Err(invalid(&format!("{key} must be a string"))),
+        }
+    };
+    let number = |key: &str| -> Result<Option<u64>, GenerationError> {
+        match args.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(value)) => value
+                .as_u64()
+                .filter(|value| *value > 0)
+                .map(Some)
+                .ok_or_else(|| invalid(&format!("{key} must be a positive integer"))),
+            Some(_) => Err(invalid(&format!("{key} must be a positive integer"))),
+        }
+    };
+    match action.as_str() {
+        "list" => Ok(ReminderToolCommand::List),
+        "add" => {
+            let text = string("text")?.ok_or_else(|| invalid("text is required"))?;
+            let due = string("due")?.ok_or_else(|| invalid("due is required"))?;
+            let repeat = string("repeat")?
+                .map(|value| parse_repeat(&value))
+                .transpose()
+                .map_err(|error| invalid(&error.to_string()))?;
+            Ok(ReminderToolCommand::Add { text, due, repeat })
+        }
+        "timer" => {
+            let instruction =
+                string("instruction")?.ok_or_else(|| invalid("instruction is required"))?;
+            let delay = args
+                .get("delay_seconds")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| invalid("delay_seconds is required"))?;
+            if !delay.is_finite() || delay <= 0.0 {
+                return Err(invalid("delay_seconds must be a positive finite number"));
+            }
+            Ok(ReminderToolCommand::Timer {
+                instruction,
+                delay_seconds: delay,
+            })
+        }
+        "delete" => Ok(ReminderToolCommand::Delete {
+            number: number("n")?.ok_or_else(|| invalid("n is required"))?,
+        }),
+        "update" => {
+            let number = number("n")?.ok_or_else(|| invalid("n is required"))?;
+            let text = string("text")?;
+            let due = string("due")?;
+            let repeat = string("repeat")?
+                .map(|value| parse_repeat(&value))
+                .transpose()
+                .map_err(|error| invalid(&error.to_string()))?;
+            if text.is_none() && due.is_none() && repeat.is_none() {
+                return Err(invalid("update requires text, due or repeat"));
+            }
+            Ok(ReminderToolCommand::Update {
+                number,
+                text,
+                due,
+                repeat,
+            })
+        }
+        other => Err(invalid(&format!("unknown action '{other}'"))),
     }
 }
 
@@ -403,13 +548,16 @@ mod tests {
             schema["properties"]["segments"]["items"]["required"],
             json!(["text"])
         );
-        assert!(
-            schema["properties"]
-                .as_object()
-                .unwrap()
-                .get("tool_call")
-                .is_none()
+        let properties = schema["properties"].as_object().unwrap();
+        for field in ["reminder_add", "reminder_delete", "timer_add", "tool_call"] {
+            assert!(properties.contains_key(field), "{field} must be reachable");
+        }
+        assert_eq!(
+            properties["tool_call"]["properties"]["args"]["properties"]["action"]["enum"],
+            json!(["list", "add", "timer", "delete", "update"])
         );
+        assert!(properties.get("entities").is_none());
+        assert!(properties.get("relations").is_none());
         let segment = &schema["properties"]["segments"]["items"]["properties"];
         assert_eq!(segment["commands"]["type"], "array");
         assert_eq!(segment["start_game"]["type"], "string");

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
-use crate::identity::{CharacterId, EventId};
+use crate::identity::{CharacterId, EventId, RequestId};
 
 use super::{
     character_view,
@@ -21,6 +21,7 @@ pub enum MessageRole {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectedMessage {
     pub event_id: EventId,
+    pub request_id: Option<RequestId>,
     pub kind: EventKind,
     pub message_id: String,
     pub external_message_id: Option<String>,
@@ -44,7 +45,7 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
                 MessageRole::User
             }
         }
-        EventKind::SessionNote => MessageRole::System,
+        EventKind::SessionNote | EventKind::ReminderToolResult => MessageRole::System,
         _ => return None,
     };
     let mut fields = draft
@@ -78,6 +79,12 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
         .unwrap_or_default();
     Some(ProjectedMessage {
         event_id: draft.id,
+        request_id: draft
+            .payload
+            .get("request_id")
+            .and_then(Value::as_str)
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .map(RequestId),
         kind: draft.kind,
         message_id,
         external_message_id: draft.external_message_id.clone(),

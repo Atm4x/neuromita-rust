@@ -6,7 +6,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -20,12 +20,14 @@ use crate::{
         CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
     },
     games::{
-        GameError, GameKey, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause,
-        PendingInvite, ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
+        GameError, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause, PendingInvite,
+        ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
     },
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     memory::MemoryCommand,
+    reminders::{ReminderProjection, resolve_requests},
+    settings::{RemindersSettings, SettingsOwner},
     timeline::domain::{AppliedEffect, CharacterBehavior},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
@@ -36,6 +38,15 @@ use crate::{
     turn::{ResponseEffect, ResponseSegment, TurnProposal},
     voice::AudioArtifact,
 };
+
+/// Runtime coupling that lets an accepted reply commit reminder effects and
+/// wake the owned scheduler without a second schedule authority.
+#[derive(Clone)]
+pub(crate) struct ReminderBridge {
+    pub(crate) settings: Arc<SettingsOwner>,
+    pub(crate) wake: Arc<Notify>,
+    pub(crate) clock: Arc<dyn crate::reminders::Clock>,
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum CharacterError {
@@ -70,7 +81,7 @@ pub(crate) struct AcceptanceContext {
     pub intent: TurnIntent,
     pub state_revision: u64,
     pub turn: TimelineTurn,
-    pub game: Option<GameKey>,
+    pub game: Option<EventId>,
 }
 
 enum Command {
@@ -118,9 +129,14 @@ enum Command {
 #[derive(Clone)]
 pub struct CharacterHandle {
     commands: mpsc::Sender<Command>,
+    memory_updates: watch::Receiver<u64>,
 }
 
 impl CharacterHandle {
+    pub(crate) fn memory_updates(&self) -> watch::Receiver<u64> {
+        self.memory_updates.clone()
+    }
+
     pub async fn memories(&self) -> Result<CharacterMemorySnapshot, CharacterError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -256,12 +272,28 @@ pub(crate) struct CharacterRegistry {
 }
 
 impl CharacterRegistry {
+    #[cfg(test)]
     pub(crate) fn spawn(
         timeline: Arc<Mutex<SessionTimeline>>,
         stop: CancellationToken,
         capacity: usize,
     ) -> (Self, Vec<JoinHandle<()>>) {
-        Self::spawn_with_maintenance_interval(timeline, stop, capacity, Duration::from_secs(60))
+        Self::spawn_inner(timeline, stop, capacity, Duration::from_secs(60), None)
+    }
+
+    pub(crate) fn spawn_with_reminders(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        reminders: ReminderBridge,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        Self::spawn_inner(
+            timeline,
+            stop,
+            capacity,
+            Duration::from_secs(60),
+            Some(reminders),
+        )
     }
 
     fn maintenance_pass(
@@ -285,11 +317,22 @@ impl CharacterRegistry {
             .unwrap_or(u64::MAX)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_with_maintenance_interval(
         timeline: Arc<Mutex<SessionTimeline>>,
         stop: CancellationToken,
         capacity: usize,
         interval: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        Self::spawn_inner(timeline, stop, capacity, interval, None)
+    }
+
+    fn spawn_inner(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        interval: Duration,
+        reminders: Option<ReminderBridge>,
     ) -> (Self, Vec<JoinHandle<()>>) {
         assert!(
             !interval.is_zero(),
@@ -312,10 +355,20 @@ impl CharacterRegistry {
             let handler = CharacterHandler {
                 character,
                 timeline: Arc::clone(&timeline),
-                game: GameSlot::default(),
                 policy: GamePolicy::default(),
+                reminders: reminders.clone(),
             };
-            handles.insert(id, CharacterHandle { commands: send });
+            let memory_updates = timeline
+                .lock()
+                .expect("timeline lock poisoned")
+                .observe_memory_changes(id);
+            handles.insert(
+                id,
+                CharacterHandle {
+                    commands: send,
+                    memory_updates,
+                },
+            );
             tasks.push(tokio::spawn(handler.run(receive, stop.clone())));
         }
         let maintenance_timeline = Arc::clone(&timeline);
@@ -350,8 +403,8 @@ impl CharacterRegistry {
 struct CharacterHandler {
     character: Character,
     timeline: Arc<Mutex<SessionTimeline>>,
-    game: GameSlot,
     policy: GamePolicy,
+    reminders: Option<ReminderBridge>,
 }
 
 impl CharacterHandler {
@@ -498,19 +551,6 @@ impl CharacterHandler {
         timeline
             .assert_admission(self.character.id, admission)
             .map_err(|_| CharacterError::StaleState)?;
-        let current_head = timeline.anchor();
-        self.game.bind_branch(timeline.selection().branch_id);
-        // The authoritative match is in-memory only, so a historical prefix
-        // cannot be paired with the current board without inventing history.
-        let historical = match at {
-            ContextPosition::Latest => false,
-            ContextPosition::At(anchor) => anchor != current_head,
-        };
-        if historical && !self.game.is_empty() {
-            return Err(CharacterError::Internal(
-                "historical context generation is unavailable while a match is active".into(),
-            ));
-        }
         let captured =
             timeline
                 .capture_context(self.character.id, at)
@@ -524,6 +564,15 @@ impl CharacterHandler {
         let now = CharacterRegistry::now_unix_ms();
         let memories = captured.memories.list_at(now);
         let memory_islands = captured.memories.islands_at(now);
+        let reminders = match &self.reminders {
+            Some(_) => crate::reminders::projection::prompt_reminders_at(
+                &timeline,
+                anchor,
+                self.character.id,
+            )
+            .map_err(|error| CharacterError::Internal(error.to_string()))?,
+            None => Vec::new(),
+        };
         let reaction = match intent {
             TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
                 captured
@@ -571,16 +620,13 @@ impl CharacterHandler {
             memory_islands,
             history: captured.history,
             view: captured.view,
-            game: if historical {
-                None
-            } else {
-                self.game.projection(GameSide::Mita)
-            },
+            game: captured.game.projection(GameSide::Mita),
+            reminders,
             current_input: guidance,
             focus: GenerationFocus { intent, reaction },
             anchor,
             turn,
-            game_key: self.game.key(),
+            game_key: captured.game_token,
         })
     }
 
@@ -596,8 +642,9 @@ impl CharacterHandler {
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        let current_at = timeline.anchor();
         let current = timeline
-            .inspect_context_at(self.character.id, timeline.anchor())
+            .inspect_context_at(self.character.id, current_at)
             .map_err(CharacterError::Internal)?;
         self.character.state = current.state;
         if context.state_revision != self.character.state.revision {
@@ -607,8 +654,7 @@ impl CharacterHandler {
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
         let branch = timeline.selection().branch_id;
-        self.game.bind_branch(branch);
-        let mut next_game = self.game.clone();
+        let mut next_game = current.game;
         let mut game_effects = Vec::new();
         let mut pending_invite = None;
         if let Some(actions) = proposed.effects().iter().find_map(|effect| match effect {
@@ -618,7 +664,7 @@ impl CharacterHandler {
             if !self.policy.enabled && actions.contains(&crate::games::ModelGameAction::Start) {
                 return Err(CharacterError::InvalidGame(GameError::Disabled));
             }
-            if context.game != self.game.key() {
+            if context.game != current.game_token {
                 return Err(CharacterError::StaleState);
             }
             let applied = next_game
@@ -628,6 +674,26 @@ impl CharacterHandler {
                 game_effects.push(AppliedEffect::GameAdvanced(fact));
             }
             pending_invite = applied.invite;
+        }
+        if let TurnIntent::React(cause) = context.intent
+            && self.reminders.is_some()
+        {
+            let selection = timeline.selection();
+            let facts = timeline
+                .reminder_facts(selection)
+                .map_err(|error| CharacterError::Internal(error.to_string()))?;
+            let projection =
+                ReminderProjection::from_facts(selection.branch_id, self.character.id, &facts)
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+            if let Some(delivery) = projection.delivery_by_event(cause)
+                && !matches!(
+                    delivery.state,
+                    crate::reminders::DeliveryState::Pending
+                        | crate::reminders::DeliveryState::Retrying
+                )
+            {
+                return Err(CharacterError::StaleState);
+            }
         }
         let current_behavior = CharacterBehavior {
             attitude: self.character.state.attitude,
@@ -658,8 +724,71 @@ impl CharacterHandler {
                     );
                 }
                 ResponseEffect::Game(_) => {}
+                ResponseEffect::MutateReminders(requests) => {
+                    let Some(bridge) = &self.reminders else {
+                        return Err(CharacterError::Internal(
+                            "reminder settings are not wired".into(),
+                        ));
+                    };
+                    let settings = bridge
+                        .settings
+                        .snapshot::<RemindersSettings>()
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?
+                        .value;
+                    let now = bridge.clock.now();
+                    if !settings.enabled {
+                        return Err(CharacterError::Internal(
+                            "reminders are disabled in settings".into(),
+                        ));
+                    }
+                    let selection = timeline.selection();
+                    let facts = timeline
+                        .reminder_facts(selection)
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let mut projection = ReminderProjection::from_facts(
+                        selection.branch_id,
+                        self.character.id,
+                        &facts,
+                    )
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let captured_anchor = ContextAnchor {
+                        branch_id: context.turn.selection.branch_id.0,
+                        through: context.turn.context_head,
+                    };
+                    let captured_facts = timeline
+                        .reminder_facts_at(captured_anchor)
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let captured = ReminderProjection::from_facts(
+                        context.turn.selection.branch_id,
+                        self.character.id,
+                        &captured_facts,
+                    )
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    if captured.reminder_state() != projection.reminder_state() {
+                        return Err(CharacterError::StaleState);
+                    }
+                    let (changes, diagnostic) = resolve_requests(
+                        &mut projection,
+                        self.character.id,
+                        requests,
+                        now,
+                        &settings.timezone,
+                        settings.policy,
+                    )
+                    .map_err(|error| {
+                        CharacterError::Internal(format!("invalid reminder effects: {error}"))
+                    })?;
+                    effects.extend(changes.into_iter().map(AppliedEffect::ReminderChanged));
+                    if let Some(text) = diagnostic {
+                        effects.push(AppliedEffect::ReminderToolResult(text));
+                    }
+                }
             }
         }
+        let has_game_effects = proposed
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ResponseEffect::Game(_)));
         effects.extend(game_effects);
         let persisted_segments = proposed
             .segments()
@@ -667,17 +796,25 @@ impl CharacterHandler {
             .map(|segment| segment.sanitized_for_persistence())
             .collect::<Vec<_>>();
         let accepted = timeline
-            .append_reply_tracked(GeneratedReply {
-                request,
-                intent: context.intent,
-                turn: context.turn,
-                expected_revision: context.state_revision,
-                content: serde_json::to_value(&persisted_segments).map_err(|error| {
-                    CharacterError::Internal(format!("invalid accepted message segments: {error}"))
-                })?,
-                audience,
-                effects: effects.clone(),
-            })
+            .append_reply_tracked(
+                GeneratedReply {
+                    request,
+                    intent: context.intent,
+                    turn: context.turn,
+                    expected_revision: context.state_revision,
+                    content: serde_json::to_value(&persisted_segments).map_err(|error| {
+                        CharacterError::Internal(format!(
+                            "invalid accepted message segments: {error}"
+                        ))
+                    })?,
+                    audience,
+                    effects: effects.clone(),
+                },
+                has_game_effects.then(|| crate::timeline::GameCommit {
+                    state: next_game.clone(),
+                    expected_head: current_at.through,
+                }),
+            )
             .map_err(|error| match error {
                 crate::timeline::domain::TimelineError::ConcurrentWrite => {
                     CharacterError::StaleState
@@ -690,8 +827,15 @@ impl CharacterHandler {
         let game_invite = pending_invite.and_then(|pending| {
             Self::resolve_invite(pending, &accepted.game, next_game.last_event())
         });
-        self.game = next_game;
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
+        if proposed
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ResponseEffect::MutateReminders(_)))
+            && let Some(bridge) = &self.reminders
+        {
+            bridge.wake.notify_one();
+        }
         Ok(AcceptedResponse {
             state_after: self.character.state.clone(),
             text: Arc::clone(proposed.text()),
@@ -726,20 +870,18 @@ impl CharacterHandler {
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         let branch = timeline.selection().branch_id;
-        let had_match = !self.game.is_empty();
         if !self.policy.enabled && matches!(command, UserGameCommand::Start { .. }) {
             return Err(CharacterError::InvalidGame(GameError::Disabled));
         }
-        self.game.bind_branch(branch);
-        if had_match && self.game.is_empty() {
-            return Err(CharacterError::InvalidGame(GameError::StaleState));
-        }
-        let mut next = self.game.clone();
+        let at = timeline.anchor();
+        let (mut next, _) = timeline
+            .game_at(self.character.id, at)
+            .map_err(CharacterError::Internal)?;
         let applied = next
             .apply_user(branch, command)
             .map_err(CharacterError::InvalidGame)?;
         let events = timeline
-            .append_game_facts(self.character.id, &applied.facts)
+            .append_game_facts(self.character.id, &applied.facts, &mut next, at.through)
             .map_err(|error| CharacterError::Internal(error.to_string()))?;
         for event in &events {
             next.record_event(*event);
@@ -748,7 +890,6 @@ impl CharacterHandler {
             .invite
             .and_then(|pending| Self::resolve_invite(pending, &events, next.last_event()));
         let receipt = Self::game_receipt(&next, next.projection(GameSide::Player), events);
-        self.game = next;
         Ok(GameReply { receipt, invite })
     }
 
@@ -757,10 +898,12 @@ impl CharacterHandler {
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
-        self.game.bind_branch(timeline.selection().branch_id);
+        let (game, _) = timeline
+            .game_at(self.character.id, timeline.anchor())
+            .map_err(CharacterError::Internal)?;
         Ok(Self::game_receipt(
-            &self.game,
-            self.game.projection(GameSide::Player),
+            &game,
+            game.projection(GameSide::Player),
             Vec::new(),
         ))
     }
@@ -792,6 +935,7 @@ impl CharacterHandler {
             prompt: Arc::clone(&self.character.prompt),
             state: captured.state,
             working_state: captured.working_state,
+            game: captured.game.projection(GameSide::Mita),
             memories: captured.memories.list(),
             memory_islands: captured.memories.islands(),
             history: captured.history,
@@ -820,8 +964,157 @@ mod turn_tests {
         CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(SessionTimeline::new())),
-            game: GameSlot::default(),
             policy: GamePolicy::default(),
+            reminders: None,
+        }
+    }
+
+    fn game_proposal() -> TurnProposal {
+        let mut response = crate::generation::StructuredResponse::spoken("placed");
+        response.attitude_change = 5.0;
+        response.segments[0].commands = vec!["PlaceShip,A1,4,H".into()];
+        TurnProposal::from_structured(response).unwrap()
+    }
+
+    #[test]
+    fn game_token_rejects_flag_change_and_epoch_rejects_game_proposal_atomically() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let (request, context) = prepare(&mut handler);
+        handler
+            .game_command(UserGameCommand::SetAutoReactions(true))
+            .unwrap();
+        let before = handler.timeline.lock().unwrap().anchor();
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            game_proposal(),
+            None,
+            ConversationAudience::private_to(CharacterId::Mita),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+        let (request, context) = prepare(&mut handler);
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            let selection = timeline.selection();
+            timeline
+                .reset_character_context(selection, CharacterId::Mita, EventId::new())
+                .unwrap();
+        }
+        let before = handler.timeline.lock().unwrap().anchor();
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            game_proposal(),
+            None,
+            ConversationAudience::private_to(CharacterId::Mita),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+    }
+
+    #[test]
+    fn private_game_commit_rejects_a_head_changed_after_preparation() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let mut timeline = handler.timeline.lock().unwrap();
+        let at = timeline.anchor();
+        let (mut next, _) = timeline.game_at(CharacterId::Mita, at).unwrap();
+        let applied = next
+            .apply_user(
+                timeline.selection().branch_id,
+                UserGameCommand::SetAutoReactions(true),
+            )
+            .unwrap();
+        timeline
+            .publish_player_message(
+                CharacterId::Mita,
+                EventId::new(),
+                Arc::from("concurrent write"),
+            )
+            .unwrap();
+        let before = timeline.anchor();
+        assert!(matches!(
+            timeline.append_game_facts(CharacterId::Mita, &applied.facts, &mut next, at.through),
+            Err(crate::timeline::domain::TimelineError::ConcurrentWrite)
+        ));
+        assert_eq!(timeline.anchor(), before);
+        assert!(
+            !timeline
+                .game_at(CharacterId::Mita, before)
+                .unwrap()
+                .0
+                .auto_reactions()
+        );
+    }
+
+    #[test]
+    fn private_game_snapshot_boundary_rejects_leaks_bad_replay_and_unknown_fields() {
+        use crate::timeline::domain::{SessionId, TimelineStore};
+        use serde_json::json;
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        handler
+            .game_command(UserGameCommand::PlaceShip {
+                coord: crate::games::seabattle::Coordinate::parse("A1").unwrap(),
+                length: 4,
+                orientation: crate::games::seabattle::Orientation::Horizontal,
+            })
+            .unwrap();
+        let timeline = handler.timeline.lock().unwrap();
+        let (game, _) = timeline
+            .game_at(CharacterId::Mita, timeline.anchor())
+            .unwrap();
+        let canonical = serde_json::to_value(game).unwrap();
+        let mut store = TimelineStore::new();
+        let branch = BranchId::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        for mode in 0..6 {
+            let mut draft = EventDraft::new(EventKind::GameStateCaptured);
+            draft.actor = Some("mita".into());
+            draft.observers.insert(CharacterId::Mita);
+            let mut state = canonical.clone();
+            match mode {
+                0 => {
+                    draft.observers.insert(CharacterId::KindMita);
+                }
+                1 => {
+                    state["unknown"] = json!(true);
+                }
+                2 => {
+                    state["current"]["game"]["actions"][0]["start"] = json!("K11");
+                }
+                3 => {
+                    state["current"]["game"]["actions"][0]["length"] = json!(5);
+                }
+                4 => {
+                    state["current"]["generation"] = json!(123);
+                }
+                _ => {
+                    draft.actor = Some("kind-mita".into());
+                }
+            }
+            draft.payload.insert("game_state".into(), state);
+            assert!(
+                store
+                    .append(branch, 0, &format!("bad:{mode}"), json!({}), vec![draft])
+                    .is_err(),
+                "mode {mode}"
+            );
+            assert!(store.world(branch).unwrap().is_empty());
         }
     }
 
@@ -1000,8 +1293,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
-                game: GameSlot::default(),
                 policy: GamePolicy::default(),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             accept_with_state_change(&mut handler, request, acceptance(&context), 3.2, -1.0, 2.0)
@@ -1228,8 +1521,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
-                game: GameSlot::default(),
                 policy: GamePolicy::default(),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             accept(&mut handler, request, acceptance(&context)).unwrap();
@@ -1248,8 +1541,8 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
-                game: GameSlot::default(),
                 policy: GamePolicy::default(),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             assert_eq!(context.state.accepted_replies, 1);
@@ -1331,8 +1624,8 @@ mod turn_tests {
         let mut handler = CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(timeline)),
-            game: GameSlot::default(),
             policy: GamePolicy::default(),
+            reminders: None,
         };
         let (request, context) = prepare(&mut handler);
         let token = acceptance(&context);

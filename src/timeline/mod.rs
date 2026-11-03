@@ -114,6 +114,11 @@ pub struct HistoryView {
 
 /// Two read models bound to the same immutable timeline prefix.
 /// The legacy view is retained for clients that have not migrated yet.
+pub(crate) struct GameCommit {
+    pub state: crate::games::GameSlot,
+    pub expected_head: u64,
+}
+
 pub(crate) struct GeneratedReply {
     pub request: RequestId,
     pub intent: TurnIntent,
@@ -129,6 +134,8 @@ pub(crate) struct TimelineContextSnapshot {
     pub(crate) working_state: CharacterWorkingState,
     pub(crate) memories: CharacterMemories,
     pub(crate) known: Vec<domain::KnownEvent>,
+    pub(crate) game: crate::games::GameSlot,
+    pub(crate) game_token: Option<EventId>,
     pub(crate) history: HistoryView,
     pub(crate) view: MitaView,
 }
@@ -152,6 +159,7 @@ pub(crate) struct SessionTimeline {
     workspace: SessionWorkspace,
     selection_updates: watch::Sender<TimelineSelection>,
     context_updates: HashMap<CharacterId, watch::Sender<u64>>,
+    memory_updates: HashMap<CharacterId, watch::Sender<u64>>,
     #[cfg(feature = "sqlite-system")]
     selection_repository: Option<storage::SqliteTimelineRepository>,
 }
@@ -174,6 +182,7 @@ impl SessionTimeline {
             store: Box::new(store),
             selection_updates: watch::channel(workspace.selected().expect("selection set")).0,
             context_updates,
+            memory_updates: Self::memory_channels(),
             workspace,
             #[cfg(feature = "sqlite-system")]
             selection_repository: None,
@@ -226,6 +235,7 @@ impl SessionTimeline {
                     workspace: SessionWorkspace::from_selection(selection),
                     selection_updates: watch::channel(selection).0,
                     context_updates,
+                    memory_updates: Self::memory_channels(),
                     selection_repository: Some(selection_repository),
                 })
             }
@@ -311,6 +321,25 @@ impl SessionTimeline {
             .collect()
     }
 
+    fn memory_channels() -> HashMap<CharacterId, watch::Sender<u64>> {
+        CharacterId::ALL
+            .into_iter()
+            .map(|character| (character, watch::channel(0).0))
+            .collect()
+    }
+
+    /// In-process invalidation hint only. The Timeline remains the sole source of
+    /// memory data, and receivers must read a new character snapshot after waking.
+    pub(crate) fn observe_memory_changes(&self, character: CharacterId) -> watch::Receiver<u64> {
+        self.memory_updates[&character].subscribe()
+    }
+
+    pub(crate) fn notify_memory_changed(&self, character: CharacterId) {
+        self.memory_updates[&character].send_modify(|revision| {
+            *revision = revision.wrapping_add(1);
+        });
+    }
+
     pub(crate) fn observe_context_epoch(&self, character: CharacterId) -> watch::Receiver<u64> {
         self.context_updates[&character].subscribe()
     }
@@ -393,6 +422,9 @@ impl SessionTimeline {
             self.context_updates[&character].send_replace(epoch);
         }
         self.selection_updates.send_replace(new_selection);
+        for character in CharacterId::ALL {
+            self.notify_memory_changed(character);
+        }
         Ok(new_selection)
     }
 
@@ -449,6 +481,7 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
         )?;
+        self.notify_memory_changed(character);
         Ok(count)
     }
 
@@ -517,7 +550,10 @@ impl SessionTimeline {
                 .map_err(|error| error.to_string())?;
         let memories = crate::character::projection::character_memories_at(&facts, character)
             .map_err(|error| error.to_string())?;
+        let (game, game_token) = Self::game_from_facts(character, at, &facts)?;
         Ok(TimelineContextSnapshot {
+            game,
+            game_token,
             history,
             view,
             state,
@@ -525,6 +561,53 @@ impl SessionTimeline {
             memories,
             known,
         })
+    }
+
+    pub(crate) fn game_at(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+    ) -> Result<(crate::games::GameSlot, Option<EventId>), String> {
+        let facts = self.read_prefix(at).map_err(|error| error.to_string())?;
+        Self::game_from_facts(character, at, &facts)
+    }
+
+    fn game_from_facts(
+        character: CharacterId,
+        at: ContextAnchor,
+        facts: &[domain::TimelineFact],
+    ) -> Result<(crate::games::GameSlot, Option<EventId>), String> {
+        let mut game = crate::games::GameSlot::default();
+        let mut token = None;
+        for fact in facts.iter().rev() {
+            if fact.draft.kind == EventKind::GameStateCaptured
+                && fact.draft.actor.as_deref() == Some(character.to_string().as_str())
+            {
+                game = serde_json::from_value(fact.draft.payload["game_state"].clone())
+                    .map_err(|error| format!("invalid canonical game: {error}"))?;
+                game.validate().map_err(str::to_owned)?;
+                token = Some(fact.draft.id);
+                break;
+            }
+        }
+        game.bind_branch(BranchId(at.branch_id));
+        Ok((game, token))
+    }
+
+    fn game_state_draft(
+        character: CharacterId,
+        game: crate::games::GameSlot,
+    ) -> Result<EventDraft, domain::TimelineError> {
+        game.validate().map_err(domain::TimelineError::Invalid)?;
+        let mut draft = EventDraft::new(EventKind::GameStateCaptured);
+        draft.actor = Some(character.to_string());
+        draft.observers.insert(character);
+        draft.payload.insert(
+            "game_state".into(),
+            serde_json::to_value(game)
+                .map_err(|_| domain::TimelineError::Invalid("invalid game state"))?,
+        );
+        Ok(draft)
     }
 
     pub(crate) fn character_state_at(
@@ -542,6 +625,94 @@ impl SessionTimeline {
         let branch = self.inspection_branch(at)?;
         self.store
             .read(branch, 0, Some(at.through), i64::MAX as usize, None)
+    }
+
+    pub(crate) fn reminder_facts_at(
+        &self,
+        at: ContextAnchor,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        self.read_prefix(at)
+    }
+
+    /// Facts of the selected branch that can carry reminder state. Unselected
+    /// branches stay untouched, so their pending deliveries are never lost.
+    pub(crate) fn reminder_facts(
+        &self,
+        selection: crate::timeline::selection::TimelineSelection,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        self.assert_selection(selection)?;
+        self.read_prefix(self.anchor())
+    }
+
+    /// Head and facts of one branch in the active session, read as a single
+    /// consistent prefix so a delivery guard and its append can use one CAS.
+    pub(crate) fn reminder_snapshot_on(
+        &self,
+        branch: BranchId,
+    ) -> Result<(u64, Vec<domain::TimelineFact>), domain::TimelineError> {
+        if self.store.branch(branch)?.session_id != self.store.branch(self.branch)?.session_id {
+            return Err(domain::TimelineError::Invalid(
+                "branch belongs to another session",
+            ));
+        }
+        let head = self.store.branch(branch)?.head_sequence;
+        let facts = self.store.read(branch, 0, None, i64::MAX as usize, None)?;
+        Ok((head, facts))
+    }
+
+    /// Append a delivery transition to the branch that owns the fired
+    /// occurrence, even when another branch is selected. Only the three
+    /// delivery transition kinds are accepted; this is not a general write
+    /// bypass. The caller supplies the head it validated against, so a stale
+    /// settlement is rejected instead of being re-read and applied blindly.
+    pub(crate) fn append_delivery_transition(
+        &mut self,
+        branch: BranchId,
+        expected_head: u64,
+        key: &str,
+        draft: domain::EventDraft,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        if !matches!(
+            draft.kind,
+            domain::EventKind::ReminderDeliverySettled
+                | domain::EventKind::ReminderDeliveryFailed
+                | domain::EventKind::ReminderDeliveryRetried
+        ) {
+            return Err(domain::TimelineError::Invalid(
+                "only delivery transitions may target another branch",
+            ));
+        }
+        if self.store.branch(branch)?.session_id != self.store.branch(self.branch)?.session_id {
+            return Err(domain::TimelineError::Invalid(
+                "branch belongs to another session",
+            ));
+        }
+        self.store
+            .append(branch, expected_head, key, json!({}), vec![draft])
+    }
+
+    pub(crate) fn append_reminder_facts(
+        &mut self,
+        expected: TimelineSelection,
+        key: &str,
+        drafts: Vec<domain::EventDraft>,
+    ) -> Result<Vec<domain::TimelineFact>, domain::TimelineError> {
+        if self.selection() != expected {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let anchor = self.anchor();
+        self.store.append_guarded(
+            self.branch,
+            anchor.through,
+            key,
+            json!({}),
+            drafts,
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )
     }
 
     fn inspection_branch(&self, at: ContextAnchor) -> Result<BranchId, domain::TimelineError> {
@@ -858,13 +1029,14 @@ impl SessionTimeline {
         &mut self,
         reply: GeneratedReply,
     ) -> Result<EventId, domain::TimelineError> {
-        self.append_reply_tracked(reply)
+        self.append_reply_tracked(reply, None)
             .map(|accepted| accepted.message)
     }
 
     pub(crate) fn append_reply_tracked(
         &mut self,
         reply: GeneratedReply,
+        game_state: Option<GameCommit>,
     ) -> Result<AcceptedReplyEvents, domain::TimelineError> {
         let GeneratedReply {
             request,
@@ -942,6 +1114,15 @@ impl SessionTimeline {
         }
         let draft = message.into_draft()?;
         let mut drafts = vec![draft];
+        let mut changes_memory = false;
+        let occurred_at = crate::reminders::UtcInstant::from_unix_micros(
+            i64::try_from(drafts[0].occurred_at_unix_ms)
+                .ok()
+                .and_then(|time| time.checked_mul(1000))
+                .ok_or(domain::TimelineError::Invalid(
+                    "reply timestamp out of reminder range",
+                ))?,
+        );
         for effect in effects {
             match effect {
                 AppliedEffect::CharacterStateChanged(behavior) => {
@@ -967,6 +1148,7 @@ impl SessionTimeline {
                     drafts.push(change);
                 }
                 AppliedEffect::CharacterMemoryChanged(memory_change) => {
+                    changes_memory = true;
                     let mut memory = EventDraft::new(EventKind::CharacterMemoryChanged);
                     memory.actor = Some(character.to_string());
                     memory.observers.insert(character);
@@ -1018,7 +1200,41 @@ impl SessionTimeline {
                     }
                     drafts.push(game);
                 }
+                AppliedEffect::ReminderChanged(change) => {
+                    let reminder = crate::reminders::change_draft(&change, Some(id), occurred_at)
+                        .map_err(|_| {
+                        domain::TimelineError::Invalid("invalid reminder change")
+                    })?;
+                    drafts.push(reminder);
+                }
+                AppliedEffect::ReminderToolResult(content) => {
+                    let result = crate::reminders::tool_result_draft(
+                        character,
+                        &content,
+                        Some(id),
+                        occurred_at,
+                    )
+                    .map_err(|_| domain::TimelineError::Invalid("invalid reminder tool result"))?;
+                    drafts.push(result);
+                }
             }
+        }
+        let expected_head = game_state
+            .as_ref()
+            .map_or_else(|| self.anchor().through, |commit| commit.expected_head);
+        if let Some(GameCommit {
+            state: mut game, ..
+        }) = game_state
+        {
+            for draft in &drafts {
+                if matches!(
+                    draft.kind,
+                    EventKind::GameStarted | EventKind::GameAction | EventKind::GameEnded
+                ) {
+                    game.record_event(draft.id);
+                }
+            }
+            drafts.push(Self::game_state_draft(character, game)?);
         }
         let game_events = drafts
             .iter()
@@ -1033,7 +1249,7 @@ impl SessionTimeline {
         let selected = self.selection();
         self.store.append_guarded(
             self.branch,
-            self.anchor().through,
+            expected_head,
             &format!("reply:{}", request.0),
             json!({}),
             drafts,
@@ -1043,22 +1259,23 @@ impl SessionTimeline {
                 accepted_reply_revision: Some((character, expected_revision)),
             },
         )?;
+        if changes_memory {
+            self.notify_memory_changed(character);
+        }
         Ok(AcceptedReplyEvents {
             message: id,
             game: game_events,
         })
     }
 
-    /// Commit owner actions as sanitized public match facts on the active
-    /// branch. The revision-scoped key rejects a duplicated command.
+    /// Commit an owner command and its private state in one guarded batch.
     pub(crate) fn append_game_facts(
         &mut self,
         character: CharacterId,
         facts: &[crate::games::GameFact],
+        state: &mut crate::games::GameSlot,
+        expected_head: u64,
     ) -> Result<Vec<EventId>, domain::TimelineError> {
-        let Some(first) = facts.first() else {
-            return Ok(Vec::new());
-        };
         let selected = self.selection();
         let mut drafts = Vec::with_capacity(facts.len());
         for fact in facts {
@@ -1076,28 +1293,15 @@ impl SessionTimeline {
             }
             drafts.push(draft);
         }
-        let ids = drafts.iter().map(|draft| draft.id).collect();
-        let operation = match first {
-            crate::games::GameFact::Started { .. } => "started".to_owned(),
-            crate::games::GameFact::PhaseChanged { .. } => "phase".to_owned(),
-            crate::games::GameFact::Shot { .. } => "shot".to_owned(),
-            crate::games::GameFact::Ended { reason, .. } => {
-                format!("ended:{}", reason.code())
-            }
-        };
-        let key = format!(
-            "game:{character}:{}:{}:{}:{operation}",
-            first.session(),
-            first.generation(),
-            drafts
-                .first()
-                .and_then(|draft| draft.payload.get("revision"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        );
+        let ids: Vec<_> = drafts.iter().map(|draft| draft.id).collect();
+        for id in &ids {
+            state.record_event(*id);
+        }
+        drafts.push(Self::game_state_draft(character, state.clone())?);
+        let key = format!("game:{character}:{}", uuid::Uuid::new_v4());
         self.store.append_guarded(
             self.branch,
-            self.anchor().through,
+            expected_head,
             &key,
             json!({}),
             drafts,

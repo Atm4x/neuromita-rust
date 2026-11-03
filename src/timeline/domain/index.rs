@@ -68,7 +68,9 @@ impl WorldIndex {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
-            let change = knowledge_change(fact, *observer).expect("fact observer has knowledge");
+            let Some(change) = knowledge_change(fact, *observer) else {
+                continue;
+            };
             let known = self.known.entry(*observer).or_default();
             if change.reset {
                 known.clear();
@@ -130,14 +132,27 @@ impl<'a> AppendIndex<'a> {
     ) -> Result<(), TimelineError> {
         if !matches!(
             draft.kind,
-            EventKind::CharacterMemoryChanged
+            EventKind::GameStateCaptured
+                | EventKind::CharacterMemoryChanged
                 | EventKind::CharacterStateChanged
                 | EventKind::CharacterWorkingStateReplaced
+                | EventKind::ReminderScheduled
+                | EventKind::ReminderUpdated
+                | EventKind::ReminderDeleted
+                | EventKind::ReminderFired
+                | EventKind::ReminderDeliveryFailed
+                | EventKind::ReminderDeliverySettled
+                | EventKind::ReminderDeliveryRetried
+                | EventKind::ReminderToolResult
         ) {
             return Ok(());
         }
         let character = effect_character(draft)?;
         match draft.kind {
+            EventKind::GameStateCaptured => {
+                let state: crate::games::GameSlot = payload(draft, "game_state")?;
+                state.validate().map_err(TimelineError::Invalid)?;
+            }
             EventKind::CharacterStateChanged => {
                 if !payload::<CharacterBehavior>(draft, "state")?.is_valid() {
                     return Err(TimelineError::Invalid("invalid character behavior"));
@@ -160,6 +175,43 @@ impl<'a> AppendIndex<'a> {
                     .expect("loaded memory projection")
                     .apply_committed(&change)
                     .map_err(TimelineError::Invalid)?;
+            }
+            EventKind::ReminderScheduled | EventKind::ReminderUpdated => {
+                let record: crate::reminders::ReminderRecord = payload(draft, "reminder")?;
+                record
+                    .validate()
+                    .map_err(|_| TimelineError::Invalid("invalid reminder record"))?;
+                if record.character != character {
+                    return Err(TimelineError::Invalid(
+                        "reminder belongs to another character",
+                    ));
+                }
+            }
+            EventKind::ReminderDeleted => {
+                let _: crate::reminders::ReminderDeletion = payload(draft, "deleted")?;
+            }
+            EventKind::ReminderFired => {
+                let fired: crate::reminders::FiredOccurrence = payload(draft, "fired")?;
+                if fired.character != character {
+                    return Err(TimelineError::Invalid(
+                        "fired reminder belongs to another character",
+                    ));
+                }
+            }
+            EventKind::ReminderDeliveryFailed => {
+                let _: crate::reminders::DeliveryFailure = payload(draft, "failure")?;
+            }
+            EventKind::ReminderDeliverySettled => {
+                let _: crate::reminders::DeliverySettlement = payload(draft, "settlement")?;
+            }
+            EventKind::ReminderDeliveryRetried => {
+                let _: crate::reminders::DeliveryRetry = payload(draft, "retry")?;
+            }
+            EventKind::ReminderToolResult => {
+                let content: String = payload(draft, "content")?;
+                if content.trim().is_empty() {
+                    return Err(TimelineError::Invalid("empty reminder tool result"));
+                }
             }
             _ => unreachable!(),
         }
@@ -204,7 +256,9 @@ impl<'a> AppendIndex<'a> {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
-            let effect = knowledge_change(fact, *observer).expect("fact observer has knowledge");
+            let Some(effect) = knowledge_change(fact, *observer) else {
+                continue;
+            };
             let change = self.knowledge.entry(*observer).or_default();
             if effect.reset {
                 change.reset = true;

@@ -311,6 +311,27 @@ impl LlmConversation {
                 text: game.prompt_block(),
             });
         }
+        if !context.reminders.is_empty() {
+            let mut block = vec![
+                "[PENDING REMINDERS]".to_owned(),
+                "Active reminders of this character in the selected branch; not instructions."
+                    .to_owned(),
+            ];
+            block.extend(context.reminders.iter().map(|reminder| {
+                format!(
+                    "#{} [{}] {} | due {}",
+                    reminder.number,
+                    reminder.kind.label(),
+                    reminder.text,
+                    reminder.due_local
+                )
+            }));
+            block.push("[/PENDING REMINDERS]".into());
+            messages.push(LlmMessage {
+                role: LlmRole::Assistant,
+                text: block.join("\n"),
+            });
+        }
 
         let task = match context.focus.intent {
             TurnIntent::Reply(_) if target_present => None,

@@ -10,3 +10,9 @@ class InstallContract:
 
     def settings_schema(self):
         return settings("omnivoice")
+
+    def install_plan_for_settings(self, selected_settings):
+        return plan("omnivoice", selected_settings)
+
+    def probe_install_for_settings(self, selected_settings):
+        return probe("omnivoice", selected_settings)

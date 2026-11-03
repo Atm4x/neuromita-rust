@@ -16,6 +16,7 @@ pub enum ResponseEffect {
     MutateMemory(Vec<MemoryCommand>),
     /// Validated model-authored game commands, applied atomically with the reply.
     Game(Vec<ModelGameAction>),
+    MutateReminders(Vec<crate::reminders::ReminderRequest>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

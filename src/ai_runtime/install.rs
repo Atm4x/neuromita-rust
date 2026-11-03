@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt;
 
 use super::{
     layer::{valid_segment, validate_lock},
-    overlay::{LockedOverlay, LockedPackage, OverlayError, OverlayInstaller},
+    overlay::{InstallerAction, LockedOverlay, LockedPackage, OverlayError, OverlayInstaller},
     resolver::{DependencyResolver, ResolveError},
 };
 
@@ -28,6 +28,23 @@ pub struct PluginInstallPlan {
     pub assets: Vec<ModelAssetRequirement>,
     #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub supported_backends: Vec<String>,
+    #[serde(default)]
+    pub required_backends: Vec<String>,
+    #[serde(default)]
+    pub supported_python_minors: Vec<String>,
+    #[serde(default)]
+    pub actions: Vec<InstallerAction>,
+    #[serde(default)]
+    pub asset_hooks: Vec<AssetHook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssetHook {
+    pub id: String,
+    pub source_plugin_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,16 +107,54 @@ pub enum PluginInstallError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct PluginInstallHandler {
     pub resolver: DependencyResolver,
     pub overlays: OverlayInstaller,
     pub assets_directory: PathBuf,
 }
 
+pub struct PluginInstallRequest<'a> {
+    pub plugin_id: &'a str,
+    pub revision: &'a str,
+    pub python_version: &'a str,
+    pub selected_backend: Option<&'a str>,
+    pub plan: &'a PluginInstallPlan,
+    pub backend_packages: &'a [LockedPackage],
+}
+
 impl PluginInstallPlan {
     pub fn validate(&self, python_version: &str) -> Result<(), PluginInstallError> {
         validate_lock(&self.packages, python_version)
             .map_err(|error| PluginInstallError::Invalid(error.to_string()))?;
+        let minor = python_version
+            .rsplit_once('.')
+            .map(|(minor, _)| minor)
+            .unwrap_or("");
+        if self.supported_python_minors.len() > 8
+            || self.supported_python_minors.iter().any(|version| {
+                let mut parts = version.split('.');
+                !matches!((parts.next(), parts.next(), parts.next()),
+                    (Some(major), Some(minor), None) if !major.is_empty() && !minor.is_empty()
+                        && major.bytes().all(|b| b.is_ascii_digit())
+                        && minor.bytes().all(|b| b.is_ascii_digit()))
+            })
+        {
+            return Err(PluginInstallError::Invalid(
+                "invalid supported Python versions".into(),
+            ));
+        }
+        if !self.supported_python_minors.is_empty()
+            && !self
+                .supported_python_minors
+                .iter()
+                .any(|version| version == minor)
+        {
+            return Err(PluginInstallError::Invalid(format!(
+                "Python {python_version} is incompatible with plugin (supported: {})",
+                self.supported_python_minors.join(", ")
+            )));
+        }
         if !self.packages.is_empty() && !self.requirements.is_empty() {
             return Err(PluginInstallError::Invalid(
                 "use either exact packages or requirements".into(),
@@ -113,6 +168,62 @@ impl PluginInstallPlan {
             && !valid_segment(backend)
         {
             return Err(PluginInstallError::Invalid("unsafe backend name".into()));
+        }
+        if self.supported_backends.len() > 8
+            || self.backend.is_some() && !self.supported_backends.is_empty()
+            || self.supported_backends.iter().any(|backend| {
+                !matches!(
+                    backend.as_str(),
+                    "torch-cpu"
+                        | "torch-cuda"
+                        | "onnx-cpu"
+                        | "onnx-cuda"
+                        | "onnx-directml"
+                        | "ctranslate2-cpu"
+                        | "ctranslate2-cuda"
+                        | "remote-api"
+                )
+            })
+        {
+            return Err(PluginInstallError::Invalid(
+                "invalid supported backends".into(),
+            ));
+        }
+        if self.required_backends.len() > 4
+            || self.required_backends.iter().any(|backend| {
+                !matches!(
+                    backend.as_str(),
+                    "torch-cpu"
+                        | "torch-cuda"
+                        | "onnx-cpu"
+                        | "onnx-cuda"
+                        | "onnx-directml"
+                        | "ctranslate2-cpu"
+                        | "ctranslate2-cuda"
+                        | "remote-api"
+                )
+            })
+            || self.required_backends.iter().collect::<HashSet<_>>().len()
+                != self.required_backends.len()
+        {
+            return Err(PluginInstallError::Invalid(
+                "invalid supplemental backends".into(),
+            ));
+        }
+        if self.asset_hooks.len() > 16
+            || self
+                .asset_hooks
+                .iter()
+                .any(|hook| !valid_segment(&hook.id) || !valid_segment(&hook.source_plugin_id))
+            || self
+                .asset_hooks
+                .iter()
+                .map(|hook| &hook.id)
+                .collect::<HashSet<_>>()
+                .len()
+                != self.asset_hooks.len()
+        {
+            return Err(PluginInstallError::Invalid("invalid asset hooks".into()));
         }
         if self.assets.len() > 512 {
             return Err(PluginInstallError::Invalid("too many assets".into()));
@@ -161,6 +272,33 @@ impl PluginInstallHandler {
         plan: &PluginInstallPlan,
         backend_packages: &[LockedPackage],
     ) -> Result<PluginInstallResult, PluginInstallError> {
+        self.install_with_approval(
+            PluginInstallRequest {
+                plugin_id,
+                revision,
+                python_version,
+                selected_backend,
+                plan,
+                backend_packages,
+            },
+            &HashSet::new(),
+        )
+        .await
+    }
+
+    pub async fn install_with_approval(
+        &self,
+        request: PluginInstallRequest<'_>,
+        approved_actions: &HashSet<String>,
+    ) -> Result<PluginInstallResult, PluginInstallError> {
+        let PluginInstallRequest {
+            plugin_id,
+            revision,
+            python_version,
+            selected_backend,
+            plan,
+            backend_packages,
+        } = request;
         plan.validate(python_version)?;
         if !valid_segment(plugin_id) || !valid_segment(revision) {
             return Err(PluginInstallError::Invalid(
@@ -171,6 +309,15 @@ impl PluginInstallHandler {
             && selected_backend != Some(required.as_str())
         {
             return Err(PluginInstallError::Backend(required.clone()));
+        }
+        if !plan.supported_backends.is_empty()
+            && !selected_backend
+                .is_some_and(|backend| plan.supported_backends.iter().any(|x| x == backend))
+        {
+            return Err(PluginInstallError::Backend(format!(
+                "supported: {}",
+                plan.supported_backends.join(", ")
+            )));
         }
         if !self.assets_directory.is_absolute() {
             return Err(PluginInstallError::Invalid(
@@ -191,14 +338,49 @@ impl PluginInstallHandler {
             revision: revision.into(),
             python_version: python_version.into(),
             packages: resolved,
+            actions: plan.actions.clone(),
         };
-        let overlay_path = self.overlays.install(&overlay).await?;
-        let assets = self.inspect_assets(plugin_id, plan).await?;
+        let overlay_path = self
+            .overlays
+            .install_with_approval(&overlay, approved_actions)
+            .await?;
+        let assets = self
+            .inspect_revision_assets(plugin_id, revision, plan)
+            .await?;
         Ok(PluginInstallResult {
             overlay,
             overlay_path,
             assets,
         })
+    }
+
+    pub async fn inspect_revision_assets(
+        &self,
+        plugin_id: &str,
+        revision: &str,
+        plan: &PluginInstallPlan,
+    ) -> Result<Vec<ModelAssetStatus>, PluginInstallError> {
+        if !valid_segment(plugin_id)
+            || !valid_segment(revision)
+            || !self.assets_directory.is_absolute()
+        {
+            return Err(PluginInstallError::Invalid("unsafe model revision".into()));
+        }
+        let root = self.assets_directory.join(plugin_id).join(revision);
+        if root.exists() {
+            let store = super::assets::ModelAssetStore {
+                root: self.assets_directory.clone(),
+                max_asset_bytes: 4 * 1024 * 1024 * 1024,
+                timeout: self.resolver.timeout,
+            };
+            store
+                .verified_revision(plugin_id, revision)
+                .await
+                .map_err(|error| {
+                    PluginInstallError::Invalid(format!("unverified model asset revision: {error}"))
+                })?;
+        }
+        self.inspect_at(&root, plan).await
     }
 
     pub async fn inspect_assets(
@@ -212,7 +394,15 @@ impl PluginInstallHandler {
             ));
         }
         let root = self.assets_directory.join(plugin_id);
-        if !safe_path_prefix(&self.assets_directory).await? || !safe_path_prefix(&root).await? {
+        self.inspect_at(&root, plan).await
+    }
+
+    async fn inspect_at(
+        &self,
+        root: &Path,
+        plan: &PluginInstallPlan,
+    ) -> Result<Vec<ModelAssetStatus>, PluginInstallError> {
+        if !safe_path_prefix(&self.assets_directory).await? || !safe_path_prefix(root).await? {
             return Err(PluginInstallError::Invalid(
                 "asset directory contains symlinks".into(),
             ));
@@ -306,13 +496,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn builtin_tts_plan_rejects_incompatible_python_before_any_install() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let host = crate::ai_runtime::PythonHostConfig {
+            python_executable: std::env::var("NEUROMITA_TEST_PYTHON")
+                .unwrap_or_else(|_| "python3".into())
+                .into(),
+            sdk_root: root.clone(),
+            plugins_directory: root.join("plugins/builtin"),
+            models_directory: None,
+            request_timeout: std::time::Duration::from_secs(6),
+        };
+        let plan = crate::ai_runtime::fetch_install_plan(&host, "silero_rvc_cuda")
+            .await
+            .unwrap();
+        assert!(plan.validate("3.12.10").is_ok());
+        assert!(matches!(
+            plan.validate("3.13.5"),
+            Err(PluginInstallError::Invalid(_))
+        ));
+        assert_eq!(plan.supported_backends, vec!["torch-cuda"]);
+    }
+
     #[test]
     fn rejects_path_traversal_and_duplicate_assets() {
         let mut plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![asset("rvc", "../voice.pth", true)],
             backend: None,
+            supported_backends: vec![],
+            required_backends: vec![],
+            supported_python_minors: vec![],
+            actions: vec![],
         };
         assert!(plan.validate("3.13.5").is_err());
         plan.assets = vec![asset("rvc", r"C:\windows\system.ini", true)];
@@ -337,14 +555,19 @@ mod tests {
         let mut present = asset("rvc_weights", "rvc/voice.pth", true);
         present.sha256 = Some(hash_file(&plugin.join("rvc/voice.pth")).await.unwrap());
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             backend: None,
+            supported_backends: vec![],
+            required_backends: vec![],
             assets: vec![
                 present.clone(),
                 asset("reference_audio", "ref/voice.wav", false),
                 asset("voice_index", "rvc/voice.index", true),
             ],
+            supported_python_minors: vec![],
+            actions: vec![],
         };
         let handler = PluginInstallHandler {
             resolver: DependencyResolver {
@@ -371,10 +594,15 @@ mod tests {
             .inspect_assets(
                 "mock_tts",
                 &PluginInstallPlan {
+                    asset_hooks: vec![],
                     assets: vec![present],
                     packages: vec![],
                     requirements: vec![],
                     backend: None,
+                    supported_backends: vec![],
+                    required_backends: vec![],
+                    supported_python_minors: vec![],
+                    actions: vec![],
                 },
             )
             .await
@@ -386,12 +614,13 @@ mod tests {
     #[tokio::test]
     async fn reads_a_plugin_install_contract_without_inference_initialization() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let python =
-            std::env::var("NEUROMITA_TEST_PYTHON").unwrap_or_else(|_| "python3".to_owned());
+        let python = std::env::var("NEUROMITA_TEST_PYTHON")
+            .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned());
         let host = crate::ai_runtime::PythonHostConfig {
             python_executable: python.into(),
             sdk_root: root.clone(),
             plugins_directory: root.join("plugins/builtin"),
+            models_directory: None,
             request_timeout: std::time::Duration::from_secs(10),
         };
         let plan = crate::ai_runtime::fetch_install_plan(&host, "mock_tts")
@@ -425,7 +654,20 @@ if [ "$2" = compile ]; then
     printf 'torch==2.8.0\ntransformers==4.45.0\ntokenizers==0.21.0\n' > "$out"
     exit 0
 fi
-[ "$2" = install ] && exit 0
+if [ "$2" = install ]; then
+    target=''
+    for arg do
+        case "$prev" in --target) target="$arg";; esac
+        prev="$arg"
+    done
+    for arg do
+        case "$arg" in
+            transformers==*) mkdir -p "$target/transformers-4.45.0.dist-info"; printf 'Name: transformers\nVersion: 4.45.0\n' > "$target/transformers-4.45.0.dist-info/METADATA";;
+            tokenizers==*) mkdir -p "$target/tokenizers-0.21.0.dist-info"; printf 'Name: tokenizers\nVersion: 0.21.0\n' > "$target/tokenizers-0.21.0.dist-info/METADATA";;
+        esac
+    done
+    exit 0
+fi
 exit 3
 "#,
         )
@@ -451,7 +693,12 @@ exit 3
             assets_directory: root.join("models"),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             backend: Some("torch-cpu".into()),
+            supported_backends: vec![],
+            required_backends: vec![],
+            supported_python_minors: vec!["3.12".into(), "3.13".into()],
+            actions: vec![],
             packages: vec![LockedPackage {
                 name: "transformers".into(),
                 version: "4.45.0".into(),
@@ -482,12 +729,28 @@ exit 3
                 .is_file()
         );
         assert!(!result.ready_for_initialization());
-        tokio::fs::create_dir_all(root.join("models/f5"))
-            .await
-            .unwrap();
-        tokio::fs::write(root.join("models/f5/model.safetensors"), b"weights")
-            .await
-            .unwrap();
+        let source = root.join("model.safetensors");
+        tokio::fs::write(&source, b"weights").await.unwrap();
+        let digest = ring::digest::digest(&ring::digest::SHA256, b"weights");
+        let sha: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        super::super::assets::ModelAssetStore {
+            root: root.join("models"),
+            max_asset_bytes: 1024,
+            timeout: std::time::Duration::from_secs(5),
+        }
+        .publish(
+            "f5",
+            "v1",
+            &plan,
+            &[super::super::assets::AssetInput {
+                role: "weights".into(),
+                relative_path: "model.safetensors".into(),
+                sha256: sha,
+                source: super::super::assets::AssetSource::LocalFile(source),
+            }],
+        )
+        .await
+        .unwrap();
         let result = handler
             .install("f5", "v1", "3.13.5", Some("torch-cpu"), &plan, &constraints)
             .await
@@ -522,10 +785,15 @@ exit 3
             assets_directory: root.clone(),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![asset("reference", "voice.wav", true)],
             backend: None,
+            supported_backends: vec![],
+            required_backends: vec![],
+            supported_python_minors: vec![],
+            actions: vec![],
         };
         assert!(matches!(
             handler.inspect_assets("mock_tts", &plan).await,

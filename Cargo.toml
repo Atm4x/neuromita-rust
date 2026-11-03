@@ -10,6 +10,10 @@ name = "neuromita-gui"
 path = "src/bin/neuromita-gui/main.rs"
 required-features = ["gui"]
 
+[[example]]
+name = "gui_snapshot"
+required-features = ["gui"]
+
 [features]
 default = ["sqlite-system"]
 sqlite-system = ["dep:rusqlite"]
@@ -17,6 +21,9 @@ gui = ["dep:slint", "dep:slint-build"]
 
 [dependencies]
 base64 = "0.23"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
+iana-time-zone = "0.1.65"
 rusqlite = { version = "0.41", optional = true, default-features = false, features = ["bundled", "libsqlite3-sys"] }
 ring = "0.17.14"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "system-proxy"] }
@@ -29,6 +36,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "registry", "std"] }
 slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+earshot = "1.2.2"
 
 [build-dependencies]
 slint-build = { version = "=1.18.1", optional = true }

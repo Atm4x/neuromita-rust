@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -91,7 +92,8 @@ pub struct Applied {
     pub invite: Option<PendingInvite>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Session {
     id: GameSessionId,
     generation: u64,
@@ -143,9 +145,9 @@ impl Session {
     }
 }
 
-/// Authoritative per-character match. It lives inside `CharacterHandler`; it is
-/// never cloned into a shared registry and contains no hidden-board accessors.
-#[derive(Clone, Default)]
+/// Transient owner working copy reconstructed from canonical private Timeline state.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GameSlot {
     current: Option<Session>,
     next_generation: u64,
@@ -195,17 +197,21 @@ impl GameSlot {
         self.current = None;
     }
 
-    /// A match belongs to the timeline branch it was started on. Selecting
-    /// another branch makes the old match unavailable instead of silently
-    /// carrying a board across branches.
-    pub fn bind_branch(&mut self, branch: BranchId) {
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|session| session.branch != branch)
-        {
-            self.current = None;
+    pub(crate) fn bind_branch(&mut self, branch: BranchId) {
+        if let Some(session) = self.current.as_mut() {
+            session.branch = branch;
         }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
+        if let Some(session) = &self.current
+            && (session.id.is_nil()
+                || session.branch.0.is_nil()
+                || session.generation.checked_add(1) != Some(self.next_generation))
+        {
+            return Err("invalid game generation");
+        }
+        Ok(())
     }
 
     pub fn apply_user(
@@ -219,7 +225,7 @@ impl GameSlot {
         };
         match command {
             UserGameCommand::Start { auto_reactions } => {
-                self.start(branch, auto_reactions, &mut applied);
+                self.start(branch, auto_reactions, &mut applied)?;
             }
             UserGameCommand::PlaceShip {
                 coord,
@@ -302,7 +308,7 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
         };
         for action in actions {
             match *action {
-                ModelGameAction::Start => self.start(branch, true, &mut applied),
+                ModelGameAction::Start => self.start(branch, true, &mut applied)?,
                 ModelGameAction::PlaceFleetRandomly => {
                     self.place_random(seabattle::Side::Mita, seed, &mut applied)?;
                 }
@@ -338,7 +344,16 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
         Ok(applied)
     }
 
-    fn start(&mut self, branch: BranchId, auto_reactions: bool, applied: &mut Applied) {
+    fn start(
+        &mut self,
+        branch: BranchId,
+        auto_reactions: bool,
+        applied: &mut Applied,
+    ) -> Result<(), GameError> {
+        let next = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(GameError::Invalid("game generation overflow"))?;
         if let Some(previous) = self.current.take() {
             applied.facts.push(GameFact::Ended {
                 session: previous.id,
@@ -349,7 +364,7 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
             });
         }
         let generation = self.next_generation;
-        self.next_generation += 1;
+        self.next_generation = next;
         let session = Session::new(branch, generation, auto_reactions);
         applied.facts.push(GameFact::Started {
             session: session.id,
@@ -362,6 +377,7 @@ React briefly in character and put exactly one legal MakeMove,<coordinate> comma
             START_INSTRUCTION.to_owned(),
         );
         self.current = Some(session);
+        Ok(())
     }
 
     fn place(
@@ -743,14 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn another_branch_cannot_keep_the_match() {
+    fn fork_projection_binds_inherited_match_to_selected_branch() {
         let (mut slot, branch) = slot_with_battle(true);
         let view = slot.projection(seabattle::Side::Player).unwrap();
         assert!(!view.own_board.is_empty());
-        slot.bind_branch(BranchId::new());
-        assert!(slot.is_empty());
-        assert!(slot.key().is_none());
-        assert!(slot.projection(seabattle::Side::Player).is_none());
-        let _ = branch;
+        let child = BranchId::new();
+        slot.bind_branch(child);
+        assert_ne!(child, branch);
+        assert_eq!(slot.key().unwrap().branch, child);
+        assert_eq!(slot.projection(seabattle::Side::Player).unwrap(), view);
     }
 }
