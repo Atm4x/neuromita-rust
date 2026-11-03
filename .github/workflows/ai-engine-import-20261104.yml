@@ -1,0 +1,41 @@
+name: Import AI Engine Slint Git Bridge bundle
+on:
+  push:
+    branches:
+      - bridge/ai-engine-ui-publish-20261104
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact local Git commit
+        shell: bash
+        env:
+          BASE: 8d4652b8423c8956fdbbb941e15083ed284c7970
+          TARGET_REF: refs/heads/codex/ai-engine-slint-pyqt-20261104
+        run: |
+          set -euo pipefail
+          if [ ! -f bridge/ai-engine-outgoing.bundle.b64 ]; then
+            echo "Transfer payload not staged yet"
+            exit 0
+          fi
+          base64 -d bridge/ai-engine-outgoing.bundle.b64 > ai-engine.bundle
+          sha256sum -c bridge/ai-engine-outgoing.bundle.sha256
+          git cat-file -e "${BASE}^{commit}"
+          git bundle verify ai-engine.bundle
+          HEAD_SHA="$(git bundle list-heads ai-engine.bundle | awk -v ref="${TARGET_REF}" '$2 == ref {print $1}')"
+          test "${#HEAD_SHA}" -eq 40
+          git fetch ai-engine.bundle "${TARGET_REF}:refs/heads/ai-engine-verified"
+          test "$(git rev-parse refs/heads/ai-engine-verified)" = "${HEAD_SHA}"
+          git merge-base --is-ancestor "${BASE}" refs/heads/ai-engine-verified
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE}" ] && [ "${EXISTING}" != "${HEAD_SHA}" ]; then
+            echo "Remote target diverged: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/ai-engine-verified:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${HEAD_SHA}"
