@@ -1,0 +1,31 @@
+name: Settings Tabs Main Source Export
+on:
+  push:
+    branches: [bridge/settings-tabs-main-export-20261104]
+  workflow_dispatch:
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Create main Git bundle
+        shell: bash
+        run: |
+          git branch -f exported-main HEAD
+          git bundle create /tmp/neuromita-main-tabs.bundle refs/heads/exported-main
+          git bundle verify /tmp/neuromita-main-tabs.bundle
+          sha256sum /tmp/neuromita-main-tabs.bundle > /tmp/neuromita-main-tabs.bundle.sha256
+          git rev-parse HEAD > /tmp/neuromita-main-tabs.head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-main-tabs-bundle
+          path: |
+            /tmp/neuromita-main-tabs.bundle
+            /tmp/neuromita-main-tabs.bundle.sha256
+            /tmp/neuromita-main-tabs.head
+          retention-days: 3
