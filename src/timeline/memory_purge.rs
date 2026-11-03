@@ -163,6 +163,7 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
         )?;
+        self.notify_memory_changed(preview.character);
         Ok(preview.records.len())
     }
 
@@ -226,6 +227,7 @@ impl SessionTimeline {
             drafts,
             AppendGuard { selection_generation: selection.generation, context: None, accepted_reply_revision: None },
         )?;
+        self.notify_memory_changed(backup.character);
         Ok(backup.records.len())
     }
 }

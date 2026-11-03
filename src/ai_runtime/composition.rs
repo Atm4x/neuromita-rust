@@ -2,7 +2,7 @@
 
 use super::{
     AiService, ProcessTopology,
-    backend::{BackendInstaller, LockedBackend},
+    backend::{BackendInstaller, BackendKind, LockedBackend},
     overlay::{LockedOverlay, LockedPackage, OverlayInstaller},
 };
 use std::{
@@ -11,7 +11,7 @@ use std::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServiceSelection {
     pub service: AiService,
     pub backends: Vec<LockedBackend>,
@@ -50,33 +50,6 @@ impl RuntimeComposition {
         &self.services
     }
 
-    /// Compose one already-installed backend layer for an explicit single
-    /// service. The hardware path uses this to avoid selecting a layer that is
-    /// absent or whose marker disagrees with the persisted selection.
-    pub fn for_single_service(
-        service: AiService,
-        backend: &LockedBackend,
-        installed_path: PathBuf,
-    ) -> Result<Self, CompositionError> {
-        backend.validate()?;
-        if !installed_path.is_absolute() {
-            return Err(CompositionError::Invalid(
-                "layer path must be absolute".into(),
-            ));
-        }
-        if !installed_path.is_dir() || installed_path.is_symlink() {
-            return Err(CompositionError::NotInstalled(
-                installed_path.display().to_string(),
-            ));
-        }
-        let canonical = std::fs::canonicalize(&installed_path)?;
-        Ok(Self {
-            python_version: backend.python_version.clone(),
-            paths: vec![canonical],
-            services: vec![service],
-        })
-    }
-
     pub async fn resolve(
         topology: ProcessTopology,
         requested_service: AiService,
@@ -104,6 +77,29 @@ impl RuntimeComposition {
             })
             .collect();
         active.sort_by_key(|selection| order(selection.service));
+        let kinds: HashSet<_> = active
+            .iter()
+            .flat_map(|selection| selection.backends.iter().map(|backend| backend.kind))
+            .collect();
+        if kinds.contains(&BackendKind::TorchCpu) && kinds.contains(&BackendKind::TorchCuda) {
+            return Err(CompositionError::Conflict(
+                "Torch CPU and CUDA backend layers cannot coexist in one Python worker".into(),
+            ));
+        }
+        if [
+            BackendKind::OnnxCpu,
+            BackendKind::OnnxCuda,
+            BackendKind::OnnxDirectml,
+        ]
+        .iter()
+        .filter(|kind| kinds.contains(kind))
+        .count()
+            > 1
+        {
+            return Err(CompositionError::Conflict(
+                "multiple ONNXRuntime variants cannot coexist in one Python worker".into(),
+            ));
+        }
         let mut versions = HashMap::<String, String>::new();
         let mut python_version: Option<String> = None;
         let mut seen_paths = HashSet::new();
@@ -145,7 +141,8 @@ fn order(service: AiService) -> u8 {
         AiService::Tts => 0,
         AiService::Asr => 1,
         AiService::Embedding => 2,
-        AiService::Beats => 3,
+        AiService::Reranker => 3,
+        AiService::Beats => 4,
     }
 }
 
@@ -212,6 +209,60 @@ mod tests {
     use uuid::Uuid;
 
     #[tokio::test]
+    async fn shared_worker_rejects_conflicting_compute_backend_variants() {
+        let root = std::env::temp_dir().join(format!("nm-composition-{}", Uuid::new_v4()));
+        let b = BackendInstaller {
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            backends_directory: root.join("backends"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(1),
+        };
+        let o = OverlayInstaller {
+            uv_executable: root.join("uv"),
+            python_executable: root.join("python"),
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(1),
+        };
+        let layer = |kind| LockedBackend {
+            kind,
+            revision: "v1".into(),
+            python_version: "3.12.10".into(),
+            packages: vec![],
+        };
+        for (first, second) in [
+            (BackendKind::TorchCpu, BackendKind::TorchCuda),
+            (BackendKind::OnnxCpu, BackendKind::OnnxDirectml),
+            (BackendKind::OnnxCuda, BackendKind::OnnxDirectml),
+        ] {
+            let selections = [
+                ServiceSelection {
+                    service: AiService::Tts,
+                    backends: vec![layer(first)],
+                    overlays: vec![],
+                },
+                ServiceSelection {
+                    service: AiService::Asr,
+                    backends: vec![layer(second)],
+                    overlays: vec![],
+                },
+            ];
+            assert!(matches!(
+                RuntimeComposition::resolve(
+                    ProcessTopology::Shared,
+                    AiService::Tts,
+                    &selections,
+                    &b,
+                    &o
+                )
+                .await,
+                Err(CompositionError::Conflict(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn split_excludes_other_services_while_shared_rejects_collisions() {
         let root = std::env::temp_dir().join(format!("nm-composition-{}", Uuid::new_v4()));
         let b = BackendInstaller {
@@ -245,6 +296,7 @@ mod tests {
                 name: "transformers".into(),
                 version: "4.45.0".into(),
             }],
+            actions: vec![],
         };
         let asr = LockedOverlay {
             plugin_id: "gigaam".into(),
@@ -254,6 +306,7 @@ mod tests {
                 name: "transformers".into(),
                 version: "4.50.0".into(),
             }],
+            actions: vec![],
         };
         for (path, marker, bytes) in [
             (
@@ -274,6 +327,23 @@ mod tests {
         ] {
             tokio::fs::create_dir_all(&path).await.unwrap();
             tokio::fs::write(path.join(marker), bytes).await.unwrap();
+            let pins = if marker == ".neuromita-backend.json" {
+                vec![("torch", "2.8.0")]
+            } else if path.to_string_lossy().contains("gigaam") {
+                vec![("transformers", "4.50.0")]
+            } else {
+                vec![("transformers", "4.45.0")]
+            };
+            for (name, version) in pins {
+                let dist = path.join(format!("{name}-{version}.dist-info"));
+                tokio::fs::create_dir_all(&dist).await.unwrap();
+                tokio::fs::write(
+                    dist.join("METADATA"),
+                    format!("Name: {name}\nVersion: {version}\n"),
+                )
+                .await
+                .unwrap();
+            }
         }
         let selected = [
             ServiceSelection {

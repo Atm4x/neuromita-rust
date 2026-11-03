@@ -13,6 +13,7 @@ pub enum ResponseEffect {
     ChangeCharacterState(CharacterStateDelta),
     ReplaceWorkingState(CharacterWorkingState),
     MutateMemory(Vec<MemoryCommand>),
+    MutateReminders(Vec<crate::reminders::ReminderRequest>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

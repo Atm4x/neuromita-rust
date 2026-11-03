@@ -18,8 +18,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::{
-    AiRuntimeError, AiService, AiSupervisor, ModelActivation, ProcessTopology, PythonHost,
-    PythonHostConfig,
+    AiRuntimeError, AiService, AiSupervisor, ModelActivation, ProcessTopology, PythonHostConfig,
     backend::{BackendKind, load_installed_backend},
     composition::RuntimeComposition,
     layer::{LayerError, valid_segment},
@@ -63,6 +62,7 @@ pub enum DeviceKind {
     Cpu,
     Cuda,
     DirectMl,
+    Remote,
 }
 
 impl DeviceKind {
@@ -71,6 +71,7 @@ impl DeviceKind {
             Self::Cpu => "cpu",
             Self::Cuda => "cuda",
             Self::DirectMl => "dml",
+            Self::Remote => "remote",
         }
     }
 }
@@ -80,6 +81,7 @@ pub enum DeviceId {
     Cpu,
     Cuda(u32),
     DirectMl(u32),
+    Remote,
 }
 
 impl DeviceId {
@@ -95,6 +97,7 @@ impl DeviceId {
         }
         match text {
             "cpu" => Ok(Self::Cpu),
+            "remote" => Ok(Self::Remote),
             _ => {
                 if let Some(rest) = text.strip_prefix("cuda:") {
                     return parse_ordinal(rest)
@@ -116,6 +119,7 @@ impl DeviceId {
             Self::Cpu => DeviceKind::Cpu,
             Self::Cuda(_) => DeviceKind::Cuda,
             Self::DirectMl(_) => DeviceKind::DirectMl,
+            Self::Remote => DeviceKind::Remote,
         }
     }
 }
@@ -135,6 +139,7 @@ impl std::fmt::Display for DeviceId {
             Self::Cpu => formatter.write_str("cpu"),
             Self::Cuda(ordinal) => write!(formatter, "cuda:{ordinal}"),
             Self::DirectMl(ordinal) => write!(formatter, "dml:{ordinal}"),
+            Self::Remote => formatter.write_str("remote"),
         }
     }
 }
@@ -197,7 +202,10 @@ impl HardwareSelection {
             });
         }
         if self.precision == Precision::Fp16
-            && !matches!(self.backend, BackendKind::TorchCuda | BackendKind::OnnxCuda)
+            && !matches!(
+                self.backend,
+                BackendKind::TorchCuda | BackendKind::OnnxCuda | BackendKind::Ctranslate2Cuda
+            )
         {
             return Err(HardwareError::UnsupportedPrecision {
                 backend: self.backend.as_str(),
@@ -265,6 +273,41 @@ pub struct HardwareConfigStore {
 }
 
 impl HardwareConfigStore {
+    fn lock(&self) -> Result<std::fs::File, HardwareError> {
+        let path = self.path.with_extension("hardware.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| HardwareError::Config {
+                path: self.path.clone(),
+                message: error.to_string(),
+            })?;
+        file.try_lock().map_err(|error| HardwareError::Config {
+            path: self.path.clone(),
+            message: error.to_string(),
+        })?;
+        Ok(file)
+    }
+
+    pub(crate) fn verify_current(
+        &self,
+        expected: &HardwareConfig,
+    ) -> Result<std::fs::File, AiRuntimeError> {
+        let guard = self
+            .lock()
+            .map_err(|error| AiRuntimeError::ActivationGuard(error.to_string()))?;
+        if self
+            .load()
+            .map_err(|error| AiRuntimeError::ActivationGuard(error.to_string()))?
+            != *expected
+        {
+            return Err(AiRuntimeError::ActivationSuperseded);
+        }
+        Ok(guard)
+    }
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
@@ -274,6 +317,14 @@ impl HardwareConfigStore {
     }
 
     pub fn load(&self) -> Result<HardwareConfig, HardwareError> {
+        if let Ok(metadata) = std::fs::metadata(&self.path)
+            && metadata.len() > 1024 * 1024
+        {
+            return Err(HardwareError::Config {
+                path: self.path.clone(),
+                message: "hardware config exceeds 1 MiB".into(),
+            });
+        }
         let bytes = match std::fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -286,12 +337,11 @@ impl HardwareConfigStore {
                 });
             }
         };
-        let config: HardwareConfig = serde_json::from_slice(&bytes).map_err(|error| {
-            HardwareError::Config {
+        let config: HardwareConfig =
+            serde_json::from_slice(&bytes).map_err(|error| HardwareError::Config {
                 path: self.path.clone(),
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         config.validate()?;
         Ok(config)
     }
@@ -299,6 +349,7 @@ impl HardwareConfigStore {
     /// Persist an explicit selection. Fields absent from `update` are inherited
     /// from the existing document; a new document requires every field.
     pub fn select(&self, update: SelectionUpdate) -> Result<HardwareConfig, HardwareError> {
+        let _guard = self.lock()?;
         let previous = match self.load() {
             Ok(config) => Some(config),
             Err(HardwareError::MissingConfig(_)) => None,
@@ -333,26 +384,41 @@ impl HardwareConfigStore {
             },
         };
         selection.validate()?;
-        let revision = previous.as_ref().map_or(1, |config| config.revision + 1);
+        let revision = match previous.as_ref() {
+            Some(config) => config
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| HardwareError::InvalidSelection("revision overflow".into()))?,
+            None => 1,
+        };
         let config = HardwareConfig {
             schema_version: HARDWARE_CONFIG_SCHEMA,
             revision,
             selection,
         };
-        self.save(&config)?;
+        self.write(&config)?;
         Ok(config)
     }
 
     pub fn save(&self, config: &HardwareConfig) -> Result<(), HardwareError> {
+        let _guard = self.lock()?;
+        self.write(config)
+    }
+
+    fn write(&self, config: &HardwareConfig) -> Result<(), HardwareError> {
         config.validate()?;
         let bytes = serde_json::to_vec_pretty(config).map_err(|error| HardwareError::Config {
             path: self.path.clone(),
             message: error.to_string(),
         })?;
-        let temporary = self.path.with_extension(format!(
-            "{}.tmp",
-            uuid::Uuid::new_v4()
-        ));
+        if bytes.len() > 1024 * 1024 {
+            return Err(HardwareError::InvalidSelection(
+                "hardware config exceeds 1 MiB".into(),
+            ));
+        }
+        let temporary = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
@@ -361,6 +427,7 @@ impl HardwareConfigStore {
                 .open(&temporary)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
+            drop(file);
             std::fs::rename(&temporary, &self.path)
         })();
         if result.is_err() {
@@ -410,9 +477,7 @@ pub enum HardwareError {
     RuntimeProfileNotConfirmed { plugin_id: String },
     #[error("worker did not report {plugin_id} as loaded and ready")]
     ModelNotReady { plugin_id: String },
-    #[error(
-        "selection changed while activation was in progress; the previous worker was kept"
-    )]
+    #[error("selection changed while activation was in progress; the previous worker was kept")]
     StaleSwitch,
 }
 
@@ -424,6 +489,8 @@ pub struct HardwareProbe {
     pub python: String,
     #[serde(default)]
     pub adapter_error: String,
+    #[serde(default)]
+    pub cuda_error: String,
     #[serde(default)]
     pub adapters: Vec<PhysicalAdapter>,
     pub backends: Vec<BackendAvailability>,
@@ -476,6 +543,10 @@ pub struct ProbeDevice {
     pub fp16: bool,
     #[serde(default)]
     pub fp16_reason: String,
+    #[serde(default)]
+    pub compute_types: Vec<String>,
+    #[serde(default)]
+    pub luid: String,
 }
 
 impl HardwareProbe {
@@ -485,9 +556,9 @@ impl HardwareProbe {
 
     pub fn device(&self, backend: &str, device: &DeviceId) -> Option<&ProbeDevice> {
         let id = device.to_string();
-        self.devices
-            .iter()
-            .find(|item| item.backend == backend && item.kind == device.kind().as_str() && item.id == id)
+        self.devices.iter().find(|item| {
+            item.backend == backend && item.kind == device.kind().as_str() && item.id == id
+        })
     }
 }
 
@@ -514,8 +585,7 @@ pub fn verify_probe(profile: &RuntimeProfile, probe: &HardwareProbe) -> Result<(
             }
         ));
     }
-    let device = DeviceId::parse(&profile.device)
-        .map_err(|error| error.to_string())?;
+    let device = DeviceId::parse(&profile.device).map_err(|error| error.to_string())?;
     let record = probe
         .device(family, &device)
         .ok_or_else(|| format!("worker does not report device {device}"))?;
@@ -549,9 +619,9 @@ pub fn verify_execution(result: &Value) -> Result<(), String> {
 pub fn backend_family(kind: BackendKind) -> &'static str {
     match kind {
         BackendKind::TorchCpu | BackendKind::TorchCuda => "torch",
-        BackendKind::OnnxCpu | BackendKind::OnnxCuda | BackendKind::OnnxDirectml => {
-            "onnxruntime"
-        }
+        BackendKind::Ctranslate2Cpu | BackendKind::Ctranslate2Cuda => "ctranslate2",
+        BackendKind::RemoteApi => "remote_api",
+        BackendKind::OnnxCpu | BackendKind::OnnxCuda | BackendKind::OnnxDirectml => "onnxruntime",
     }
 }
 
@@ -560,6 +630,9 @@ pub fn backend_device_kind(kind: BackendKind) -> DeviceKind {
         BackendKind::TorchCpu | BackendKind::OnnxCpu => DeviceKind::Cpu,
         BackendKind::TorchCuda | BackendKind::OnnxCuda => DeviceKind::Cuda,
         BackendKind::OnnxDirectml => DeviceKind::DirectMl,
+        BackendKind::Ctranslate2Cpu => DeviceKind::Cpu,
+        BackendKind::Ctranslate2Cuda => DeviceKind::Cuda,
+        BackendKind::RemoteApi => DeviceKind::Remote,
     }
 }
 
@@ -576,33 +649,71 @@ pub struct ReadyReport {
     pub backend: BackendKind,
     pub revision: String,
     pub device: String,
-    pub device_name: String,
+    pub device_name: Option<String>,
     pub precision: Precision,
     pub plugin_id: String,
 }
 
-pub struct HardwareRuntime {
-    supervisor: AiSupervisor,
+pub struct HardwareRuntime<'a> {
+    application: &'a super::application::RunningAiApplication,
+    supervisor: &'a AiSupervisor,
     store: HardwareConfigStore,
     backends_directory: PathBuf,
 }
 
-impl HardwareRuntime {
+pub(crate) fn verify_worker_plan(
+    worker: &super::application::AiWorkerSelection,
+    config: &HardwareConfig,
+) -> Result<(), HardwareError> {
+    let selected = &config.selection;
+    if !worker.models.iter().any(|model| {
+        model.service == selected.service
+            && model.plugin_id == selected.plugin_id
+            && model.settings == selected.settings
+    }) {
+        return Err(HardwareError::InvalidSelection(
+            "selection differs from application worker plan".into(),
+        ));
+    }
+    for layer in worker.composition.paths() {
+        let marker = layer.join(".neuromita-backend.json");
+        match std::fs::read(marker) {
+            Ok(bytes) => {
+                let backend: super::backend::LockedBackend = serde_json::from_slice(&bytes)
+                    .map_err(|error| HardwareError::BackendLayer(error.to_string()))?;
+                if backend.kind == selected.backend && backend.revision == selected.backend_revision
+                {
+                    backend
+                        .validate()
+                        .map_err(|error| HardwareError::BackendLayer(error.to_string()))?;
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(HardwareError::BackendLayer(error.to_string())),
+        }
+    }
+    Err(HardwareError::BackendLayer(
+        "selected backend revision is absent from the resolved production composition".into(),
+    ))
+}
+
+impl<'a> HardwareRuntime<'a> {
     pub fn new(
-        topology: ProcessTopology,
-        host: PythonHostConfig,
+        application: &'a super::application::RunningAiApplication,
         data_directory: PathBuf,
         config_path: PathBuf,
     ) -> Self {
         Self {
-            supervisor: AiSupervisor::new(topology, host),
+            application,
+            supervisor: application.supervisor(),
             store: HardwareConfigStore::new(config_path),
-            backends_directory: data_directory.join("environments").join("bases"),
+            backends_directory: data_directory.join("backends"),
         }
     }
 
     pub fn supervisor(&self) -> &AiSupervisor {
-        &self.supervisor
+        self.supervisor
     }
 
     pub fn store(&self) -> &HardwareConfigStore {
@@ -636,83 +747,47 @@ impl HardwareRuntime {
     /// execution, load the model and confirm the runtime profile before it is
     /// published. Publication happens only while the persisted revision still
     /// matches the applied snapshot.
-    pub async fn apply(&self, config: &HardwareConfig) -> Result<ReadyReport, HardwareError> {
+    pub async fn apply(
+        &self,
+        config: &HardwareConfig,
+        worker: &super::application::AiWorkerSelection,
+    ) -> Result<ReadyReport, HardwareError> {
         config.validate()?;
         let selection = &config.selection;
         let device = selection.validate()?;
-        let (locked, path) = load_installed_backend(
-            &self.backends_directory,
-            selection.backend,
-            &selection.backend_revision,
-        )
-        .map_err(|error| self.layer_error(error, selection.backend, &selection.backend_revision))?;
-        let composition = RuntimeComposition::for_single_service(selection.service, &locked, path)
-            .map_err(|error| HardwareError::BackendLayer(error.to_string()))?;
-        let models = [ModelActivation {
-            service: selection.service,
-            plugin_id: selection.plugin_id.clone(),
-            settings: selection.settings.clone(),
-        }];
+        if self.application.worker_services(selection.service)
+            != Some(worker.composition.services())
+        {
+            return Err(HardwareError::InvalidSelection(
+                "switch must preserve the application's complete worker service set".into(),
+            ));
+        }
+        verify_worker_plan(worker, config)?;
+        let composition = &worker.composition;
+        let models = &worker.models;
+        if !models.iter().any(|model| {
+            model.service == selection.service
+                && model.plugin_id == selection.plugin_id
+                && model.settings == selection.settings
+        }) {
+            return Err(HardwareError::InvalidSelection(
+                "selection differs from the application worker plan".into(),
+            ));
+        }
         let profile = selection.profile();
         let store = &self.store;
-        let expected_revision = config.revision;
-        let expected_selection = selection.clone();
-        let verify = move || -> Result<(), AiRuntimeError> {
-            let current = store
-                .load()
-                .map_err(|error| AiRuntimeError::ActivationGuard(error.to_string()))?;
-            if current.revision == expected_revision && current.selection == expected_selection {
-                Ok(())
-            } else {
-                Err(AiRuntimeError::ActivationSuperseded)
-            }
-        };
+        let verify = || store.verify_current(config);
         let generation = self
             .supervisor
-            .activate_hardware(
-                selection.service,
-                &composition,
-                &models,
-                &profile,
-                &verify,
-            )
+            .activate_hardware(selection.service, composition, models, &profile, &verify)
             .await
             .map_err(|error| self.runtime_error(error))?;
-        let probe = self
-            .supervisor
-            .hardware_probe(selection.service)
-            .await
-            .map_err(|error| self.runtime_error(error))?;
-        let family = backend_family(selection.backend);
-        let record = probe.device(family, &device).ok_or_else(|| {
-            HardwareError::DeviceUnavailable {
-                device: device.to_string(),
-                reason: "device disappeared after activation".into(),
-            }
-        })?;
-        let status = self
-            .supervisor
-            .readiness(selection.service)
-            .await
-            .map_err(|error| self.runtime_error(error))?;
-        let entry = status
-            .get("services")
-            .and_then(|services| services.get(selection.service.kind()));
-        let ready = entry.is_some_and(|entry| {
-            entry.get("plugin_id").and_then(Value::as_str) == Some(selection.plugin_id.as_str())
-                && entry.get("model_ready").and_then(Value::as_bool) == Some(true)
-        });
-        if !ready {
-            return Err(HardwareError::ModelNotReady {
-                plugin_id: selection.plugin_id.clone(),
-            });
-        }
         Ok(ReadyReport {
             generation,
             backend: selection.backend,
             revision: selection.backend_revision.clone(),
             device: device.to_string(),
-            device_name: record.name.clone(),
+            device_name: None,
             precision: selection.precision,
             plugin_id: selection.plugin_id.clone(),
         })
@@ -777,12 +852,13 @@ pub async fn run_cli(arguments: Vec<OsString>) -> Result<(), Box<dyn std::error:
 const HELP: &str = "neuromita hardware inspect --config FILE | --backend KIND --revision REV
     --python EXE --sdk DIR --plugins DIR [--data DIR] [--topology shared|split] [--timeout SECS]
   neuromita hardware select --config FILE [--backend KIND] [--revision REV] [--device DEVICE]
-    [--precision fp32|fp16] [--service tts|asr|embedding|beats] [--plugin ID] [--settings FILE]
-  neuromita hardware apply --config FILE --python EXE --sdk DIR --plugins DIR --data DIR
+    [--precision fp32|fp16] [--service tts|asr|embedding|reranker|beats] [--plugin ID] [--settings FILE]
+  neuromita hardware apply --config FILE --composition FILE --models FILE --python EXE --sdk DIR --plugins DIR --data DIR
     [--topology shared|split] [--timeout SECS]
 
-KIND: torch_cpu, torch_cuda, onnx_cpu, onnx_cuda, onnx_directml.
-DEVICE: cpu, cuda:<ordinal> or dml:<ordinal>. FP16 is accepted only on CUDA
+KIND: torch_cpu, torch_cuda, onnx_cpu, onnx_cuda, onnx_directml,
+  ctranslate2_cpu, ctranslate2_cuda, remote_api.
+DEVICE: cpu, cuda:<ordinal>, dml:<ordinal> or remote. FP16 is accepted only on CUDA
 backends and only when the worker reports the device as FP16 capable.
 `inspect` is read-only inventory. `select` persists the explicit choice.
 `apply` loads the model and reports readiness; source availability alone is
@@ -799,6 +875,8 @@ enum Invocation {
 #[derive(Default)]
 struct Options {
     config: Option<PathBuf>,
+    composition: Option<PathBuf>,
+    models: Option<PathBuf>,
     python: Option<PathBuf>,
     sdk: Option<PathBuf>,
     plugins: Option<PathBuf>,
@@ -812,12 +890,6 @@ struct Options {
     settings: Option<PathBuf>,
     topology: ProcessTopology,
     timeout: Option<u64>,
-}
-
-impl Default for ProcessTopology {
-    fn default() -> Self {
-        Self::Split
-    }
 }
 
 impl Invocation {
@@ -854,6 +926,10 @@ impl Invocation {
             };
             match argument.as_ref() {
                 "--config" => options.config = unique_path(options.config, value()?)?,
+                "--composition" => {
+                    options.composition = unique_path(options.composition, value()?)?
+                }
+                "--models" => options.models = unique_path(options.models, value()?)?,
                 "--python" => options.python = unique_path(options.python, value()?)?,
                 "--sdk" => options.sdk = unique_path(options.sdk, value()?)?,
                 "--plugins" => options.plugins = unique_path(options.plugins, value()?)?,
@@ -931,7 +1007,9 @@ fn run_select(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         .backend
         .map(|text| {
             BackendKind::parse(&text).ok_or_else(|| {
-                invalid(&format!("unknown backend {text}; expected torch_cpu, torch_cuda, onnx_cpu, onnx_cuda or onnx_directml"))
+                invalid(&format!(
+                    "unknown backend {text}; use --help for accepted names"
+                ))
             })
         })
         .transpose()?;
@@ -941,8 +1019,11 @@ fn run_select(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             "tts" => Ok(AiService::Tts),
             "asr" => Ok(AiService::Asr),
             "embedding" => Ok(AiService::Embedding),
+            "reranker" => Ok(AiService::Reranker),
             "beats" => Ok(AiService::Beats),
-            _ => Err(invalid("unknown service; expected tts, asr, embedding or beats")),
+            _ => Err(invalid(
+                "unknown service; expected tts, asr, embedding, reranker or beats",
+            )),
         })
         .transpose()?;
     let precision = options
@@ -975,18 +1056,23 @@ fn run_select(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         plugin_id: options.plugin,
         settings,
     })?;
-    println!("Selection persisted: {} (revision {})", path.display(), config.revision);
-    print_selection(&config.selection);
     println!(
-        "Next: neuromita hardware apply --config {}",
-        path.display()
+        "Selection persisted: {} (revision {})",
+        path.display(),
+        config.revision
     );
+    print_selection(&config.selection);
+    println!("Next: neuromita hardware apply --config {}", path.display());
     Ok(())
 }
 
 async fn run_inspect(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = options.config.clone();
-    let (backend, revision) = match (&config_path, options.backend.as_deref(), options.revision.as_deref()) {
+    let (backend, revision) = match (
+        &config_path,
+        options.backend.as_deref(),
+        options.revision.as_deref(),
+    ) {
         (Some(config), None, None) => {
             let config = HardwareConfigStore::new(config).load()?;
             (config.selection.backend, config.selection.backend_revision)
@@ -996,19 +1082,21 @@ async fn run_inspect(options: Options) -> Result<(), Box<dyn std::error::Error>>
                 .ok_or_else(|| invalid("unknown backend; use --help for accepted names"))?;
             (backend, revision.to_owned())
         }
-        _ => return Err(invalid("inspect requires --config or --backend with --revision")),
+        _ => return Err(invalid("inspect requires --config or --backend with --revision").into()),
     };
     let data = options
         .data
+        .as_ref()
         .ok_or_else(|| invalid("--data is required for hardware inspect"))?;
     let host = host_config(&options, duration(options.timeout))?;
-    let runtime = HardwareRuntime::new(
-        options.topology,
-        host,
-        data,
-        config_path.unwrap_or_else(|| PathBuf::from("hardware-config.json")),
-    );
-    let inspection = runtime.inspect(backend, &revision).await?;
+    let (_, path) = load_installed_backend(&data.join("backends"), backend, &revision)?;
+    let supervisor = AiSupervisor::new(options.topology, host);
+    let probe = serde_json::from_value(supervisor.inspect_layers(&[path]).await?)?;
+    let inspection = Inspection {
+        backend,
+        revision,
+        probe,
+    };
     println!(
         "Backend: {} revision {} (Python {})",
         backend.as_str(),
@@ -1023,9 +1111,17 @@ async fn run_inspect(options: Options) -> Result<(), Box<dyn std::error::Error>>
             println!(
                 "  [{index}] {} ({}, {} bytes, luid {})",
                 adapter.name,
-                if adapter.vendor.is_empty() { "unknown" } else { &adapter.vendor },
+                if adapter.vendor.is_empty() {
+                    "unknown"
+                } else {
+                    &adapter.vendor
+                },
                 adapter.dedicated_vram_bytes,
-                if adapter.luid.is_empty() { "-" } else { &adapter.luid }
+                if adapter.luid.is_empty() {
+                    "-"
+                } else {
+                    &adapter.luid
+                }
             );
         }
     }
@@ -1056,10 +1152,18 @@ async fn run_inspect(options: Options) -> Result<(), Box<dyn std::error::Error>>
             device.id,
             device.backend,
             device.name,
-            if device.compute_capability.is_empty() { "-" } else { &device.compute_capability },
+            if device.compute_capability.is_empty() {
+                "-"
+            } else {
+                &device.compute_capability
+            },
             device.memory_bytes,
             if device.fp16 { "yes" } else { "no" },
-            if device.fp16_reason.is_empty() { "-" } else { &device.fp16_reason }
+            if device.fp16_reason.is_empty() {
+                "-"
+            } else {
+                &device.fp16_reason
+            }
         );
     }
     println!("Inventory only: no model is loaded and no inference readiness is claimed.");
@@ -1079,28 +1183,60 @@ async fn run_apply(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| invalid("--data is required for hardware apply"))?;
     let store = HardwareConfigStore::new(&config_path);
     let config = store.load()?;
-    let runtime = HardwareRuntime::new(
+    let composition_path = options.composition.as_ref().ok_or_else(|| {
+        invalid("--composition FILE is required; use the installed production backend/overlay plan")
+    })?;
+    let selections: Vec<super::composition::ServiceSelection> =
+        serde_json::from_slice(&std::fs::read(composition_path)?)?;
+    let installer = super::backend::BackendInstaller {
+        uv_executable: PathBuf::new(),
+        python_executable: host.python_executable.clone(),
+        backends_directory: data.join("backends"),
+        cache_directory: data.join("cache"),
+        timeout: host.request_timeout,
+    };
+    let overlays = super::overlay::OverlayInstaller {
+        uv_executable: PathBuf::new(),
+        python_executable: host.python_executable.clone(),
+        overlays_directory: data.join("overlays"),
+        cache_directory: data.join("cache"),
+        timeout: host.request_timeout,
+    };
+    let composition = RuntimeComposition::resolve(
         options.topology,
+        config.selection.service,
+        &selections,
+        &installer,
+        &overlays,
+    )
+    .await?;
+    let models_path = options.models.as_ref().ok_or_else(|| {
+        invalid("--models FILE is required; include explicit plugin/settings and installed asset revisions")
+    })?;
+    let models: Vec<ModelActivation> = serde_json::from_slice(&std::fs::read(models_path)?)?;
+    let worker = super::application::AiWorkerSelection {
+        service: config.selection.service,
+        composition,
+        models,
+    };
+    let app = super::application::AiApplicationConfig {
+        topology: options.topology,
         host,
-        data,
-        config_path,
-    );
-    let report = runtime.apply(&config).await?;
+        workers: vec![worker],
+        voice_profiles: None,
+    }
+    .activate_with_hardware(&config, &store)
+    .await?;
     println!(
-        "Ready: backend={} revision={} device={} ({:?}) precision={} plugin={} worker={}",
-        report.backend.as_str(),
-        report.revision,
-        report.device,
-        report.device_name,
-        report.precision,
-        report.plugin_id,
-        report.generation
+        "Model loaded with verified backend={} device={} precision={} plugin={}; stopping verification session.",
+        config.selection.backend.as_str(),
+        config.selection.device,
+        config.selection.precision,
+        config.selection.plugin_id
     );
-    println!("Model is loaded and the worker reports inference readiness.");
-    let _ = runtime.stop(config.selection.service).await;
+    app.shutdown().await?;
     Ok(())
 }
-
 fn host_config(options: &Options, timeout: Duration) -> io::Result<PythonHostConfig> {
     let python = options
         .python
@@ -1115,9 +1251,9 @@ fn host_config(options: &Options, timeout: Duration) -> io::Result<PythonHostCon
         .clone()
         .ok_or_else(|| invalid("--plugins is required"))?;
     Ok(PythonHostConfig {
-        host: PythonHost::managed(),
         python_executable: python,
         sdk_root: sdk,
+        models_directory: options.data.as_ref().map(|data| data.join("models")),
         plugins_directory: plugins,
         request_timeout: timeout,
     })
@@ -1128,8 +1264,19 @@ fn duration(seconds: Option<u64>) -> Duration {
 }
 
 fn print_selection(selection: &HardwareSelection) {
-    println!("Backend: {} revision {}", selection.backend.as_str(), selection.backend_revision);
-    println!("Device: {} precision {}", selection.device, selection.precision);
-    println!("Service: {} plugin {}", selection.service.kind(), selection.plugin_id);
-    println!("Settings: {}", selection.settings);
+    println!(
+        "Backend: {} revision {}",
+        selection.backend.as_str(),
+        selection.backend_revision
+    );
+    println!(
+        "Device: {} precision {}",
+        selection.device, selection.precision
+    );
+    println!(
+        "Service: {} plugin {}",
+        selection.service.kind(),
+        selection.plugin_id
+    );
+    println!("Plugin settings: configured (values omitted)");
 }

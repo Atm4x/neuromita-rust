@@ -51,6 +51,39 @@ class HostTests(unittest.TestCase):
         self.assertTrue(self.request(process, "unload", {"kind": "tts"})["ok"])
         self.assertFalse(self.request(process, "infer", {"kind": "tts", "input": {"text": "again"}})["ok"])
 
+    def test_chunked_wav_stream_is_bounded_and_correlated(self):
+        import base64
+        process = self.start_host()
+        self.assertTrue(self.request(process, "initialize", {"plugin_id": "mock_tts"})["ok"])
+        started = self.request(process, "infer_stream_start", {"kind": "tts", "input": {"text": "a" * 200}})
+        self.assertTrue(started["ok"])
+        stream = started["result"]
+        self.assertEqual(stream["format"], "wav")
+        self.assertFalse(self.request(process, "unload", {"kind": "tts"})["ok"])
+        self.assertFalse(self.request(process, "infer_stream_next", {"stream_id": "bogus"})["ok"])
+        chunks = []
+        while True:
+            result = self.request(process, "infer_stream_next", {"stream_id": stream["stream_id"]})
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["result"]["stream_id"], stream["stream_id"])
+            chunks.append(base64.b64decode(result["result"]["chunk_base64"]))
+            if result["result"]["done"]:
+                break
+        data = b"".join(chunks)
+        self.assertEqual(len(data), stream["length"])
+        self.assertTrue(data.startswith(b"RIFF"))
+        self.assertFalse(self.request(process, "infer_stream_next", {"stream_id": stream["stream_id"]})["ok"])
+        self.assertTrue(self.request(process, "unload", {"kind": "tts"})["ok"])
+
+    def test_stream_cancel_releases_buffer_and_allows_reuse(self):
+        process = self.start_host()
+        self.assertTrue(self.request(process, "initialize", {"plugin_id": "mock_tts"})["ok"])
+        args = {"kind": "tts", "input": {"text": "short"}}
+        stream = self.request(process, "infer_stream_start", args)["result"]["stream_id"]
+        self.assertFalse(self.request(process, "infer_stream_start", args)["ok"])
+        self.assertTrue(self.request(process, "infer_stream_cancel", {"stream_id": stream})["ok"])
+        self.assertTrue(self.request(process, "infer_stream_start", args)["ok"])
+
     def test_shared_worker_supports_independent_service_slots(self):
         process = self.start_host()
         self.assertTrue(self.request(process, "initialize", {"plugin_id": "mock_asr"})["ok"])
@@ -60,6 +93,24 @@ class HostTests(unittest.TestCase):
         self.assertFalse(self.request(process, "initialize", {"plugin_id": "mock_tts"})["ok"])
         self.assertTrue(self.request(process, "unload", {"kind": "asr"})["ok"])
         self.assertTrue(self.request(process, "infer", {"kind": "tts", "input": {"text": "still here"}})["ok"])
+
+    def test_asr_mock_accepts_captured_pcm16_wav(self):
+        import base64
+        import io
+        import wave
+        process = self.start_host()
+        self.assertTrue(self.request(process, "initialize", {"plugin_id": "mock_asr"})["ok"])
+        audio = io.BytesIO()
+        with wave.open(audio, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(bytes(512))
+        response = self.request(process, "infer", {"kind": "asr", "input": {
+            "audio_base64": base64.b64encode(audio.getvalue()).decode("ascii")
+        }})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["result"], {"text": "", "language": "en"})
 
     def test_invalid_and_incompatible_discovery(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -84,6 +135,14 @@ class HostTests(unittest.TestCase):
             self.assertEqual(plan["result"]["packages"][0]["name"], "transformers")
             self.assertTrue(self.request(host, "settings_schema", {"plugin_id": "third_party"})["ok"])
             self.assertFalse(self.request(host, "initialize", {"plugin_id": "third_party"})["ok"])
+
+    def test_validate_config_without_inference_loading(self):
+        process = self.start_host()
+        result = self.request(process, "validate_config", {"plugin_id": "silero_rvc_cuda", "settings": {"silero.speaker_id": "kseniya"}})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"]["rvc.pitch_shift_semitones"], 6.0)
+        self.assertFalse(self.request(process, "validate_config", {"plugin_id": "silero_rvc_cuda", "settings": {"volume": float("nan")}})["ok"])
+        self.assertFalse(self.request(process, "active_settings_schema", {"kind": "tts"})["ok"])
 
     def test_wrong_settings_not_ready(self):
         process = self.start_host()

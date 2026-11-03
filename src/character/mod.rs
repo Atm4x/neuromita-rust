@@ -1,4 +1,5 @@
 mod handler;
+mod lexical_dedup;
 pub mod memory;
 pub(crate) mod memory_access;
 mod model;
@@ -8,6 +9,7 @@ pub mod state;
 pub use crate::identity::CharacterId;
 pub(crate) use handler::AcceptanceContext;
 pub(crate) use handler::CharacterRegistry;
+pub(crate) use handler::ReminderBridge;
 pub use handler::{AcceptedResponse, CharacterError, CharacterHandle};
 pub use model::{CharacterContext, CharacterState, CharacterView, GenerationFocus, ReactionCause};
 

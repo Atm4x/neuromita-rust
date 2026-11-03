@@ -60,6 +60,10 @@ fn legacy(stored: &StoredSettings) -> Vec<u8> {
         "mita": characters["mita"]["presets"],
         "kind_mita": characters["kind_mita"]["presets"],
     });
+    value["settings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reminders");
     serde_json::to_vec(&value).unwrap()
 }
 
@@ -108,20 +112,46 @@ fn old_documents_receive_only_the_explicit_version_one_upgrade() {
 }
 
 #[test]
+fn version_two_documents_gain_only_the_explicit_reminders_defaults() {
+    let expected = record(6);
+    let mut old = serde_json::to_value(&expected).unwrap();
+    old["schema_version"] = json!(2);
+    old["settings"].as_object_mut().unwrap().remove("reminders");
+    let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
+    let stored = migrated.stored();
+    assert_eq!(stored.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(stored.revision, 6);
+    assert_eq!(stored.settings.presets, expected.settings.presets);
+    assert_eq!(stored.settings.characters, expected.settings.characters);
+    assert_eq!(stored.settings.voice, expected.settings.voice);
+    assert!(stored.settings.reminders.enabled);
+    assert_eq!(
+        stored.settings.reminders.timezone,
+        neuromita::reminders::TimeZoneId::utc()
+    );
+    let mut current = serde_json::to_value(&expected).unwrap();
+    current["settings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reminders");
+    assert!(SettingsTransfer::decode(&serde_json::to_vec(&current).unwrap()).is_err());
+}
+
+#[test]
 fn invalid_and_duplicate_documents_are_rejected_without_a_fallback() {
     let source = serde_json::to_string(&record(9)).unwrap();
     let duplicate = source.replacen("\"revision\":9", "\"revision\":9,\"revision\":10", 1);
     let duplicate_schema = source.replacen(
-        "\"schema_version\":2",
-        "\"schema_version\":2,\"schema_version\":2",
+        "\"schema_version\":3",
+        "\"schema_version\":3,\"schema_version\":3",
         1,
     );
     let duplicate_nested = source.replacen("\"volume\":80", "\"volume\":80,\"volume\":81", 1);
     let mut future = serde_json::to_value(record(9)).unwrap();
-    future["schema_version"] = json!(3);
+    future["schema_version"] = json!(4);
     assert!(matches!(
         SettingsTransfer::decode(&serde_json::to_vec(&future).unwrap()),
-        Err(SettingsTransferError::UnsupportedSchema { found: 3 })
+        Err(SettingsTransferError::UnsupportedSchema { found: 4 })
     ));
     for bytes in [
         duplicate.as_bytes(),
@@ -261,7 +291,7 @@ impl StartupMigration for StartupProbe {
     }
     fn run(&self) -> Result<(), MigrationError> {
         let document: Value = serde_json::from_slice(&fs::read(&self.0).unwrap()).unwrap();
-        assert_eq!(document["schema_version"], 2);
+        assert_eq!(document["schema_version"], 3);
         assert!(SettingsApi::snapshot_all().is_err());
         Err(MigrationError::Storage("injected extension failure".into()))
     }
@@ -273,7 +303,7 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     let path = directory.path("settings.json");
     let repository = Arc::new(JsonSettingsRepository::new(path.clone()));
     let mut unsupported = serde_json::to_value(record(9)).unwrap();
-    unsupported["schema_version"] = json!(3);
+    unsupported["schema_version"] = json!(4);
     let original = serde_json::to_vec(&unsupported).unwrap();
     fs::write(&path, &original).unwrap();
     assert!(
@@ -412,7 +442,10 @@ fn failed_persisted_upgrade_keeps_version_one_until_retry_commits() {
     assert_eq!(fs::read(&path).unwrap(), original);
     drop(locked);
     repository.migrate().unwrap();
-    assert_eq!(repository.read_versioned().unwrap().version, 2);
+    assert_eq!(
+        repository.read_versioned().unwrap().version,
+        SETTINGS_SCHEMA_VERSION
+    );
     assert_eq!(repository.load().unwrap(), record(9));
 }
 

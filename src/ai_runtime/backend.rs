@@ -14,7 +14,7 @@ use super::{
 
 pub type BackendError = LayerError;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
     TorchCpu,
@@ -22,6 +22,9 @@ pub enum BackendKind {
     OnnxCpu,
     OnnxCuda,
     OnnxDirectml,
+    Ctranslate2Cpu,
+    Ctranslate2Cuda,
+    RemoteApi,
 }
 
 impl BackendKind {
@@ -32,6 +35,9 @@ impl BackendKind {
             Self::OnnxCpu => "onnx_cpu",
             Self::OnnxCuda => "onnx_cuda",
             Self::OnnxDirectml => "onnx_directml",
+            Self::Ctranslate2Cpu => "ctranslate2_cpu",
+            Self::Ctranslate2Cuda => "ctranslate2_cuda",
+            Self::RemoteApi => "remote_api",
         }
     }
 
@@ -42,6 +48,9 @@ impl BackendKind {
             "onnx_cpu" => Some(Self::OnnxCpu),
             "onnx_cuda" => Some(Self::OnnxCuda),
             "onnx_directml" => Some(Self::OnnxDirectml),
+            "ctranslate2_cpu" => Some(Self::Ctranslate2Cpu),
+            "ctranslate2_cuda" => Some(Self::Ctranslate2Cuda),
+            "remote_api" => Some(Self::RemoteApi),
             _ => None,
         }
     }
@@ -53,14 +62,19 @@ impl BackendKind {
             Self::OnnxCpu => "onnx-cpu",
             Self::OnnxCuda => "onnx-cuda",
             Self::OnnxDirectml => "onnx-directml",
+            Self::Ctranslate2Cpu => "ctranslate2-cpu",
+            Self::Ctranslate2Cuda => "ctranslate2-cuda",
+            Self::RemoteApi => "remote-api",
         }
     }
-    fn required_package(self) -> &'static str {
+    fn required_package(self) -> Option<&'static str> {
         match self {
-            Self::TorchCpu | Self::TorchCuda => "torch",
-            Self::OnnxCpu => "onnxruntime",
-            Self::OnnxCuda => "onnxruntime-gpu",
-            Self::OnnxDirectml => "onnxruntime-directml",
+            Self::TorchCpu | Self::TorchCuda => Some("torch"),
+            Self::OnnxCpu => Some("onnxruntime"),
+            Self::OnnxCuda => Some("onnxruntime-gpu"),
+            Self::OnnxDirectml => Some("onnxruntime-directml"),
+            Self::Ctranslate2Cpu | Self::Ctranslate2Cuda => Some("ctranslate2"),
+            Self::RemoteApi => None,
         }
     }
 }
@@ -73,6 +87,7 @@ pub struct LockedBackend {
     pub packages: Vec<LockedPackage>,
 }
 
+#[derive(Clone)]
 pub struct BackendInstaller {
     pub uv_executable: PathBuf,
     pub python_executable: PathBuf,
@@ -92,14 +107,16 @@ impl LockedBackend {
             .iter()
             .map(|p| p.name.to_ascii_lowercase().replace(['-', '_', '.'], "-"))
             .collect();
-        if !names
-            .iter()
-            .any(|name| name == self.kind.required_package())
-        {
-            return Err(LayerError::Invalid(format!(
-                "backend must pin {}",
-                self.kind.required_package()
-            )));
+        match self.kind.required_package() {
+            Some(required) if !names.iter().any(|name| name == required) => {
+                return Err(LayerError::Invalid(format!("backend must pin {required}")));
+            }
+            None if !names.is_empty() => {
+                return Err(LayerError::Invalid(
+                    "remote API backend must not install local compute packages".into(),
+                ));
+            }
+            _ => {}
         }
         let onnx_variants = ["onnxruntime", "onnxruntime-gpu", "onnxruntime-directml"];
         if names
@@ -169,7 +186,13 @@ impl BackendInstaller {
     }
     pub async fn installed(&self, plan: &LockedBackend) -> Result<bool, BackendError> {
         self.layer()
-            .installed(&self.installed_path(plan)?, ".neuromita-backend.json", plan)
+            .installed(
+                &self.installed_path(plan)?,
+                ".neuromita-backend.json",
+                plan,
+                &plan.packages,
+                &[],
+            )
             .await
     }
     pub async fn install(&self, plan: &LockedBackend) -> Result<PathBuf, BackendError> {
@@ -179,6 +202,7 @@ impl BackendInstaller {
                 ".neuromita-backend.json",
                 plan,
                 &plan.packages,
+                &[],
             )
             .await
     }
@@ -216,6 +240,28 @@ mod tests {
         assert!(spec.validate().is_err());
     }
 
+    #[test]
+    fn explicit_ctranslate2_and_remote_backends_have_distinct_install_contracts() {
+        let mut spec = LockedBackend {
+            kind: BackendKind::Ctranslate2Cpu,
+            revision: "rev1".into(),
+            python_version: "3.12.10".into(),
+            packages: vec![LockedPackage {
+                name: "ctranslate2".into(),
+                version: "4.6.0".into(),
+            }],
+        };
+        assert!(spec.validate().is_ok());
+        spec.kind = BackendKind::Ctranslate2Cuda;
+        assert!(spec.validate().is_ok());
+        spec.packages[0].name = "torch".into();
+        assert!(spec.validate().is_err());
+        spec.kind = BackendKind::RemoteApi;
+        assert!(spec.validate().is_err());
+        spec.packages.clear();
+        assert!(spec.validate().is_ok());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn backend_is_published_immutably_without_modifying_overlay() {
@@ -223,7 +269,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("nm-backend-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let uv = root.join("uv");
-        tokio::fs::write(&uv, "#!/bin/sh\n[ \"$1\" = pip ] || exit 2\nexit 0\n")
+        tokio::fs::write(&uv, "#!/bin/sh\n[ \"$1\" = pip ] || exit 2\ntarget=''\nprev=''\nfor arg do if [ \"$prev\" = --target ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nmkdir -p \"$target/onnxruntime_directml-1.22.0.dist-info\"\nprintf 'Name: onnxruntime-directml\\nVersion: 1.22.0\\n' > \"$target/onnxruntime_directml-1.22.0.dist-info/METADATA\"\n")
             .await
             .unwrap();
         std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();

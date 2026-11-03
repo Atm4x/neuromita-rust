@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod ai_runtime;
 pub mod api;
 pub mod app;
+pub mod audio;
 pub mod character;
 pub mod generation;
 mod identity;
@@ -15,6 +16,7 @@ pub mod localization;
 mod maintenance;
 pub mod migration;
 pub mod presentation;
+pub mod reminders;
 pub mod request;
 mod runtime;
 pub mod server;
@@ -24,3 +26,5 @@ pub mod voice;
 
 pub use character::memory;
 pub mod turn;
+
+pub mod releases;

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::SettingsError;
 use crate::generation::PresetId;
+use crate::reminders::{LocalTimePolicy, TimeZoneId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
@@ -119,12 +120,34 @@ pub struct PresetSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RemindersSettings {
+    pub enabled: bool,
+    pub timezone: TimeZoneId,
+    pub policy: LocalTimePolicy,
+}
+
+impl RemindersSettings {
+    pub fn initial_profile() -> Self {
+        // Deterministic declared profile: the initial zone is always UTC and
+        // never depends on the host. A local zone is set explicitly through
+        // SettingsApi or the `zone` terminal command.
+        Self {
+            enabled: true,
+            timezone: TimeZoneId::utc(),
+            policy: LocalTimePolicy::LENIENT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub presets: PresetSettings,
     pub characters: CharactersSettings,
     pub voice: VoiceSettings,
     pub capture: CaptureSettings,
     pub interface: InterfaceSettings,
+    pub reminders: RemindersSettings,
 }
 
 impl AppSettings {
@@ -147,6 +170,7 @@ impl AppSettings {
                 language: Language::Russian,
                 font_size: 14,
             },
+            reminders: RemindersSettings::initial_profile(),
         }
     }
     pub fn selected_preset(
@@ -212,6 +236,7 @@ section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
+section!(RemindersSettings, reminders);
 
 #[derive(Debug, Clone)]
 pub struct SectionSnapshot<T> {

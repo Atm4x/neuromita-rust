@@ -36,6 +36,7 @@ class FixtureHost:
             backend = args.get("backend")
             device = args.get("device")
             kinds = {
+                "remote_api": ("remote_api", "remote"),
                 "torch_cpu": ("torch", "cpu"),
                 "torch_cuda": ("torch", "cuda"),
                 "onnx_cpu": ("onnxruntime", "cpu"),

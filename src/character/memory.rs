@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const MAX_ACTIVE_FACTS: usize = 256;
+pub const MAX_RETAINED_MEMORIES: usize = 1024;
+pub const MAX_MEMORY_EDIT_CHANGES: usize = MAX_ACTIVE_FACTS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MemoryId(pub Uuid);
@@ -140,6 +144,20 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    /// Idempotent exact-text insertion. A retained forgotten/deleted fact is
+    /// reactivated under its original ID instead of allocating another record.
+    /// Ordinary Add, explicit Restore and island operations are unchanged.
+    EnsureFact {
+        priority: MemoryPriority,
+        content: String,
+    },
+    /// Explicit lexical Jaccard dedup on active facts only. This does not run inference.
+    /// A threshold of 800 represents Python MEMORY_DEDUP_THRESHOLD=0.8.
+    AddLexicallyDeduplicated {
+        priority: MemoryPriority,
+        content: String,
+        threshold_per_mille: u16,
+    },
     Update {
         id: MemoryId,
         priority: Option<MemoryPriority>,
@@ -155,6 +173,12 @@ pub enum MemoryCommand {
     },
     /// Explicitly replace a typed island, preserving its identity on subsequent updates.
     SetIsland {
+        island: MemoryIsland,
+        content: String,
+    },
+    /// Initialize one island only if its category has never been retained.
+    /// Unlike SetIsland, repeated seeding never overwrites evolving memory.
+    SeedIsland {
         island: MemoryIsland,
         content: String,
     },
@@ -175,6 +199,74 @@ pub enum MemoryCommand {
         id: MemoryId,
         protected: bool,
     },
+}
+
+/// A pure, opt-in capacity reduction proposal. No memory is forgotten until
+/// the character owner commits the corresponding explicit Forget commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryCapacityPlan {
+    active_facts: usize,
+    limit: usize,
+    victims: Vec<MemoryId>,
+}
+
+impl MemoryCapacityPlan {
+    /// Stable priority-first ordering, with MemoryId as a tie-breaker. MemoryId
+    /// is NOT a proxy for creation time or retrieval frequency.
+    pub fn preview(records: &[MemoryRecord], limit: usize) -> Result<Self, &'static str> {
+        if !(1..=MAX_ACTIVE_FACTS).contains(&limit) {
+            return Err("active memory target must be 1..256");
+        }
+        let active_facts = records
+            .iter()
+            .filter(|record| record.kind == MemoryKind::Fact && record.state == MemoryState::Active)
+            .count();
+        let needed = active_facts.saturating_sub(limit);
+        let mut candidates = records
+            .iter()
+            .filter(|record| {
+                record.kind == MemoryKind::Fact
+                    && record.state == MemoryState::Active
+                    && !record.protected
+                    && record.priority != MemoryPriority::Critical
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable_by_key(|record| (record.priority, record.id));
+        if candidates.len() < needed {
+            return Err("insufficient forgettable memories to reach capacity target");
+        }
+        Ok(Self {
+            active_facts,
+            limit,
+            victims: candidates[..needed]
+                .iter()
+                .map(|record| record.id)
+                .collect(),
+        })
+    }
+
+    pub fn active_facts(&self) -> usize {
+        self.active_facts
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub fn victims(&self) -> &[MemoryId] {
+        &self.victims
+    }
+
+    pub fn is_noop(&self) -> bool {
+        self.victims.is_empty()
+    }
+
+    pub fn forget_commands(&self) -> Vec<MemoryCommand> {
+        self.victims
+            .iter()
+            .map(|&id| MemoryCommand::Forget { id })
+            .collect()
+    }
 }
 
 /// Canonical committed operation; upserts include complete values, not partial deltas.
@@ -300,7 +392,9 @@ impl CharacterMemories {
                         return Err("protected memory cannot change before unprotecting");
                     }
                 }
-                if !self.records.contains_key(&record.id) && self.records.len() >= 1024 {
+                if !self.records.contains_key(&record.id)
+                    && self.records.len() >= MAX_RETAINED_MEMORIES
+                {
                     return Err("retained memory capacity exceeded");
                 }
                 let next_active_facts = self
@@ -315,7 +409,7 @@ impl CharacterMemories {
                     + usize::from(
                         record.kind == MemoryKind::Fact && record.state == MemoryState::Active,
                     );
-                if next_active_facts > 256 {
+                if next_active_facts > MAX_ACTIVE_FACTS {
                     return Err("active memory capacity exceeded");
                 }
                 self.records.insert(record.id, record.clone());
@@ -365,7 +459,41 @@ impl CharacterMemories {
         let mut changes = Vec::new();
         for command in commands {
             match command {
-                MemoryCommand::Add { priority, content } => {
+                MemoryCommand::Add { priority, content }
+                | MemoryCommand::AddLexicallyDeduplicated {
+                    priority, content, ..
+                } => {
+                    if let MemoryCommand::AddLexicallyDeduplicated {
+                        threshold_per_mille,
+                        ..
+                    } = command
+                    {
+                        if content.trim().is_empty() || content.chars().count() > 2000 {
+                            return Err("invalid memory record");
+                        }
+                        let duplicate = super::lexical_dedup::best_active_fact(
+                            next.records.values(),
+                            content,
+                            *threshold_per_mille,
+                        )?;
+                        if let Some(id) = duplicate {
+                            let previous = next.get(id).expect("dedup candidate from records");
+                            if previous.protected {
+                                return Err(
+                                    "protected memory cannot be edited before unprotecting",
+                                );
+                            }
+                            let mut changed = previous.clone();
+                            changed.content = content.clone();
+                            changed.priority = changed.priority.max(*priority);
+                            if changed != *previous {
+                                let change = MemoryChange::Upsert(changed);
+                                next.apply_committed(&change)?;
+                                changes.push(change);
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(previous) = next.records.values().find(|record| {
                         record.kind == MemoryKind::Fact
                             && record.state != MemoryState::Deleted
@@ -390,6 +518,42 @@ impl CharacterMemories {
                     ));
                     next.apply_committed(&change)?;
                     changes.push(change);
+                }
+                MemoryCommand::EnsureFact { priority, content } => {
+                    if content.trim().is_empty() || content.chars().count() > 2000 {
+                        return Err("invalid memory record");
+                    }
+                    // Python skip_if_exists compares exact text, not normalized
+                    // lexical similarity. Ambiguous retained identities must not
+                    // be chosen based on map iteration order.
+                    let mut matches = next.records.values().filter(|record| {
+                        record.kind == MemoryKind::Fact && record.content == *content
+                    });
+                    let existing = matches.next().cloned();
+                    if matches.next().is_some() {
+                        return Err("ambiguous retained exact memory match");
+                    }
+                    if let Some(mut record) = existing {
+                        if record.state == MemoryState::Active {
+                            continue;
+                        }
+                        if record.protected {
+                            return Err("protected memory cannot be restored");
+                        }
+                        record.state = MemoryState::Active;
+                        record.priority = *priority;
+                        let change = MemoryChange::Upsert(record);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    } else {
+                        let change = MemoryChange::Upsert(MemoryRecord::fact(
+                            MemoryId::new(),
+                            *priority,
+                            content.clone(),
+                        ));
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
                 }
                 MemoryCommand::Update {
                     id,
@@ -489,6 +653,24 @@ impl CharacterMemories {
                     });
                     record.content = content.clone();
                     record.state = MemoryState::Active;
+                    let change = MemoryChange::Upsert(record);
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
+                MemoryCommand::SeedIsland { island, content } => {
+                    if content.trim().is_empty() || content.chars().count() > 2000 {
+                        return Err("invalid memory record");
+                    }
+                    if next
+                        .records
+                        .values()
+                        .any(|record| record.kind == MemoryKind::Island(*island))
+                    {
+                        continue;
+                    }
+                    let mut record =
+                        MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, content.clone());
+                    record.kind = MemoryKind::Island(*island);
                     let change = MemoryChange::Upsert(record);
                     next.apply_committed(&change)?;
                     changes.push(change);
@@ -1004,5 +1186,372 @@ mod tests {
         book.apply_committed(&MemoryChange::Upsert(duplicate))
             .unwrap();
         assert_eq!(book.ensure_unique(), Err("duplicate memory island"));
+    }
+
+    #[test]
+    fn ensure_fact_exact_match_restores_retained_identity_and_priority() {
+        let id = MemoryId(Uuid::from_u128(501));
+        let mut book = CharacterMemories::default();
+        let mut record = MemoryRecord::fact(id, MemoryPriority::Low, "Original Text");
+        record.expires_at_unix_ms = Some(1234);
+        book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+
+        apply(&mut book, &[MemoryCommand::Forget { id }]);
+        assert!(
+            book.resolve(&[MemoryCommand::Add {
+                priority: MemoryPriority::High,
+                content: "Original Text".into(),
+            }])
+            .is_err()
+        );
+        let expected = MemoryCommand::EnsureFact {
+            priority: MemoryPriority::High,
+            content: "Original Text".into(),
+        };
+        let changes = book.resolve(std::slice::from_ref(&expected)).unwrap();
+        assert_eq!(changes.len(), 1);
+        let MemoryChange::Upsert(reactivated) = &changes[0] else {
+            panic!("expected upsert")
+        };
+        assert_eq!(reactivated.id, id);
+        assert_eq!(reactivated.state, MemoryState::Active);
+        assert_eq!(reactivated.priority, MemoryPriority::High);
+        assert_eq!(reactivated.expires_at_unix_ms, Some(1234));
+        book.apply_committed(&changes[0]).unwrap();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Critical,
+                content: "Original Text".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.get(id).unwrap().priority, MemoryPriority::High);
+
+        apply(&mut book, &[MemoryCommand::SoftDelete { id }]);
+        apply(
+            &mut book,
+            &[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "Original Text".into(),
+            }],
+        );
+        assert_eq!(book.all().len(), 1);
+        assert_eq!(book.get(id).unwrap().state, MemoryState::Active);
+        assert_eq!(book.get(id).unwrap().priority, MemoryPriority::Normal);
+    }
+
+    #[test]
+    fn ensure_fact_uses_exact_text_and_refuses_ambiguous_retained_matches() {
+        let mut book = CharacterMemories::default();
+        apply(
+            &mut book,
+            &[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "Tea time".into(),
+            }],
+        );
+        let before = book.clone();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Low,
+                content: "tea time".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book, before);
+
+        let first = MemoryId(Uuid::from_u128(502));
+        let second = MemoryId(Uuid::from_u128(503));
+        for id in [first, second] {
+            let mut record = MemoryRecord::fact(id, MemoryPriority::Low, "duplicated deleted row");
+            record.state = MemoryState::Deleted;
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        assert_eq!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "duplicated deleted row".into(),
+            }]),
+            Err("ambiguous retained exact memory match")
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "  ".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book.get(first).unwrap().state, MemoryState::Deleted);
+        assert_eq!(book.get(second).unwrap().state, MemoryState::Deleted);
+        assert_eq!(book.all().len(), 3);
+    }
+
+    #[test]
+    fn ensure_fact_rejects_protected_reactivation_and_batch_rolls_back() {
+        let mut book = CharacterMemories::default();
+        let id = MemoryId(Uuid::from_u128(504));
+        let mut record = MemoryRecord::fact(id, MemoryPriority::High, "protected forgotten");
+        record.state = MemoryState::Forgotten;
+        record.protected = true;
+        book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        let before = book.clone();
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Critical,
+                content: "protected forgotten".into(),
+            }])
+            .is_err()
+        );
+        assert!(
+            book.resolve(&[
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Low,
+                    content: "new fact".into(),
+                },
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Critical,
+                    content: "protected forgotten".into(),
+                },
+            ])
+            .is_err()
+        );
+        assert_eq!(book, before);
+    }
+
+    #[test]
+    fn ensure_fact_batches_are_idempotent_and_capacity_guarded() {
+        let mut book = CharacterMemories::default();
+        let changes = book
+            .resolve(&[
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::Low,
+                    content: "one consistent fact".into(),
+                },
+                MemoryCommand::EnsureFact {
+                    priority: MemoryPriority::High,
+                    content: "one consistent fact".into(),
+                },
+            ])
+            .unwrap();
+        assert_eq!(changes.len(), 1);
+        let MemoryChange::Upsert(record) = &changes[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(record.priority, MemoryPriority::Low);
+        book.apply_committed(&changes[0]).unwrap();
+        assert_eq!(book.all().len(), 1);
+
+        for n in 1..MAX_ACTIVE_FACTS {
+            let record = MemoryRecord::fact(
+                MemoryId(Uuid::from_u128(1000 + n as u128)),
+                MemoryPriority::Normal,
+                format!("capacity item {n}"),
+            );
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        let mut hidden = MemoryRecord::fact(
+            MemoryId(Uuid::from_u128(2000)),
+            MemoryPriority::Low,
+            "unavailable target",
+        );
+        hidden.state = MemoryState::Forgotten;
+        book.apply_committed(&MemoryChange::Upsert(hidden)).unwrap();
+        let original = book.clone();
+        assert_eq!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::High,
+                content: "unavailable target".into(),
+            }]),
+            Err("active memory capacity exceeded")
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::EnsureFact {
+                priority: MemoryPriority::Normal,
+                content: "new overflow".into(),
+            }])
+            .is_err()
+        );
+        assert_eq!(book, original);
+    }
+
+    #[test]
+    fn seed_island_is_one_time_and_does_not_overwrite_any_retained_state() {
+        let mut book = CharacterMemories::default();
+        let seed = MemoryCommand::SeedIsland {
+            island: MemoryIsland::Relationship,
+            content: "initial relationship".into(),
+        };
+        let changes = book.resolve(&[seed.clone(), seed.clone()]).unwrap();
+        assert_eq!(changes.len(), 1);
+        book.apply_committed(&changes[0]).unwrap();
+        let original = book.all()[0].clone();
+        assert_eq!(original.priority, MemoryPriority::High);
+        assert_eq!(
+            original.kind,
+            MemoryKind::Island(MemoryIsland::Relationship)
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Relationship,
+                content: "attempted overwrite".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.all(), vec![original.clone()]);
+
+        apply(&mut book, &[MemoryCommand::Forget { id: original.id }]);
+        assert!(
+            book.resolve(std::slice::from_ref(&seed))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(book.all()[0].state, MemoryState::Forgotten);
+        apply(&mut book, &[MemoryCommand::SoftDelete { id: original.id }]);
+        assert!(book.resolve(&[seed]).unwrap().is_empty());
+        assert_eq!(book.all()[0].state, MemoryState::Deleted);
+        assert_eq!(book.all()[0].id, original.id);
+    }
+
+    #[test]
+    fn seed_island_preserves_manual_updates_and_protection() {
+        let mut book = CharacterMemories::default();
+        apply(
+            &mut book,
+            &[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Preferences,
+                content: "original preferences".into(),
+            }],
+        );
+        let id = book.islands()[0].id;
+        apply(
+            &mut book,
+            &[MemoryCommand::SetIsland {
+                island: MemoryIsland::Preferences,
+                content: "updated preferences".into(),
+            }],
+        );
+        apply(
+            &mut book,
+            &[MemoryCommand::SetProtection {
+                id,
+                protected: true,
+            }],
+        );
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Preferences,
+                content: "should not change".into(),
+            }])
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(book.islands()[0].id, id);
+        assert_eq!(book.islands()[0].content, "updated preferences");
+        assert!(book.islands()[0].protected);
+        assert!(
+            book.resolve(&[MemoryCommand::SeedIsland {
+                island: MemoryIsland::Language,
+                content: "   ".into(),
+            }])
+            .is_err()
+        );
+        assert!(
+            book.resolve(&[
+                MemoryCommand::SeedIsland {
+                    island: MemoryIsland::Language,
+                    content: "language seed".into(),
+                },
+                MemoryCommand::SeedIsland {
+                    island: MemoryIsland::Opinion,
+                    content: " ".into(),
+                },
+            ])
+            .is_err()
+        );
+        assert_eq!(book.all().len(), 1);
+    }
+
+    #[test]
+    fn capacity_preview_is_pure_priority_ordered_and_excludes_protected_and_islands() {
+        let mut book = CharacterMemories::default();
+        let mut fixture = [
+            (10, MemoryPriority::Low, false, MemoryKind::Fact),
+            (2, MemoryPriority::Low, false, MemoryKind::Fact),
+            (6, MemoryPriority::Normal, false, MemoryKind::Fact),
+            (7, MemoryPriority::Low, true, MemoryKind::Fact),
+            (8, MemoryPriority::Critical, false, MemoryKind::Fact),
+            (
+                9,
+                MemoryPriority::Low,
+                false,
+                MemoryKind::Island(MemoryIsland::Language),
+            ),
+        ];
+        fixture.reverse();
+        for (number, priority, protected, kind) in fixture {
+            let mut record = MemoryRecord::fact(
+                MemoryId(Uuid::from_u128(number)),
+                priority,
+                format!("unique {number}"),
+            );
+            record.protected = protected;
+            record.kind = kind;
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        let before = book.clone();
+        let plan = MemoryCapacityPlan::preview(&book.all(), 3).unwrap();
+        assert_eq!(plan.active_facts(), 5);
+        assert_eq!(plan.limit(), 3);
+        assert_eq!(
+            plan.victims(),
+            &[MemoryId(Uuid::from_u128(2)), MemoryId(Uuid::from_u128(10))]
+        );
+        assert_eq!(book, before);
+        let changes = book.resolve(&plan.forget_commands()).unwrap();
+        assert_eq!(changes.len(), 2);
+        for change in &changes {
+            book.apply_committed(change).unwrap();
+        }
+        assert_eq!(book.list().len(), 3);
+        assert_eq!(book.islands().len(), 1);
+        assert_eq!(book.forgotten().len(), 2);
+        assert!(
+            MemoryCapacityPlan::preview(&book.all(), 3)
+                .unwrap()
+                .is_noop()
+        );
+    }
+
+    #[test]
+    fn capacity_plan_fails_atomically_if_critical_or_protected_block_target() {
+        let mut book = CharacterMemories::default();
+        let protected_id = MemoryId(Uuid::from_u128(1));
+        let critical_id = MemoryId(Uuid::from_u128(2));
+        let normal_id = MemoryId(Uuid::from_u128(3));
+        for (id, priority, protected) in [
+            (protected_id, MemoryPriority::Low, true),
+            (critical_id, MemoryPriority::Critical, false),
+            (normal_id, MemoryPriority::Normal, false),
+        ] {
+            let mut record = MemoryRecord::fact(id, priority, format!("fact {id:?}"));
+            record.protected = protected;
+            book.apply_committed(&MemoryChange::Upsert(record)).unwrap();
+        }
+        let original = book.clone();
+        assert_eq!(
+            MemoryCapacityPlan::preview(&book.all(), 1),
+            Err("insufficient forgettable memories to reach capacity target")
+        );
+        assert!(MemoryCapacityPlan::preview(&book.all(), 0).is_err());
+        assert!(MemoryCapacityPlan::preview(&book.all(), 257).is_err());
+        assert_eq!(book, original);
+        assert_eq!(
+            MemoryCapacityPlan::preview(&book.all(), 2)
+                .unwrap()
+                .victims(),
+            &[normal_id]
+        );
     }
 }

@@ -133,6 +133,14 @@ impl<'a> AppendIndex<'a> {
             EventKind::CharacterMemoryChanged
                 | EventKind::CharacterStateChanged
                 | EventKind::CharacterWorkingStateReplaced
+                | EventKind::ReminderScheduled
+                | EventKind::ReminderUpdated
+                | EventKind::ReminderDeleted
+                | EventKind::ReminderFired
+                | EventKind::ReminderDeliveryFailed
+                | EventKind::ReminderDeliverySettled
+                | EventKind::ReminderDeliveryRetried
+                | EventKind::ReminderToolResult
         ) {
             return Ok(());
         }
@@ -160,6 +168,43 @@ impl<'a> AppendIndex<'a> {
                     .expect("loaded memory projection")
                     .apply_committed(&change)
                     .map_err(TimelineError::Invalid)?;
+            }
+            EventKind::ReminderScheduled | EventKind::ReminderUpdated => {
+                let record: crate::reminders::ReminderRecord = payload(draft, "reminder")?;
+                record
+                    .validate()
+                    .map_err(|_| TimelineError::Invalid("invalid reminder record"))?;
+                if record.character != character {
+                    return Err(TimelineError::Invalid(
+                        "reminder belongs to another character",
+                    ));
+                }
+            }
+            EventKind::ReminderDeleted => {
+                let _: crate::reminders::ReminderDeletion = payload(draft, "deleted")?;
+            }
+            EventKind::ReminderFired => {
+                let fired: crate::reminders::FiredOccurrence = payload(draft, "fired")?;
+                if fired.character != character {
+                    return Err(TimelineError::Invalid(
+                        "fired reminder belongs to another character",
+                    ));
+                }
+            }
+            EventKind::ReminderDeliveryFailed => {
+                let _: crate::reminders::DeliveryFailure = payload(draft, "failure")?;
+            }
+            EventKind::ReminderDeliverySettled => {
+                let _: crate::reminders::DeliverySettlement = payload(draft, "settlement")?;
+            }
+            EventKind::ReminderDeliveryRetried => {
+                let _: crate::reminders::DeliveryRetry = payload(draft, "retry")?;
+            }
+            EventKind::ReminderToolResult => {
+                let content: String = payload(draft, "content")?;
+                if content.trim().is_empty() {
+                    return Err(TimelineError::Invalid("empty reminder tool result"));
+                }
             }
             _ => unreachable!(),
         }

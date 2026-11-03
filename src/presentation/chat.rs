@@ -52,6 +52,10 @@ pub struct ChatPresenter {
 }
 
 impl ChatPresenter {
+    pub fn trace(&self, id: RequestId) -> Option<Arc<crate::request::RequestTrace>> {
+        self.api.registry.trace(id)
+    }
+
     pub fn reply(
         &self,
         character: CharacterId,
