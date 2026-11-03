@@ -39,7 +39,7 @@ pub enum Command {
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
-    SectionVisibility(usize, bool),
+    SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     Select(CharacterId),
     Send(String),

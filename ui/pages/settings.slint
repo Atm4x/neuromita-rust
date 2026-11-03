@@ -360,8 +360,9 @@ export component SettingsPage inherits Rectangle {
                         CollapsibleSettingsSection {
                             title: I18n.i18n("settings.general.visible-sections", "Видимые разделы");
                             subtitle: I18n.i18n("settings.general.visible-sections-note", "Включите только те разделы, которыми пользуетесь — остальные спрячутся из настроек и боковой панели.");
-                            glyph: "\u{f0b0}";
+                            glyph: "\u{f1de}";
                             expanded <=> root.general-sections-expanded;
+                            VerticalLayout { padding: 0px; spacing: 6px;
                             for tab in [
                                 {id: 1, label: "API"},
                                 {id: 2, label: I18n.i18n("settings.characters", "Персонажи")},
@@ -378,6 +379,7 @@ export component SettingsPage inherits Rectangle {
                                 checked: SettingsUi.section-visible[tab.id];
                                 changed(value) => { SettingsUi.section-visibility(tab.id, value); }
                             }
+                            }
                         }
                         CollapsibleSettingsSection {
                             title: I18n.i18n("settings.general.sandbox-panels", "Панели песочницы");
@@ -386,7 +388,7 @@ export component SettingsPage inherits Rectangle {
                             SettingsText { text: I18n.i18n("settings.general.panel-controls-pending", "Управление видимостью панелей пока не предоставлено Rust-ядром."); color: SettingsTheme.muted; wrap: word-wrap; }
                         }
                         CollapsibleSettingsSection {
-                            title: I18n.i18n("settings.general.privacy", "Приватность"); glyph: "\u{f21b}";
+                            title: I18n.i18n("settings.general.privacy", "Приватность"); glyph: "\u{f505}";
                             SettingsToggleRow {
                                 title: I18n.i18n("settings.general.hide-private", "Скрывать приватные данные");
                                 description: I18n.i18n("settings.general.hide-private-note", "Сохраняет предпочтение маскирования; подключение к отображению секретов ещё требуется.");
@@ -397,7 +399,7 @@ export component SettingsPage inherits Rectangle {
                         CollapsibleSettingsSection {
                             title: I18n.i18n("settings.general.ipc", "Локальное IPC-управление");
                             subtitle: I18n.i18n("settings.general.ipc-note", "Локальный IPC принимает только явно разрешённые команды на 127.0.0.1.");
-                            glyph: "\u{f0ac}";
+                            glyph: "\u{e55d}";
                             SettingsText { text: I18n.i18n("settings.general.ipc-pending", "Настройка локального IPC пока недоступна в Rust API."); color: SettingsTheme.muted; wrap: word-wrap; }
                         }
                         CollapsibleSettingsSection {

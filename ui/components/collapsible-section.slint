@@ -1,6 +1,7 @@
 import { SettingsText, SettingsGlyph } from "settings-kit.slint";
 import { ActionSurface } from "controls.slint";
 import { SettingsTheme } from "../settings/theme.slint";
+import { Centered } from "../sandbox/controls.slint";
 
 export component CollapsibleSettingsSection inherits Rectangle {
     in property <string> title;
@@ -31,14 +32,14 @@ export component CollapsibleSettingsSection inherits Rectangle {
                 padding-left: root.inner ? 4px : 16px;
                 padding-right: root.inner ? 4px : 16px;
                 spacing: 10px;
-                if !root.inner: Rectangle {
+                if !root.inner: Centered { width: 26px; Rectangle {
                     width: 26px; height: 26px;
                     border-radius: 9px;
                     background: SettingsTheme.icon-background;
                     border-width: 1px;
                     border-color: SettingsTheme.icon-border;
                     SettingsGlyph { width: 100%; height: 100%; text: root.glyph; font-size: 14px; color: SettingsTheme.icon; }
-                }
+                } }
                 VerticalLayout {
                     padding: 0px; spacing: 2px; alignment: center; horizontal-stretch: 1;
                     SettingsText { text: root.title; font-size: 12px; font-weight: 800; }
@@ -58,7 +59,7 @@ export component CollapsibleSettingsSection inherits Rectangle {
             content := VerticalLayout {
                 padding-left: root.inner ? 28px : 20px;
                 padding-right: root.inner ? 12px : 20px;
-                padding-top: 12px; padding-bottom: 16px; spacing: 10px;
+                padding-top: root.inner ? 5px : 8px; padding-bottom: root.inner ? 5px : 16px; spacing: 10px;
                 @children
             }
         }

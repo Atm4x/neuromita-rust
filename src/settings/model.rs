@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::SettingsError;
 use crate::generation::PresetId;
@@ -62,18 +63,84 @@ pub enum Language {
 pub struct InterfaceSettings {
     pub language: Language,
     pub font_size: u16,
-    #[serde(default = "all_sections_visible")]
-    pub visible_sections: [bool; 12],
-    #[serde(default = "hide_private_by_default")]
+    pub visibility: SettingsVisibility,
     pub hide_private: bool,
 }
 
-fn all_sections_visible() -> [bool; 12] {
-    [true; 12]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsArea {
+    Api,
+    Characters,
+    Voice,
+    Language,
+    Asr,
+    AiEngine,
+    Games,
+    Models,
+    Images,
+    Updates,
+    Datasets,
 }
 
-fn hide_private_by_default() -> bool {
-    true
+impl SettingsArea {
+    pub const ALL: [Self; 11] = [
+        Self::Api,
+        Self::Characters,
+        Self::Voice,
+        Self::Language,
+        Self::Asr,
+        Self::AiEngine,
+        Self::Games,
+        Self::Models,
+        Self::Images,
+        Self::Updates,
+        Self::Datasets,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "BTreeMap<SettingsArea, bool>",
+    into = "BTreeMap<SettingsArea, bool>"
+)]
+pub struct SettingsVisibility(BTreeMap<SettingsArea, bool>);
+
+impl SettingsVisibility {
+    pub fn all_visible() -> Self {
+        Self(
+            SettingsArea::ALL
+                .into_iter()
+                .map(|area| (area, true))
+                .collect(),
+        )
+    }
+    pub fn is_visible(&self, area: SettingsArea) -> bool {
+        self.0[&area]
+    }
+    pub fn set_visible(&mut self, area: SettingsArea, visible: bool) {
+        self.0.insert(area, visible);
+    }
+}
+
+impl TryFrom<BTreeMap<SettingsArea, bool>> for SettingsVisibility {
+    type Error = String;
+    fn try_from(values: BTreeMap<SettingsArea, bool>) -> Result<Self, Self::Error> {
+        if values.len() != SettingsArea::ALL.len()
+            || SettingsArea::ALL
+                .iter()
+                .any(|area| !values.contains_key(area))
+        {
+            return Err("visibility must explicitly contain every settings area".into());
+        }
+        Ok(Self(values))
+    }
+}
+
+impl From<SettingsVisibility> for BTreeMap<SettingsArea, bool> {
+    fn from(value: SettingsVisibility) -> Self {
+        value.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,7 +278,7 @@ impl AppSettings {
             interface: InterfaceSettings {
                 language: Language::Russian,
                 font_size: 14,
-                visible_sections: all_sections_visible(),
+                visibility: SettingsVisibility::all_visible(),
                 hide_private: true,
             },
             reminders: RemindersSettings::initial_profile(),
@@ -243,11 +310,6 @@ impl AppSettings {
         if self.capture.interval_ms == 0 || !(1..=100).contains(&self.capture.jpeg_quality) {
             return Err(SettingsError::Validation(
                 "invalid capture interval or JPEG quality".into(),
-            ));
-        }
-        if !self.interface.visible_sections[0] {
-            return Err(SettingsError::Validation(
-                "the General settings section must remain visible".into(),
             ));
         }
         if !(6..=96).contains(&self.interface.font_size) {

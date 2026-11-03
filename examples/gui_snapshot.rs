@@ -35,7 +35,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     translations.set_locale("ru".into());
     window.set_page(view::PageId::Settings);
     window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
-    window.global::<view::SettingsUi>().set_section(2);
+    let general = std::env::args().nth(2).as_deref() == Some("general");
+    window
+        .global::<view::SettingsUi>()
+        .set_section(if general { 0 } else { 2 });
+    let characters = neuromita::character::character_catalog()
+        .enumerate()
+        .map(|(index, item)| view::CharacterOption {
+            index: index as i32,
+            id: item.id.as_str().into(),
+            name: item.name.source().into(),
+            name_key: item.name.id().into(),
+            conversation_name: item.conversation_name.source().into(),
+            conversation_key: item.conversation_name.id().into(),
+            initial: item.id.as_str().chars().next().unwrap().to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    window
+        .global::<view::CharacterCatalog>()
+        .set_entries(slint::ModelRc::new(slint::VecModel::from(characters)));
     window.show()?;
     window
         .window()

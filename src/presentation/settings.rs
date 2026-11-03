@@ -6,8 +6,8 @@ use crate::{
     character::CharacterId,
     settings::{
         AppSettings, CharactersSettings, InterfaceSettings, OperationPresets, PresetId,
-        PresetSelection, PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot,
-        SettingsTransfer, VoiceSettings, Volume,
+        PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
+        SettingsSnapshot, SettingsTransfer, VoiceSettings, Volume,
     },
 };
 
@@ -189,8 +189,16 @@ impl CharactersSettingsPresenter {
 }
 
 pub struct InterfaceSettingsPresenter {
-    pub visible_sections: BoundProperty<[bool; 12]>,
+    owner: Arc<SettingsOwner>,
     pub hide_private: BoundProperty<bool>,
+}
+
+impl InterfaceSettingsPresenter {
+    pub fn set_visible(&self, area: SettingsArea, visible: bool) -> Result<(), SettingsError> {
+        self.owner
+            .edit::<InterfaceSettings>(|settings| settings.visibility.set_visible(area, visible))
+            .map(|_| ())
+    }
 }
 
 pub struct SettingsPresenter {
@@ -205,15 +213,7 @@ impl SettingsPresenter {
         Self {
             owner: Arc::clone(&owner),
             interface: InterfaceSettingsPresenter {
-                visible_sections: BoundProperty::new(
-                    Arc::clone(&owner),
-                    |settings| settings.interface.visible_sections,
-                    |owner, value| {
-                        owner
-                            .edit::<InterfaceSettings>(|s| s.visible_sections = value)
-                            .map(|_| ())
-                    },
-                ),
+                owner: Arc::clone(&owner),
                 hide_private: BoundProperty::new(
                     Arc::clone(&owner),
                     |settings| settings.interface.hide_private,

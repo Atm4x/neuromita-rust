@@ -9,13 +9,15 @@ export component SettingsText inherits Text {
     overflow: elide;
 }
 
-export component SettingsGlyph inherits Text {
-    font-family: "Font Awesome 6 Free Solid";
-    font-weight: 900;
-    font-size: 14px;
-    color: SettingsTheme.icon;
-    horizontal-alignment: center;
-    vertical-alignment: center;
+export component SettingsGlyph inherits VerticalLayout {
+    in property <string> text;
+    in property <length> font-size: 14px;
+    in property <color> color: SettingsTheme.icon;
+    width: 16px; min-height: 18px; vertical-stretch: 1;
+    padding: 0px; spacing: 0px; alignment: center;
+    Text { text: root.text; font-family: "Font Awesome 6 Free Solid"; font-weight: 900;
+        font-size: root.font-size; color: root.color; width: 100%; height: 100%;
+        horizontal-alignment: center; vertical-alignment: center; }
 }
 
 export component SettingsSectionHeading inherits HorizontalLayout {
@@ -42,18 +44,18 @@ export component SettingsRow inherits Rectangle {
     in property <string> title;
     in property <string> description;
     in property <bool> active: true;
-    height: root.description == "" ? 32px : 48px;
+    height: root.description == "" ? 26px : 34px;
     vertical-stretch: 0;
     background: transparent;
     border-radius: 8px;
     HorizontalLayout {
         padding-left: 2px; padding-right: 2px; spacing: 10px;
         VerticalLayout {
-            horizontal-stretch: 1; alignment: center; spacing: 2px;
+            horizontal-stretch: 1; alignment: center; spacing: 2px; padding: 0px;
             SettingsText { text: root.title; color: root.active ? SettingsTheme.text : SettingsTheme.muted; wrap: word-wrap; overflow: clip; }
             if root.description != "": SettingsText { text: root.description; color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
         }
-        @children
+        VerticalLayout { padding: 0px; spacing: 0px; alignment: center; horizontal-stretch: 0; @children }
     }
 }
 
@@ -65,15 +67,15 @@ export component SettingsToggle inherits ActionSurface {
     border-width: 0px; background: transparent; border-radius: 11px;
     activated => { root.toggled(!root.checked); }
     Rectangle {
-        width: 42px; height: 22px; border-radius: 11px;
-        background: !root.enabled ? #090a12dc : root.checked ? #79e78ceb : #ffffff1e;
-        border-width: root.checked ? 0px : 1px; border-color: #ffffff12;
+        x: 1px; y: 1px; width: 40px; height: 20px; border-radius: 10px;
+        background: !root.enabled ? SettingsTheme.switch-disabled : root.checked ? SettingsTheme.switch-on : SettingsTheme.switch-off;
     }
+    if root.enabled: Rectangle { x: root.checked ? 23px : 3px; y: 4px; width: 16px; height: 16px; border-radius: 8px; background: SettingsTheme.switch-shadow; animate x { duration: 140ms; easing: ease-in-out; } }
     Rectangle {
         x: root.checked ? 23px : 3px; y: 3px;
         width: 16px; height: 16px; border-radius: 8px;
-        background: root.enabled ? #fffffff0 : #848692be;
-        border-width: 1px; border-color: root.enabled ? #0f11212e : #ffffff12;
+        background: root.enabled ? SettingsTheme.switch-knob : SettingsTheme.switch-disabled-knob;
+        border-width: 1px; border-color: root.enabled ? SettingsTheme.switch-knob-border : SettingsTheme.switch-disabled-border;
         animate x { duration: 140ms; easing: ease-in-out; }
     }
 }
@@ -129,7 +131,7 @@ export component SettingsEntryRow inherits SettingsRow {
     in property <string> placeholder;
     callback committed(string);
     SettingsTextField {
-        width: max(140px, parent.width / 3);
+        width: max(140px, root.width / 3);
         value <=> root.value; editable: root.active; placeholder: root.placeholder;
         accepted(value) => { root.committed(value); }
     }
@@ -159,7 +161,7 @@ export component SettingsChoiceRow inherits SettingsRow {
     in property <string> value;
     callback changed(string);
     Rectangle {
-        width: max(160px, parent.width / 3); height: 38px;
+        width: max(160px, root.width / 3); height: 38px;
         background: SettingsTheme.field; border-color: SettingsTheme.field-border;
         border-width: 1px; border-radius: 10px;
         HorizontalLayout {

@@ -6,10 +6,31 @@ use neuromita::{
     character::CharacterId,
     generation::{GeminiPresetDefinition, PresetDefinition, PresetId, PresetRecord},
     presentation::{GuiPresenter, PresetSlot},
-    settings::{PersistenceState, PresetSelection, SettingsSnapshot},
+    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
+
+const GUI_SETTINGS_AREAS: [SettingsArea; 11] = [
+    SettingsArea::Api,
+    SettingsArea::Characters,
+    SettingsArea::Voice,
+    SettingsArea::Language,
+    SettingsArea::Asr,
+    SettingsArea::AiEngine,
+    SettingsArea::Games,
+    SettingsArea::Models,
+    SettingsArea::Images,
+    SettingsArea::Updates,
+    SettingsArea::Datasets,
+];
+
+fn area_for_section(index: i32) -> Option<SettingsArea> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| GUI_SETTINGS_AREAS.get(index).copied())
+}
 
 pub struct AdministrationSnapshot {
     pub settings: Arc<SettingsSnapshot>,
@@ -79,18 +100,11 @@ pub fn execute(
             .in_game
             .set(value)
             .map_err(|e| e.to_string())?,
-        Command::SectionVisibility(index, enabled) => {
-            if index == 0 || index >= 12 {
-                return Err("Invalid settings section index".into());
-            }
-            let mut visible = api.settings.interface.visible_sections.get();
-            visible[index] = enabled;
-            api.settings
-                .interface
-                .visible_sections
-                .set(visible)
-                .map_err(|e| e.to_string())?;
-        }
+        Command::SectionVisibility(area, enabled) => api
+            .settings
+            .interface
+            .set_visible(area, enabled)
+            .map_err(|e| e.to_string())?,
         Command::HidePrivate(value) => api
             .settings
             .interface
@@ -264,8 +278,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let send = dispatch.clone();
     settings.on_section_visibility(move |index, checked| {
-        if let Ok(index) = usize::try_from(index) {
-            send(Command::SectionVisibility(index, checked));
+        if let Some(area) = area_for_section(index) {
+            send(Command::SectionVisibility(area, checked));
         }
     });
     let send = dispatch.clone();
@@ -288,7 +302,13 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     let settings = &model.settings;
     window.set_settings_revision(settings.revision.to_string().into());
     window.set_section_visible(ModelRc::new(VecModel::from(
-        settings.values.interface.visible_sections.to_vec(),
+        std::iter::once(true)
+            .chain(
+                GUI_SETTINGS_AREAS
+                    .iter()
+                    .map(|area| settings.values.interface.visibility.is_visible(*area)),
+            )
+            .collect::<Vec<_>>(),
     )));
     window.set_hide_private(settings.values.interface.hide_private);
     window.set_settings_persistence(match settings.persistence {

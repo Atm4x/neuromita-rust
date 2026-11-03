@@ -370,7 +370,9 @@ async fn manual_turn_places_the_fleet_when_auto_reactions_are_off() {
             .is_err()
     );
 
-    let manual = GameApi::request_mita_turn(CharacterId::Crazy).await.unwrap();
+    let manual = GameApi::request_mita_turn(CharacterId::Crazy)
+        .await
+        .unwrap();
     let handle = manual.reaction.expect("manual placement request").unwrap();
     seen.insert(handle.id());
     let call = server.next().await;
