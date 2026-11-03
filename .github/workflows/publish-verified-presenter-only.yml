@@ -1,0 +1,41 @@
+name: Publish verified presenter-only Git objects
+on:
+  push:
+    branches:
+      - bridge/presenter-only-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact user-authored commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/bridge/presenter-only.b64 ]]; then
+            echo "Awaiting bundle payload"
+            exit 0
+          fi
+          base64 --decode .github/bridge/presenter-only.b64 > /tmp/incoming.bundle
+          echo 'aab5abc22c1c9bd196a1fb089979ebd7c3974780d8ec9915e579e5c50b6b11c5  /tmp/incoming.bundle' | sha256sum -c -
+          git fetch origin refs/heads/codex/slint-character-memory-20261103:refs/remotes/origin/product-base
+          test "$(git rev-parse refs/remotes/origin/product-base)" = e5abf7d617a766e4691106940f37b4b9463bbfb4
+          git bundle verify /tmp/incoming.bundle
+          git fetch /tmp/incoming.bundle refs/heads/codex/character-memory-presenter-only-20261103:refs/remotes/imported/presenter
+          commit="$(git rev-parse refs/remotes/imported/presenter)"
+          test "$commit" = b078f706dd9af8c86eb2262289c2b1293f41723d
+          test "$(git rev-parse "$commit^{tree}")" = 4ba6a4439cdebb2297f8147508a5195730615776
+          test "$(git rev-parse "$commit~2")" = e5abf7d617a766e4691106940f37b4b9463bbfb4
+          for sha in "$commit" "$commit~1"; do
+            test "$(git show -s --format=%an "$sha")" = Atm4x
+            test "$(git show -s --format=%cn "$sha")" = Atm4x
+            test "$(git show -s --format=%ae "$sha")" = mrtaktplay@gmail.com
+            test "$(git show -s --format=%ce "$sha")" = mrtaktplay@gmail.com
+          done
+          git push origin "$commit:refs/heads/codex/slint-character-memory-20261103"
+          git push origin "$commit:refs/heads/codex/character-memory-presenter-only-20261103"
+          echo "Published exact SHA: $commit"
