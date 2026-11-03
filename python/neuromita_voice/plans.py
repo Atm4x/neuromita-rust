@@ -131,7 +131,7 @@ def settings(plugin_id: str) -> dict:
             "protect": {"type": "number", "default": 0.33, "min": 0.0, "max": 0.5},
         })
     if engine == "silero":
-        result.update({"speaker": {"type": "string", "default": "xenia"},
+        result.update({"speaker": {"type": "string", "default": "kseniya"},
                        "language": {"type": "string", "default": "ru", "choices": ["ru", "en"]},
                        "sample_rate": {"type": "integer", "default": 48000, "choices": [8000, 24000, 48000]}})
     if engine == "edge":
