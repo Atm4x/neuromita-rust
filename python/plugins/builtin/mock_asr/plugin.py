@@ -8,7 +8,7 @@ class Plugin:
         return {"kind": "asr", "languages": ["en", "ru"]}
 
     def install_plan(self):
-        return InstallPlan()
+        return InstallPlan(supported_backends=("remote-api",))
 
     def probe_install(self):
         return {"installed": True, "missing": []}

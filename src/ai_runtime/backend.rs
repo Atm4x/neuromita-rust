@@ -11,7 +11,7 @@ use super::{
 
 pub type BackendError = LayerError;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendKind {
     TorchCpu,
@@ -19,6 +19,9 @@ pub enum BackendKind {
     OnnxCpu,
     OnnxCuda,
     OnnxDirectml,
+    Ctranslate2Cpu,
+    Ctranslate2Cuda,
+    RemoteApi,
 }
 
 impl BackendKind {
@@ -29,14 +32,19 @@ impl BackendKind {
             Self::OnnxCpu => "onnx-cpu",
             Self::OnnxCuda => "onnx-cuda",
             Self::OnnxDirectml => "onnx-directml",
+            Self::Ctranslate2Cpu => "ctranslate2-cpu",
+            Self::Ctranslate2Cuda => "ctranslate2-cuda",
+            Self::RemoteApi => "remote-api",
         }
     }
-    fn required_package(self) -> &'static str {
+    fn required_package(self) -> Option<&'static str> {
         match self {
-            Self::TorchCpu | Self::TorchCuda => "torch",
-            Self::OnnxCpu => "onnxruntime",
-            Self::OnnxCuda => "onnxruntime-gpu",
-            Self::OnnxDirectml => "onnxruntime-directml",
+            Self::TorchCpu | Self::TorchCuda => Some("torch"),
+            Self::OnnxCpu => Some("onnxruntime"),
+            Self::OnnxCuda => Some("onnxruntime-gpu"),
+            Self::OnnxDirectml => Some("onnxruntime-directml"),
+            Self::Ctranslate2Cpu | Self::Ctranslate2Cuda => Some("ctranslate2"),
+            Self::RemoteApi => None,
         }
     }
 }
@@ -69,14 +77,16 @@ impl LockedBackend {
             .iter()
             .map(|p| p.name.to_ascii_lowercase().replace(['-', '_', '.'], "-"))
             .collect();
-        if !names
-            .iter()
-            .any(|name| name == self.kind.required_package())
-        {
-            return Err(LayerError::Invalid(format!(
-                "backend must pin {}",
-                self.kind.required_package()
-            )));
+        match self.kind.required_package() {
+            Some(required) if !names.iter().any(|name| name == required) => {
+                return Err(LayerError::Invalid(format!("backend must pin {required}")));
+            }
+            None if !names.is_empty() => {
+                return Err(LayerError::Invalid(
+                    "remote API backend must not install local compute packages".into(),
+                ));
+            }
+            _ => {}
         }
         let onnx_variants = ["onnxruntime", "onnxruntime-gpu", "onnxruntime-directml"];
         if names
@@ -166,6 +176,28 @@ mod tests {
             version: "1.22.0".into(),
         });
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn explicit_ctranslate2_and_remote_backends_have_distinct_install_contracts() {
+        let mut spec = LockedBackend {
+            kind: BackendKind::Ctranslate2Cpu,
+            revision: "rev1".into(),
+            python_version: "3.12.10".into(),
+            packages: vec![LockedPackage {
+                name: "ctranslate2".into(),
+                version: "4.6.0".into(),
+            }],
+        };
+        assert!(spec.validate().is_ok());
+        spec.kind = BackendKind::Ctranslate2Cuda;
+        assert!(spec.validate().is_ok());
+        spec.packages[0].name = "torch".into();
+        assert!(spec.validate().is_err());
+        spec.kind = BackendKind::RemoteApi;
+        assert!(spec.validate().is_err());
+        spec.packages.clear();
+        assert!(spec.validate().is_ok());
     }
 
     #[cfg(unix)]

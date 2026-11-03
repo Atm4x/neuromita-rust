@@ -452,6 +452,7 @@ mod tests {
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
@@ -518,6 +519,7 @@ mod tests {
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
             assets: vec![],

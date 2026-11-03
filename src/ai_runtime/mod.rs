@@ -916,6 +916,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
@@ -1047,6 +1048,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
             assets: vec![ModelAssetRequirement {

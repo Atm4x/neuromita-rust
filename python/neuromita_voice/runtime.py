@@ -12,7 +12,7 @@ import tempfile
 import sys
 import wave
 
-from .plans import VARIANTS, asset_root, family, plan, probe, settings
+from .plans import VARIANTS, SILERO_TTS_MODELS, asset_root, family, plan, probe, settings, supported_backends
 from neuromita_ai_sdk import validate_settings
 
 
@@ -36,6 +36,12 @@ class VoicePlugin:
     def probe_install(self):
         return probe(self.plugin_id)
 
+    def install_plan_for_settings(self, selected_settings):
+        return plan(self.plugin_id, selected_settings)
+
+    def probe_install_for_settings(self, selected_settings):
+        return probe(self.plugin_id, selected_settings)
+
     def settings_schema(self):
         schema = settings(self.plugin_id)
         if self.initialized and self.engine is not None and family(self.plugin_id) == "silero":
@@ -49,9 +55,8 @@ class VoicePlugin:
         _, mode, _, _ = VARIANTS[self.plugin_id]
         if mode == "cuda" and not self.options["device"].startswith("cuda"):
             raise ValueError("CUDA TTS variant requires a CUDA device")
-        if mode == "onnx" and self.options["device"].startswith("cuda"):
-            raise ValueError("ONNX TTS variant requires an explicit CPU/DirectML device")
-        state = self.probe_install()
+        supported_backends(self.plugin_id, self.options)
+        state = self.probe_install_for_settings(self.options)
         if not state["installed"]:
             raise RuntimeError(f"TTS dependencies/assets missing: {state}")
         engine, mode, cross, rvc = VARIANTS[self.plugin_id]
@@ -60,10 +65,12 @@ class VoicePlugin:
             if engine in ("edge", "silero") or rvc:
                 self.rvc = self._init_rvc(root, mode)
             if engine == "silero":
-                from silero import silero_tts
-                language = self.options["language"]
-                model_id = "v3_en" if language == "en" else "v5_ru"
-                self.engine, _ = silero_tts(language=language, speaker=model_id)
+                from torch.package import PackageImporter
+                model_id, relative_path, _, _ = SILERO_TTS_MODELS[self.options["language"]]
+                model_path = root / relative_path
+                if model_path.is_symlink() or not model_path.is_file() or model_path.stat().st_size == 0:
+                    raise RuntimeError(f"Silero {model_id} package is not installed: {relative_path}")
+                self.engine = PackageImporter(str(model_path)).load_pickle("tts_models", "model")
                 self.engine.to("cpu" if mode == "onnx" else self.options["device"])
                 speakers = getattr(self.engine, "speakers", None)
                 if speakers is not None and self.options["silero.speaker_id"] not in speakers:

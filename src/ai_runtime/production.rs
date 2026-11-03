@@ -68,7 +68,8 @@ pub struct SelectedModel {
     pub service: AiService,
     pub plugin_id: String,
     pub package_revision: String,
-    pub backend: Option<LockedBackend>,
+    pub backend: LockedBackend,
+    pub extra_backends: Vec<LockedBackend>,
     pub settings: Value,
     pub assets: ModelAssets,
     pub approved_actions: HashSet<String>,
@@ -125,6 +126,9 @@ fn backend_name(kind: BackendKind) -> &'static str {
         BackendKind::OnnxCpu => "onnx-cpu",
         BackendKind::OnnxCuda => "onnx-cuda",
         BackendKind::OnnxDirectml => "onnx-directml",
+        BackendKind::Ctranslate2Cpu => "ctranslate2-cpu",
+        BackendKind::Ctranslate2Cuda => "ctranslate2-cuda",
+        BackendKind::RemoteApi => "remote-api",
     }
 }
 
@@ -257,10 +261,19 @@ impl AiProductionInstaller {
                     .assets
                     .revision()
                     .is_some_and(|revision| !valid_segment(revision))
+                || model.backend.python_version != self.bootstrap.python_version
+                || model.extra_backends.len() > 4
+                || model.extra_backends.iter().any(|backend| {
+                    backend.python_version != self.bootstrap.python_version
+                        || backend.kind == model.backend.kind
+                })
                 || model
-                    .backend
-                    .as_ref()
-                    .is_some_and(|backend| backend.python_version != self.bootstrap.python_version)
+                    .extra_backends
+                    .iter()
+                    .map(|backend| backend.kind)
+                    .collect::<HashSet<_>>()
+                    .len()
+                    != model.extra_backends.len()
             {
                 return Err(AiProductionError::Invalid(format!(
                     "invalid or conflicting service selection: {}",
@@ -330,31 +343,67 @@ impl AiProductionInstaller {
             plan.validate(&self.bootstrap.python_version)?;
             let mut backend_layers = Vec::new();
             let mut dependencies = Vec::new();
-            let (backend_id, backend_packages) = match &selection.backend {
-                Some(backend) => {
-                    let task_backend_installer = backends.clone();
-                    let task_backend = backend.clone();
-                    let task =
-                        tokio::spawn(
-                            async move { task_backend_installer.install(&task_backend).await },
-                        );
-                    let _abort_on_drop = AbortOnDrop(task.abort_handle());
-                    let path = task.await??;
-                    dependencies.push(path);
-                    backend_layers.push(backend.clone());
-                    (
-                        Some(backend_name(backend.kind)),
-                        backend.packages.as_slice(),
-                    )
-                }
-                None => (None, &[][..]),
-            };
+            if plan.backend.is_none() && plan.supported_backends.is_empty() {
+                return Err(AiProductionError::Invalid(format!(
+                    "plugin {} does not declare a required compute or remote backend",
+                    selection.plugin_id
+                )));
+            }
+            let backend = &selection.backend;
+            let backend_id = backend_name(backend.kind);
+            let selected_extra: HashSet<_> = selection
+                .extra_backends
+                .iter()
+                .map(|entry| backend_name(entry.kind))
+                .collect();
+            let required_extra: HashSet<_> =
+                plan.required_backends.iter().map(String::as_str).collect();
+            if selected_extra != required_extra {
+                return Err(AiProductionError::Invalid(format!(
+                    "plugin {} requires supplemental backends: {}",
+                    selection.plugin_id,
+                    plan.required_backends.join(", ")
+                )));
+            }
+            if plan
+                .backend
+                .as_deref()
+                .is_some_and(|kind| kind != backend_id)
+                || !plan.supported_backends.is_empty()
+                    && !plan
+                        .supported_backends
+                        .iter()
+                        .any(|kind| kind == backend_id)
+            {
+                return Err(AiProductionError::Invalid(format!(
+                    "plugin {} does not support selected backend {backend_id}",
+                    selection.plugin_id
+                )));
+            }
+            let task_backend_installer = backends.clone();
+            let task_backend = backend.clone();
+            let task =
+                tokio::spawn(async move { task_backend_installer.install(&task_backend).await });
+            let _abort_on_drop = AbortOnDrop(task.abort_handle());
+            let path = task.await??;
+            dependencies.push(path);
+            backend_layers.push(backend.clone());
+            let mut backend_packages = backend.packages.clone();
+            for extra in &selection.extra_backends {
+                let worker = backends.clone();
+                let plan = extra.clone();
+                let task = tokio::spawn(async move { worker.install(&plan).await });
+                let _abort_on_drop = AbortOnDrop(task.abort_handle());
+                dependencies.push(task.await??);
+                backend_layers.push(extra.clone());
+                backend_packages.extend(extra.packages.iter().cloned());
+            }
             let task_installer = installer.clone();
             let task_plugin = selection.plugin_id.clone();
             let task_revision = selection.package_revision.clone();
             let task_python = self.bootstrap.python_version.clone();
-            let task_backend = backend_id.map(ToOwned::to_owned);
-            let task_backend_packages = backend_packages.to_vec();
+            let task_backend = backend_id.to_owned();
+            let task_backend_packages = backend_packages;
             let task_plan = plan.clone();
             let task_approvals = selection.approved_actions.clone();
             let task = tokio::spawn(async move {
@@ -364,7 +413,7 @@ impl AiProductionInstaller {
                             plugin_id: &task_plugin,
                             revision: &task_revision,
                             python_version: &task_python,
-                            selected_backend: task_backend.as_deref(),
+                            selected_backend: Some(&task_backend),
                             plan: &task_plan,
                             backend_packages: &task_backend_packages,
                         },

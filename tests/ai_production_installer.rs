@@ -4,6 +4,7 @@ use std::{collections::HashSet, os::unix::fs::PermissionsExt, path::PathBuf, tim
 
 use neuromita::ai_runtime::{
     AiService, ProcessTopology,
+    backend::{BackendKind, LockedBackend},
     managed::{ManagedRuntimeBootstrap, ManagedRuntimeError},
     production::{AiProductionError, AiProductionInstaller, ModelAssets, SelectedModel},
     uv::{UvArchiveKind, UvDistribution, UvInstaller},
@@ -22,8 +23,14 @@ fn model(service: AiService, plugin_id: &str) -> SelectedModel {
         service,
         plugin_id: plugin_id.into(),
         package_revision: "rev1".into(),
-        backend: None,
+        backend: LockedBackend {
+            kind: BackendKind::RemoteApi,
+            revision: "api-v1".into(),
+            python_version: "3.12.10".into(),
+            packages: Vec::new(),
+        },
         settings: json!({}),
+        extra_backends: Vec::new(),
         assets: ModelAssets::None,
         approved_actions: HashSet::new(),
     }
@@ -127,9 +134,10 @@ exit 5
             .unwrap();
         let content = format!(
             r#"from neuromita_ai_sdk import InstallPlan, AssetRequirement
+from dataclasses import replace
 class Plugin:
     def describe(self): return {{"kind": "tts"}}
-    def install_plan(self): return {plan}
+    def install_plan(self): return replace({plan}, supported_backends=("remote-api",))
     def probe_install(self): return {{"installed": True}}
     def settings_schema(self): return {{}}
     def initialize(self, settings): return {{"model_ready": True}}
@@ -154,7 +162,7 @@ async fn production_install_prepares_and_activates_shared_selected_models() {
     assert_eq!(prepared.workers.len(), 1);
     assert_eq!(prepared.workers[0].models.len(), 2);
     assert_eq!(prepared.workers[0].composition.python_version(), "3.12.10");
-    assert_eq!(prepared.workers[0].composition.paths().len(), 2);
+    assert_eq!(prepared.workers[0].composition.paths().len(), 3);
     let running = prepared.activate().await.unwrap();
     assert!(running.has_service(AiService::Tts));
     assert!(running.has_service(AiService::Asr));
@@ -183,6 +191,22 @@ async fn production_split_activates_independent_workers() {
 }
 
 #[tokio::test]
+async fn incompatible_backend_is_rejected_before_backend_layer_installation() {
+    use neuromita::ai_runtime::overlay::LockedPackage;
+    let fixture = Fixture::new(ProcessTopology::Split).await;
+    let mut selected = model(AiService::Asr, "mock_asr");
+    selected.backend.kind = BackendKind::TorchCpu;
+    selected.backend.packages = vec![LockedPackage {
+        name: "torch".into(),
+        version: "2.8.0".into(),
+    }];
+    let error = fixture.runtime.prepare(&[selected]).await.err().unwrap();
+    assert!(matches!(error, AiProductionError::Invalid(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends/torch-cpu").exists());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn missing_assets_fail_closed_without_model_activation() {
     let mut fixture = Fixture::new(ProcessTopology::Split).await;
     fixture
@@ -206,7 +230,9 @@ async fn missing_assets_fail_closed_without_model_activation() {
 async fn unsupported_python_and_duplicate_services_fail_before_bootstrap() {
     let mut fixture = Fixture::new(ProcessTopology::Split).await;
     fixture.runtime.bootstrap.python_version = "3.13.5".into();
-    let choices = [model(AiService::Tts, "mock_tts")];
+    let mut wrong = model(AiService::Tts, "mock_tts");
+    wrong.backend.python_version = "3.13.5".into();
+    let choices = [wrong];
     let error = fixture.runtime.prepare(&choices).await.err().unwrap();
     assert!(matches!(
         error,
