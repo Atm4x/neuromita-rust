@@ -1,6 +1,7 @@
 use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
 
 use neuromita::localization::{FallbackPolicy, LocaleId, Localizer, i18n};
+use neuromita::presentation::PresetsPresenter;
 use slint::ComponentHandle;
 
 mod view {
@@ -54,6 +55,46 @@ fn main() -> Result<(), Box<dyn Error>> {
     window
         .global::<view::CharacterCatalog>()
         .set_entries(slint::ModelRc::new(slint::VecModel::from(characters)));
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "characters".into());
+    let settings = window.global::<view::SettingsUi>();
+    settings.set_section(if general { 0 } else if mode.starts_with("api") { 1 } else { 2 });
+    if mode.starts_with("api") {
+        let templates = PresetsPresenter::providers()
+            .into_iter()
+            .map(|provider| view::PresetTemplateItem {
+                id: provider.id.into(),
+                name: provider.name.into(),
+                icon: provider.icon.into(),
+                format: provider.schema_label.into(),
+                documentation: provider.documentation.into(),
+                badge: provider.badge.into(),
+                endpoint: if provider.id == "gemini" {
+                    neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
+                } else {
+                    "".into()
+                },
+                available: provider.supported,
+            })
+            .collect::<Vec<_>>();
+        settings.set_preset_templates(slint::ModelRc::new(slint::VecModel::from(templates)));
+        let parameters = PresetsPresenter::parameters()
+            .into_iter()
+            .map(|parameter| view::PresetParameterItem {
+                id: parameter.id.into(),
+                wire_key: parameter.wire_key.into(),
+                title_ru: parameter.title_ru.into(),
+                title_en: parameter.title_en.into(),
+                description_ru: parameter.description_ru.into(),
+                description_en: parameter.description_en.into(),
+                editable: parameter.editable,
+                sent: parameter.sent,
+            })
+            .collect::<Vec<_>>();
+        settings.set_preset_parameters(slint::ModelRc::new(slint::VecModel::from(parameters)));
+        settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
+    }
     window.show()?;
     window
         .window()

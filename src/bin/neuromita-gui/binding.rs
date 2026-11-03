@@ -318,6 +318,10 @@ fn open_project_url(url: &str) -> Result<(), String> {
     {
         return Err("Недопустимая ссылка на внешний ресурс".into());
     }
+    open_external_url(url)
+}
+
+pub(super) fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = Command::new("explorer.exe");

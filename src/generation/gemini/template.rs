@@ -74,17 +74,14 @@ impl fmt::Debug for GeminiTemplate {
 }
 
 impl GeminiTemplate {
+    pub const GOOGLE_ENDPOINT: &'static str = "https://generativelanguage.googleapis.com/v1beta/";
+
     pub fn google(
         model: &str,
         api_key: &str,
         settings: GenerationSettings,
     ) -> Result<Self, PresetError> {
-        Self::new(
-            "https://generativelanguage.googleapis.com/v1beta/",
-            model,
-            api_key,
-            settings,
-        )
+        Self::new(Self::GOOGLE_ENDPOINT, model, api_key, settings)
     }
 
     pub fn new(

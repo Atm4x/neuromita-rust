@@ -179,6 +179,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_server_running(snapshot.running);
         }
         Update::Administration(snapshot) => super::settings::render(window, &snapshot),
+        Update::PresetDraft(draft) => super::settings::draft(window, &draft),
         Update::AdminError(error) => {
             window
                 .global::<SettingsUi>()
