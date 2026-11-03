@@ -390,26 +390,7 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_character_presets(ModelRc::new(VecModel::from(rows)));
-    let templates = model
-        .presets
-        .providers
-        .iter()
-        .map(|provider| PresetTemplateItem {
-            id: provider.id.into(),
-            name: provider.name.into(),
-            icon: provider.icon.into(),
-            format: provider.schema_label.into(),
-            endpoint: if provider.id == "gemini" {
-                neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
-            } else {
-                "".into()
-            },
-            documentation: provider.documentation.into(),
-            pricing: provider.pricing.into(),
-            badge_kind: provider.badge_kind.into(),
-            available: provider.supported,
-        })
-        .collect::<Vec<_>>();
+    let templates = provider_templates(&model.presets.providers);
     window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
     let parameters = model
         .presets
@@ -418,10 +399,12 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         .map(|parameter| PresetParameterItem {
             id: parameter.id.into(),
             wire_key: parameter.wire_key.into(),
-            title_ru: parameter.title_ru.into(),
-            title_en: parameter.title_en.into(),
-            description_ru: parameter.description_ru.into(),
-            description_en: parameter.description_en.into(),
+            title: parameter.title.source().into(),
+            title_key: parameter.title.id().into(),
+
+            description: parameter.description.source().into(),
+            description_key: parameter.description.id().into(),
+
             editable: parameter.editable,
             sent: parameter.sent,
         })
@@ -470,6 +453,10 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_temperature(record.temperature.clone());
     ui.set_preset_tokens(record.tokens.clone());
     ui.set_preset_timeout(record.timeout.clone());
+    ui.set_preset_template_id("".into());
+    ui.set_preset_template_name("".into());
+    ui.set_preset_provider_icon("".into());
+    ui.set_preset_schema_label("".into());
     if let Some(template) = ui
         .get_preset_templates()
         .iter()
@@ -479,6 +466,8 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
         ui.set_preset_template_name(template.name);
         ui.set_preset_provider_icon(record.provider.clone());
         ui.set_preset_schema_label(template.format);
+    } else {
+        ui.set_settings_error("Provider metadata is unavailable for this preset".into());
     }
 }
 
@@ -519,4 +508,27 @@ pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
         ui.set_preset_save_token("".into());
     }
     ui.set_settings_error("".into());
+}
+
+pub(super) fn provider_templates(
+    providers: &[neuromita::presentation::ProviderOption],
+) -> Vec<PresetTemplateItem> {
+    providers
+        .iter()
+        .map(|provider| PresetTemplateItem {
+            id: provider.id.into(),
+            name: provider.name.into(),
+            icon: provider.icon.into(),
+            format: provider.schema_label.into(),
+            endpoint: if provider.id == "gemini" {
+                neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
+            } else {
+                "".into()
+            },
+            documentation: provider.documentation.into(),
+            pricing: provider.pricing.into(),
+            badge_kind: provider.badge_kind.into(),
+            available: provider.supported,
+        })
+        .collect::<Vec<_>>()
 }

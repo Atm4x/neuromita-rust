@@ -134,7 +134,7 @@ impl ApplicationConfig {
             ai_hardware: None,
             ai_knowledge: None,
             settings: SettingsConfig {
-                source: SettingsSource::Initial(AppSettings::initial_profile()),
+                source: SettingsSource::initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
             finetune: None,
@@ -182,7 +182,7 @@ impl ApplicationConfig {
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                SettingsSource::Initial(AppSettings::initial_profile())
+                SettingsSource::initial(AppSettings::initial_profile())
             }
             Err(error) => return Err(error.into()),
         };

@@ -1,3 +1,4 @@
+import { SettingsSectionHeading } from "../components/settings-kit.slint";
 import { SettingsTheme } from "theme.slint";
 import { Caption, Field, HeaderButton, Glyph } from "../sandbox/controls.slint";
 export component Card inherits Rectangle {
@@ -28,17 +29,4 @@ export component EditorField inherits VerticalLayout {
     SettingsField { text <=> root.text; height: 40px; }
 }
 
-export component SectionHeading inherits HorizontalLayout {
-    in property <string> title;
-    in property <string> description;
-    in property <string> glyph;
-    height: 48px; padding: 0px; spacing: 14px;
-    Rectangle { width: 48px; height: 48px; border-radius: 12px; background: SettingsTheme.heading-icon-background;
-        Glyph { text: root.glyph; color: SettingsTheme.accent; width: 100%; height: 100%; font-size: 27px; }
-    }
-    VerticalLayout { padding: 0px; spacing: 2px; alignment: center;
-        SettingsLabel { text: root.title; font-family: SettingsTheme.font-family; font-size: 23px; font-weight: 700; }
-        SettingsLabel { text: root.description; font-size: 12px; color: SettingsTheme.muted; }
-    }
-}
-
+export component SectionHeading inherits SettingsSectionHeading {}

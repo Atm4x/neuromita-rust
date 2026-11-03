@@ -52,9 +52,15 @@ pub struct SettingsSnapshot {
 }
 
 pub enum SettingsSource {
-    Initial(AppSettings),
+    Initial(Box<AppSettings>),
     Stored,
 }
+impl SettingsSource {
+    pub fn initial(settings: AppSettings) -> Self {
+        Self::Initial(Box::new(settings))
+    }
+}
+
 pub struct SettingsConfig {
     pub source: SettingsSource,
     pub repository: Arc<dyn SettingsRepository>,
@@ -251,6 +257,7 @@ impl SettingsLifecycle {
     pub(crate) async fn prepare(config: SettingsConfig) -> Result<Self, SettingsError> {
         let stored = match config.source {
             SettingsSource::Initial(settings) => {
+                let settings = *settings;
                 settings.validate()?;
                 StoredSettings {
                     revision: 0,
@@ -384,7 +391,7 @@ mod tests {
         });
         let lifecycle = Arc::new(
             SettingsLifecycle::prepare(SettingsConfig {
-                source: SettingsSource::Initial(AppSettings::initial_profile()),
+                source: SettingsSource::initial(AppSettings::initial_profile()),
                 repository,
             })
             .await

@@ -4,7 +4,7 @@ mod extract;
 fn main() {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    println!("cargo:rerun-if-changed=src/bin/neuromita-gui");
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-changed=localization");
     let messages = extract::extract_sources(&root).expect("extract localization declarations");

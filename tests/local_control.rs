@@ -392,7 +392,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 continue;
             }
             "diagnostics" => {
-                cmd["character"] = json!("mita");
+                cmd["character"] = json!("Crazy");
                 cmd["request_id"] = json!(Uuid::new_v4());
                 client.send(cmd.clone()).await;
                 let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
@@ -401,7 +401,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 continue;
             }
             "diagnostics_recent" | "diagnostics_errors" => {
-                cmd["character"] = json!("mita");
+                cmd["character"] = json!("Crazy");
             }
             "set_volume" => cmd["value"] = json!(42),
             _ => {}

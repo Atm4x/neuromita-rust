@@ -6,7 +6,17 @@ mod probe {
         import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
         import { SettingsTheme } from "../../../ui/settings/theme.slint";
         import { SettingsScrollView } from "../../../ui/settings/scroll-view.slint";
+        import { SettingsToggleRow } from "../../../ui/components/settings-kit.slint";
         export { I18n }
+        export component ControlsProbe inherits Window {
+            preferred-width: 400px; preferred-height: 140px;
+            out property <length> row-top: row.y;
+            VerticalLayout { padding: 0px; spacing: 0px;
+                CollapsibleSettingsSection { title: "Title"; subtitle: "Subtitle"; glyph: "\u{f1de}"; }
+                row := SettingsToggleRow { title: "Toggle"; height: 60px; checked: true; }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
             out property <string> more: I18n.i18n("launcher.actions.more", "Дополнительно");
@@ -68,6 +78,27 @@ impl slint::platform::Platform for TestPlatform {
 #[test]
 fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let controls = probe::ControlsProbe::new().unwrap();
+    controls.show().unwrap();
+    controls
+        .window()
+        .set_size(slint::PhysicalSize::new(400, 140));
+    let image = controls.window().take_snapshot().unwrap();
+    let green_rows = image
+        .as_bytes()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| {
+            pixel[1] > pixel[0].saturating_add(40) && pixel[1] > pixel[2].saturating_add(30)
+        })
+        .map(|(index, _)| (index / 400) as f32)
+        .collect::<Vec<_>>();
+    assert!(!green_rows.is_empty());
+    assert!(green_rows[0] > controls.get_row_top() + 17.0);
+    assert!(*green_rows.last().unwrap() < controls.get_row_top() + 43.0);
+    controls.hide().unwrap();
     let accordion = probe::AccordionProbe::new().unwrap();
     accordion.show().unwrap();
     accordion
@@ -322,7 +353,13 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 fn settings_render_and_bindings(window: &AppWindow) {
     use super::super::view::{PresetItem, SettingsUi};
     let settings = window.global::<SettingsUi>();
+    settings.set_preset_templates(ModelRc::new(VecModel::from(
+        super::super::settings::provider_templates(
+            &neuromita::presentation::PresetsPresenter::providers(),
+        ),
+    )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        provider: "google".into(),
         id: "7".into(),
         name: "Main".into(),
         model: "fixture-model".into(),

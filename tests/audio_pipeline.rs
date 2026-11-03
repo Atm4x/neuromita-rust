@@ -132,7 +132,7 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
     config.voice = Arc::new(Voice);
     let mut settings = AppSettings::initial_profile();
     settings.voice.in_launcher = true;
-    config.settings.source = SettingsSource::Initial(settings);
+    config.settings.source = SettingsSource::initial(settings);
     let app = ApplicationLifecycle::start(config).await.unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let handler = SpeechInputHandler::new(

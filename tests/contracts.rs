@@ -235,6 +235,27 @@ async fn complete_minimal_contracts() {
         7
     );
     let presenter = app.presenter();
+    std::thread::scope(|scope| {
+        for area in neuromita::settings::SettingsArea::ALL {
+            let interface = &presenter.settings.interface;
+            scope.spawn(move || interface.set_visible(area, false).unwrap());
+        }
+    });
+    let preferences = SettingsApi::snapshot::<neuromita::settings::InterfaceSettings>().unwrap();
+    for area in neuromita::settings::SettingsArea::ALL {
+        assert!(!preferences.value.visibility.is_visible(area));
+        presenter
+            .settings
+            .interface
+            .set_visible(area, true)
+            .unwrap();
+    }
+    let mut incomplete = serde_json::to_value(&preferences.value).unwrap();
+    incomplete["visibility"]
+        .as_object_mut()
+        .unwrap()
+        .remove("characters");
+    assert!(serde_json::from_value::<neuromita::settings::InterfaceSettings>(incomplete).is_err());
 
     let mut volume = presenter.settings.voice.volume.observe();
     assert_eq!(volume.next().await.unwrap().get(), 80);

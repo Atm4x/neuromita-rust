@@ -425,7 +425,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "initiate", "character": "mita", "instruction": "hello"})
+                json!({"command_id": Uuid::new_v4(), "command": "initiate", "character": "Crazy", "instruction": "hello"})
             )
             .as_bytes(),
         )
@@ -452,7 +452,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "mita", "request_id": request_id, "section": "usage"})
+                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "Crazy", "request_id": request_id, "section": "usage"})
             )
             .as_bytes(),
         )
@@ -470,7 +470,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "mita", "request_id": request_id})
+                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "Crazy", "request_id": request_id})
             )
             .as_bytes(),
         )

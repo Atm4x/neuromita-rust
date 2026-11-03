@@ -1098,5 +1098,153 @@
   "settings.preset.params-presenter": {
     "source": "Параметры принадлежат этому пресету. Поддерживаемые поля передаются ядром; остальные недоступны.",
     "translation": "Parameters belong to this preset. Supported fields are sent by the core; other fields are unavailable."
+  },
+  "settings.parameter.temperature.title": {
+    "source": "Температура",
+    "translation": "Temperature"
+  },
+  "settings.parameter.temperature.description": {
+    "source": "Разнообразие ответов: ниже — предсказуемее, выше — свободнее.",
+    "translation": "Response variety: lower is more predictable, higher is more varied."
+  },
+  "settings.parameter.max_tokens.title": {
+    "source": "Макс. токенов",
+    "translation": "Max tokens"
+  },
+  "settings.parameter.max_tokens.description": {
+    "source": "Лимит выходных токенов, включая токены размышления.",
+    "translation": "Output token limit, including reasoning tokens."
+  },
+  "settings.parameter.top_p.title": {
+    "source": "Порог Top-P",
+    "translation": "Top-P"
+  },
+  "settings.parameter.top_p.description": {
+    "source": "Ограничивает выбор слов по суммарной вероятности.",
+    "translation": "Limits word selection by cumulative probability."
+  },
+  "settings.parameter.presence_penalty.title": {
+    "source": "Штраф присутствия",
+    "translation": "Presence penalty"
+  },
+  "settings.parameter.presence_penalty.description": {
+    "source": "Снижает вероятность повторного использования уже встречавшихся слов.",
+    "translation": "Reduces reuse of words already present in the response."
+  },
+  "settings.parameter.frequency_penalty.title": {
+    "source": "Штраф частоты",
+    "translation": "Frequency penalty"
+  },
+  "settings.parameter.frequency_penalty.description": {
+    "source": "Снижает вероятность слов пропорционально числу их повторений.",
+    "translation": "Penalizes words in proportion to how often they repeat."
+  },
+  "settings.parameter.top_k.title": {
+    "source": "Лимит Top-K",
+    "translation": "Top-K"
+  },
+  "settings.parameter.top_k.description": {
+    "source": "Число кандидатов при выборе следующего токена.",
+    "translation": "Number of candidates for the next token."
+  },
+  "settings.parameter.thinking_level.title": {
+    "source": "Глубина размышлений",
+    "translation": "Reasoning effort"
+  },
+  "settings.parameter.thinking_level.description": {
+    "source": "Низкий thinkingLevel сокращает размышления, но не отключает мышление.",
+    "translation": "A low thinkingLevel reduces reasoning but does not disable thinking."
+  },
+  "settings.parameter.thinking_budget.title": {
+    "source": "Бюджет мышления Gemini",
+    "translation": "Gemini thinking budget"
+  },
+  "settings.parameter.thinking_budget.description": {
+    "source": "Лимит токенов размышления: -1 — автоматически, 0 — отключить, если модель поддерживает.",
+    "translation": "Reasoning token limit: -1 is automatic, 0 disables it when supported."
+  },
+  "settings.parameter.include_thoughts.title": {
+    "source": "Возвращать сводки размышлений",
+    "translation": "Return thought summaries"
+  },
+  "settings.parameter.include_thoughts.description": {
+    "source": "Возвращает сводки размышлений и не управляет объёмом мышления.",
+    "translation": "Returns thought summaries without controlling the amount of thinking."
+  },
+  "settings.parameter.timeout.title": {
+    "source": "Тайм-аут",
+    "translation": "Timeout"
+  },
+  "settings.parameter.timeout.description": {
+    "source": "Время ожидания ответа API в миллисекундах.",
+    "translation": "API response timeout in milliseconds."
+  },
+  "settings.general.pyqt-description": {
+    "source": "Базовые параметры интерфейса, приватности, памяти и языка.",
+    "translation": "Basic interface, privacy, memory and language preferences."
+  },
+  "settings.general.visible-sections": {
+    "source": "Видимые разделы",
+    "translation": "Visible sections"
+  },
+  "settings.general.visible-sections-note": {
+    "source": "Включите только те разделы, которыми пользуетесь — остальные спрячутся из настроек и боковой панели.",
+    "translation": "Enable only the sections you use; the rest will be hidden from settings and the sidebar."
+  },
+  "settings.general.sandbox-panels": {
+    "source": "Панели песочницы",
+    "translation": "Sandbox panels"
+  },
+  "settings.general.sandbox-panels-note": {
+    "source": "Показывайте только нужные панели в правой части Песочницы.",
+    "translation": "Show only the panels you need in the Sandbox inspector."
+  },
+  "settings.general.panel-controls-pending": {
+    "source": "Управление видимостью панелей пока не предоставлено Rust-ядром.",
+    "translation": "Panel visibility controls are not yet provided by the Rust core."
+  },
+  "settings.general.privacy": {
+    "source": "Приватность",
+    "translation": "Privacy"
+  },
+  "settings.general.hide-private": {
+    "source": "Скрывать приватные данные",
+    "translation": "Hide private data"
+  },
+  "settings.general.hide-private-note": {
+    "source": "Сохраняет предпочтение маскирования; подключение к отображению секретов ещё требуется.",
+    "translation": "Stores the masking preference; secret display integration is still pending."
+  },
+  "settings.general.ipc": {
+    "source": "Локальное IPC-управление",
+    "translation": "Local IPC control"
+  },
+  "settings.general.ipc-note": {
+    "source": "Локальный IPC принимает только явно разрешённые команды на 127.0.0.1.",
+    "translation": "Local IPC accepts only explicitly allowed commands on 127.0.0.1."
+  },
+  "settings.general.ipc-pending": {
+    "source": "Настройка локального IPC пока недоступна в Rust API.",
+    "translation": "Local IPC settings are not yet available through the Rust API."
+  },
+  "settings.general.chat": {
+    "source": "Настройки чата",
+    "translation": "Chat settings"
+  },
+  "settings.general.state": {
+    "source": "Состояние приложения",
+    "translation": "Application state"
+  },
+  "settings.provider.subscription": {
+    "source": "Подписка",
+    "translation": "Subscription"
+  },
+  "settings.core.status": {
+    "source": "Состояние ядра",
+    "translation": "Core status"
+  },
+  "settings.saved-state": {
+    "source": "Сохранение",
+    "translation": "Persistence"
   }
 }

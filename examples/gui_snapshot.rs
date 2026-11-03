@@ -59,8 +59,52 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(2)
         .unwrap_or_else(|| "characters".into());
     let settings = window.global::<view::SettingsUi>();
-    settings.set_section(if general { 0 } else if mode.starts_with("api") { 1 } else { 2 });
+    settings.set_section(if general {
+        0
+    } else if mode.starts_with("api") {
+        1
+    } else {
+        2
+    });
     if mode.starts_with("api") {
+        let catalog = neuromita::generation::PresetCatalog::new(Default::default());
+        let definition = neuromita::generation::GeminiPresetDefinition {
+            endpoint: neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into(),
+            model: "fixture-model".into(),
+            credential_env: "SNAPSHOT_UNUSED_KEY".into(),
+            temperature: 0.7,
+            max_output_tokens: 128,
+            timeout_ms: 60_000,
+        };
+        let name = "QA preset";
+        let id = catalog.create(neuromita::generation::PresetRecord {
+            name: name.into(),
+            definition: neuromita::generation::PresetDefinition::Gemini(definition.clone()),
+        })?;
+        let row = view::PresetItem {
+            id: id.0.to_string().into(),
+            name: name.into(),
+            model: definition.model.clone().into(),
+            provider: "google".into(),
+            endpoint: definition.endpoint.clone().into(),
+            key_env: definition.credential_env.clone().into(),
+            temperature: definition.temperature.to_string().into(),
+            tokens: definition.max_output_tokens.to_string().into(),
+            timeout: definition.timeout_ms.to_string().into(),
+        };
+        settings.set_settings_presets(slint::ModelRc::new(slint::VecModel::from(vec![row])));
+        settings.set_settings_active(id.0.to_string().into());
+        settings.set_preset_edit_id(id.0.to_string().into());
+        settings.set_preset_name(name.into());
+        settings.set_preset_model(definition.model.into());
+        settings.set_preset_endpoint(definition.endpoint.into());
+        settings.set_preset_key_env(definition.credential_env.into());
+        settings.set_preset_temperature(definition.temperature.to_string().into());
+        settings.set_preset_tokens(definition.max_output_tokens.to_string().into());
+        settings.set_preset_timeout(definition.timeout_ms.to_string().into());
+        settings.set_preset_provider_icon("google".into());
+        settings.set_preset_template_id("gemini".into());
+        settings.set_preset_template_name("Google AI Studio".into());
         let templates = PresetsPresenter::providers()
             .into_iter()
             .map(|provider| view::PresetTemplateItem {
@@ -85,10 +129,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|parameter| view::PresetParameterItem {
                 id: parameter.id.into(),
                 wire_key: parameter.wire_key.into(),
-                title_ru: parameter.title_ru.into(),
-                title_en: parameter.title_en.into(),
-                description_ru: parameter.description_ru.into(),
-                description_en: parameter.description_en.into(),
+                title: parameter.title.source().into(),
+                title_key: parameter.title.id().into(),
+
+                description: parameter.description.source().into(),
+                description_key: parameter.description.id().into(),
+
                 editable: parameter.editable,
                 sent: parameter.sent,
             })
@@ -100,6 +146,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     window
         .window()
         .set_size(slint::PhysicalSize::new(1560, 918));
+    if mode == "api-dropdown" {
+        let weak = window.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(250), move || {
+            if let Some(window) = weak.upgrade() {
+                let position = slint::LogicalPosition {
+                    x: 1350.0,
+                    y: 430.0,
+                };
+                window
+                    .window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                        position,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+                window
+                    .window()
+                    .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                        position,
+                        button: slint::platform::PointerEventButton::Left,
+                    });
+            }
+        });
+    }
     let result = Rc::new(RefCell::new(None));
     let completed = result.clone();
     let weak = window.as_weak();

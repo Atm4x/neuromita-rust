@@ -160,7 +160,7 @@ fn config(
 }
 
 fn initial() -> SettingsSource {
-    SettingsSource::Initial(neuromita::settings::AppSettings::initial_profile())
+    SettingsSource::initial(neuromita::settings::AppSettings::initial_profile())
 }
 
 fn reply(_model: &str, text: &str) -> Result<RequestHandle, SubmitError> {

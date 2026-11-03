@@ -163,7 +163,7 @@ async fn canonical_game_survives_historical_reply_fork_and_core_restart_without_
             .collect();
         assert_eq!(private.len(), 2);
         for fact in private {
-            assert_eq!(fact.draft.actor.as_deref(), Some("mita"));
+            assert_eq!(fact.draft.actor.as_deref(), Some("Crazy"));
             assert_eq!(
                 fact.draft.observers.iter().copied().collect::<Vec<_>>(),
                 vec![CharacterId::Crazy]

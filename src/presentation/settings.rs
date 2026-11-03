@@ -304,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn character_preset_bindings_are_independent_and_observable() {
         let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
-            source: SettingsSource::Initial(AppSettings::initial_profile()),
+            source: SettingsSource::initial(AppSettings::initial_profile()),
             repository: Arc::new(MemorySettingsRepository::new()),
         })
         .await
