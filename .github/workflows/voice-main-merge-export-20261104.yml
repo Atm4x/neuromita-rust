@@ -1,0 +1,39 @@
+name: Export pinned main for voice integration
+on:
+  push:
+    branches:
+      - bridge/voice-main-merge-source-20261104
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create Git bundle
+        shell: bash
+        env:
+          MAIN_SHA: 13dc29b81ba572d8729264ba898aa4dcb8fe1402
+          VOICE_SHA: 18905efcf00f0932d72338d55f3e09a175fe44c4
+        run: |
+          set -euo pipefail
+          git cat-file -e "${MAIN_SHA}^{commit}"
+          git cat-file -e "${VOICE_SHA}^{commit}"
+          git update-ref refs/heads/voice-main "${MAIN_SHA}"
+          git update-ref refs/heads/voice-source "${VOICE_SHA}"
+          git bundle create voice-main-merge.bundle refs/heads/voice-main refs/heads/voice-source
+          git bundle verify voice-main-merge.bundle
+          sha256sum voice-main-merge.bundle > voice-main-merge.bundle.sha256
+          printf '%s\n' "${MAIN_SHA}" > main-commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-main-merge-source
+          path: |
+            voice-main-merge.bundle
+            voice-main-merge.bundle.sha256
+            main-commit.txt
+          retention-days: 2
+          if-no-files-found: error
