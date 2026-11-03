@@ -140,6 +140,43 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     }
     window.set_page(PageId::Home);
     window.window().take_snapshot().unwrap();
+    window.set_release_releases(ModelRc::new(VecModel::from(vec![
+        ReleaseEntry {
+            id: "2026.11.01".into(),
+            title: "NeuroMita v2026.11.01".into(),
+            date: "2026-11-01".into(),
+            summary: "Тестовый интеграционный релиз / Integration test release.".into(),
+            details: "Релиз включает обновления интерфейса и основные исправления.".into(),
+            url: "https://github.com/Atm4x/NeuroMita/releases/tag/v2026.11.01".into(),
+            prerelease: false,
+        },
+        ReleaseEntry {
+            id: "2026.10.22".into(),
+            title: "NeuroMita v2026.10.22".into(),
+            date: "2026-10-22".into(),
+            summary: "Тестовая сборка / Test build.".into(),
+            details: String::new().into(),
+            url: "https://github.com/Atm4x/NeuroMita/releases/tag/v2026.10.22".into(),
+            prerelease: false,
+        },
+    ])));
+    for (page, filename) in [
+        (PageId::Releases, "releases-ru.ppm"),
+        (PageId::About, "about-ru.ppm"),
+    ] {
+        window.set_page(page);
+        let image = window.window().take_snapshot().unwrap();
+        assert_eq!((image.width(), image.height()), (1560, 918));
+        if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut ppm = format!("P6\\n{} {}\\n255\\n", image.width(), image.height()).into_bytes();
+            for rgba in image.as_bytes().as_chunks::<4>().0 {
+                ppm.extend_from_slice(&rgba[..3]);
+            }
+            std::fs::write(directory.join(filename), ppm).unwrap();
+        }
+    }
     window.set_page(PageId::Sandbox);
     window.set_core_connected(false);
     window.set_chat_error("Core is not connected".into());
