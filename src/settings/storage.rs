@@ -4,24 +4,19 @@ use std::{
     sync::Mutex,
 };
 
-use crate::migration::{MigrationError, MigrationSchema, MigrationStore, VersionedData};
 use serde::{Deserialize, Serialize};
 
 use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
-use super::{RustSettingsMigration, migration::SettingsSchema};
-
-pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredSettings {
-    pub schema_version: u32,
     pub revision: u64,
     pub settings: AppSettings,
 }
 
 pub trait SettingsRepository: Send + Sync + 'static {
-    /// Completes required persisted upgrades before settings are published.
+    /// Validates the current document before publishing settings; does not migrate old formats.
     fn migrate(&self) -> Result<(), SettingsError>;
     fn load(&self) -> Result<StoredSettings, SettingsError>;
     fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError>;
@@ -92,10 +87,7 @@ impl JsonSettingsRepository {
 }
 impl SettingsRepository for JsonSettingsRepository {
     fn migrate(&self) -> Result<(), SettingsError> {
-        RustSettingsMigration::service()
-            .run(self)
-            .map_err(|error| SettingsError::Storage(error.to_string()))?;
-        Ok(())
+        self.load().map(|_| ())
     }
     fn load(&self) -> Result<StoredSettings, SettingsError> {
         let bytes =
@@ -105,36 +97,6 @@ impl SettingsRepository for JsonSettingsRepository {
     fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError> {
         let transfer = SettingsTransfer::new(settings.clone())?;
         atomic_write(&self.path, &transfer.encode()?)
-    }
-}
-
-impl MigrationStore<Vec<u8>> for JsonSettingsRepository {
-    fn read_versioned(&self) -> Result<VersionedData<Vec<u8>>, MigrationError> {
-        let bytes = std::fs::read(&self.path)
-            .map_err(|error| MigrationError::Storage(error.to_string()))?;
-        RustSettingsMigration::document(bytes)
-            .map_err(|error| MigrationError::InvalidData(error.to_string()))
-    }
-
-    fn commit(
-        &self,
-        expected: &VersionedData<Vec<u8>>,
-        next: &VersionedData<Vec<u8>>,
-    ) -> Result<(), MigrationError> {
-        SettingsSchema.validate(next)?;
-        if next.version <= expected.version {
-            return Err(MigrationError::InvalidData(
-                "migration must advance the schema".into(),
-            ));
-        }
-        let _lock =
-            writer_lock(&self.path).map_err(|error| MigrationError::Storage(error.to_string()))?;
-        let current = self.read_versioned()?;
-        if current != *expected {
-            return Err(MigrationError::Conflict);
-        }
-        atomic_replace(&self.path, &next.data)
-            .map_err(|error| MigrationError::Storage(error.to_string()))
     }
 }
 
@@ -190,47 +152,16 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{PresetId, PresetSelection};
-    use serde_json::{Value, json};
-    use uuid::Uuid;
-
     #[test]
-    fn legacy_character_assignments_migrate_without_changing_selections() {
-        let path = std::env::temp_dir().join(format!(
-            "neuromita-settings-migration-{}.json",
-            Uuid::new_v4()
-        ));
+    fn rejects_previous_dev_document_without_rewriting() {
+        let path =
+            std::env::temp_dir().join(format!("strict-settings-{}.json", uuid::Uuid::new_v4()));
+        let original = serde_json::to_vec(&serde_json::json!({"schema_version":3,"revision":1,"settings":AppSettings::initial_profile()})).unwrap();
+        std::fs::write(&path, &original).unwrap();
         let repo = JsonSettingsRepository::new(path.clone());
-        let mut settings = AppSettings::initial_profile();
-        settings.presets.active = PresetId(3);
-        settings.characters.crazy.presets.react = PresetSelection::Specific(PresetId(7));
-        settings.characters.kind.presets.reply = PresetSelection::Specific(PresetId(11));
-        let old_assignments = json!({
-            "mita": settings.characters.crazy.presets,
-            "kind_mita": settings.characters.kind.presets,
-        });
-        let mut old_settings = serde_json::to_value(&settings).unwrap();
-        old_settings.as_object_mut().unwrap().remove("characters");
-        old_settings.as_object_mut().unwrap().remove("reminders");
-        old_settings["presets"]["characters"] = old_assignments;
-        let old_record = json!({
-            "schema_version": 1,
-            "revision": 9,
-            "settings": old_settings,
-        });
-        std::fs::write(&path, serde_json::to_vec(&old_record).unwrap()).unwrap();
-
-        let upgraded = repo.load().unwrap();
-        assert_eq!(upgraded.schema_version, SETTINGS_SCHEMA_VERSION);
-        assert_eq!(upgraded.revision, 9);
-        assert_eq!(upgraded.settings, settings);
-        repo.save(&upgraded).unwrap();
-
-        let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted["schema_version"], SETTINGS_SCHEMA_VERSION);
-        assert!(persisted["settings"]["presets"].get("characters").is_none());
-        assert!(persisted["settings"]["characters"].is_object());
-        assert_eq!(repo.load().unwrap().settings, settings);
+        assert!(repo.load().is_err());
+        assert!(repo.migrate().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
     }
 }

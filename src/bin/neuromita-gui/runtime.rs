@@ -47,6 +47,7 @@ pub enum Command {
 }
 
 pub enum Update {
+    CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
     ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
@@ -169,6 +170,9 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(Update::CharacterCatalog(
+        app.presenter().characters.catalog(),
+    ));
     if let Err(error) = observe(app.presenter(), &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }

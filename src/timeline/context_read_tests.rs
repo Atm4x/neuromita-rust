@@ -108,13 +108,13 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
     let mut inner = TimelineStore::new();
     inner.create_session(SessionId::new(), branch).unwrap();
     let mut observed = EventDraft::new(EventKind::CharacterObservation);
-    observed.actor = Some("mita".into());
+    observed.actor = Some("Crazy".into());
     observed.observers.insert(CharacterId::Crazy);
     observed
         .payload
         .insert("content".into(), json!("known event"));
     let mut memory = EventDraft::new(EventKind::CharacterMemoryChanged);
-    memory.actor = Some("mita".into());
+    memory.actor = Some("Crazy".into());
     memory.observers.insert(CharacterId::Crazy);
     memory.payload.insert(
         "change".into(),
@@ -131,7 +131,7 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
         )),
     );
     let mut private = EventDraft::new(EventKind::CharacterObservation);
-    private.actor = Some("kind-mita".into());
+    private.actor = Some("Kind".into());
     private.observers.insert(CharacterId::Kind);
     private
         .payload

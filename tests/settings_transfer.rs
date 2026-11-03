@@ -6,8 +6,8 @@ use std::{
 };
 
 use neuromita::settings::{
-    AppSettings, JsonSettingsRepository, SETTINGS_SCHEMA_VERSION, SettingsError,
-    SettingsRepository, SettingsTransfer, SettingsTransferError, StoredSettings, Volume,
+    AppSettings, JsonSettingsRepository, SettingsError, SettingsRepository, SettingsTransfer,
+    SettingsTransferError, StoredSettings, Volume,
 };
 use uuid::Uuid;
 
@@ -36,11 +36,7 @@ impl Drop for TempDir {
 fn stored(revision: u64, volume: u8) -> StoredSettings {
     let mut settings = AppSettings::initial_profile();
     settings.voice.volume = Volume::new(volume).unwrap();
-    StoredSettings {
-        schema_version: SETTINGS_SCHEMA_VERSION,
-        revision,
-        settings,
-    }
+    StoredSettings { revision, settings }
 }
 
 fn settings_json(volume: u32) -> String {
@@ -49,8 +45,8 @@ fn settings_json(volume: u32) -> String {
     serde_json::to_string(&settings).unwrap()
 }
 
-fn envelope(schema: u32, revision: u64, settings: &str) -> String {
-    format!("{{\"schema_version\":{schema},\"revision\":{revision},\"settings\":{settings}}}")
+fn envelope(_schema: u32, revision: u64, settings: &str) -> String {
+    format!("{{\"revision\":{revision},\"settings\":{settings}}}")
 }
 
 fn complete(schema: u32, revision: u64) -> String {
@@ -87,7 +83,7 @@ fn export_is_a_complete_canonical_envelope() {
     let object = document.as_object().unwrap();
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["revision", "schema_version", "settings"]);
+    assert_eq!(keys, ["revision", "settings"]);
     let mut section_keys: Vec<&str> = object["settings"]
         .as_object()
         .unwrap()
@@ -106,7 +102,6 @@ fn export_is_a_complete_canonical_envelope() {
             "voice"
         ]
     );
-    assert_eq!(object["schema_version"], 4);
     assert_eq!(object["revision"], 12);
 
     assert_eq!(fs::read(&store_path).unwrap(), backup);
@@ -151,44 +146,9 @@ fn import_replaces_the_whole_store_idempotently() {
 }
 
 #[test]
-fn decode_classifies_rejections() {
-    let unknown_top = envelope(2, 4, &settings_json(80)).replacen("{", "{\"presets\":[],", 1);
-    let unknown_nested = envelope(
-        2,
-        4,
-        &settings_json(80).replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
-    );
-    let missing_section = envelope(2, 4, "{}");
-    let duplicate_top = format!(
-        "{{\"schema_version\":2,\"revision\":4,\"revision\":5,\"settings\":{}}}",
-        settings_json(80)
-    );
-    let duplicate_nested = envelope(
-        2,
-        4,
-        &settings_json(80).replace("\"volume\":80", "\"volume\":80,\"volume\":70"),
-    );
-    let invalid_volume = envelope(2, 4, &settings_json(101));
-    let empty_voice = envelope(
-        2,
-        4,
-        &settings_json(80).replace("\"voice\":\"default\"", "\"voice\":\"  \""),
-    );
-    let invalid_font = envelope(
-        2,
-        4,
-        &settings_json(80).replace("\"font_size\":14", "\"font_size\":5"),
-    );
-    let invalid_interval = envelope(
-        2,
-        4,
-        &settings_json(80).replace("\"interval_ms\":1000", "\"interval_ms\":0"),
-    );
-    let wrong_type = format!(
-        "{{\"schema_version\":2,\"revision\":4,\"settings\":{}}}",
-        settings_json(80).replace("\"volume\":80", "\"volume\":\"80\"")
-    );
-
+fn decode_classifies_strict_rejections() {
+    let current = envelope(0, 4, &settings_json(80));
+    assert!(SettingsTransfer::decode(current.as_bytes()).is_ok());
     assert!(matches!(
         SettingsTransfer::decode(b"not json"),
         Err(SettingsTransferError::MalformedJson(_))
@@ -198,43 +158,28 @@ fn decode_classifies_rejections() {
         Err(SettingsTransferError::NotFullSettingsTransfer(_))
     ));
     assert!(matches!(
-        SettingsTransfer::decode(br#"{"schema_version":2,"revision":1}"#),
+        SettingsTransfer::decode(br#"{"revision":1}"#),
         Err(SettingsTransferError::NotFullSettingsTransfer(_))
     ));
+    let historical = current.replacen("{", "{\"schema_version\":4,", 1);
     assert!(matches!(
-        SettingsTransfer::decode(complete(5, 4).as_bytes()),
-        Err(SettingsTransferError::UnsupportedSchema { found: 5 })
+        SettingsTransfer::decode(historical.as_bytes()),
+        Err(SettingsTransferError::InvalidEnvelope(_))
     ));
+    let duplicate = current.replacen("\"revision\":4", "\"revision\":4,\"revision\":5", 1);
     assert!(matches!(
-        SettingsTransfer::decode(complete(0, 4).as_bytes()),
-        Err(SettingsTransferError::Migration(
-            neuromita::migration::MigrationError::MissingStep { from: 0, .. }
-        ))
+        SettingsTransfer::decode(duplicate.as_bytes()),
+        Err(SettingsTransferError::InvalidEnvelope(_))
     ));
-    for fixture in [
-        unknown_top,
-        unknown_nested,
-        missing_section,
-        duplicate_top,
-        duplicate_nested,
-        wrong_type,
-        invalid_volume,
+    for broken in [
+        current.replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
+        current.replace("\"volume\":80", "\"volume\":101"),
+        current.replace("\"volume\":80", "\"volume\":\"80\""),
+        envelope(0, 4, "{}"),
     ] {
         assert!(
-            matches!(
-                SettingsTransfer::decode(fixture.as_bytes()),
-                Err(SettingsTransferError::Migration(_))
-            ),
-            "fixture must be rejected as an invalid envelope: {fixture}"
-        );
-    }
-    for fixture in [empty_voice, invalid_font, invalid_interval] {
-        assert!(
-            matches!(
-                SettingsTransfer::decode(fixture.as_bytes()),
-                Err(SettingsTransferError::Migration(_))
-            ),
-            "fixture must be rejected as invalid values: {fixture}"
+            SettingsTransfer::decode(broken.as_bytes()).is_err(),
+            "{broken}"
         );
     }
 }
@@ -278,17 +223,14 @@ fn invalid_imports_leave_the_destination_untouched() {
     destination.save(&stored(5, 60)).unwrap();
     let before = fs::read(&destination_path).unwrap();
 
+    let valid = complete(0, 5);
     let fixtures = [
-        complete(5, 5),
-        complete(0, 5),
-        complete(2, 5).replace("\"volume\":80", "\"volume\":101"),
-        complete(2, 5).replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
-        format!(
-            "{{\"schema_version\":2,\"revision\":5,\"revision\":6,\"settings\":{}}}",
-            settings_json(80)
-        ),
+        valid.replacen("{", "{\"schema_version\":5,", 1),
+        valid.replace("\"volume\":80", "\"volume\":101"),
+        valid.replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
+        valid.replacen("\"revision\":5", "\"revision\":5,\"revision\":6", 1),
         "{\"volume\":80}".to_owned(),
-        "{\"schema_version\":2,".to_owned(),
+        "{\"revision\":5,".to_owned(),
     ];
     for fixture in fixtures {
         assert!(
@@ -368,12 +310,6 @@ fn repository_save_rejects_invalid_settings_without_writing() {
     ));
     assert_eq!(fs::read(&store_path).unwrap(), before);
 
-    let mut future = stored(2, 81);
-    future.schema_version = 5;
-    assert!(matches!(
-        store.save(&future),
-        Err(SettingsError::Storage(message)) if message.contains("unsupported settings schema 4")
-    ));
     assert_eq!(fs::read(&store_path).unwrap(), before);
     assert!(temporary_files(&directory.path).is_empty());
 }
@@ -383,13 +319,11 @@ fn load_rejects_future_foreign_and_duplicate_documents() {
     let directory = TempDir::new();
     let store_path = directory.path("store.json");
     let store = JsonSettingsRepository::new(store_path.clone());
+    let valid = complete(0, 1);
     let fixtures = [
-        complete(5, 1),
-        complete(2, 1).replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
-        format!(
-            "{{\"schema_version\":2,\"revision\":1,\"revision\":2,\"settings\":{}}}",
-            settings_json(80)
-        ),
+        valid.replacen("{", "{\"schema_version\":5,", 1),
+        valid.replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
+        valid.replacen("\"revision\":1", "\"revision\":1,\"revision\":2", 1),
         "{\"revision\":1}".to_owned(),
     ];
     for fixture in fixtures {

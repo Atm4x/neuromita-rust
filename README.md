@@ -37,9 +37,9 @@ cargo run --locked --offline -- --model YOUR_GEMINI_MODEL --character mita --lis
 cargo run --locked --offline -- --model YOUR_GEMINI_MODEL --character mita --listen 127.0.0.1:5555 --message "Привет"
 ```
 
-YOUR_GEMINI_MODEL — доступный вам model ID. Стартовый состав: mita, kind-mita. Описания и промпты минимальные, без переноса всего функционала Python.
+YOUR_GEMINI_MODEL — доступный вам model ID. Канонический каталог: Crazy, Kind, Cappie, ShortHair, Mila, Sleepy, Ghost, Creepy, GameMaster. Описания и промпты минимальные, без переноса всего функционала Python.
 
-Консольные команды: /character mita, /character kind-mita, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
+Консольные команды: /character Crazy, /character Kind, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
 
 ## Launcher
 

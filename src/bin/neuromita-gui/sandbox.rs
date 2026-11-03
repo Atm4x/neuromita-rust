@@ -13,7 +13,10 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
-    view::{AppWindow, ChatRow, ChatStatus, ConversationUi, MemoryUi, SettingsUi},
+    view::{
+        AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
+        MemoryUi, SettingsUi,
+    },
 };
 
 pub fn attach(
@@ -119,8 +122,31 @@ pub fn attach(
     Ok(runtime)
 }
 
+pub(super) fn render_catalog(
+    window: &AppWindow,
+    catalog: Vec<neuromita::character::CharacterDefinition>,
+) {
+    let entries = catalog
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| CharacterOption {
+            index: index as i32,
+            id: item.id.as_str().into(),
+            name: item.name.source().into(),
+            name_key: item.name.id().into(),
+            conversation_name: item.conversation_name.source().into(),
+            conversation_key: item.conversation_name.id().into(),
+            initial: item.id.as_str().chars().next().unwrap().to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    window
+        .global::<CharacterCatalog>()
+        .set_entries(ModelRc::new(VecModel::from(entries)));
+}
+
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),

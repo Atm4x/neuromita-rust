@@ -21,7 +21,7 @@ component CharacterSelector inherits Rectangle {
             width: 24px; height: 24px; surface: SandboxTheme.input;
         } }
         Caption {
-            text: CharacterCatalog.entries[root.character].name;
+            text: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
             font-size: 12px; horizontal-stretch: 1;
         }
         Glyph { text: Fa.down; width: 16px; font-size: 11px; }
@@ -34,10 +34,10 @@ component CharacterSelector inherits Rectangle {
             VerticalLayout {
                 padding: 4px; spacing: 1px;
                 for entry in CharacterCatalog.entries: ActionSurface {
-                    label: entry.name; height: 30px;
+                    label: CharacterCatalog.name(entry); height: 30px;
                     HorizontalLayout { padding-left: 7px; padding-right: 7px; spacing: 7px;
                         Centered { width: 24px; CharacterPortrait { width: 24px; height: 24px; character: entry.index; surface: #161322; } }
-                        Caption { text: entry.name; horizontal-stretch: 1; }
+                        Caption { text: CharacterCatalog.name(entry); horizontal-stretch: 1; }
                     }
                     activated => { root.selected(entry.index); menu.close(); }
                 }
@@ -252,7 +252,7 @@ component DebugTab inherits ScrollView {
         }
         Strip {
             title: I18n.i18n("sandbox.debug.context", "Контекст сессии"); glyph: Fa.list;
-            ValueRow { title: I18n.i18n("sandbox.label.character", "Персонаж"); value: CharacterCatalog.entries[root.character].name; right-aligned: true; }
+            ValueRow { title: I18n.i18n("sandbox.label.character", "Персонаж"); value: CharacterCatalog.name(CharacterCatalog.entries[root.character]); right-aligned: true; }
             ValueRow { title: I18n.i18n("sandbox.debug.prompts", "Промпты"); value: root.preset; right-aligned: true; }
             ValueRow { title: I18n.i18n("sandbox.label.model", "Модель"); value: root.model; right-aligned: true; }
             ValueRow { title: I18n.i18n("sandbox.label.voice", "Голос"); value: root.voice-enabled ? I18n.i18n("sandbox.status.not-ready", "Не готово") : I18n.i18n("sandbox.status.off", "Выкл."); right-aligned: true; }

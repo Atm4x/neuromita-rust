@@ -6,12 +6,12 @@ use neuromita::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
     },
-    migration::{Migration, MigrationError, MigrationStore, StartupMigration},
+    migration::{Migration, MigrationError, StartupMigration},
     settings::{
         AppSettings, JsonSettingsRepository, Language, PresetId, PresetSelection,
-        PythonSettingsMigration, RustSettingsMigration, SETTINGS_SCHEMA_VERSION, SettingsApi,
-        SettingsConfig, SettingsError, SettingsImportFormat, SettingsRepository, SettingsSource,
-        SettingsTransfer, SettingsTransferError, StoredSettings, Volume,
+        PythonSettingsMigration, RustSettingsMigration, SettingsApi, SettingsConfig, SettingsError,
+        SettingsImportFormat, SettingsRepository, SettingsSource, SettingsTransfer,
+        SettingsTransferError, StoredSettings, Volume,
     },
 };
 use serde_json::{Value, json};
@@ -41,215 +41,35 @@ fn record(revision: u64) -> StoredSettings {
     settings.presets.active = PresetId(3);
     settings.characters.crazy.presets.react = PresetSelection::Specific(PresetId(7));
     settings.characters.kind.presets.reply = PresetSelection::Specific(PresetId(11));
-    StoredSettings {
-        schema_version: SETTINGS_SCHEMA_VERSION,
-        revision,
-        settings,
-    }
-}
-
-fn legacy(stored: &StoredSettings) -> Vec<u8> {
-    let mut value = serde_json::to_value(stored).unwrap();
-    value["schema_version"] = json!(1);
-    let characters = value["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("characters")
-        .unwrap();
-    value["settings"]["presets"]["characters"] = json!({
-        "mita": characters["Crazy"]["presets"],
-        "kind_mita": characters["Kind"]["presets"],
-    });
-    value["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("reminders");
-    serde_json::to_vec(&value).unwrap()
+    StoredSettings { revision, settings }
 }
 
 #[test]
-fn startup_and_import_use_the_same_strict_migration() {
+fn strict_current_format_and_import_have_the_same_contract() {
     let directory = Directory::new();
     let path = directory.path("settings.json");
-    let expected = record(9);
-    let bytes = legacy(&expected);
-    fs::write(&path, &bytes).unwrap();
-    let loaded = JsonSettingsRepository::new(path.clone()).load().unwrap();
-    let migrated = RustSettingsMigration.migrate(bytes.as_slice()).unwrap();
-    let prepared = SettingsApi::prepare_import(SettingsImportFormat::Rust, &bytes).unwrap();
-    assert_eq!(loaded, expected);
-    assert_eq!(migrated, loaded);
-    assert_eq!(prepared.stored(), &loaded);
-    assert_eq!(fs::read(path).unwrap(), bytes);
-    let current = prepared.encode().unwrap();
+    let current = serde_json::to_vec(&record(9)).unwrap();
+    fs::write(&path, &current).unwrap();
+    let repository = JsonSettingsRepository::new(path.clone());
+    repository.migrate().unwrap();
+    let loaded = repository.load().unwrap();
+    assert_eq!(loaded, record(9));
     assert_eq!(
-        SettingsTransfer::decode(&current)
+        RustSettingsMigration.migrate(current.as_slice()).unwrap(),
+        loaded
+    );
+    assert_eq!(
+        SettingsApi::prepare_import(SettingsImportFormat::Rust, &current)
             .unwrap()
-            .encode()
-            .unwrap(),
-        current
+            .stored(),
+        &loaded
     );
-}
-
-#[test]
-fn old_documents_receive_only_the_explicit_version_one_upgrade() {
-    let expected = record(4);
-    let mut old: Value = serde_json::from_slice(&legacy(&expected)).unwrap();
-    old["settings"].as_object_mut().unwrap().remove("presets");
-    let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
-    assert_eq!(migrated.stored().settings.presets.active, PresetId(0));
-    assert_eq!(
-        migrated.stored().settings.characters,
-        AppSettings::initial_profile().characters
-    );
-    assert_eq!(migrated.stored().settings.voice, expected.settings.voice);
-    let mut current = serde_json::to_value(expected).unwrap();
-    current["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("presets");
-    assert!(SettingsTransfer::decode(&serde_json::to_vec(&current).unwrap()).is_err());
-}
-
-#[test]
-fn version_two_documents_gain_only_the_explicit_reminders_defaults() {
-    let expected = record(6);
-    let mut old = serde_json::to_value(&expected).unwrap();
-    old["schema_version"] = json!(2);
-    old["settings"]["characters"] = json!({"mita": expected.settings.characters.crazy, "kind_mita": expected.settings.characters.kind});
-    old["settings"].as_object_mut().unwrap().remove("reminders");
-    let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
-    let stored = migrated.stored();
-    assert_eq!(stored.schema_version, SETTINGS_SCHEMA_VERSION);
-    assert_eq!(stored.revision, 6);
-    assert_eq!(stored.settings.presets, expected.settings.presets);
-    assert_eq!(stored.settings.characters, expected.settings.characters);
-    assert_eq!(stored.settings.voice, expected.settings.voice);
-    assert!(stored.settings.reminders.enabled);
-    assert_eq!(
-        stored.settings.reminders.timezone,
-        neuromita::reminders::TimeZoneId::utc()
-    );
-    let mut current = serde_json::to_value(&expected).unwrap();
-    current["settings"]
-        .as_object_mut()
-        .unwrap()
-        .remove("reminders");
-    assert!(SettingsTransfer::decode(&serde_json::to_vec(&current).unwrap()).is_err());
-}
-
-#[test]
-fn version_three_preserves_assignments_and_adds_the_complete_catalog() {
-    let expected = record(17);
-    let mut old = serde_json::to_value(&expected).unwrap();
-    old["schema_version"] = json!(3);
-    old["settings"]["characters"] = json!({"mita": expected.settings.characters.crazy, "kind_mita": expected.settings.characters.kind});
-    let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
-    assert_eq!(migrated.stored(), &expected);
-    let mut incomplete = serde_json::to_value(&expected).unwrap();
-    incomplete["settings"]["characters"]
-        .as_object_mut()
-        .unwrap()
-        .remove("Cappie");
-    assert!(SettingsTransfer::decode(&serde_json::to_vec(&incomplete).unwrap()).is_err());
-    for (index, id) in neuromita::character::CharacterId::ALL
-        .into_iter()
-        .enumerate()
-    {
-        assert_eq!(
-            neuromita::character::CharacterId::from_index(index as i32),
-            Some(id)
-        );
-        assert_eq!(
-            neuromita::character::CharacterId::parse(id.as_str()),
-            Some(id)
-        );
-        assert_eq!(serde_json::to_value(id).unwrap(), id.as_str());
-    }
-    assert_eq!(
-        serde_json::from_str::<neuromita::character::CharacterId>("\"mita\"").unwrap(),
-        neuromita::character::CharacterId::Crazy
-    );
-}
-
-#[test]
-fn invalid_and_duplicate_documents_are_rejected_without_a_fallback() {
-    let source = serde_json::to_string(&record(9)).unwrap();
-    let duplicate = source.replacen("\"revision\":9", "\"revision\":9,\"revision\":10", 1);
-    let duplicate_schema = source.replacen(
-        "\"schema_version\":4",
-        "\"schema_version\":4,\"schema_version\":4",
-        1,
-    );
-    let duplicate_nested = source.replacen("\"volume\":80", "\"volume\":80,\"volume\":81", 1);
-    let mut future = serde_json::to_value(record(9)).unwrap();
-    future["schema_version"] = json!(5);
-    assert!(matches!(
-        SettingsTransfer::decode(&serde_json::to_vec(&future).unwrap()),
-        Err(SettingsTransferError::UnsupportedSchema { found: 5 })
-    ));
-    for bytes in [
-        duplicate.as_bytes(),
-        duplicate_schema.as_bytes(),
-        duplicate_nested.as_bytes(),
-        b"{}",
-        b"[]",
-        b"{",
-    ] {
-        assert!(SettingsTransfer::decode(bytes).is_err());
-    }
-    for pointer in [
-        "/settings/voice/voice",
-        "/settings/capture/interval_ms",
-        "/settings/interface/font_size",
-    ] {
-        let mut invalid = serde_json::to_value(record(9)).unwrap();
-        *invalid.pointer_mut(pointer).unwrap() = if pointer.ends_with("voice") {
-            json!(" ")
-        } else {
-            json!(0)
-        };
-        assert!(SettingsTransfer::decode(&serde_json::to_vec(&invalid).unwrap()).is_err());
-    }
-    let mut unknown = serde_json::to_value(record(9)).unwrap();
-    unknown["settings"]["unrecognized"] = json!(true);
-    assert!(SettingsTransfer::decode(&serde_json::to_vec(&unknown).unwrap()).is_err());
-}
-
-#[test]
-fn offline_transfer_preserves_whole_settings_and_never_writes_invalid_input() {
-    let directory = Directory::new();
-    let source = JsonSettingsRepository::new(directory.path("source.json"));
-    let target_path = directory.path("target.json");
-    let target = JsonSettingsRepository::new(target_path.clone());
-    let expected = record(42);
-    source.save(&expected).unwrap();
-    let transfer = source.export_to(&directory.path("backup.json")).unwrap();
-    let bytes = transfer.encode().unwrap();
-    target.import(&bytes).unwrap();
-    assert_eq!(target.load().unwrap(), expected);
-    target.import(&bytes).unwrap();
-    assert_eq!(fs::read(&target_path).unwrap(), bytes);
-    assert!(target.import(b"{}").is_err());
-    assert!(
-        target
-            .import_from(SettingsImportFormat::Python, b"{}")
-            .is_err()
-    );
-    assert_eq!(fs::read(&target_path).unwrap(), bytes);
-    let blocked = directory.path("destination-directory");
-    fs::create_dir(&blocked).unwrap();
-    let marker = blocked.join("keep");
-    fs::write(&marker, b"unchanged").unwrap();
-    assert!(source.export_to(&blocked).is_err());
-    assert_eq!(fs::read(marker).unwrap(), b"unchanged");
-    assert!(fs::read_dir(&directory.0).unwrap().all(|entry| {
-        !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".tmp")
-    }));
+    assert_eq!(fs::read(&path).unwrap(), current);
+    let old = serde_json::json!({"schema_version":3, "revision":9, "settings":record(9).settings});
+    let original = serde_json::to_vec(&old).unwrap();
+    fs::write(&path, &original).unwrap();
+    assert!(repository.migrate().is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
 }
 
 #[test]
@@ -259,10 +79,6 @@ fn python_is_an_explicit_unimplemented_migration() {
         Err(SettingsTransferError::NotImplemented {
             format: SettingsImportFormat::Python
         })
-    ));
-    assert!(matches!(
-        SettingsApi::prepare_import(SettingsImportFormat::Python, b"not parsed"),
-        Err(SettingsTransferError::NotImplemented { .. })
     ));
 }
 
@@ -326,7 +142,7 @@ impl StartupMigration for StartupProbe {
     }
     fn run(&self) -> Result<(), MigrationError> {
         let document: Value = serde_json::from_slice(&fs::read(&self.0).unwrap()).unwrap();
-        assert_eq!(document["schema_version"], SETTINGS_SCHEMA_VERSION);
+        assert!(document.get("schema_version").is_none());
         assert!(SettingsApi::snapshot_all().is_err());
         Err(MigrationError::Storage("injected extension failure".into()))
     }
@@ -348,7 +164,7 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     );
     assert!(SettingsApi::snapshot_all().is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
-    fs::write(&path, legacy(&record(9))).unwrap();
+    fs::write(&path, serde_json::to_vec(&record(9)).unwrap()).unwrap();
     let mut failing = config(repository.clone());
     failing
         .migrations
@@ -433,57 +249,6 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     restarted.shutdown().await.unwrap();
 }
 
-#[test]
-fn stale_migration_snapshot_cannot_overwrite_another_writer() {
-    let directory = Directory::new();
-    let path = directory.path("settings.json");
-    fs::write(&path, legacy(&record(9))).unwrap();
-    let repository = JsonSettingsRepository::new(path.clone());
-    let original = repository.read_versioned().unwrap();
-    let next = RustSettingsMigration::service()
-        .prepare(original.clone())
-        .unwrap();
-    let mut changed = record(10);
-    changed.settings.voice.volume = Volume::new(17).unwrap();
-    JsonSettingsRepository::new(path.clone())
-        .save(&changed)
-        .unwrap();
-    assert!(matches!(
-        repository.commit(&original, &next),
-        Err(MigrationError::Conflict)
-    ));
-    assert_eq!(repository.load().unwrap(), changed);
-    let before = fs::read(&path).unwrap();
-    repository.migrate().unwrap();
-    assert_eq!(fs::read(path).unwrap(), before);
-}
-
-#[cfg(windows)]
-#[test]
-fn failed_persisted_upgrade_keeps_version_one_until_retry_commits() {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    let directory = Directory::new();
-    let path = directory.path("settings.json");
-    let original = legacy(&record(9));
-    fs::write(&path, &original).unwrap();
-    let repository = JsonSettingsRepository::new(path.clone());
-    let locked = fs::OpenOptions::new()
-        .read(true)
-        .share_mode(3)
-        .open(&path)
-        .unwrap();
-    assert!(repository.migrate().is_err());
-    assert_eq!(fs::read(&path).unwrap(), original);
-    drop(locked);
-    repository.migrate().unwrap();
-    assert_eq!(
-        repository.read_versioned().unwrap().version,
-        SETTINGS_SCHEMA_VERSION
-    );
-    assert_eq!(repository.load().unwrap(), record(9));
-}
-
 #[cfg(windows)]
 #[test]
 fn a_locked_destination_keeps_the_previous_file_and_allows_retry() {
@@ -519,7 +284,7 @@ fn offline_cli_runs_without_a_key_and_exposes_the_python_stub() {
     let source = directory.path("source.json");
     let target = directory.path("target.json");
     let backup = directory.path("backup.json");
-    fs::write(&source, legacy(&record(5))).unwrap();
+    fs::write(&source, serde_json::to_vec(&record(5)).unwrap()).unwrap();
     let run = |command: &str, from: &PathBuf, to: &PathBuf, extra: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_neuromita"))
             .args(["settings", command, "--source"])

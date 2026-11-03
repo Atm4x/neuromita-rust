@@ -31,7 +31,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -56,7 +56,7 @@ impl Options {
             .remove("--character")
             .ok_or_else(|| invalid("--character is required"))?;
         let character = CharacterId::parse(&character)
-            .ok_or_else(|| invalid("unknown character; use mita or kind-mita"))?;
+            .ok_or_else(|| invalid("unknown character; use a canonical character ID"))?;
         let listen = values
             .remove("--listen")
             .ok_or_else(|| invalid("--listen is required"))?

@@ -101,7 +101,6 @@ impl SettingsOwner {
     pub(crate) fn export(&self) -> Result<SettingsTransfer, SettingsError> {
         let snapshot = self.snapshot_all()?;
         Ok(SettingsTransfer::new(StoredSettings {
-            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: snapshot.revision,
             settings: snapshot.values.clone(),
         })?)
@@ -254,7 +253,6 @@ impl SettingsLifecycle {
             SettingsSource::Initial(settings) => {
                 settings.validate()?;
                 StoredSettings {
-                    schema_version: SETTINGS_SCHEMA_VERSION,
                     revision: 0,
                     settings,
                 }
@@ -266,9 +264,6 @@ impl SettingsLifecycle {
                     .map_err(|error| SettingsError::Storage(error.to_string()))??
             }
         };
-        if stored.schema_version != SETTINGS_SCHEMA_VERSION {
-            return Err(SettingsError::Storage("unsupported settings schema".into()));
-        }
         stored.settings.validate()?;
         let snapshot = Arc::new(SettingsSnapshot {
             closed: false,
@@ -304,7 +299,6 @@ impl SettingsLifecycle {
             return Ok(());
         }
         let stored = StoredSettings {
-            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: snapshot.revision,
             settings: snapshot.values.clone(),
         };

@@ -5,9 +5,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CharacterId {
-    #[serde(alias = "mita")]
     Crazy,
-    #[serde(alias = "kind-mita")]
     Kind,
     Cappie,
     ShortHair,
@@ -58,20 +56,8 @@ impl CharacterId {
             .and_then(|index| Self::ALL.get(index).copied())
     }
 
-    pub(crate) const fn previous_id(self) -> &'static str {
-        match self {
-            Self::Crazy => "mita",
-            Self::Kind => "kind-mita",
-            _ => self.as_str(),
-        }
-    }
-
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "mita" => Some(Self::Crazy),
-            "kind-mita" => Some(Self::Kind),
-            _ => Self::ALL.into_iter().find(|id| id.as_str() == value),
-        }
+        Self::ALL.into_iter().find(|id| id.as_str() == value)
     }
 }
 

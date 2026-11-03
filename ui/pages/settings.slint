@@ -144,7 +144,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                     padding: 3px; spacing: 0px; alignment: start;
                     for entry in CharacterCatalog.entries: VerticalLayout { padding: 0px; spacing: 0px; vertical-stretch: 0;
                     if CharacterCatalog.matches(entry, root.search): ActionSurface {
-                        height: 48px; label: entry.name;
+                        height: 48px; label: CharacterCatalog.name(entry);
                         selected: root.character == entry.index; border-radius: 9px; border-width: 1px;
                         border-color: self.selected || self.hovered ? SettingsTheme.selected-border : SettingsTheme.item-border;
                         background: SettingsTheme.panel;
@@ -153,7 +153,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                             Centered { width: 32px; CharacterPortrait { width: 32px; height: 32px; character: entry.index; surface: SettingsTheme.panel; } }
                             VerticalLayout {
                                 padding: 0px; spacing: 2px; alignment: center;
-                                SettingsLabel { text: entry.name; font-weight: 700; }
+                                SettingsLabel { text: CharacterCatalog.name(entry); font-weight: 700; }
                                 SettingsLabel { text: "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
                             }
                         }
@@ -182,7 +182,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                 VerticalLayout {
                     padding: 0px; spacing: 2px; alignment: center;
                     SettingsLabel {
-                        text: CharacterCatalog.entries[root.character].name;
+                        text: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         font-size: 20px; font-weight: 700;
                     }
                     SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }

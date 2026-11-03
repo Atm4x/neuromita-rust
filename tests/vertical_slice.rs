@@ -2227,22 +2227,22 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert_eq!(source.len(), 2);
     assert_eq!(listener.len(), 2);
     assert_eq!(listener[0]["speaker"], "player");
-    assert_eq!(listener[0]["targets"], json!(["mita"]));
+    assert_eq!(listener[0]["targets"], json!(["Crazy"]));
     assert_eq!(
         listener[0]["timeline_event_id"],
         source[0]["timeline_event_id"]
     );
     assert_eq!(source[1]["role"], "assistant");
     assert_eq!(listener[1]["role"], "user");
-    assert_eq!(listener[1]["speaker"], "mita");
+    assert_eq!(listener[1]["speaker"], "Crazy");
     assert_eq!(
         source[1]["timeline_event_id"],
         listener[1]["timeline_event_id"]
     );
-    assert_eq!(source[1]["targets"], json!(["player", "kind-mita"]));
+    assert_eq!(source[1]["targets"], json!(["player", "Kind"]));
     assert_eq!(
         listener[1]["participants"],
-        json!(["player", "mita", "kind-mita"])
+        json!(["player", "Crazy", "Kind"])
     );
     assert_eq!(
         listener[1]["content"],
@@ -2292,7 +2292,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert_eq!(kind_now.view.count(), 4);
     assert_eq!(
         kind_now.view.provider_messages()[3]["targets"],
-        json!(["mita"])
+        json!(["Crazy"])
     );
     assert_eq!(kind_now.view.provider_messages()[3]["role"], "assistant");
 
@@ -2328,7 +2328,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         .unwrap();
     assert_eq!(now_mita.view.count(), 3);
     assert_eq!(now_kind.view.count(), 5);
-    assert_eq!(now_mita.view.provider_messages()[2]["speaker"], "kind-mita");
+    assert_eq!(now_mita.view.provider_messages()[2]["speaker"], "Kind");
     assert_eq!(now_kind.view.provider_messages()[4]["role"], "assistant");
     let initiate = ChatApi::initiate(
         neuromita::request::InitiateRequest::new(

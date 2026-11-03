@@ -65,7 +65,7 @@ export component MessageRow inherits VerticalLayout {
                 padding-top: 8px; padding-bottom: 8px; spacing: 2px;
                 Caption {
                     text: root.item.user ? I18n.i18n("sandbox.author.you", "Вы")
-                        : root.item.character-index >= 0 ? CharacterCatalog.entries[root.item.character-index].name
+                        : root.item.character-index >= 0 ? CharacterCatalog.name(CharacterCatalog.entries[root.item.character-index])
                         : root.item.speaker == "World" ? I18n.i18n("sandbox.observation", "Наблюдение")
                         : root.item.speaker != "" ? root.item.speaker : root.character-name;
                     color: root.item.user ? #ffd7ea : #ff8fc8;

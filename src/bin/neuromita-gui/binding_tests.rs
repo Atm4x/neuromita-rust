@@ -164,6 +164,10 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog));
     window.global::<I18n>().set_locale("ru".into());
+    super::super::sandbox::render_catalog(
+        &window,
+        neuromita::character::character_catalog().collect(),
+    );
     let catalog = window
         .global::<super::super::view::CharacterCatalog>()
         .get_entries();

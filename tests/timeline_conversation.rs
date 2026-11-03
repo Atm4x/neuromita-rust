@@ -59,10 +59,10 @@ fn contract(
     assert_eq!(initial[0]["role"], "user");
     assert_eq!(initial[0]["speaker"], "player");
     assert_eq!(initial[0]["message_id"], "dialogue:player:1");
-    assert_eq!(initial[0]["targets"], json!(["mita"]));
+    assert_eq!(initial[0]["targets"], json!(["Crazy"]));
     assert_eq!(
         initial[0]["participants"],
-        json!(["player", "mita", "kind-mita"])
+        json!(["player", "Crazy", "Kind"])
     );
     assert_eq!(initial[0]["content"], incoming.content);
     assert_eq!(
@@ -99,7 +99,7 @@ fn contract(
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
 
     let mut assistant = ConversationMessage::new(
-        "dialogue:mita:1",
+        "dialogue:Crazy:1",
         ConversationSpeaker::Character(CharacterId::Crazy),
         json!("Answer"),
         [CharacterId::Kind],
@@ -127,7 +127,7 @@ fn contract(
     assert_eq!(kind.count(), 1);
     assert_eq!(mita.provider_messages()[1]["role"], "assistant");
     assert_eq!(kind.provider_messages()[0]["role"], "user");
-    assert_eq!(kind.provider_messages()[0]["speaker"], "mita");
+    assert_eq!(kind.provider_messages()[0]["speaker"], "Crazy");
     assert_eq!(mita.messages()[1].event_id, kind.messages()[0].event_id);
     assert_eq!(kind.messages()[0].learned_at, 2);
 
@@ -238,7 +238,7 @@ fn structured_segments_survive_sqlite_reopen_as_one_message() {
         repository.create_session(SessionId::new(), branch).unwrap();
         repository.select_branch(branch, None).unwrap();
         original = ConversationMessage::new(
-            "structured:kind-mita:1",
+            "structured:Kind:1",
             ConversationSpeaker::Character(CharacterId::Kind),
             segments.clone(),
             [CharacterId::Crazy],

@@ -412,8 +412,8 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
         &mut write,
         json!({
             "command":"publish_message", "command_id":Uuid::new_v4(),
-            "event_id":unseen, "occurred_at_unix_ms":1762020000000u64, "speaker":{"character":"mita"},
-            "content":"Only Mita saw this", "seen_by":["mita"]
+            "event_id":unseen, "occurred_at_unix_ms":1762020000000u64, "speaker":{"character":"Crazy"},
+            "content":"Only Mita saw this", "seen_by":["Crazy"]
         }),
     )
     .await;
@@ -427,7 +427,7 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
         &mut write,
         json!({
             "command":"react", "command_id":Uuid::new_v4(),
-            "event_id":unseen, "character":"kind-mita", "instruction":"React to what you heard"
+            "event_id":unseen, "character":"Kind", "instruction":"React to what you heard"
         }),
     )
     .await;
@@ -441,11 +441,11 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
     let command_id = Uuid::new_v4();
     let publish = json!({
         "command":"publish_message", "command_id":command_id,
-        "event_id":message, "occurred_at_unix_ms":1762020000001u64, "speaker":{"character":"mita"},
+        "event_id":message, "occurred_at_unix_ms":1762020000001u64, "speaker":{"character":"Crazy"},
         "content":"KindMita, let's talk",
-        "targets":[{"character":"kind-mita"}],
-        "participants":[{"character":"mita"},{"character":"kind-mita"}],
-        "seen_by":["mita","kind-mita"]
+        "targets":[{"character":"Kind"}],
+        "participants":[{"character":"Crazy"},{"character":"Kind"}],
+        "seen_by":["Crazy","Kind"]
     });
     submit(&mut write, publish.clone()).await;
     assert_eq!(
@@ -464,10 +464,10 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
     let mut retry = json!({
         "command":"publish_message", "command_id":Uuid::new_v4(),
         "event_id":message, "occurred_at_unix_ms":1762020000001u64,
-        "speaker":{"character":"mita"}, "content":"KindMita, let's talk",
-        "targets":[{"character":"kind-mita"}],
-        "participants":[{"character":"mita"},{"character":"kind-mita"}],
-        "seen_by":["mita","kind-mita"]
+        "speaker":{"character":"Crazy"}, "content":"KindMita, let's talk",
+        "targets":[{"character":"Kind"}],
+        "participants":[{"character":"Crazy"},{"character":"Kind"}],
+        "seen_by":["Crazy","Kind"]
     });
     submit(&mut second_write, retry.take()).await;
     let deduplicated = receive(&mut second_reader, "published").await;
@@ -480,7 +480,7 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
         &mut write,
         json!({
             "command":"reply", "command_id":Uuid::new_v4(),
-            "message_id":message, "character":"kind-mita", "seen_by":["mita"]
+            "message_id":message, "character":"Kind", "seen_by":["Crazy"]
         }),
     )
     .await;
@@ -501,7 +501,7 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
         &mut write,
         json!({
             "command":"react", "command_id":Uuid::new_v4(),
-            "event_id":message, "character":"kind-mita", "instruction":"React briefly"
+            "event_id":message, "character":"Kind", "instruction":"React briefly"
         }),
     )
     .await;
@@ -520,7 +520,7 @@ async fn unity_tcp_publishes_message_and_chooses_reply_react_or_initiate() {
         &mut write,
         json!({
             "command":"initiate", "command_id":Uuid::new_v4(),
-            "character":"kind-mita", "instruction":"Start a fresh topic"
+            "character":"Kind", "instruction":"Start a fresh topic"
         }),
     )
     .await;

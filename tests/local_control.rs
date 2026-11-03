@@ -283,7 +283,7 @@ async fn voice_failure_keeps_the_accepted_message_identity_in_status_and_replay(
     SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
     let mut client = fixture.connect().await;
     let command_id = Uuid::new_v4();
-    let request = reply(command_id, "mita", "reply with unavailable voice");
+    let request = reply(command_id, "Crazy", "reply with unavailable voice");
     client.send(request.clone()).await;
     let accepted = client.accepted(command_id).await;
     let request_id = uuid(&accepted["request_id"]);
@@ -357,21 +357,21 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         let mut cmd = command(name);
         match name {
             "reply" => {
-                cmd = reply(uuid(&cmd["command_id"]), "mita", "catalog execution");
+                cmd = reply(uuid(&cmd["command_id"]), "Crazy", "catalog execution");
             }
             "publish_message" => {
                 cmd["event_id"] = json!(Uuid::new_v4());
                 cmd["occurred_at_unix_ms"] = json!(123);
                 cmd["speaker"] = json!("player");
                 cmd["content"] = json!("network publication");
-                cmd["seen_by"] = json!(["mita"]);
+                cmd["seen_by"] = json!(["Crazy"]);
             }
             "react" | "initiate" => {
-                cmd["character"] = json!("mita");
+                cmd["character"] = json!("Crazy");
                 cmd["instruction"] = json!("catalog execution");
                 if name == "react" {
                     cmd["event_id"] =
-                        reply(Uuid::new_v4(), "mita", "reaction target")["message_id"].clone();
+                        reply(Uuid::new_v4(), "Crazy", "reaction target")["message_id"].clone();
                 }
             }
             "cancel" => {
@@ -465,7 +465,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
         (line(json!({"command_id": id, "command":"unknown"})), "unknown_command", Some(id)),
         (line(json!({"command_id": id, "command":"set_volume", "value":101})), "invalid_command", Some(id)),
         (line(json!({"command_id": id, "command":"ping", "extra":1})), "invalid_command", Some(id)),
-        (line(reply(id, "mita", " ")), "invalid_value", Some(id)),
+        (line(reply(id, "Crazy", " ")), "invalid_value", Some(id)),
         (line(json!({"command_id": id, "command":"cancel", "request_id":Uuid::new_v4()})), "ownership_denied", Some(id)),
         (format!("{{\"command_id\":\"{id}\",\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10}}\n").into_bytes(), "invalid_command", None),
         (format!("{{\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10,\"value\":11}}\n").into_bytes(), "invalid_command", Some(id)),
@@ -496,7 +496,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
             json!({"type":"pong", "command_id":ping["command_id"]})
         );
     }
-    let start = reply(id, "mita", "held");
+    let start = reply(id, "Crazy", "held");
     client.send(start).await;
     let accepted = client.accepted(id).await;
     let call = fixture.call().await;
@@ -593,7 +593,7 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         value["extra"] = json!(true);
         match name {
             "reply" => {
-                value["character"] = json!("mita");
+                value["character"] = json!("Crazy");
                 value["text"] = json!("must not run");
             }
             "cancel" => value["request_id"] = json!(Uuid::new_v4()),
@@ -616,8 +616,10 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
     }
     invalid.extend([
         line(reply(Uuid::new_v4(), "missing", "hello")),
-        line(reply(Uuid::new_v4(), "mita", " \t")),
-        line(json!({"command_id":Uuid::new_v4(), "command":"reply", "character":"mita", "text":4})),
+        line(reply(Uuid::new_v4(), "Crazy", " \t")),
+        line(
+            json!({"command_id":Uuid::new_v4(), "command":"reply", "character":"Crazy", "text":4}),
+        ),
         line(json!({"command_id":Uuid::new_v4(), "command":"cancel", "request_id":"bad"})),
     ]);
     for bytes in invalid {
@@ -655,9 +657,7 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         );
     }
     let id = Uuid::new_v4();
-    client
-        .send(reply(id, "kind-mita", "valid after errors"))
-        .await;
+    client.send(reply(id, "Kind", "valid after errors")).await;
     let accepted = client.accepted(id).await;
     let call = fixture.call().await;
     assert_eq!(call.context.character_id, CharacterId::Kind);
@@ -676,7 +676,7 @@ async fn fragmented_utf8_and_coalesced_lines_preserve_commands() {
     let mut client = fixture.connect().await;
     let id = Uuid::new_v4();
     let bytes = line(
-        json!({"command_id":id,"command":"initiate","character":"mita","instruction":"Привет"}),
+        json!({"command_id":id,"command":"initiate","character":"Crazy","instruction":"Привет"}),
     );
     let split = bytes.iter().position(|byte| *byte >= 128).unwrap() + 1;
     client.bytes(&bytes[..split]).await;
@@ -718,7 +718,7 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     let mut fixture = Fixture::start(|server| server.receipt_capacity = positive(2)).await;
     let mut client = fixture.connect().await;
     let first = Uuid::new_v4();
-    let first_command = reply(first, "mita", "long running");
+    let first_command = reply(first, "Crazy", "long running");
     client.send(first_command.clone()).await;
     let original = client.accepted(first).await;
     let first_request = uuid(&original["request_id"]);
@@ -728,8 +728,8 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     assert_eq!(replay["request_id"], original["request_id"]);
     assert_eq!(replay["replayed"], true);
     for changed in [
-        reply(first, "mita", "changed"),
-        reply(first, "kind-mita", "long running"),
+        reply(first, "Crazy", "changed"),
+        reply(first, "Kind", "long running"),
         json!({"command_id": first, "command":"set_volume", "value":1}),
     ] {
         client.send(changed).await;
@@ -744,20 +744,18 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
         80
     );
     let second = Uuid::new_v4();
-    let second_command = reply(second, "kind-mita", "short running");
+    let second_command = reply(second, "Kind", "short running");
     client.send(second_command.clone()).await;
     let accepted = client.accepted(second).await;
     let second_request = uuid(&accepted["request_id"]);
     let second_call = fixture.call().await;
-    client
-        .send(reply(Uuid::new_v4(), "kind-mita", "full"))
-        .await;
+    client.send(reply(Uuid::new_v4(), "Kind", "full")).await;
     client.error("too many tracked requests").await;
     assert!(fixture.calls.try_recv().is_err());
     second_call.finish("terminal result");
     let finished = client.terminal(second_request).await;
     assert_eq!(finished["outcome"], "success");
-    client.send(reply(Uuid::new_v4(), "kind-mita", " ")).await;
+    client.send(reply(Uuid::new_v4(), "Kind", " ")).await;
     client.error("target event is not observable").await;
     client.send(second_command).await;
     let replay = client.accepted(second).await;
@@ -767,7 +765,7 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     assert!(fixture.calls.try_recv().is_err());
     let third = Uuid::new_v4();
     client
-        .send(reply(third, "kind-mita", "reuse terminal slot"))
+        .send(reply(third, "Kind", "reuse terminal slot"))
         .await;
     let accepted = client.accepted(third).await;
     fixture.call().await.finish("third result");
@@ -793,7 +791,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
     let owner_id = owner.id;
     assert_ne!(owner.id, other.id);
     let command_id = Uuid::new_v4();
-    let original_command = reply(command_id, "mita", "survives disconnect");
+    let original_command = reply(command_id, "Crazy", "survives disconnect");
     owner.send(original_command.clone()).await;
     let accepted = owner.accepted(command_id).await;
     let request_id = uuid(&accepted["request_id"]);
@@ -804,7 +802,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
     assert!(!handle.snapshot().state.is_terminal());
     let other_command = Uuid::new_v4();
     other
-        .send(reply(other_command, "kind-mita", "other client"))
+        .send(reply(other_command, "Kind", "other client"))
         .await;
     let other_accepted = other.accepted(other_command).await;
     let other_id = uuid(&other_accepted["request_id"]);
@@ -878,18 +876,18 @@ async fn queue_full_rejection_does_not_reserve_a_command_id() {
     let mut fixture = Fixture::with_queue(1, |_| {}).await;
     let mut client = fixture.connect().await;
     let first = Uuid::new_v4();
-    client.send(reply(first, "mita", "running")).await;
+    client.send(reply(first, "Crazy", "running")).await;
     let first_request = uuid(&client.accepted(first).await["request_id"]);
     let first_call = fixture.call().await;
     let second = Uuid::new_v4();
-    client.send(reply(second, "mita", "queued")).await;
+    client.send(reply(second, "Crazy", "queued")).await;
     let second_request = uuid(&client.accepted(second).await["request_id"]);
     assert!(matches!(
         active(second_request).snapshot().state,
         RequestState::Pending
     ));
     let third = Uuid::new_v4();
-    let third_command = reply(third, "mita", "retry after queue full");
+    let third_command = reply(third, "Crazy", "retry after queue full");
     let timeline = fixture.app.timeline().len();
     client.send(third_command.clone()).await;
     let rejected = client.until(|v| v["type"] == "error").await;

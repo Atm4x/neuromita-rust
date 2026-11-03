@@ -4,12 +4,12 @@ import { Avatar } from "../components/avatar.slint";
 export component CharacterPortrait inherits Rectangle {
     in property <int> character;
     in property <color> surface;
-    if CharacterCatalog.entries[root.character].has-avatar: Avatar {
+    if CharacterCatalog.has-avatar(CharacterCatalog.entries[root.character].id): Avatar {
         width: parent.width; height: parent.height;
-        source: CharacterCatalog.entries[root.character].avatar;
+        source: CharacterCatalog.avatar(CharacterCatalog.entries[root.character].id);
         surface: root.surface;
     }
-    if !CharacterCatalog.entries[root.character].has-avatar: Rectangle {
+    if !CharacterCatalog.has-avatar(CharacterCatalog.entries[root.character].id): Rectangle {
         width: parent.width; height: parent.height;
         border-radius: min(self.width, self.height) / 2;
         background: #ff80bf;

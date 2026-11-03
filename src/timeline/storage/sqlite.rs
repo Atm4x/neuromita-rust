@@ -382,15 +382,14 @@ impl<'a> IndexedWorld<'a> {
         for (branch, cutoff) in &self.lineage {
             let id = branch.0.to_string();
             let ceiling = cutoff.to_string();
-            let previous_id = character.previous_id();
             let character = character.to_string();
             let rows = if let Some(event) = event {
-                self.connection.query("SELECT max(sequence) FROM timeline_acquisitions WHERE branch_id=? AND character_id IN (?,?) AND event_id=? AND sequence<=?",
-                    &[&id,&character,previous_id,&event.0.to_string(),&ceiling])?
+                self.connection.query("SELECT max(sequence) FROM timeline_acquisitions WHERE branch_id=? AND character_id=? AND event_id=? AND sequence<=?",
+                    &[&id,&character,&event.0.to_string(),&ceiling])?
             } else {
                 debug_assert_eq!(table, "timeline_resets");
-                self.connection.query("SELECT max(sequence) FROM timeline_resets WHERE branch_id=? AND character_id IN (?,?) AND sequence<=?",
-                    &[&id,&character,previous_id,&ceiling])?
+                self.connection.query("SELECT max(sequence) FROM timeline_resets WHERE branch_id=? AND character_id=? AND sequence<=?",
+                    &[&id,&character,&ceiling])?
             };
             if let Some(row) = rows.first()
                 && !row[0].is_empty()
@@ -616,8 +615,8 @@ fn read_page(
         let limit = remaining.to_string();
         let rows = if let Some(observer) = observer {
             conn.query(
-                "SELECT e.fact_json FROM timeline_events e WHERE e.branch_id=? AND e.sequence>? AND e.sequence<=? AND EXISTS(SELECT 1 FROM timeline_observers o WHERE o.branch_id=e.branch_id AND o.sequence=e.sequence AND o.character_id IN (?,?)) ORDER BY e.sequence LIMIT ?",
-                &[&id, &lower, &ceiling, &observer.to_string(), observer.previous_id(), &limit],
+                "SELECT e.fact_json FROM timeline_events e WHERE e.branch_id=? AND e.sequence>? AND e.sequence<=? AND EXISTS(SELECT 1 FROM timeline_observers o WHERE o.branch_id=e.branch_id AND o.sequence=e.sequence AND o.character_id=?) ORDER BY e.sequence LIMIT ?",
+                &[&id, &lower, &ceiling, &observer.to_string(), &limit],
             )?
         } else {
             conn.query(
