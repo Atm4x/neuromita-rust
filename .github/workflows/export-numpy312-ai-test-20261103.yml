@@ -1,0 +1,31 @@
+name: Export pinned NumPy for Python 3.12 AI tests
+on:
+  push:
+    branches:
+      - bridge/ai-python312-numpy-test-20261103
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Export NumPy 1.26.0 wheel installation for CPython 3.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.12.10 --no-bin
+          PYTHON=$(uv python find --managed-python --no-python-downloads 3.12.10)
+          mkdir -p python312-deps
+          uv pip install --python "$PYTHON" --target "$GITHUB_WORKSPACE/python312-deps" --no-deps numpy==1.26.0
+          PYTHONPATH="$GITHUB_WORKSPACE/python312-deps" "$PYTHON" -c 'import numpy; assert numpy.__version__ == "1.26.0"; print(numpy.__version__)'
+          tar -czf numpy-cp312.tar.gz -C python312-deps .
+          sha256sum numpy-cp312.tar.gz > numpy-cp312.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-numpy1260-cp312
+          path: |
+            numpy-cp312.tar.gz
+            numpy-cp312.tar.gz.sha256
+          retention-days: 1
