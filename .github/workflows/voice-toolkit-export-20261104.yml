@@ -1,0 +1,33 @@
+name: Export voice GUI toolkit pinned source
+on:
+  push:
+    branches:
+      - bridge/voice-gui-kit-export-20261104
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle reference GUI toolkit
+        env:
+          REF_SHA: 7dfca6507e5891c41d26a758cff9315c7dcc1eea
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "${REF_SHA}^{commit}"
+          git update-ref refs/heads/voice-toolkit "${REF_SHA}"
+          git bundle create voice-toolkit.bundle refs/heads/voice-toolkit
+          sha256sum voice-toolkit.bundle > voice-toolkit.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-toolkit-source
+          path: |
+            voice-toolkit.bundle
+            voice-toolkit.bundle.sha256
+          retention-days: 2
+          if-no-files-found: error
