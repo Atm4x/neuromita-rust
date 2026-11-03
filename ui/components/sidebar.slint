@@ -3,7 +3,7 @@ import { Label, Icon, ActionSurface, IconButton } from "controls.slint";
 import { I18n } from "../i18n.slint";
 import { LanguageMenu } from "language-menu.slint";
 
-export enum PageId { home, settings, sandbox, releases, gallery, wiki, logs }
+export enum PageId { home, settings, sandbox, releases, gallery, wiki, logs, about }
 
 export component Sidebar inherits Rectangle {
     in property <PageId> current-page: home;
@@ -40,7 +40,8 @@ export component Sidebar inherits Rectangle {
                 { page: PageId.releases, label: I18n.i18n("navigation.releases", "Релизы"), icon: Icons.releases },
                 { page: PageId.gallery, label: I18n.i18n("navigation.gallery", "Галерея"), icon: Icons.gallery },
                 { page: PageId.wiki, label: I18n.i18n("navigation.wiki", "Вики"), icon: Icons.wiki },
-                { page: PageId.logs, label: I18n.i18n("navigation.logs", "Логи"), icon: Icons.logs }
+                { page: PageId.logs, label: I18n.i18n("navigation.logs", "Логи"), icon: Icons.logs },
+                { page: PageId.about, label: I18n.i18n("navigation.about", "О приложении"), icon: Icons.about }
             ]: ActionSurface {
                 height: Theme.navigation-height; label: item.label;
                 selected: root.current-page == item.page;

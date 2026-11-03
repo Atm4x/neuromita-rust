@@ -2,6 +2,7 @@
 
 mod binding;
 mod presenter;
+mod releases;
 mod runtime;
 mod sandbox;
 
