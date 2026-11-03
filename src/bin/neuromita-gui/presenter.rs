@@ -10,6 +10,7 @@ pub enum Page {
     Gallery,
     Wiki,
     Logs,
+    About,
 }
 
 impl Page {
@@ -22,6 +23,7 @@ impl Page {
             Self::Gallery => i18n("page.gallery.title", "Галерея"),
             Self::Wiki => i18n("page.wiki.title", "Вики"),
             Self::Logs => i18n("page.logs.title", "Системные логи"),
+            Self::About => i18n("page.about.title", "О приложении"),
         }
     }
 }

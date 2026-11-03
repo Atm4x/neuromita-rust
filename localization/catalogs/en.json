@@ -754,5 +754,105 @@
   "memory.protected": {
     "source": "Защищено",
     "translation": "Protected"
+  },
+  "sandbox.action.reset": {
+    "source": "Сбросить персонажа",
+    "translation": "Reset character"
+  },
+  "navigation.about": {
+    "source": "О приложении",
+    "translation": "About"
+  },
+  "navigation.releases": {
+    "source": "Релизы",
+    "translation": "Releases"
+  },
+  "page.about.title": {
+    "source": "О приложении",
+    "translation": "About NeuroMita"
+  },
+  "page.releases.title": {
+    "source": "Релизы NeuroMita",
+    "translation": "NeuroMita releases"
+  },
+  "releases.open-release": {
+    "source": "Открыть релиз",
+    "translation": "Open release"
+  },
+  "releases.collapse": {
+    "source": "Свернуть",
+    "translation": "Collapse"
+  },
+  "releases.subtitle-prefix": {
+    "source": "Лента публичных релизов с GitHub (",
+    "translation": "GitHub release feed ("
+  },
+  "releases.subtitle-suffix": {
+    "source": "): changelog, бета-сборки и ссылки на полные заметки.",
+    "translation": "): changelog, beta builds and links to full notes."
+  },
+  "releases.refresh": {
+    "source": "Обновить",
+    "translation": "Refresh"
+  },
+  "releases.github": {
+    "source": "Открыть на GitHub",
+    "translation": "Open on GitHub"
+  },
+  "releases.filter.all": {
+    "source": "Все",
+    "translation": "All"
+  },
+  "releases.filter.release": {
+    "source": "Релизы",
+    "translation": "Releases"
+  },
+  "releases.filter.pre": {
+    "source": "Пререлизы",
+    "translation": "Pre-releases"
+  },
+  "releases.loading": {
+    "source": "Загрузка релизов…",
+    "translation": "Loading releases…"
+  },
+  "releases.empty": {
+    "source": "Релизы пока не найдены.",
+    "translation": "No releases found."
+  },
+  "releases.section.pre": {
+    "source": "ПРЕРЕЛИЗЫ",
+    "translation": "PRE-RELEASES"
+  },
+  "releases.section.release": {
+    "source": "РЕЛИЗЫ",
+    "translation": "RELEASES"
+  },
+  "about.title": {
+    "source": "О приложении",
+    "translation": "About"
+  },
+  "about.version": {
+    "source": "Версия",
+    "translation": "Version"
+  },
+  "about.project": {
+    "source": "О проекте",
+    "translation": "About the project"
+  },
+  "about.description": {
+    "source": "NeuroMita — лаунчер и приложение для взаимодействия с персонажами MiSide. Интерфейс этого клиента реализован на Rust с использованием Slint.",
+    "translation": "NeuroMita is a launcher and application for interacting with MiSide characters. This client interface is built with Rust and Slint."
+  },
+  "about.links": {
+    "source": "Ссылки на проект",
+    "translation": "Project links"
+  },
+  "about.repository": {
+    "source": "Исходники NeuroMita",
+    "translation": "NeuroMita source code"
+  },
+  "about.rust-repository": {
+    "source": "Rust-версия NeuroMita",
+    "translation": "NeuroMita Rust edition"
   }
 }
