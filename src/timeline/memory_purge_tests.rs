@@ -486,3 +486,34 @@ fn foreign_branch_backup_and_duplicate_archive_entries_fail_closed() {
     assert_eq!(timeline.anchor(), head);
     let _ = std::fs::remove_file(archive);
 }
+
+#[test]
+fn memory_purge_and_restore_notify_only_after_authorized_commits() {
+    use crate::maintenance::restore_from_backup;
+    let mut timeline = SessionTimeline::new();
+    let id = MemoryId::new();
+    memory(&mut timeline, id, "archived", MemoryState::Deleted, false);
+    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
+    let mut other = timeline.observe_memory_changes(CharacterId::KindMita);
+    let preview = timeline
+        .preview_memory_purge(timeline.selection(), CharacterId::Mita, &[id])
+        .unwrap();
+    assert!(!mita.has_changed().unwrap());
+    let destination = path("watch-commits");
+    assert!(matches!(
+        purge_with_backup(&mut timeline, &preview, false, &destination),
+        Err(SafePurgeError::ConfirmationRequired)
+    ));
+    assert!(!mita.has_changed().unwrap());
+    purge_with_backup(&mut timeline, &preview, true, &destination).unwrap();
+    assert!(mita.has_changed().unwrap());
+    assert!(!other.has_changed().unwrap());
+    mita.borrow_and_update();
+    assert!(restore_from_backup(&mut timeline, false, &destination).is_err());
+    assert!(!mita.has_changed().unwrap());
+    restore_from_backup(&mut timeline, true, &destination).unwrap();
+    assert!(mita.has_changed().unwrap());
+    assert!(!other.has_changed().unwrap());
+    let _ = std::fs::remove_file(destination);
+    other.borrow_and_update();
+}

@@ -28,6 +28,156 @@ use uuid::Uuid;
 
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_queue() {
+    use neuromita::{settings::Volume, timeline::domain::MessageRole};
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let sandbox = &app.presenter().conversation;
+    assert_eq!(sandbox.characters(), &CharacterId::ALL);
+    assert!(
+        sandbox
+            .snapshot(CharacterId::Mita)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+
+    let first = sandbox
+        .reply(CharacterId::Mita, "sandbox input".into())
+        .unwrap();
+    let call = server.next().await;
+    let queued = sandbox
+        .reply(CharacterId::Mita, "cancel before generation".into())
+        .unwrap();
+    shown(&app.presenter().chat, queued.id(), false).await;
+    assert_eq!(
+        sandbox.cancel(queued.id()).unwrap(),
+        CancelResult::Cancelled
+    );
+    assert!(matches!(
+        finished(&queued).await.state,
+        RequestState::Cancelled
+    ));
+    let before = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    assert!(
+        before
+            .messages
+            .iter()
+            .all(|message| message.role != MessageRole::Assistant)
+    );
+    assert_eq!(before.messages.len(), 2);
+    assert!(
+        sandbox
+            .snapshot(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+
+    call.respond
+        .send(Reply::Text("accepted sandbox answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, first.id(), true).await;
+    let after = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .filter(|m| m.content == "accepted sandbox answer")
+            .count(),
+        1
+    );
+    assert_eq!(after.state.accepted_replies, 1);
+    assert!(
+        after
+            .messages
+            .iter()
+            .any(|m| m.request_id == Some(first.id()))
+    );
+    assert_eq!(after.model.as_deref().unwrap(), "test-model");
+    assert!(
+        after
+            .messages
+            .iter()
+            .all(|m| m.sequence <= after.at.through)
+    );
+
+    let mut settings = sandbox.observe_settings().unwrap();
+    sandbox.set_volume(Volume::new(27).unwrap()).unwrap();
+    settings.changed().await.unwrap();
+    assert_eq!(
+        sandbox
+            .snapshot(CharacterId::Mita)
+            .await
+            .unwrap()
+            .settings
+            .values
+            .voice
+            .volume
+            .get(),
+        27
+    );
+
+    let external = ChatApi::reply(ReplyRequest::new(
+        CharacterId::KindMita,
+        ChatApi::publish_message(
+            CharacterId::KindMita,
+            UserInput::new("external input".into()).unwrap(),
+        )
+        .unwrap(),
+        RequestSource::Client(Uuid::new_v4()),
+    ))
+    .unwrap();
+    let call = server.next().await;
+    shown(&app.presenter().chat, external.id(), false).await;
+    assert!(
+        sandbox
+            .snapshot(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .requests
+            .requests
+            .iter()
+            .any(|r| r.metadata.id == external.id())
+    );
+    call.respond
+        .send(Reply::Text("external accepted answer"))
+        .unwrap();
+    finished(&external).await;
+    let kind = sandbox.snapshot(CharacterId::KindMita).await.unwrap();
+    assert!(
+        kind.messages
+            .iter()
+            .any(|m| m.content == "external accepted answer")
+    );
+    assert!(
+        !kind
+            .messages
+            .iter()
+            .any(|m| m.content == "accepted sandbox answer")
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[derive(Debug)]
 struct Call {
     path: String,
@@ -2476,4 +2626,181 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     app.shutdown().await.unwrap();
     server.shutdown().await;
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
+    use neuromita::{
+        generation::{
+            GeminiPresetDefinition, PresetCatalogError, PresetDefinition, PresetId, PresetRecord,
+        },
+        settings::{PresetSelection, Volume},
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let directory = std::env::temp_dir().join(format!("neuromita-unconfigured-{}", Uuid::new_v4()));
+    let setup = || {
+        ApplicationConfig::persistent_unconfigured(
+            ResponseGenerator::new([
+                Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+            ])
+            .unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &directory,
+        )
+        .unwrap()
+    };
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    let view = app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert!(view.messages.is_empty());
+    assert!(matches!(
+        view.model,
+        Err(PresetCatalogError::NotFound(PresetId(0)))
+    ));
+    assert!(app.presenter().presets.require(PresetId(0)).is_err());
+    let id = app
+        .presenter()
+        .presets
+        .create(PresetRecord {
+            name: "Explicit".into(),
+            definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                endpoint: "http://127.0.0.1:1/v1beta/".into(),
+                model: "explicit-model".into(),
+                credential_env: "NEUROMITA_MISSING_FIXTURE_CREDENTIAL_42".into(),
+                temperature: 0.7,
+                max_output_tokens: 100,
+                timeout_ms: 1000,
+            }),
+        })
+        .unwrap();
+    app.presenter().presets.require(id).unwrap();
+    app.presenter().settings.presets.active.set(id).unwrap();
+    app.presenter()
+        .settings
+        .characters
+        .kind_mita
+        .reply
+        .set(PresetSelection::Specific(id))
+        .unwrap();
+    app.presenter()
+        .settings
+        .voice
+        .volume
+        .set(Volume::new(37).unwrap())
+        .unwrap();
+    let view = app
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert!(matches!(
+        view.model,
+        Err(PresetCatalogError::MissingCredential(_))
+    ));
+    let mut connections = app.presenter().connections.observe();
+    connections.borrow_and_update();
+    let client = TcpStream::connect(app.server().address()).await.unwrap();
+    timeout(Duration::from_secs(2), connections.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(connections.borrow_and_update().connected_clients, 1);
+    drop(client);
+    app.shutdown().await.unwrap();
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert_eq!(app.presenter().settings.voice.volume.get().get(), 37);
+    assert_eq!(
+        app.presenter().settings.characters.kind_mita.reply.get(),
+        PresetSelection::Specific(id)
+    );
+    app.presenter().presets.delete(id).unwrap();
+    assert_eq!(app.presenter().settings.presets.active.get(), id);
+    assert!(
+        matches!(app.presenter().conversation.snapshot(CharacterId::Mita).await.unwrap().model, Err(PresetCatalogError::NotFound(value)) if value == id)
+    );
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characters() {
+    use neuromita::{
+        presentation::{ConversationChange, ConversationError},
+        request::UserInput,
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    api.characters
+        .observe(CharacterId::Mita, UserInput::new("first".into()).unwrap())
+        .await
+        .unwrap();
+    api.characters
+        .observe(
+            CharacterId::KindMita,
+            UserInput::new("private".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let stale = api
+        .conversation
+        .preview_change(CharacterId::Mita, ConversationChange::ClearMessages)
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Mita, UserInput::new("second".into()).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        api.conversation.apply_change(stale),
+        Err(ConversationError::StalePreview)
+    ));
+    let preview = api
+        .conversation
+        .preview_change(CharacterId::Mita, ConversationChange::ClearMessages)
+        .await
+        .unwrap();
+    assert_eq!(preview.message_count(), 2);
+    api.conversation.apply_change(preview).unwrap();
+    assert!(
+        api.conversation
+            .snapshot(CharacterId::Mita)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        api.conversation
+            .snapshot(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    let reset = api
+        .conversation
+        .preview_change(CharacterId::Mita, ConversationChange::ResetContext)
+        .await
+        .unwrap();
+    api.conversation.apply_change(reset).unwrap();
+    app.shutdown().await.unwrap();
 }

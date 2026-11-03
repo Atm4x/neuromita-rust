@@ -4,7 +4,7 @@ use std::{
     io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::UNIX_EPOCH,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use serde::de::DeserializeOwned;
@@ -47,6 +47,7 @@ impl ClearConfirmation {
 
 #[derive(Clone)]
 pub struct FineTuneStore {
+    cancellation: tokio_util::sync::CancellationToken,
     root: Arc<PathBuf>,
     io_lock: Arc<Mutex<()>>,
     stats_cache: Arc<Mutex<Option<(Signature, Stats)>>>,
@@ -62,10 +63,19 @@ impl FineTuneStore {
         }
         fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
         Ok(Self {
+            cancellation: tokio_util::sync::CancellationToken::new(),
             root: Arc::new(root),
             io_lock: Arc::new(Mutex::new(())),
             stats_cache: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub(super) fn with_cancellation(
+        mut self,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -814,10 +824,30 @@ impl FineTuneStore {
     }
 
     fn guard(&self) -> Result<StoreGuard<'_>, FineTuneError> {
-        let mutex = self
-            .io_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let check = || {
+            if self.cancellation.is_cancelled() || Instant::now() >= deadline {
+                Err(io_error(
+                    self.root(),
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "dataset lock cancelled or timed out",
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let mutex = loop {
+            check()?;
+            match self.io_lock.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+            }
+        };
         let path = self.root.join(".neuromita-finetune.lock");
         let file = OpenOptions::new()
             .read(true)
@@ -826,7 +856,16 @@ impl FineTuneStore {
             .truncate(false)
             .open(&path)
             .map_err(|error| io_error(&path, error))?;
-        file.lock().map_err(|error| io_error(&path, error))?;
+        loop {
+            check()?;
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(io_error(&path, error)),
+            }
+        }
         Ok(StoreGuard {
             _mutex: mutex,
             _lock: file,

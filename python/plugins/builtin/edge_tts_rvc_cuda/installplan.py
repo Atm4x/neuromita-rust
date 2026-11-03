@@ -10,3 +10,9 @@ class InstallContract:
 
     def settings_schema(self):
         return settings("edge_tts_rvc_cuda")
+
+    def install_plan_for_settings(self, selected_settings):
+        return plan("edge_tts_rvc_cuda", selected_settings)
+
+    def probe_install_for_settings(self, selected_settings):
+        return probe("edge_tts_rvc_cuda", selected_settings)

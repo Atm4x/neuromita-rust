@@ -36,7 +36,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /diagnostics ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character mita|kind-mita --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character mita|kind-mita, /diagnostics ..., /dataset status, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -123,6 +123,156 @@ fn input() -> mpsc::Receiver<io::Result<String>> {
     receive
 }
 
+/// Real user workflow over the same typed `RemindersApi` the model tools use.
+async fn reminder_command(character: CharacterId, line: &str) -> Result<String, String> {
+    use neuromita::reminders::{
+        CreateReminder, CreateTimer, RemindersApi, TimeZoneId, UpdateReminder, parse_friendly_due,
+        parse_structured_repeat, system_timezone,
+    };
+    let settings =
+        neuromita::settings::SettingsApi::snapshot::<neuromita::settings::RemindersSettings>()
+            .map_err(|error| error.to_string())?;
+    let zone = settings.value.timezone.clone();
+    let policy = settings.value.policy;
+    let now = RemindersApi::now()
+        .await
+        .map_err(|error| error.to_string())?;
+    let rest = if line.trim() == "/reminders" {
+        "list"
+    } else {
+        line.trim_start_matches("/reminder").trim()
+    };
+    let (action, args) = match rest.split_once(char::is_whitespace) {
+        Some((action, args)) => (action, args.trim()),
+        None => (rest, ""),
+    };
+    match action {
+        "" | "list" => {
+            let views = RemindersApi::list(character)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut lines = views.iter().map(|view| view.summary()).collect::<Vec<_>>();
+            if lines.is_empty() {
+                lines.push("Нет активных напоминаний.".into());
+            }
+            let snapshot = RemindersApi::snapshot().map_err(|error| error.to_string())?;
+            for delivery in snapshot
+                .deliveries
+                .iter()
+                .filter(|delivery| delivery.character == character)
+            {
+                lines.push(format!(
+                    "Доставка {}: {:?}; запрос {:?}; ошибка {:?}",
+                    delivery.id, delivery.state, delivery.request_id, delivery.last_error
+                ));
+            }
+            Ok(lines.join("\n"))
+        }
+        "add" => {
+            let (due, text) = args
+                .split_once('|')
+                .ok_or("формат: /reminder add <когда> | <текст>")?;
+            let due = parse_friendly_due(due.trim(), now, &zone, policy)
+                .map_err(|error| error.to_string())?;
+            let view = RemindersApi::create(CreateReminder::new(character, text.trim(), due))
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Создано: {}", view.summary()))
+        }
+        "timer" => {
+            let (delay, instruction) = args
+                .split_once('|')
+                .ok_or("формат: /reminder timer <секунды> | <инструкция>")?;
+            let delay: f64 = delay
+                .trim()
+                .parse()
+                .map_err(|_| "задержка должна быть числом секунд".to_string())?;
+            if !delay.is_finite() || delay <= 0.0 {
+                return Err("задержка должна быть положительной".into());
+            }
+            let delay = std::time::Duration::try_from_secs_f64(delay)
+                .map_err(|_| "задержка вне допустимого диапазона".to_string())?;
+            let view =
+                RemindersApi::create_timer(CreateTimer::new(character, instruction.trim(), delay))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            Ok(format!("Запущен таймер: {}", view.summary()))
+        }
+        "update" => {
+            let (number, rest) = args
+                .split_once(char::is_whitespace)
+                .ok_or("формат: /reminder update <N> text|due|repeat <значение>")?;
+            let number: u64 = number
+                .parse()
+                .map_err(|_| "N должно быть числом".to_string())?;
+            let (field, value) = rest
+                .split_once(char::is_whitespace)
+                .ok_or("формат: /reminder update <N> text|due|repeat <значение>")?;
+            let mut input = UpdateReminder::new(character, number);
+            match field {
+                "text" => input = input.text(value.trim()),
+                "due" => {
+                    let due = parse_friendly_due(value.trim(), now, &zone, policy)
+                        .map_err(|error| error.to_string())?;
+                    input = input.due(due);
+                }
+                "repeat" => {
+                    let repeat =
+                        parse_structured_repeat(value.trim()).map_err(|error| error.to_string())?;
+                    input = input.repeat(repeat);
+                }
+                other => return Err(format!("неизвестное поле '{other}'")),
+            }
+            let view = RemindersApi::update(input)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Обновлено: {}", view.summary()))
+        }
+        "delete" => {
+            let number: u64 = args
+                .parse()
+                .map_err(|_| "формат: /reminder delete <N>".to_string())?;
+            let view = RemindersApi::delete(character, number)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Удалено: {}", view.summary()))
+        }
+        "enable" | "disable" => {
+            RemindersApi::set_enabled(action == "enable")
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(if action == "enable" {
+                "Планировщик напоминаний включён".into()
+            } else {
+                "Планировщик напоминаний выключен; записи сохранены".into()
+            })
+        }
+        "retry" => {
+            let id = args
+                .parse::<uuid::Uuid>()
+                .map_err(|_| "формат: /reminder retry <delivery-uuid>".to_string())?;
+            let delivery = neuromita::reminders::DeliveryId(neuromita::timeline::EventId(id));
+            RemindersApi::retry(delivery)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok("Повтор доставки разрешён".into())
+        }
+        "zone" => {
+            let zone = if args.eq_ignore_ascii_case("local") {
+                system_timezone().map_err(|error| error.to_string())?
+            } else {
+                TimeZoneId::parse(args).map_err(|error| error.to_string())?
+            };
+            RemindersApi::set_timezone(zone.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(format!("Часовой пояс напоминаний: {zone}"))
+        }
+        "now" => Ok(format!("Сейчас: {now}")),
+        other => Err(format!("неизвестная команда /reminder {other}")),
+    }
+}
+
 fn display(snapshot: &RequestSnapshot) {
     let id = snapshot.metadata.id;
     let character = snapshot.metadata.character_id;
@@ -156,7 +306,30 @@ fn display(snapshot: &RequestSnapshot) {
     }
 }
 
-pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> {
+fn dataset_status(dataset: Option<&neuromita::finetune::FineTuneCollector>) -> String {
+    let Some(dataset) = dataset else {
+        return "Dataset collection is not configured".into();
+    };
+    let status = dataset.delivery_status();
+    format!(
+        "Dataset enabled={} closed={} admitted={} completed={} pending={} dropped={} rejected={} errors={}\nLast delivery error: {}",
+        dataset.enabled(),
+        status.closed,
+        status.admitted,
+        status.completed,
+        status.pending,
+        status.dropped,
+        status.rejected,
+        status.errors,
+        status.last_error.as_deref().unwrap_or("none")
+    )
+}
+
+pub async fn run(
+    presenter: &ChatPresenter,
+    options: Options,
+    dataset: Option<&neuromita::finetune::FineTuneCollector>,
+) -> io::Result<()> {
     let mut character = options.character;
     let mut updates = presenter.observe();
     let mut printed: HashMap<RequestId, u64> = HashMap::new();
@@ -233,9 +406,16 @@ pub async fn run(presenter: &ChatPresenter, options: Options) -> io::Result<()> 
                                 }
                                 Err(_) => eprintln!("Invalid request UUID"),
                             }
+                        } else if line == "/dataset status" {
+                            println!("{}", dataset_status(dataset));
                         } else if let Some(value) = line.strip_prefix("/diagnostics") {
                             if let Err(error) = diagnostics_command(character, value.trim()) {
                                 eprintln!("{error}");
+                            }
+                        } else if line.starts_with("/reminder") {
+                            match reminder_command(character, line.trim()).await {
+                                Ok(text) => println!("{text}"),
+                                Err(error) => eprintln!("{error}"),
                             }
                         } else {
                             match presenter.reply(character, line) {
@@ -467,5 +647,40 @@ mod tests {
         assert_eq!(arguments.next(), Some("usage"));
         assert_eq!(unquote(arguments.rest()), "C:/tmp/trace with space.json");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dataset_delivery_tests {
+    use super::*;
+    use neuromita::finetune::{
+        FineTuneCollector, FineTuneSettings, Retention, SampleId, SampleOutcome,
+    };
+    #[tokio::test]
+    async fn runtime_dataset_status_reports_late_writer_failure() {
+        let root = std::env::temp_dir().join(format!("pr67-status-{}", uuid::Uuid::new_v4()));
+        let collector = FineTuneCollector::from_settings(
+            &FineTuneSettings::new(root.clone(), true, Retention::Unlimited).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir(root.join(".neuromita-finetune.lock")).unwrap();
+        let request = RequestId(uuid::Uuid::new_v4());
+        collector
+            .enqueue_outcome(
+                SampleId::for_request(request),
+                request,
+                None,
+                SampleOutcome::Accepted,
+            )
+            .unwrap();
+        collector
+            .drain(std::time::Duration::from_secs(2), true)
+            .await;
+        let output = dataset_status(Some(&collector));
+        assert!(output.contains("errors=1"), "{output}");
+        assert!(output.contains("pending=0"), "{output}");
+        assert!(output.contains(".neuromita-finetune.lock"), "{output}");
+        drop(collector);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

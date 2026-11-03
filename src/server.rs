@@ -712,6 +712,7 @@ pub fn status(snapshot: &RequestSnapshot) -> Value {
                 RequestOutcome::VoiceGenerationFailed { response, error } => {
                     message["outcome"] = json!("voice_error");
                     message["text"] = json!(response.text);
+                    message["event_id"] = json!(response.event_id);
                     message["error"] = json!(error.to_string());
                 }
                 RequestOutcome::TextGenerationFailed(error) => {

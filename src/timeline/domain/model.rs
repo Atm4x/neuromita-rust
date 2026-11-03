@@ -51,6 +51,14 @@ pub enum EventKind {
     CharacterStateChanged,
     CharacterWorkingStateReplaced,
     CharacterMemoryChanged,
+    ReminderScheduled,
+    ReminderUpdated,
+    ReminderDeleted,
+    ReminderFired,
+    ReminderDeliveryFailed,
+    ReminderDeliverySettled,
+    ReminderDeliveryRetried,
+    ReminderToolResult,
     CharacterJoined,
     CharacterLeft,
     UnityEvent,
@@ -81,6 +89,8 @@ pub enum AppliedEffect {
     CharacterStateChanged(CharacterBehavior),
     CharacterWorkingStateReplaced(CharacterWorkingState),
     CharacterMemoryChanged(MemoryChange),
+    ReminderChanged(crate::reminders::ReminderChange),
+    ReminderToolResult(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

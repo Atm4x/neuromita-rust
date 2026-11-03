@@ -1,6 +1,6 @@
 use crate::{
     identity::CharacterId,
-    memory::{MemoryChange, MemoryCommand, MemoryRecord},
+    memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord},
     timeline::{
         ContextAnchor, SessionTimeline, domain::TimelineError, selection::TimelineSelection,
     },
@@ -27,6 +27,15 @@ impl CharacterMemorySnapshot {
 
     pub fn records(&self) -> &[MemoryRecord] {
         &self.records
+    }
+
+    /// Opaque branch selection plus character-memory identity, without
+    /// treating unrelated Timeline appends as memory-edit conflicts.
+    pub(crate) fn matches_version(&self, other: &Self) -> bool {
+        self.character == other.character
+            && self.selection == other.selection
+            && self.anchor.branch_id == other.anchor.branch_id
+            && self.records == other.records
     }
 }
 
@@ -63,9 +72,9 @@ pub(crate) fn edit_memory_snapshot(
     if expected.character != character {
         return Err(TimelineError::ConcurrentWrite);
     }
-    if commands.is_empty() || commands.len() > 128 {
+    if commands.is_empty() || commands.len() > MAX_MEMORY_EDIT_CHANGES {
         return Err(TimelineError::Invalid(
-            "memory edit requires 1..128 operations",
+            "memory edit requires 1..256 operations",
         ));
     }
     if commands

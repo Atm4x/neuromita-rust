@@ -40,6 +40,7 @@ class Plugin:
         revision: "rev1".into(),
         python_version: "3.13.5".into(),
         packages: vec![],
+        actions: vec![],
     };
     let backends = BackendInstaller {
         uv_executable: root.join("uv"),
@@ -91,6 +92,7 @@ class Plugin:
             python_executable: PathBuf::from(python),
             sdk_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
             plugins_directory: root.join("plugins"),
+            models_directory: None,
             request_timeout: Duration::from_secs(10),
         },
     );

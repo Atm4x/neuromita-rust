@@ -84,7 +84,7 @@ fn offline_export_and_import_roundtrip_without_api_key() {
     ]);
     assert!(exported.status.success(), "{}", stderr(&exported));
     assert!(
-        stdout(&exported).contains("Exported full Rust AppSettings (schema 2, revision 5)"),
+        stdout(&exported).contains("Exported full Rust AppSettings (schema 3, revision 5)"),
         "{}",
         stdout(&exported)
     );
@@ -111,7 +111,7 @@ fn offline_export_and_import_roundtrip_without_api_key() {
     ]);
     assert!(imported.status.success(), "{}", stderr(&imported));
     assert!(
-        stdout(&imported).contains("Imported full Rust AppSettings (schema 2, revision 5)"),
+        stdout(&imported).contains("Imported full Rust AppSettings (schema 3, revision 5)"),
         "{}",
         stdout(&imported)
     );
@@ -132,7 +132,7 @@ fn invalid_cli_import_preserves_the_destination() {
 
     let invalid_source = directory.path("future.json");
     let mut future = stored(9, 10);
-    future.schema_version = 3;
+    future.schema_version = neuromita::settings::SETTINGS_SCHEMA_VERSION + 1;
     fs::write(&invalid_source, serde_json::to_vec_pretty(&future).unwrap()).unwrap();
     let rejected = run(&[
         "settings",
@@ -144,7 +144,7 @@ fn invalid_cli_import_preserves_the_destination() {
     ]);
     assert!(!rejected.status.success());
     assert!(
-        stderr(&rejected).contains("unsupported settings schema 3"),
+        stderr(&rejected).contains("unsupported settings schema 4"),
         "{}",
         stderr(&rejected)
     );

@@ -33,6 +33,8 @@ The `request_status` projection shares its source `RequestSnapshot` with the San
 
 The wire `speaker`, `targets`, and `participants` are serialized as `"player"` or `{ "character": "mita" }` / `{ "character": "kind-mita" }`. `seen_by` uses character ID strings (`"mita"`, `"kind-mita"`). New Unity roster and scene-witness mapping remain the responsibility of the Unity orchestration layer; the Rust core does not infer them.
 
+Both `success` and `voice_error` terminal statuses include the canonical accepted Message's `event_id`. A voice error leaves the accepted text and its identity available for history reconciliation; it does not turn that text back into a provisional or failed generation. Replaying the retained command receipt returns the same `request_id` and terminal `event_id` without another generation.
+
 The generated speaker is always included in its own `seen_by`. Other witnesses, targets and participants are supplied by the caller and are **not** inferred from each other.
 
 ## Known boundaries

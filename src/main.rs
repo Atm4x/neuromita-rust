@@ -121,7 +121,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     config.knowledge = knowledge;
     let app = ApplicationLifecycle::start(config).await?;
     tracing::info!(address = %app.server().address(), "server listening");
-    let result = terminal::run(&app.presenter().chat, options).await;
+    let result = terminal::run(&app.presenter().chat, options, app.finetune()).await;
     let stopped = app.shutdown().await;
     result?;
     stopped?;

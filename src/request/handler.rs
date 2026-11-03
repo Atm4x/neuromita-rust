@@ -89,7 +89,7 @@ impl MessageHandler {
         queue.close();
         while let Some(id) = queue.recv().await {
             if let Some(record) = self.registry.get(id) {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::QueueDrain);
                 record.finish_cancelled();
             }
         }
@@ -116,7 +116,7 @@ impl MessageHandler {
         let context = match prepared {
             Ok(context) => context,
             Err(CharacterError::StaleState) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::ContextChanged);
                 record.finish_cancelled();
                 return;
             }
@@ -138,7 +138,7 @@ impl MessageHandler {
         };
         let voice_settings = settings.values.voice.clone();
         let voice_enabled = match message.source() {
-            RequestSource::Presenter => voice_settings.in_launcher,
+            RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
         let voice_options = voice_enabled.then_some(VoiceOptions {
@@ -187,12 +187,16 @@ impl MessageHandler {
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => GenerationRun::Cancelled,
+            _ = stop.cancelled() => {
+                record.cancel_with_reason(CancelReason::Shutdown);
+                GenerationRun::Cancelled
+            }
             _ = selection_changed(self.selection_updates.clone(), acceptance.turn.selection) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::SelectionChanged);
                 GenerationRun::Cancelled
             }
             _ = context_epoch_changed(self.context_updates.clone(), acceptance.turn.context_epoch) => {
-                record.cancel();
+                record.cancel_with_reason(CancelReason::ContextChanged);
                 GenerationRun::Cancelled
             }
             response = async {
@@ -211,7 +215,7 @@ impl MessageHandler {
                 self.generator.generate_observed(request, &mut combined).await
             } => GenerationRun::Response(response),
         };
-        let capture = self.persist_observation(observer.as_ref()).await;
+        let capture = self.persist_observation(observer.as_ref());
         if capture.sample_id.is_some() || capture.warning.is_some() {
             record.dataset_capture(capture.sample_id, capture.warning.clone());
         }
@@ -223,8 +227,7 @@ impl MessageHandler {
                     &capture,
                     None,
                     SampleOutcome::AcceptanceFailed,
-                )
-                .await;
+                );
                 record.finish(RequestOutcome::TextGenerationFailed(error));
                 return;
             }
@@ -234,8 +237,7 @@ impl MessageHandler {
                     &capture,
                     None,
                     SampleOutcome::CancelledBeforeAccept,
-                )
-                .await;
+                );
                 record.finish_cancelled();
                 return;
             }
@@ -247,8 +249,7 @@ impl MessageHandler {
                 &capture,
                 None,
                 SampleOutcome::CancelledBeforeAccept,
-            )
-            .await;
+            );
             record.finish_cancelled();
             return;
         }
@@ -262,8 +263,7 @@ impl MessageHandler {
                         &capture,
                         None,
                         SampleOutcome::CancelledBeforeAccept,
-                    )
-                    .await;
+                    );
                     record.finish_cancelled();
                     return;
                 }
@@ -282,8 +282,7 @@ impl MessageHandler {
                             &capture,
                             None,
                             SampleOutcome::CancelledBeforeAccept,
-                        )
-                        .await;
+                        );
                         record.finish_cancelled();
                         return;
                     }
@@ -295,9 +294,8 @@ impl MessageHandler {
                             &capture,
                             None,
                             SampleOutcome::CancelledBeforeAccept,
-                        )
-                        .await;
-                        record.cancel();
+                        );
+                        record.cancel_with_reason(CancelReason::Shutdown);
                         record.finish_cancelled();
                         return;
                     }
@@ -309,9 +307,8 @@ impl MessageHandler {
                             &capture,
                             None,
                             SampleOutcome::CancelledBeforeAccept,
-                        )
-                        .await;
-                        record.cancel();
+                        );
+                        record.cancel_with_reason(CancelReason::SelectionChanged);
                         record.finish_cancelled();
                         return;
                     }
@@ -323,9 +320,8 @@ impl MessageHandler {
                             &capture,
                             None,
                             SampleOutcome::CancelledBeforeAccept,
-                        )
-                        .await;
-                        record.cancel();
+                        );
+                        record.cancel_with_reason(CancelReason::ContextChanged);
                         record.finish_cancelled();
                         return;
                     }
@@ -349,8 +345,7 @@ impl MessageHandler {
                 &capture,
                 None,
                 SampleOutcome::CancelledBeforeAccept,
-            )
-            .await;
+            );
             record.finish_cancelled();
             return;
         }
@@ -374,8 +369,7 @@ impl MessageHandler {
                     } else {
                         SampleOutcome::Accepted
                     },
-                )
-                .await;
+                );
                 response
             }
             Err(error) => {
@@ -384,8 +378,7 @@ impl MessageHandler {
                     &capture,
                     None,
                     SampleOutcome::AcceptanceFailed,
-                )
-                .await;
+                );
                 record.finish(RequestOutcome::InternalError(
                     record.failure(error.to_string()),
                 ));
@@ -403,7 +396,7 @@ impl MessageHandler {
         record.finish(outcome);
     }
 
-    async fn finish_dataset_outcome(
+    fn finish_dataset_outcome(
         &self,
         record: &Arc<RequestRecord>,
         capture: &CaptureStatus,
@@ -413,15 +406,12 @@ impl MessageHandler {
         let (Some(collector), Some(sample_id)) = (&self.finetune, capture.sample_id) else {
             return;
         };
-        if let Err(error) = collector
-            .record_outcome(
-                sample_id,
-                record.snapshot().metadata.id,
-                accepted_event_id,
-                outcome,
-            )
-            .await
-        {
+        if let Err(error) = collector.enqueue_outcome(
+            sample_id,
+            record.snapshot().metadata.id,
+            accepted_event_id,
+            outcome,
+        ) {
             let warning = match capture.warning.as_deref() {
                 Some(warning) => format!("{warning}; dataset outcome: {error}"),
                 None => format!("dataset outcome: {error}"),
@@ -430,10 +420,7 @@ impl MessageHandler {
         }
     }
 
-    async fn persist_observation(
-        &self,
-        observer: Option<&FineTuneCaptureObserver>,
-    ) -> CaptureStatus {
+    fn persist_observation(&self, observer: Option<&FineTuneCaptureObserver>) -> CaptureStatus {
         let (Some(collector), Some(observer)) = (&self.finetune, observer) else {
             return CaptureStatus::default();
         };
@@ -441,8 +428,7 @@ impl MessageHandler {
             return observer.status().clone();
         };
         collector
-            .persist(captured)
-            .await
+            .enqueue(captured)
             .unwrap_or_else(|error| CaptureStatus {
                 sample_id: None,
                 warning: Some(Arc::from(error.to_string())),

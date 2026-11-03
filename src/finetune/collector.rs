@@ -84,17 +84,66 @@ impl GenerationObserver for FineTuneCaptureObserver {
 pub struct FineTuneCollector {
     store: FineTuneStore,
     enabled: bool,
-    retention: Retention,
+    delivery: delivery::Delivery,
 }
 
 impl FineTuneCollector {
     pub fn from_settings(settings: &FineTuneSettings) -> Result<Self, FineTuneError> {
         settings.validate()?;
+        let store = FineTuneStore::open(settings.data_dir.clone())?;
+        let delivery = delivery::Delivery::start(store.clone(), settings.retention)?;
         Ok(Self {
-            store: FineTuneStore::open(settings.data_dir.clone())?,
+            store,
+            delivery,
             enabled: settings.enabled,
-            retention: settings.retention,
         })
+    }
+
+    /// Sample ids denote admitted observations, not a durability receipt.
+    pub fn enqueue(
+        &self,
+        capture: CapturedProviderResponse,
+    ) -> Result<CaptureStatus, FineTuneError> {
+        if !self.enabled {
+            return Ok(CaptureStatus::default());
+        }
+        let sample = build_sample(&capture.scope, &capture.request, &capture.response);
+        let sample_id = sample.id;
+        self.delivery.sample(sample)?;
+        Ok(CaptureStatus {
+            sample_id: Some(sample_id),
+            warning: None,
+        })
+    }
+
+    pub fn enqueue_outcome(
+        &self,
+        sample_id: SampleId,
+        request_id: RequestId,
+        accepted_event_id: Option<EventId>,
+        outcome: SampleOutcome,
+    ) -> Result<(), FineTuneError> {
+        self.delivery.outcome(OutcomeRecord {
+            sample_id,
+            request_id: Some(request_id),
+            accepted_event_id,
+            outcome,
+            recorded_at: UtcTimestamp::now(),
+        })
+    }
+
+    pub(crate) fn stop_delivery(&self) {
+        self.delivery.stop();
+    }
+
+    pub fn delivery_status(&self) -> DeliveryStatus {
+        self.delivery.status()
+    }
+
+    /// Waits only up to the supplied budget. With close=true, admission stops,
+    /// then any remaining queued work is discarded after the deadline.
+    pub async fn drain(&self, budget: std::time::Duration, close: bool) -> DeliveryStatus {
+        self.delivery.drain(budget, close).await
     }
 
     pub fn enabled(&self) -> bool {
@@ -117,58 +166,6 @@ impl FineTuneCollector {
             captured: None,
             status: CaptureStatus::default(),
         }
-    }
-
-    /// Persists one immutable provider observation outside the provider
-    /// callback. The handler awaits this before acceptance, so a successful
-    /// response is durable before any message or character effect is applied.
-    pub async fn persist(
-        &self,
-        capture: CapturedProviderResponse,
-    ) -> Result<CaptureStatus, FineTuneError> {
-        if !self.enabled {
-            return Ok(CaptureStatus::default());
-        }
-        let sample = build_sample(&capture.scope, &capture.request, &capture.response);
-        let sample_id = sample.id;
-        let store = self.store.clone();
-        let retention = self.retention;
-        let outcome = tokio::task::spawn_blocking(move || store.append_sample(&sample, retention))
-            .await
-            .map_err(|error| {
-                FineTuneError::SettingsInvalid(format!("dataset capture task failed: {error}"))
-            })??;
-        let mut status = CaptureStatus {
-            sample_id: Some(sample_id),
-            warning: None,
-        };
-        if let Err(error) = outcome.retention {
-            status.warning = Some(error.to_string().into());
-        }
-        Ok(status)
-    }
-
-    pub async fn record_outcome(
-        &self,
-        sample_id: SampleId,
-        request_id: RequestId,
-        accepted_event_id: Option<EventId>,
-        outcome: SampleOutcome,
-    ) -> Result<(), FineTuneError> {
-        let record = OutcomeRecord {
-            sample_id,
-            request_id: Some(request_id),
-            accepted_event_id,
-            outcome,
-            recorded_at: UtcTimestamp::now(),
-        };
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || store.append_outcome(&record))
-            .await
-            .map_err(|error| {
-                FineTuneError::SettingsInvalid(format!("dataset outcome task failed: {error}"))
-            })??;
-        Ok(())
     }
 
     pub fn rate(&self, sample_id: SampleId, rating: Rating) -> Result<RatingUpdate, FineTuneError> {
@@ -236,6 +233,7 @@ fn build_sample(
     });
     sample.source = Some(match scope.source {
         RequestSource::Presenter => "presenter".into(),
+        RequestSource::Scheduler => "scheduler".into(),
         RequestSource::Client(id) => format!("client:{id}"),
     });
     sample.usage = response.usage.map(usage_payload);

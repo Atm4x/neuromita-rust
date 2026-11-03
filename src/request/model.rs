@@ -17,7 +17,17 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RequestSource {
     Presenter,
+    Scheduler,
     Client(Uuid),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    User,
+    Shutdown,
+    SelectionChanged,
+    ContextChanged,
+    QueueDrain,
 }
 
 pub trait GenerationCommand: Send + Sync + fmt::Debug {
@@ -258,6 +268,7 @@ pub struct RequestSnapshot {
     pub revision: u64,
     pub state: RequestState,
     pub dataset: DatasetCapture,
+    pub cancel_reason: Option<CancelReason>,
 }
 
 impl RequestSnapshot {

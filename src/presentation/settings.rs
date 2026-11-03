@@ -5,8 +5,9 @@ use tokio::sync::watch;
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, CharactersSettings, PresetId, PresetSelection, PresetSettings, SettingsError,
-        SettingsOwner, SettingsSnapshot, SettingsTransfer, VoiceSettings, Volume,
+        AppSettings, CharactersSettings, OperationPresets, PresetId, PresetSelection,
+        PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
+        VoiceSettings, Volume,
     },
 };
 
@@ -98,7 +99,15 @@ pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PresetSlot {
+    Reply,
+    React,
+    Initiate,
+}
+
 pub struct CharacterSettingsPresenter {
+    pub assignments: BoundProperty<OperationPresets>,
     pub reply: BoundProperty<PresetSelection>,
     pub react: BoundProperty<PresetSelection>,
     pub initiate: BoundProperty<PresetSelection>,
@@ -107,6 +116,17 @@ pub struct CharacterSettingsPresenter {
 impl CharacterSettingsPresenter {
     fn new(owner: Arc<SettingsOwner>, character: CharacterId) -> Self {
         Self {
+            assignments: BoundProperty::new(
+                Arc::clone(&owner),
+                move |settings| settings.characters.for_character(character).presets,
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).presets = value
+                        })
+                        .map(|_| ())
+                },
+            ),
             reply: BoundProperty::new(
                 Arc::clone(&owner),
                 move |settings| settings.characters.for_character(character).presets.reply,

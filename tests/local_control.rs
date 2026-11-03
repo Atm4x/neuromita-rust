@@ -277,6 +277,45 @@ fn active(id: Uuid) -> RequestHandle {
     ChatApi::active_request(RequestId(id)).unwrap().unwrap()
 }
 
+#[tokio::test]
+async fn voice_failure_keeps_the_accepted_message_identity_in_status_and_replay() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+    let mut client = fixture.connect().await;
+    let command_id = Uuid::new_v4();
+    let request = reply(command_id, "mita", "reply with unavailable voice");
+    client.send(request.clone()).await;
+    let accepted = client.accepted(command_id).await;
+    let request_id = uuid(&accepted["request_id"]);
+    let handle = active(request_id);
+    fixture
+        .call()
+        .await
+        .finish("Accepted text despite voice failure");
+    let final_snapshot = bounded(handle.wait()).await.unwrap();
+    let RequestState::Finished(RequestOutcome::VoiceGenerationFailed { response, .. }) =
+        &final_snapshot.state
+    else {
+        panic!("expected a committed reply with a voice failure");
+    };
+    assert!(response.audio.is_none());
+    let terminal = client.terminal(request_id).await;
+    assert_eq!(terminal["outcome"], "voice_error");
+    assert_eq!(terminal["text"], response.text.as_ref());
+    assert_eq!(terminal["event_id"], json!(response.event_id));
+    assert_eq!(terminal["can_cancel"], false);
+    assert!(terminal.get("provisional").is_none());
+    assert!(terminal.get("audio").is_none());
+
+    client.send(request).await;
+    let replay = client.accepted(command_id).await;
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["request_id"], accepted["request_id"]);
+    assert_eq!(client.terminal(request_id).await, terminal);
+    assert!(fixture.calls.try_recv().is_err());
+    fixture.shutdown().await;
+}
+
 async fn server_state(server: &ServerHandle, predicate: impl Fn(&ServerSnapshot) -> bool) {
     let mut changes = server.observe();
     bounded(async {

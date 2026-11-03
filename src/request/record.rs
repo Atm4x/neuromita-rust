@@ -20,6 +20,7 @@ struct Execution {
     snapshot: Arc<RequestSnapshot>,
     dataset: DatasetCapture,
     phase: EffectPhase,
+    cancel_reason: Option<CancelReason>,
     message: Option<Box<dyn GenerationCommand>>,
     trace: Option<RequestTrace>,
     draft_text: Option<Arc<str>>,
@@ -47,6 +48,9 @@ impl RequestHandle {
     }
     pub fn cancel(&self) -> CancelResult {
         self.record.cancel()
+    }
+    pub(crate) fn cancel_with_reason(&self, reason: CancelReason) -> CancelResult {
+        self.record.cancel_with_reason(reason)
     }
     pub fn observe(&self) -> RequestObserver {
         RequestObserver {
@@ -107,6 +111,7 @@ impl RequestRecord {
             revision: 0,
             state: RequestState::Pending,
             dataset: DatasetCapture::default(),
+            cancel_reason: None,
         });
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         let diagnostics_limits = registry
@@ -124,6 +129,7 @@ impl RequestRecord {
                 snapshot,
                 dataset: DatasetCapture::default(),
                 phase: EffectPhase::Working,
+                cancel_reason: None,
                 message: Some(message),
                 trace: Some(trace),
                 draft_text: None,
@@ -150,6 +156,7 @@ impl RequestRecord {
             revision: inner.snapshot.revision + 1,
             state,
             dataset: inner.dataset.clone(),
+            cancel_reason: inner.cancel_reason,
         });
         inner.snapshot = Arc::clone(&snapshot);
         let phase = inner.phase;
@@ -198,6 +205,10 @@ impl RequestRecord {
     }
 
     pub(crate) fn cancel(&self) -> CancelResult {
+        self.cancel_with_reason(CancelReason::User)
+    }
+
+    pub(crate) fn cancel_with_reason(&self, reason: CancelReason) -> CancelResult {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal() {
             return CancelResult::AlreadyFinished;
@@ -205,6 +216,7 @@ impl RequestRecord {
         if matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied) {
             return CancelResult::TooLate;
         }
+        inner.cancel_reason.get_or_insert(reason);
         self.cancellation.cancel();
         if matches!(inner.snapshot.state, RequestState::Pending) {
             inner.phase = EffectPhase::Discarded;
@@ -319,6 +331,7 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state: inner.snapshot.state.clone(),
+            cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
         });
         inner.snapshot = Arc::clone(&snapshot);

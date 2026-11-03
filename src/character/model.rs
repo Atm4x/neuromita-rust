@@ -78,6 +78,8 @@ pub struct CharacterContext {
     pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
+    /// Own active reminders of the selected branch; never another character's.
+    pub reminders: Vec<crate::reminders::ReminderPrompt>,
     pub current_input: Arc<str>,
     pub focus: GenerationFocus,
     pub anchor: ContextAnchor,

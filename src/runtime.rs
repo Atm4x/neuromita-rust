@@ -21,6 +21,7 @@ pub(crate) struct ApiBindings {
     pub(crate) characters: CharacterRegistry,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
+    pub(crate) reminders: Arc<crate::reminders::RemindersHandle>,
 }
 
 struct Slot {

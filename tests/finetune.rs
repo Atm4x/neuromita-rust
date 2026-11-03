@@ -295,8 +295,18 @@ async fn done(
         .unwrap()
 }
 
+async fn flush(app: &ApplicationLifecycle) {
+    let status = app
+        .finetune()
+        .unwrap()
+        .drain(Duration::from_secs(5), false)
+        .await;
+    assert_eq!(status.pending, 0, "{status:?}");
+    assert_eq!(status.errors, 0, "{status:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn provider_capture_precedes_acceptance_and_records_outcomes() {
+async fn provider_capture_is_delivered_independently_and_records_outcomes() {
     let _serial = APP_LOCK.lock().await;
     let root = TempDir::new("lifecycle");
     let data_dir = root.path().join("data");
@@ -338,6 +348,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let store = app.finetune().unwrap().store();
+    flush(&app).await;
     let samples = read_samples(store);
     assert_eq!(samples.len(), 1);
     let captured = &samples[0];
@@ -389,6 +400,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         done(&failed).await.state,
         RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
     ));
+    flush(&app).await;
     assert_eq!(store.stats().unwrap().total, 1);
 
     let empty = presenter
@@ -404,6 +416,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         done(&empty).await.state,
         RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
     ));
+    flush(&app).await;
     assert_eq!(store.stats().unwrap().total, 2);
 
     let second = presenter
@@ -433,6 +446,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         RequestState::Finished(RequestOutcome::InternalError(_))
     ));
     assert!(generations.try_recv().is_err());
+    flush(&app).await;
     assert_eq!(store.stats().unwrap().total, 3);
 
     let rejected = presenter
@@ -454,6 +468,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         done(&rejected).await.state,
         RequestState::Finished(RequestOutcome::InternalError(_))
     ));
+    flush(&app).await;
     let all = store.list(&SampleFilters::default(), 20).unwrap();
     assert_eq!(all.matched, 4);
     let empty_sample = all
@@ -500,6 +515,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         done(&cancelled).await.state,
         RequestState::Cancelled
     ));
+    flush(&app).await;
     let cancelled_sample = store
         .list(&SampleFilters::default(), 20)
         .unwrap()
@@ -530,6 +546,7 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     assert_eq!(partial_done.dataset.sample_id, None);
+    flush(&app).await;
     assert_eq!(store.stats().unwrap().total, 5);
 
     let saved_data = root.path().join("saved-data");
@@ -549,8 +566,15 @@ async fn provider_capture_precedes_acceptance_and_records_outcomes() {
         storage_done.state,
         RequestState::Finished(RequestOutcome::Success(_))
     ));
-    assert_eq!(storage_done.dataset.sample_id, None);
-    assert!(storage_done.dataset.warning.is_some());
+    assert!(storage_done.dataset.sample_id.is_some());
+    let delivery = app
+        .finetune()
+        .unwrap()
+        .drain(Duration::from_secs(2), false)
+        .await;
+    assert_eq!(delivery.pending, 0);
+    assert!(delivery.errors > 0);
+    assert!(delivery.last_error.is_some());
     fs::remove_file(&settings.data_dir).unwrap();
     fs::rename(&saved_data, &settings.data_dir).unwrap();
 
@@ -738,6 +762,7 @@ async fn actual_wire_request_and_prevalidation_response_are_captured() {
         RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
     ));
 
+    flush(&app).await;
     let rows = store.list(&SampleFilters::default(), 10).unwrap().rows;
     assert_eq!(rows.len(), 2);
     let accepted_sample = rows
@@ -1403,4 +1428,106 @@ fn cli_export_preview_does_not_create_a_file() {
     .unwrap();
     assert!(!root.path().join("preview.jsonl").exists());
     assert_eq!(store.stats().unwrap().total, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_storage_does_not_block_completion_cancel_or_shutdown() {
+    let _serial = APP_LOCK.lock().await;
+    let root = TempDir::new("stalled");
+    let settings =
+        FineTuneSettings::new(root.path().join("data"), true, Retention::Unlimited).unwrap();
+    let (generated, mut generations) = mpsc::unbounded_channel();
+    let (voiced, mut voices) = mpsc::unbounded_channel();
+    let mut config = ApplicationConfig::minimal(
+        preset(),
+        generator(generated),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.finetune = Some(settings.clone());
+    config.voice = Arc::new(ControlledVoice(voiced));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+    let collector = app.finetune().unwrap().clone();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(settings.data_dir.join(".neuromita-finetune.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let request = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "storage stalled".into())
+        .unwrap();
+    next(&mut generations)
+        .await
+        .reply
+        .send(fixture_ok("answer", 9))
+        .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_millis(150), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert!(collector.delivery_status().pending > 0);
+
+    app.presenter()
+        .settings
+        .voice
+        .in_launcher
+        .set(true)
+        .unwrap();
+    let cancelled = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "cancel while writer stalled".into())
+        .unwrap();
+    next(&mut generations)
+        .await
+        .reply
+        .send(fixture_ok("cancelled", 9))
+        .unwrap();
+    let speech = next(&mut voices).await;
+    assert_eq!(cancelled.cancel(), CancelResult::Requested);
+    assert!(matches!(
+        timeout(Duration::from_millis(150), cancelled.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Cancelled
+    ));
+    drop(speech);
+
+    let shutdown = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Mita, "shutdown while writer stalled".into())
+        .unwrap();
+    next(&mut generations)
+        .await
+        .reply
+        .send(fixture_ok("shutdown", 9))
+        .unwrap();
+    let speech = next(&mut voices).await;
+    timeout(Duration::from_secs(2), app.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(shutdown.snapshot().state, RequestState::Cancelled));
+    assert_eq!(
+        shutdown.snapshot().cancel_reason,
+        Some(neuromita::request::CancelReason::Shutdown)
+    );
+    drop(speech);
+    let status = collector.drain(Duration::from_secs(1), true).await;
+    assert!(status.closed);
+    assert_eq!(status.pending, 0);
+    assert!(status.errors + status.dropped > 0);
+    drop(lock);
 }

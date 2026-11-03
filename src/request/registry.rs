@@ -230,6 +230,10 @@ impl RequestRegistry {
     }
 
     pub(crate) fn cancel_all(&self) {
+        self.cancel_all_with_reason(CancelReason::Shutdown);
+    }
+
+    pub(crate) fn cancel_all_with_reason(&self, reason: CancelReason) {
         let handles: Vec<_> = self
             .inner
             .records
@@ -239,7 +243,7 @@ impl RequestRegistry {
             .map(|record| record.handle())
             .collect();
         for handle in handles {
-            handle.cancel();
+            handle.cancel_with_reason(reason);
         }
     }
 

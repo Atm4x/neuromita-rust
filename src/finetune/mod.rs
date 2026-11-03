@@ -1,5 +1,7 @@
 pub mod cli;
 mod collector;
+mod delivery;
+pub use delivery::{DELIVERY_CAPACITY, DELIVERY_DRAIN, DELIVERY_RECORD_BYTES, DeliveryStatus};
 mod model;
 mod settings;
 mod store;
