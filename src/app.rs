@@ -99,6 +99,43 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
+        let mut config = Self::minimal(preset.clone(), generator, limits, bind);
+        config.configure_persistence(data_directory, BTreeMap::from([(PresetId(0), preset)]))?;
+        Ok(config)
+    }
+
+    /// A local editor for canonical character memory. It starts the ordinary
+    /// application owners and Timeline, but registers no generation provider.
+    pub fn memory_workspace(
+        limits: RuntimeLimits,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
+        let mut config = Self {
+            migrations: StartupMigrations::new(),
+            server: ServerConfig::test_protocol(
+                "127.0.0.1:0".parse().expect("loopback address"),
+                CharacterId::Mita,
+            ),
+            timeline: TimelineConfig::Transient,
+            presets: PresetCatalog::new(BTreeMap::new()),
+            generator: ResponseGenerator::new(Vec::new()).expect("empty provider set"),
+            knowledge: KnowledgeRetrieval::lexical(),
+            limits,
+            voice: Arc::new(UnavailableVoiceProvider),
+            settings: SettingsConfig {
+                source: SettingsSource::Initial(AppSettings::initial_profile()),
+                repository: Arc::new(MemorySettingsRepository::new()),
+            },
+        };
+        config.configure_persistence(data_directory, BTreeMap::new())?;
+        Ok(config)
+    }
+
+    fn configure_persistence(
+        &mut self,
+        data_directory: &Path,
+        runtime_presets: BTreeMap<PresetId, GenerationPreset>,
+    ) -> Result<(), ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
@@ -108,23 +145,22 @@ impl ApplicationConfig {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut config = Self::minimal(preset.clone(), generator, limits, bind);
-        config.timeline = TimelineConfig::Persistent {
+        self.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
-        config.presets = PresetCatalog::open(
-            BTreeMap::from([(PresetId(0), preset)]),
+        self.presets = PresetCatalog::open(
+            runtime_presets,
             repository,
             Arc::new(EnvironmentPresetCredentials),
         )?;
-        config.settings = SettingsConfig {
+        self.settings = SettingsConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
         };
-        Ok(config)
+        Ok(())
     }
 }
 

@@ -3,7 +3,7 @@ import { Label, Icon, ActionSurface, IconButton } from "controls.slint";
 import { I18n } from "../i18n.slint";
 import { LanguageMenu } from "language-menu.slint";
 
-export enum PageId { home, settings, sandbox, releases, gallery, wiki, logs }
+export enum PageId { home, settings, sandbox, memory, releases, gallery, wiki, logs }
 
 export component Sidebar inherits Rectangle {
     in property <PageId> current-page: home;
@@ -37,6 +37,7 @@ export component Sidebar inherits Rectangle {
                 { page: PageId.home, label: I18n.i18n("navigation.home", "Главная"), icon: Icons.home },
                 { page: PageId.settings, label: I18n.i18n("navigation.settings", "Настройки"), icon: Icons.settings },
                 { page: PageId.sandbox, label: I18n.i18n("navigation.sandbox", "Песочница"), icon: Icons.sandbox },
+                { page: PageId.memory, label: I18n.i18n("navigation.memory", "Память"), icon: Icons.memory },
                 { page: PageId.releases, label: I18n.i18n("navigation.releases", "Релизы"), icon: Icons.releases },
                 { page: PageId.gallery, label: I18n.i18n("navigation.gallery", "Галерея"), icon: Icons.gallery },
                 { page: PageId.wiki, label: I18n.i18n("navigation.wiki", "Вики"), icon: Icons.wiki },
