@@ -215,3 +215,17 @@ export component SettingsTextArea inherits Rectangle {
         edited => { root.committed(root.value); }
     }
 }
+
+export component SettingsWideEntryRow inherits SettingsRow {
+    in-out property <string> value;
+    in property <string> placeholder;
+    callback committed(string);
+    height: 38px;
+    SettingsTextField {
+        width: max(210px, parent.width * 0.875);
+        value <=> root.value;
+        editable: root.active;
+        placeholder: root.placeholder;
+        accepted(value) => { root.committed(value); }
+    }
+}
