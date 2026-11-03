@@ -54,12 +54,12 @@ def schema(plugin_id: str) -> dict:
         return {
             "language": {"type": "string", "default": "ru", "choices": ["ru"]},
             "model": {"type": "string", "default": "v3_e2e_rnnt" if plugin_id == "gigaam" else "v2_rnnt", "choices": list(GIGAAM_MODELS)},
-            "device": {"type": "string", "default": "auto", "choices": ["auto", "cpu", "cuda"] if plugin_id == "gigaam" else ["auto", "cpu", "dml"]},
+            "device": {"type": "string", "default": "cpu", "choices": ["cpu", "cuda"] if plugin_id == "gigaam" else ["cpu", "dml"]},
         }
     if plugin_id == "whisper_onnx":
         return {
             "language": {"type": "string", "default": "ru"},
-            "device": {"type": "string", "default": "auto", "choices": ["auto", "cpu", "dml"]},
+            "device": {"type": "string", "default": "cpu", "choices": ["cpu", "dml"]},
             "max_tokens": {"type": "integer", "default": 192, "choices": [96, 128, 160, 192, 224, 256]},
         }
     raise ValueError("unknown ASR engine")
@@ -86,7 +86,11 @@ WHISPER_ONNX_FILES = (
 def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
     options = validate_settings(schema(plugin_id), settings or {})
     if plugin_id == "google":
-        return InstallPlan(requirements=("SpeechRecognition>=3.10,<4",), supported_python_minors=("3.11", "3.12"))
+        return InstallPlan(
+            requirements=("SpeechRecognition>=3.10,<4",),
+            supported_backends=("remote-api",),
+            supported_python_minors=("3.11", "3.12"),
+        )
     if plugin_id == "gigaam":
         model = options["model"]
         assets = [AssetRequirement("gigaam_checkpoint", f"{model}.ckpt")]
@@ -94,7 +98,9 @@ def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
             assets.append(AssetRequirement("gigaam_tokenizer", f"{model}_tokenizer.model"))
         return InstallPlan(
             requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
-            assets=tuple(assets), supported_python_minors=("3.11", "3.12"),
+            assets=tuple(assets),
+            supported_backends=(f"torch-{options['device']}",),
+            supported_python_minors=("3.11", "3.12"),
         )
     if plugin_id == "gigaam_onnx":
         ort = "onnxruntime-directml>=1.18,<2" if options["device"] == "dml" else "onnxruntime>=1.18,<2"
@@ -102,6 +108,8 @@ def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
             requirements=("numpy==1.26.0", "torch>=2.3,<3", "torchaudio>=2.3,<3", "onnx>=1.16,<2", ort, "omegaconf>=2,<3", "hydra-core>=1.3,<2", "sentencepiece>=0.2,<1", "tqdm>=4.60,<5"),
             assets=tuple(AssetRequirement("gigaam_onnx", name) for name in _gigaam_onnx_files(options["model"])),
             asset_hooks=(AssetHook("export_gigaam_onnx", "gigaam"),),
+            required_backends=("torch-cpu",),
+            supported_backends=("onnx-directml" if options["device"] == "dml" else "onnx-cpu",),
             supported_python_minors=("3.11", "3.12"),
         )
     if plugin_id == "whisper_onnx":
@@ -109,13 +117,17 @@ def install_plan(plugin_id: str, settings: dict | None = None) -> InstallPlan:
         return InstallPlan(
             requirements=("numpy==1.26.0", "scipy>=1.12,<2", "torch>=2.3,<3", "transformers>=4.40,<5", "optimum>=1.20,<3", ort),
             assets=tuple(AssetRequirement("whisper_onnx", name) for name in WHISPER_ONNX_FILES),
+            required_backends=("torch-cpu",),
+            supported_backends=("onnx-directml" if options["device"] == "dml" else "onnx-cpu",),
             supported_python_minors=("3.11", "3.12"),
         )
     selected = options["model"]
     assets = tuple(AssetRequirement("whisper_ct2", f"{selected}/{name}") for name in WHISPER_FILES)
     return InstallPlan(
         requirements=("numpy==1.26.0", "faster-whisper>=1.1,<2", "ctranslate2>=4.4,<5"),
-        assets=assets, supported_python_minors=("3.11", "3.12"),
+        assets=assets,
+        supported_backends=(f"ctranslate2-{options['device']}",),
+        supported_python_minors=("3.11", "3.12"),
     )
 
 

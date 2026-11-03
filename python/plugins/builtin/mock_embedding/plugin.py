@@ -14,7 +14,7 @@ class Plugin:
         return {"model_id": {"type": "string", "default": "fixture"}, "dimensions": {"type": "integer", "default": 3, "choices": [3]}}
 
     def install_plan(self):
-        return InstallPlan()
+        return InstallPlan(supported_backends=("remote-api",))
 
     def probe_install(self):
         return {"installed": True, "missing": []}

@@ -53,8 +53,8 @@ class InferenceContracts(unittest.TestCase):
         self.assertTrue(all(a["relative_path"].startswith("large-v3/") for a in large["assets"]))
         with self.assertRaises(ValueError):
             host.dispatch("install_plan", {"plugin_id": "whisper", "settings": {"model": "../../bad"}})
-        with self.assertRaises(ValueError):
-            host.dispatch("install_plan", {"plugin_id": "silero_rvc_cuda", "settings": {"language": "en"}})
+        english = host.dispatch("install_plan", {"plugin_id": "silero_rvc_cuda", "settings": {"language": "en"}})
+        self.assertTrue(any(a["relative_path"] == "silero/v3_en.pt" for a in english["assets"]))
 
     def test_model_storage_is_revision_scoped_and_safe(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"NEUROMITA_AI_MODELS_DIR": root, "NEUROMITA_AI_MODEL_REVISIONS": json.dumps({"whisper": "sha42"})}):

@@ -13,7 +13,7 @@ class Plugin:
         return {"model_id": {"type": "string", "default": "rerank-fixture"}}
 
     def install_plan(self):
-        return InstallPlan()
+        return InstallPlan(supported_backends=("remote-api",))
 
     def probe_install(self):
         return {"installed": True, "missing": []}

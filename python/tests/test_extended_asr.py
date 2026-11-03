@@ -37,7 +37,28 @@ class ExtendedAsrTests(unittest.TestCase):
                 self.assertEqual(discovered[name]["discovery_status"], "available")
                 self.assertEqual(discovered[name]["kind"], "asr")
                 self.assertEqual(host.dispatch("describe", {"plugin_id": name})["kind"], "asr")
-                self.assertEqual(host.dispatch("install_plan", {"plugin_id": name})["supported_python_minors"], ["3.11", "3.12"])
+                plan = host.dispatch("install_plan", {"plugin_id": name})
+                self.assertEqual(plan["supported_python_minors"], ["3.11", "3.12"])
+                self.assertTrue(plan["supported_backends"])
+
+    def test_all_asr_backend_choices_follow_model_specific_selection(self):
+        expected = {
+            "google": ("remote-api",),
+            "whisper": ("ctranslate2-cpu",),
+            "gigaam": ("torch-cpu",),
+            "gigaam_onnx": ("onnx-cpu",),
+            "whisper_onnx": ("onnx-cpu",),
+        }
+        for plugin_id, kinds in expected.items():
+            with self.subTest(plugin=plugin_id):
+                self.assertEqual(install_plan(plugin_id).supported_backends, kinds)
+        self.assertEqual(install_plan("whisper", {"device": "cuda"}).supported_backends, ("ctranslate2-cuda",))
+        self.assertEqual(install_plan("gigaam", {"device": "cuda"}).supported_backends, ("torch-cuda",))
+        self.assertEqual(install_plan("gigaam_onnx", {"device": "dml"}).supported_backends, ("onnx-directml",))
+        self.assertEqual(install_plan("whisper_onnx", {"device": "cpu"}).supported_backends, ("onnx-cpu",))
+        for plugin_id in ("gigaam", "gigaam_onnx", "whisper_onnx"):
+            with self.assertRaises(ValueError):
+                install_plan(plugin_id, {"device": "auto"})
 
     def test_selected_gigaam_model_changes_assets_without_rust_changes(self):
         self.assertEqual(len(install_plan("gigaam", {"model": "v2_ctc"}).assets), 1)

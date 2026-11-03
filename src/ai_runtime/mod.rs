@@ -13,6 +13,7 @@ pub mod install;
 mod layer;
 pub mod managed;
 pub mod overlay;
+pub mod production;
 pub mod resolver;
 pub mod speech;
 pub mod uv;
@@ -295,6 +296,84 @@ impl WorkerProcess {
         let outcome = in_flight.worker.request_inner(operation, args).await;
         in_flight.completed = true;
         outcome
+    }
+
+    async fn stream_wav(&mut self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        let mut transaction = InFlightRequest {
+            worker: self,
+            completed: false,
+        };
+        let result = transaction.worker.stream_wav_inner(input).await;
+        transaction.completed = result.is_ok();
+        result
+    }
+
+    async fn stream_wav_inner(&mut self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+        let head = self
+            .request_inner(
+                "infer_stream_start",
+                &json!({"kind": "tts", "input": input}),
+            )
+            .await?;
+        let stream_id = head
+            .get("stream_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AiRuntimeError::Protocol("missing stream identity".into()))?;
+        if stream_id.len() != 32
+            || !stream_id.bytes().all(|b| b.is_ascii_hexdigit())
+            || head.get("format").and_then(Value::as_str) != Some("wav")
+        {
+            return Err(AiRuntimeError::Protocol("invalid stream metadata".into()));
+        }
+        let length = head
+            .get("length")
+            .and_then(Value::as_u64)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(|| AiRuntimeError::Protocol("invalid stream size".into()))?;
+        if !(44..=MAX_STREAM_BYTES).contains(&length) {
+            return Err(AiRuntimeError::Protocol("stream size exceeds limit".into()));
+        }
+        let mut audio = Vec::with_capacity(length);
+        while audio.len() < length {
+            let response = self
+                .request_inner("infer_stream_next", &json!({"stream_id": stream_id}))
+                .await?;
+            if response.get("stream_id").and_then(Value::as_str) != Some(stream_id) {
+                return Err(AiRuntimeError::Protocol("stream identity changed".into()));
+            }
+            let encoded = response
+                .get("chunk_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AiRuntimeError::Protocol("missing stream chunk".into()))?;
+            if encoded.len() > 70_000 {
+                return Err(AiRuntimeError::Protocol("stream chunk too large".into()));
+            }
+            let chunk = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+            if chunk.is_empty() || chunk.len() > 48 * 1024 || chunk.len() > length - audio.len() {
+                return Err(AiRuntimeError::Protocol(
+                    "invalid stream chunk length".into(),
+                ));
+            }
+            audio.extend_from_slice(&chunk);
+            let done = response
+                .get("done")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| AiRuntimeError::Protocol("missing stream completion flag".into()))?;
+            if done != (audio.len() == length) {
+                return Err(AiRuntimeError::Protocol(
+                    "inconsistent stream completion".into(),
+                ));
+            }
+        }
+        if &audio[..4] != b"RIFF" || &audio[8..12] != b"WAVE" {
+            return Err(AiRuntimeError::Protocol(
+                "stream did not contain WAV".into(),
+            ));
+        }
+        Ok(audio)
     }
 
     async fn request_inner(
@@ -607,6 +686,36 @@ impl AiSupervisor {
         result
     }
 
+    pub async fn synthesize_streamed_wav(&self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        let service = AiService::Tts;
+        let worker = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned()
+            .ok_or(AiRuntimeError::NotRunning)?;
+        let mut locked = worker.lock().await;
+        let generation = locked.generation;
+        let result = locked.stream_wav(input).await;
+        drop(locked);
+        let current = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned();
+        let current_generation = if let Some(current) = current {
+            Some(current.lock().await.generation)
+        } else {
+            None
+        };
+        if current_generation != Some(generation) {
+            return Err(AiRuntimeError::StaleGeneration);
+        }
+        result
+    }
+
     pub async fn discover(&self, service: AiService) -> Result<Value, AiRuntimeError> {
         self.call(service, "discover", json!({})).await
     }
@@ -748,32 +857,11 @@ impl VoiceProvider for PythonVoiceProvider {
                     input["reference_text"] = Value::String(reference);
                 }
             }
-            let result = self
+            let decoded = self
                 .supervisor
-                .call(
-                    self.service,
-                    "infer",
-                    json!({
-                        "kind": "tts", "input": input
-                    }),
-                )
+                .synthesize_streamed_wav(input)
                 .await
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
-            if result.get("format").and_then(Value::as_str) != Some("wav") {
-                return Err(VoiceError::Generation("unsupported audio format".into()));
-            }
-            let encoded = result
-                .get("audio_base64")
-                .and_then(Value::as_str)
-                .ok_or_else(|| VoiceError::Generation("missing audio payload".into()))?;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| VoiceError::Generation(error.to_string()))?;
-            if decoded.len() < 44 || &decoded[..4] != b"RIFF" || &decoded[8..12] != b"WAVE" {
-                return Err(VoiceError::Generation(
-                    "Python TTS returned invalid WAV".into(),
-                ));
-            }
             Ok(AudioArtifact {
                 format: AudioFormat::Wave,
                 bytes: decoded.into(),
@@ -943,6 +1031,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
@@ -1074,6 +1163,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
             assets: vec![ModelAssetRequirement {

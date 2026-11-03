@@ -31,6 +31,8 @@ pub struct PluginInstallPlan {
     #[serde(default)]
     pub supported_backends: Vec<String>,
     #[serde(default)]
+    pub required_backends: Vec<String>,
+    #[serde(default)]
     pub supported_python_minors: Vec<String>,
     #[serde(default)]
     pub actions: Vec<InstallerAction>,
@@ -105,6 +107,7 @@ pub enum PluginInstallError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Clone)]
 pub struct PluginInstallHandler {
     pub resolver: DependencyResolver,
     pub overlays: OverlayInstaller,
@@ -171,12 +174,40 @@ impl PluginInstallPlan {
             || self.supported_backends.iter().any(|backend| {
                 !matches!(
                     backend.as_str(),
-                    "torch-cpu" | "torch-cuda" | "onnx-cpu" | "onnx-cuda" | "onnx-directml"
+                    "torch-cpu"
+                        | "torch-cuda"
+                        | "onnx-cpu"
+                        | "onnx-cuda"
+                        | "onnx-directml"
+                        | "ctranslate2-cpu"
+                        | "ctranslate2-cuda"
+                        | "remote-api"
                 )
             })
         {
             return Err(PluginInstallError::Invalid(
                 "invalid supported backends".into(),
+            ));
+        }
+        if self.required_backends.len() > 4
+            || self.required_backends.iter().any(|backend| {
+                !matches!(
+                    backend.as_str(),
+                    "torch-cpu"
+                        | "torch-cuda"
+                        | "onnx-cpu"
+                        | "onnx-cuda"
+                        | "onnx-directml"
+                        | "ctranslate2-cpu"
+                        | "ctranslate2-cuda"
+                        | "remote-api"
+                )
+            })
+            || self.required_backends.iter().collect::<HashSet<_>>().len()
+                != self.required_backends.len()
+        {
+            return Err(PluginInstallError::Invalid(
+                "invalid supplemental backends".into(),
             ));
         }
         if self.asset_hooks.len() > 16
@@ -497,6 +528,7 @@ mod tests {
             assets: vec![asset("rvc", "../voice.pth", true)],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
@@ -528,6 +560,7 @@ mod tests {
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             assets: vec![
                 present.clone(),
                 asset("reference_audio", "ref/voice.wav", false),
@@ -567,6 +600,7 @@ mod tests {
                     requirements: vec![],
                     backend: None,
                     supported_backends: vec![],
+                    required_backends: vec![],
                     supported_python_minors: vec![],
                     actions: vec![],
                 },
@@ -662,6 +696,7 @@ exit 3
             asset_hooks: vec![],
             backend: Some("torch-cpu".into()),
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec!["3.12".into(), "3.13".into()],
             actions: vec![],
             packages: vec![LockedPackage {
@@ -756,6 +791,7 @@ exit 3
             assets: vec![asset("reference", "voice.wav", true)],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
