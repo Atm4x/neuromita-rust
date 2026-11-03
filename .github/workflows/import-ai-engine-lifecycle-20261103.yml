@@ -1,0 +1,39 @@
+name: Import exact AI Engine lifecycle commit
+on:
+  push:
+    branches:
+      - bridge/ai-engine-lifecycle-publish-20261103
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import verified authored Git objects to candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=1cf84d6079a4a0165c17714198951e4279f0391b
+          HEAD=4e1df0422906b6f7889ddb7e9406125637591472
+          SHA256=7e923dd30b29af163ce4fd9bc442b238a5ecb551ad7e90dea84d71dfcc5bf617
+          SOURCE_REF=refs/heads/codex/ai-engine-install-voice-20261103
+          CANDIDATE_REF=refs/heads/bridge/ai-engine-lifecycle-candidate-20261103
+          LOCAL_REF=refs/heads/ai-engine-lifecycle-verified
+          BUNDLE="$RUNNER_TEMP/ai-engine-lifecycle.bundle"
+          base64 -d transport/ai-engine-lifecycle-20261103.bundle.b64 > "$BUNDLE"
+          test "$(wc -c < "$BUNDLE")" -eq 9037
+          echo "$SHA256  $BUNDLE" | sha256sum --check
+          git fetch --no-tags origin "$SOURCE_REF"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git bundle verify "$BUNDLE"
+          test "$(git bundle list-heads "$BUNDLE" | head -n 1)" = "$HEAD $SOURCE_REF"
+          git fetch "$BUNDLE" "$SOURCE_REF:$LOCAL_REF"
+          test "$(git rev-parse "$LOCAL_REF")" = "$HEAD"
+          test "$(git rev-parse "$HEAD^")" = "$BASE"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full --no-reflogs
+          git push origin "$LOCAL_REF:$CANDIDATE_REF"
+          echo "Verified exact HEAD: $HEAD"
