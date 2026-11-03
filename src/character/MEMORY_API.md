@@ -89,3 +89,12 @@ including after forgetting, soft deletion or a user edit. `SetIsland` remains
 the intentional update operation. Both resolve through the existing guarded
 character-memory editing boundary and require no new Presenter endpoint, GUI
 component, storage or AI Engine changes.
+
+## Explicit lexical deduplication (#21)
+
+`MemoryCommand::AddLexicallyDeduplicated` is a pure Character domain command,
+with an explicit Jaccard threshold measured in per-mille. It reuses the same
+`CharactersPresenter::edit_memories` and guarded Timeline path as all other
+memory edits. A matching active fact retains its ID while its content and
+priority are updated; protected, hidden and island records cannot become
+mutation targets. It does not activate any ML provider or alter normal Add.

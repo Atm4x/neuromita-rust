@@ -904,3 +904,171 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_semantics() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let mut observer = presenter
+        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .unwrap();
+    assert_eq!(observer.next().await.unwrap().total_matches(), 0);
+
+    let empty = presenter.memories(CharacterId::Mita).await.unwrap();
+    let first = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            empty.clone(),
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::High,
+                content: "Кошки любят молоко".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let id = first.snapshot.records()[0].id;
+    assert_eq!(observer.next().await.unwrap().total_matches(), 1);
+
+    let updated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            first.snapshot,
+            vec![MemoryCommand::AddLexicallyDeduplicated {
+                priority: MemoryPriority::Low,
+                content: "Кошка любит молоко".into(),
+                threshold_per_mille: 800,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.applied.len(), 1);
+    assert_eq!(updated.snapshot.records().len(), 1);
+    assert_eq!(updated.snapshot.records()[0].id, id);
+    assert_eq!(updated.snapshot.records()[0].priority, MemoryPriority::High);
+    assert_eq!(
+        observer.next().await.unwrap().records()[0].content,
+        "Кошка любит молоко"
+    );
+    assert!(matches!(
+        presenter
+            .edit_memories(
+                CharacterId::Mita,
+                empty,
+                vec![MemoryCommand::AddLexicallyDeduplicated {
+                    priority: MemoryPriority::Normal,
+                    content: "Кошки любят молоко".into(),
+                    threshold_per_mille: 800,
+                }],
+            )
+            .await,
+        Err(CharacterError::StaleState)
+    ));
+    let repeated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            updated.snapshot,
+            vec![MemoryCommand::AddLexicallyDeduplicated {
+                priority: MemoryPriority::Low,
+                content: "Кошка любит молоко".into(),
+                threshold_per_mille: 800,
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(repeated.applied.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), observer.next())
+            .await
+            .is_err()
+    );
+    assert!(
+        presenter
+            .memories(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn lexical_dedup_preserves_identity_across_persistent_timeline_reopen() {
+    let _serial = SERIAL.lock().await;
+    let path =
+        std::env::temp_dir().join(format!("neuromita-lexical-dedup-{}", uuid::Uuid::new_v4()));
+    let launch = || {
+        let preset = GenerationPreset::new(ProviderTemplate::Gemini(
+            GeminiTemplate::new(
+                "http://127.0.0.1:1/v1beta/",
+                "test-model",
+                "unused-key",
+                GenerationSettings::new(0.7, 128, Duration::from_secs(5)).unwrap(),
+            )
+            .unwrap(),
+        ));
+        ApplicationConfig::persistent(
+            preset,
+            ResponseGenerator::new(Vec::new()).unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &path,
+        )
+        .unwrap()
+    };
+    let app = ApplicationLifecycle::start(launch()).await.unwrap();
+    let presenter = &app.presenter().characters;
+    let first = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            presenter.memories(CharacterId::Mita).await.unwrap(),
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "играли в шахматы".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let id = first.snapshot.records()[0].id;
+    let updated = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            first.snapshot,
+            vec![MemoryCommand::AddLexicallyDeduplicated {
+                priority: MemoryPriority::High,
+                content: "играть в шахматы".into(),
+                threshold_per_mille: 800,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.snapshot.records().len(), 1);
+    assert_eq!(updated.snapshot.records()[0].id, id);
+    app.shutdown().await.unwrap();
+
+    let reopened = ApplicationLifecycle::start(launch()).await.unwrap();
+    let stored = reopened
+        .presenter()
+        .characters
+        .memories(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert_eq!(stored.records().len(), 1);
+    assert_eq!(stored.records()[0].id, id);
+    assert_eq!(stored.records()[0].content, "играть в шахматы");
+    assert_eq!(stored.records()[0].priority, MemoryPriority::High);
+    assert!(
+        reopened
+            .presenter()
+            .characters
+            .memories(CharacterId::KindMita)
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    reopened.shutdown().await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
