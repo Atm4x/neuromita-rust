@@ -37,8 +37,8 @@ use crate::{
     lifecycle::Lifecycle,
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
-        CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SandboxPresenter,
-        SettingsPresenter,
+        CharactersPresenter, ConnectionsPresenter, ConversationPresenter, GuiPresenter,
+        PresenterRunner, PresetsPresenter, SettingsPresenter,
     },
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
@@ -102,11 +102,20 @@ impl ApplicationConfig {
         limits: RuntimeLimits,
         bind: std::net::SocketAddr,
     ) -> Self {
+        Self::with_catalog(PresetCatalog::single(preset), generator, limits, bind)
+    }
+
+    fn with_catalog(
+        presets: PresetCatalog,
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+    ) -> Self {
         Self {
             migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
-            presets: PresetCatalog::single(preset),
+            presets,
             generator,
             knowledge: KnowledgeRetrieval::lexical(),
             limits,
@@ -127,6 +136,33 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
+        Self::persistent_catalog(
+            BTreeMap::from([(PresetId(0), preset)]),
+            generator,
+            limits,
+            bind,
+            data_directory,
+        )
+    }
+
+    /// Starts administration/history without inventing a generation preset.
+    /// Submitting generation before selecting a valid preset remains an error.
+    pub fn persistent_unconfigured(
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
+        Self::persistent_catalog(BTreeMap::new(), generator, limits, bind, data_directory)
+    }
+
+    fn persistent_catalog(
+        runtime: BTreeMap<PresetId, GenerationPreset>,
+        generator: ResponseGenerator,
+        limits: RuntimeLimits,
+        bind: std::net::SocketAddr,
+        data_directory: &Path,
+    ) -> Result<Self, ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
@@ -136,18 +172,16 @@ impl ApplicationConfig {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut config = Self::minimal(preset.clone(), generator, limits, bind);
+        let mut config =
+            Self::with_catalog(PresetCatalog::new(BTreeMap::new()), generator, limits, bind);
         config.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
-        config.presets = PresetCatalog::open(
-            BTreeMap::from([(PresetId(0), preset)]),
-            repository,
-            Arc::new(EnvironmentPresetCredentials),
-        )?;
+        config.presets =
+            PresetCatalog::open(runtime, repository, Arc::new(EnvironmentPresetCredentials))?;
         config.settings = SettingsConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
@@ -428,7 +462,8 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
-                sandbox: SandboxPresenter::new(
+                connections: ConnectionsPresenter::new(server.clone()),
+                conversation: ConversationPresenter::new(
                     chat.clone(),
                     CharactersPresenter::new(bindings.characters.clone()),
                     Arc::clone(&timeline),

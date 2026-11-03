@@ -344,6 +344,11 @@ impl PresetCatalog {
             .collect()
     }
 
+    pub fn contains(&self, id: PresetId) -> bool {
+        let state = self.state.read().expect("preset catalog poisoned");
+        state.runtime.contains_key(&id) || state.stored.entries.contains_key(&id)
+    }
+
     pub fn create(&self, record: PresetRecord) -> Result<PresetId, PresetCatalogError> {
         record.validate()?;
         let mut state = self.state.write().expect("preset catalog poisoned");

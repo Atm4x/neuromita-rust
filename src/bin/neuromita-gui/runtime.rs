@@ -3,19 +3,39 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 use neuromita::{
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     character::CharacterId,
+    generation::PresetRecord,
     generation::{
         GenerationPreset, GenerationProvider, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiProvider, GeminiTemplate, GenerationSettings},
     },
-    presentation::{SandboxPresenter, SandboxSnapshot},
+    presentation::{
+        ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
+        PresetSlot,
+    },
     request::{CancelResult, RequestId},
-    settings::Volume,
+    settings::{PresetId, PresetSelection, Volume},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub enum Command {
-    Connect(String),
+    MemorySelect(CharacterId),
+    MemoryEdit(
+        neuromita::character::CharacterMemorySnapshot,
+        Vec<neuromita::memory::MemoryCommand>,
+    ),
+    Preview(ConversationChange),
+    Confirm,
+    Abort,
+    Diagnostics,
+    CreatePreset(PresetRecord),
+    UpdatePreset(PresetId, PresetRecord),
+    DeletePreset(PresetId),
+    ActivePreset(PresetId),
+    AssignPreset(CharacterId, PresetSlot, PresetSelection),
+    VoiceInLauncher(bool),
+    VoiceInGame(bool),
+    VoiceName(String),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -24,10 +44,19 @@ pub enum Command {
 }
 
 pub enum Update {
+    Memory(Box<neuromita::presentation::MemoryListPage>),
+    MemoryError(String),
+    MemorySaved,
+    Confirmation(Option<(ConversationChange, usize)>),
+    Diagnostics(String),
+    Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
+    Administration(Box<super::settings::AdministrationSnapshot>),
+    AdminSaved(Option<PresetId>),
+    AdminError(String),
     Stopped,
     Connecting,
     Connected(String),
-    Snapshot(Box<SandboxSnapshot>),
+    Snapshot(Box<ConversationSnapshot>),
     Sent(String),
     Error(String),
 }
@@ -77,12 +106,10 @@ impl Drop for DesktopRuntime {
     }
 }
 
-async fn start(directory: &std::path::Path, model: &str) -> Result<ApplicationLifecycle, String> {
-    let key = std::env::var("GEMINI_API_KEY")
-        .map_err(|_| "GEMINI_API_KEY is required in the application's environment".to_owned())?;
-    let generation =
-        GenerationSettings::new(0.7, 3000, Duration::from_secs(60)).map_err(|e| e.to_string())?;
-    let template = GeminiTemplate::google(model, &key, generation).map_err(|e| e.to_string())?;
+async fn start(
+    directory: &std::path::Path,
+    model: Option<&str>,
+) -> Result<ApplicationLifecycle, String> {
     let provider: Arc<dyn GenerationProvider> =
         Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
     let generator = ResponseGenerator::new([provider]).map_err(|e| e.to_string())?;
@@ -93,13 +120,26 @@ async fn start(directory: &std::path::Path, model: &str) -> Result<ApplicationLi
         presenter_updates: NonZeroUsize::new(128).unwrap(),
         retained_finished: NonZeroUsize::new(100).unwrap(),
     };
-    let config = ApplicationConfig::persistent(
-        GenerationPreset::new(ProviderTemplate::Gemini(template)),
-        generator,
-        limits,
-        "127.0.0.1:0".parse().unwrap(),
-        directory,
-    )
+    let bind = "127.0.0.1:0".parse().unwrap();
+    let config = match model {
+        Some(model) => {
+            let key = std::env::var("GEMINI_API_KEY").map_err(|_| {
+                "GEMINI_API_KEY is required for the explicitly selected startup model".to_owned()
+            })?;
+            let generation = GenerationSettings::new(0.7, 3000, Duration::from_secs(60))
+                .map_err(|e| e.to_string())?;
+            let template =
+                GeminiTemplate::google(model, &key, generation).map_err(|e| e.to_string())?;
+            ApplicationConfig::persistent(
+                GenerationPreset::new(ProviderTemplate::Gemini(template)),
+                generator,
+                limits,
+                bind,
+                directory,
+            )
+        }
+        None => ApplicationConfig::persistent_unconfigured(generator, limits, bind, directory),
+    }
     .map_err(|e| e.to_string())?;
     ApplicationLifecycle::start(config)
         .await
@@ -113,59 +153,55 @@ async fn run(
     stop: CancellationToken,
     publish: impl Fn(Update) + Send + Sync,
 ) {
-    let mut next_model = initial_model;
-    loop {
-        let model = match next_model.take() {
-            Some(model) => model,
-            None => loop {
-                tokio::select! {
-                    biased;
-                    _ = stop.cancelled() => return,
-                    command = receive.recv() => match command {
-                        Some(Command::Connect(model)) => break model,
-                        None => return,
-                        _ => publish(Update::Error("Core is not connected".into())),
-                    }
-                }
-            },
-        };
-        publish(Update::Connecting);
-        let app = match start(&directory, &model).await {
-            Ok(app) => app,
-            Err(error) => {
-                publish(Update::Error(error));
-                continue;
-            }
-        };
-        publish(Update::Connected(app.server().address().to_string()));
-        let presenter = app.presenter().sandbox.clone();
-        if let Err(error) = observe(&presenter, &mut receive, &stop, &publish).await {
+    publish(Update::Connecting);
+    let app = match start(&directory, initial_model.as_deref()).await {
+        Ok(app) => app,
+        Err(error) => {
             publish(Update::Error(error));
+            publish(Update::Stopped);
+            return;
         }
-        if let Err(error) = app.shutdown().await {
-            publish(Update::Error(error.to_string()));
-        }
-        publish(Update::Stopped);
-        return;
+    };
+    publish(Update::Connected(app.server().address().to_string()));
+    if let Err(error) = observe(app.presenter(), &mut receive, &stop, &publish).await {
+        publish(Update::Error(error));
     }
+    if let Err(error) = app.shutdown().await {
+        publish(Update::Error(error.to_string()));
+    }
+    publish(Update::Stopped);
 }
 
 async fn observe(
-    presenter: &SandboxPresenter,
+    administration: &GuiPresenter,
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
 ) -> Result<(), String> {
+    let presenter = &administration.conversation;
+    let mut connections = administration.connections.observe();
+    let mut memories = MemoryWatch::start(administration, CharacterId::Mita)?;
+    let mut pending: Option<ConversationChangePreview> = None;
     let mut character = CharacterId::Mita;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     loop {
+        publish(Update::Connections(connections.borrow_and_update().clone()));
         requests.borrow_and_update();
         settings.borrow_and_update();
         presets.borrow_and_update();
         selection.borrow_and_update();
+        match administration.settings.snapshot() {
+            Ok(settings) => publish(Update::Administration(Box::new(
+                super::settings::AdministrationSnapshot {
+                    settings,
+                    presets: administration.presets.list(),
+                },
+            ))),
+            Err(error) => publish(Update::AdminError(error.to_string())),
+        }
         match presenter.snapshot(character).await {
             Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
             Err(error) => publish(Update::Error(error.to_string())),
@@ -174,8 +210,38 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
+                Some(command @ (Command::CreatePreset(_) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_))) => {
+                    match super::settings::execute(administration, command) {
+                        Ok(id) => publish(Update::AdminSaved(id)),
+                        Err(error) => publish(Update::AdminError(error)),
+                    }
+                },
                 None => return Ok(()),
-                Some(Command::Select(id)) => character = id,
+                Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
+                Some(Command::MemoryEdit(expected, commands)) => {
+                    match administration.characters.edit_memories(expected.character(), expected, commands).await {
+                        Ok(_) => publish(Update::MemorySaved), Err(error) => publish(Update::MemoryError(error.to_string())),
+                    }
+                },
+                Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
+                    Ok(preview) => { publish(Update::Confirmation(Some((preview.operation(), preview.message_count())))); pending = Some(preview); },
+                    Err(error) => publish(Update::Error(error.to_string())),
+                },
+                Some(Command::Confirm) => {
+                    if let Some(preview) = pending.take() && let Err(error) = presenter.apply_change(preview) { publish(Update::Error(error.to_string())); }
+                    publish(Update::Confirmation(None));
+                },
+                Some(Command::Abort) => { pending = None; publish(Update::Confirmation(None)); },
+                Some(Command::Diagnostics) => {
+                    let model = administration.chat.snapshot();
+                    let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == character).and_then(|r| administration.chat.trace(r.metadata.id));
+                    let text = match trace {
+                        Some(trace) => format!("Request: {}\nPreset: {}\nContext: {:?}\nTransitions:\n{}", trace.metadata.id, trace.preset_description, trace.context.as_ref().map(|context| context.anchor), trace.transitions.iter().map(|step| format!("#{} {:?} · {:?}", step.revision, step.phase, step.state)).collect::<Vec<_>>().join("\n")),
+                        None => "No retained request trace".into(),
+                    };
+                    publish(Update::Diagnostics(text));
+                },
+                Some(Command::Select(id)) => { character = id; pending = None; publish(Update::Confirmation(None)); },
                 Some(Command::Refresh) => {},
                 Some(Command::Send(text)) => match presenter.reply(character, text.clone()) {
                     Ok(_) => publish(Update::Sent(text)),
@@ -189,10 +255,11 @@ async fn observe(
                 },
                 Some(Command::Volume(value)) => match Volume::new(value).and_then(|v| presenter.set_volume(v)) {
                     Ok(()) => {},
-                    Err(error) => publish(Update::Error(error.to_string())),
+                    Err(error) => publish(Update::AdminError(error.to_string())),
                 },
-                Some(Command::Connect(_)) => publish(Update::Error("Core is already running".into())),
             },
+            update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
+            result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
             result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
@@ -221,4 +288,40 @@ pub fn data_directory() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(directory).join(".config/neuromita"));
     }
     Err("Specify --data-dir or NEUROMITA_DATA_DIR".into())
+}
+
+struct MemoryWatch {
+    updates: mpsc::Receiver<Update>,
+    task: tokio::task::JoinHandle<()>,
+    closed: bool,
+}
+impl MemoryWatch {
+    fn start(api: &GuiPresenter, character: CharacterId) -> Result<Self, String> {
+        let mut observer = api
+            .characters
+            .observe_memories(character, Default::default())
+            .map_err(|e| e.to_string())?;
+        let (send, updates) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            loop {
+                let (update, failed) = match observer.next().await {
+                    Ok(page) => (Update::Memory(Box::new(page)), false),
+                    Err(error) => (Update::MemoryError(error.to_string()), true),
+                };
+                if send.send(update).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            updates,
+            task,
+            closed: false,
+        })
+    }
+}
+impl Drop for MemoryWatch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }

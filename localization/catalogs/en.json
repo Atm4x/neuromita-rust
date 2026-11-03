@@ -155,10 +155,6 @@
     "source": "Посмотреть последний запрос",
     "translation": "View last request"
   },
-  "sandbox.action.reset": {
-    "source": "Сбросить персонажа",
-    "translation": "Reset character"
-  },
   "sandbox.action.settings": {
     "source": "Полные настройки",
     "translation": "All settings"
@@ -506,5 +502,225 @@
   "sandbox.status.off": {
     "source": "Выкл.",
     "translation": "Off"
+  },
+  "settings.preset.active": {
+    "source": "Активный пресет",
+    "translation": "Active preset"
+  },
+  "settings.subtitle": {
+    "source": "Параметры NeuroMita: персонажи, модели и озвучка.",
+    "translation": "NeuroMita settings: characters, models and voice."
+  },
+  "settings.general": {
+    "source": "Общие",
+    "translation": "General"
+  },
+  "settings.characters": {
+    "source": "Персонажи",
+    "translation": "Characters"
+  },
+  "settings.voice": {
+    "source": "Озвучка",
+    "translation": "Voice"
+  },
+  "settings.general.title": {
+    "source": "Общие настройки",
+    "translation": "General settings"
+  },
+  "settings.general.description": {
+    "source": "Состояние приложения и сохранение параметров.",
+    "translation": "Application status and settings persistence."
+  },
+  "settings.core.ready": {
+    "source": "Ядро работает",
+    "translation": "Core is running"
+  },
+  "settings.core.starting": {
+    "source": "Ядро запускается",
+    "translation": "Core is starting"
+  },
+  "settings.revision": {
+    "source": "Версия настроек",
+    "translation": "Settings revision"
+  },
+  "settings.saved": {
+    "source": "Настройки сохранены",
+    "translation": "Settings saved"
+  },
+  "settings.save-failed": {
+    "source": "Ошибка сохранения",
+    "translation": "Save failed"
+  },
+  "settings.saving": {
+    "source": "Сохранение…",
+    "translation": "Saving…"
+  },
+  "settings.api.title": {
+    "source": "API и модели",
+    "translation": "API and models"
+  },
+  "settings.api.description": {
+    "source": "Каталог пресетов генерации и параметры провайдера.",
+    "translation": "Generation presets and provider parameters."
+  },
+  "settings.presets": {
+    "source": "Пресеты",
+    "translation": "Presets"
+  },
+  "settings.preset.new": {
+    "source": "Создать пресет",
+    "translation": "Create preset"
+  },
+  "settings.preset.edit": {
+    "source": "Редактирование пресета",
+    "translation": "Edit preset"
+  },
+  "settings.preset.name": {
+    "source": "Название",
+    "translation": "Name"
+  },
+  "settings.preset.model": {
+    "source": "Модель Gemini",
+    "translation": "Gemini model"
+  },
+  "settings.preset.endpoint": {
+    "source": "Адрес API",
+    "translation": "API URL"
+  },
+  "settings.preset.key-env": {
+    "source": "Переменная окружения с ключом",
+    "translation": "Credential environment variable"
+  },
+  "settings.preset.temperature": {
+    "source": "Температура",
+    "translation": "Temperature"
+  },
+  "settings.preset.tokens": {
+    "source": "Максимум токенов",
+    "translation": "Maximum tokens"
+  },
+  "settings.preset.timeout": {
+    "source": "Тайм-аут, миллисекунды",
+    "translation": "Timeout, milliseconds"
+  },
+  "settings.save": {
+    "source": "Сохранить",
+    "translation": "Save"
+  },
+  "settings.preset.use": {
+    "source": "Сделать активным",
+    "translation": "Make active"
+  },
+  "settings.delete": {
+    "source": "Удалить",
+    "translation": "Delete"
+  },
+  "settings.delete.confirm": {
+    "source": "Удалить пресет? Привязки останутся прежними и потребуют существующий пресет.",
+    "translation": "Delete this preset? Assignments remain unchanged and require an existing preset."
+  },
+  "settings.characters.description": {
+    "source": "Назначение пресетов для разных видов генерации.",
+    "translation": "Preset assignments for each generation operation."
+  },
+  "settings.operation.reply": {
+    "source": "Ответ на сообщение",
+    "translation": "Reply to message"
+  },
+  "settings.operation.react": {
+    "source": "Реакция на событие",
+    "translation": "React to event"
+  },
+  "settings.operation.initiate": {
+    "source": "Инициатива",
+    "translation": "Initiative"
+  },
+  "settings.voice.description": {
+    "source": "Параметры голоса и места озвучивания.",
+    "translation": "Voice and playback settings."
+  },
+  "settings.voice.launcher": {
+    "source": "Озвучивать в лаунчере",
+    "translation": "Speak in launcher"
+  },
+  "settings.voice.game": {
+    "source": "Озвучивать в игре",
+    "translation": "Speak in game"
+  },
+  "settings.voice.volume": {
+    "source": "Громкость",
+    "translation": "Volume"
+  },
+  "settings.voice.id": {
+    "source": "Идентификатор голоса",
+    "translation": "Voice ID"
+  },
+  "conversation.clear.title": {
+    "source": "Очистить видимую историю?",
+    "translation": "Clear visible history?"
+  },
+  "conversation.reset.title": {
+    "source": "Сбросить контекст персонажа?",
+    "translation": "Reset character context?"
+  },
+  "conversation.clear.body": {
+    "source": "Сообщения будут скрыты только для этого персонажа. Исходные события сохранятся.",
+    "translation": "Messages will be hidden only for this character. Original events are retained."
+  },
+  "conversation.reset.body": {
+    "source": "Начнётся новый контекст персонажа. Прежние события сохранятся; запросы со старым контекстом потеряют актуальность.",
+    "translation": "Start a new character context. Previous events are retained; requests using the old context become stale."
+  },
+  "conversation.confirm": {
+    "source": "Подтвердить",
+    "translation": "Confirm"
+  },
+  "memory.summary": {
+    "source": "Активных / забытых / удалённых",
+    "translation": "Active / forgotten / deleted"
+  },
+  "memory.add": {
+    "source": "Добавить воспоминание",
+    "translation": "Add memory"
+  },
+  "memory.page": {
+    "source": "Записей на странице: до 50. Всего",
+    "translation": "Records per page: up to 50. Total"
+  },
+  "memory.content": {
+    "source": "Содержимое воспоминания",
+    "translation": "Memory content"
+  },
+  "memory.forget": {
+    "source": "Забыть",
+    "translation": "Forget"
+  },
+  "memory.restore": {
+    "source": "Восстановить",
+    "translation": "Restore"
+  },
+  "memory.protect": {
+    "source": "Переключить защиту",
+    "translation": "Toggle protection"
+  },
+  "memory.delete.confirm": {
+    "source": "Подтвердить перенос в корзину",
+    "translation": "Confirm moving to trash"
+  },
+  "memory.search": {
+    "source": "Найти",
+    "translation": "Search"
+  },
+  "memory.previous": {
+    "source": "Назад",
+    "translation": "Previous"
+  },
+  "memory.next": {
+    "source": "Далее",
+    "translation": "Next"
+  },
+  "settings.core.unavailable": {
+    "source": "Ядро недоступно",
+    "translation": "Core is unavailable"
   }
 }

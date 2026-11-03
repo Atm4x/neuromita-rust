@@ -1,3 +1,5 @@
+import { MemoryUi } from "memory.slint";
+import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
 import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Centered } from "controls.slint";
@@ -79,6 +81,8 @@ component SessionTab inherits ScrollView {
     in property <string> model;
     in property <string> preset;
     in property <string> address;
+    in property <int> clients;
+    in property <bool> server-running;
     in property <bool> connected;
     in property <bool> connecting;
     in property <bool> voice-enabled;
@@ -108,11 +112,11 @@ component SessionTab inherits ScrollView {
                 Caption { text: I18n.i18n("sandbox.label.game", "Связь с игрой"); color: SandboxTheme.muted; min-width: 88px; }
                 Centered { width: 80px; Rectangle {
                     width: 80px; height: 20px; background: #ffffff0f; border-radius: 8px;
-                    Caption { text: I18n.i18n("sandbox.no-link", "Нет связи"); font-size: 10.6667px; horizontal-alignment: center; color: SandboxTheme.muted; width: 100%; height: 100%; }
+                    Caption { text: root.clients > 0 ? I18n.i18n("sandbox.status.connected", "Подключено") + " · " + root.clients : I18n.i18n("sandbox.no-link", "Нет связи"); font-size: 10.6667px; horizontal-alignment: center; color: SandboxTheme.muted; width: 100%; height: 100%; }
                 } }
                 Rectangle { horizontal-stretch: 1; }
                 Centered { width: 40px; Rectangle { width: 40px; height: 20px; border-radius: 10px; background: #ffffff1e;
-                    Rectangle { x: 2px; y: 2px; width: 16px; height: 16px; border-radius: 8px; background: #d1ced8; }
+                    Rectangle { x: root.server-running ? 22px : 2px; y: 2px; width: 16px; height: 16px; border-radius: 8px; background: root.server-running ? #79e78c : #d1ced8; }
                 } }
                 Centered { width: 26px; GearButton { label: I18n.i18n("sandbox.label.game", "Связь с игрой"); activated => { root.settings(); } } }
             }
@@ -141,10 +145,10 @@ component SessionTab inherits ScrollView {
         }
         Strip {
             title: I18n.i18n("sandbox.section.quick", "Быстрые действия"); glyph: Fa.bolt;
-            QuickAction { text: I18n.i18n("sandbox.action.last", "Посмотреть последний запрос"); enabled: false; }
+            QuickAction { text: I18n.i18n("sandbox.action.last", "Посмотреть последний запрос"); activated => { ConversationUi.trace(); } }
             QuickAction { text: I18n.i18n("sandbox.action.character", "Настройки персонажа"); activated => { root.settings(); } }
             QuickAction { text: I18n.i18n("sandbox.action.settings", "Полные настройки"); activated => { root.settings(); } }
-            QuickAction { text: I18n.i18n("sandbox.action.reset", "Сбросить персонажа"); enabled: false; border-color: #ff6e8c59; }
+            QuickAction { text: I18n.i18n("conversation.reset.title", "Сбросить контекст персонажа?"); activated => { ConversationUi.preview(2); } border-color: #ff6e8c59; }
         }
     }
 }
@@ -212,7 +216,7 @@ component StateTab inherits ScrollView {
                 ValueRow { title: I18n.i18n("sandbox.state.trash", "Корзина"); value: "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.last", "Посл. сообщение"); value: "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.db-size", "Размер БД"); value: "—"; }
-                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { root.settings(); } }
+                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { MemoryUi.open = true; } }
             }
         }
     }
@@ -308,6 +312,8 @@ export component SandboxInspector inherits Rectangle {
     in property <string> model;
     in property <string> preset;
     in property <string> address;
+    in property <int> clients;
+    in property <bool> server-running;
     in property <bool> connected;
     in property <bool> connecting;
     in property <bool> voice-enabled;
@@ -352,6 +358,7 @@ export component SandboxInspector inherits Rectangle {
             if root.tab == 0: SessionTab {
                 width: 100%; height: 100%; character: root.character; model: root.model; preset: root.preset;
                 address: root.address; connected: root.connected; connecting: root.connecting;
+                clients: root.clients; server-running: root.server-running;
                 voice-enabled: root.voice-enabled; anchor: root.anchor; active: root.active;
                 model-input <=> root.model-input; connect(name) => { root.connect(name); }
                 selected(id) => { root.selected(id); }
