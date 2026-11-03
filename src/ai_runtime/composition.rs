@@ -50,6 +50,33 @@ impl RuntimeComposition {
         &self.services
     }
 
+    /// Compose one already-installed backend layer for an explicit single
+    /// service. The hardware path uses this to avoid selecting a layer that is
+    /// absent or whose marker disagrees with the persisted selection.
+    pub fn for_single_service(
+        service: AiService,
+        backend: &LockedBackend,
+        installed_path: PathBuf,
+    ) -> Result<Self, CompositionError> {
+        backend.validate()?;
+        if !installed_path.is_absolute() {
+            return Err(CompositionError::Invalid(
+                "layer path must be absolute".into(),
+            ));
+        }
+        if !installed_path.is_dir() || installed_path.is_symlink() {
+            return Err(CompositionError::NotInstalled(
+                installed_path.display().to_string(),
+            ));
+        }
+        let canonical = std::fs::canonicalize(&installed_path)?;
+        Ok(Self {
+            python_version: backend.python_version.clone(),
+            paths: vec![canonical],
+            services: vec![service],
+        })
+    }
+
     pub async fn resolve(
         topology: ProcessTopology,
         requested_service: AiService,

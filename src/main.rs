@@ -25,8 +25,20 @@ async fn main() -> ExitCode {
     tracing::debug!("starting application");
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
-    if arguments.next().as_deref() == Some(std::ffi::OsStr::new("launcher")) {
+    let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("launcher")) {
         return match neuromita::launcher::run_cli(arguments.collect::<Vec<_>>()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(error = %error, "application failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if command.as_deref() == Some(std::ffi::OsStr::new("hardware")) {
+        return match neuromita::ai_runtime::hardware::run_cli(arguments.collect::<Vec<_>>())
+            .await
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!(error = %error, "application failed");

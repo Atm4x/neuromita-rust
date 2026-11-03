@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from neuromita_ai_sdk import API_VERSION, InstallPlan
+from neuromita_ai_sdk import hardware
 
 
 class PluginHost:
@@ -17,6 +18,7 @@ class PluginHost:
         self.plugins_dir = plugins_dir.resolve()
         self.active_by_kind: dict[str, Any] = {}
         self.active_ids_by_kind: dict[str, str] = {}
+        self.active_runtime_by_kind: dict[str, Any] = {}
 
     def _manifest(self, directory: Path) -> dict[str, Any]:
         if directory.is_symlink() or not directory.is_dir():
@@ -104,6 +106,21 @@ class PluginHost:
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
         if op == "discover":
             return self.discover()
+        if op == "hardware":
+            return hardware.probe()
+        if op == "execute":
+            return hardware.execute(args["backend"], args["device"], args["precision"])
+        if op == "status":
+            return {
+                "services": {
+                    kind: {
+                        "plugin_id": self.active_ids_by_kind[kind],
+                        "model_ready": True,
+                        "runtime": self.active_runtime_by_kind.get(kind),
+                    }
+                    for kind in self.active_by_kind
+                }
+            }
         if op in ("describe", "install_plan", "probe_install", "settings_schema"):
             plugin = (self._load_install_contract(args["plugin_id"])
                       if op in ("install_plan", "probe_install", "settings_schema")
@@ -124,10 +141,19 @@ class PluginHost:
             settings = args.get("settings", {})
             if not isinstance(settings, dict):
                 raise ValueError("settings must be an object")
+            runtime = args.get("runtime")
+            if runtime is not None:
+                runtime = hardware.verify_runtime(runtime)
+                settings = self._apply_runtime_settings(plugin, settings, runtime)
             with contextlib.redirect_stdout(sys.stderr):
                 result = plugin.initialize(settings)
+            if not isinstance(result, dict):
+                raise ValueError("plugin initialize must return an object")
             self.active_by_kind[kind] = plugin
             self.active_ids_by_kind[kind] = plugin_id
+            self.active_runtime_by_kind[kind] = runtime
+            if runtime is not None:
+                result = {**result, "runtime": runtime}
             return result
         if op == "infer":
             kind = args.get("kind")
@@ -147,8 +173,26 @@ class PluginHost:
                     plugin.unload()
                 self.active_by_kind.pop(kind)
                 self.active_ids_by_kind.pop(kind)
+                self.active_runtime_by_kind.pop(kind, None)
             return {"unloaded": True}
         raise ValueError("unsupported host operation")
+
+    def _apply_runtime_settings(
+        self, plugin: Any, settings: dict[str, Any], runtime: dict[str, str]
+    ) -> dict[str, Any]:
+        schema = plugin.settings_schema()
+        if not isinstance(schema, dict):
+            raise ValueError("plugin settings_schema must be an object")
+        if "device" not in schema:
+            return dict(settings)
+        declared = settings.get("device")
+        if declared is not None and str(declared) != runtime["device"]:
+            raise ValueError(
+                f"settings device {declared!r} conflicts with the selected device {runtime['device']!r}"
+            )
+        merged = dict(settings)
+        merged["device"] = runtime["device"]
+        return merged
 
 
 def serve(host: PluginHost) -> None:

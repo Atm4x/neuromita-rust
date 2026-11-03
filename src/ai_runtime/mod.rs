@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod bootstrap;
 pub mod composition;
+pub mod hardware;
 pub mod install;
 mod layer;
 pub mod managed;
@@ -27,6 +28,7 @@ use uuid::Uuid;
 use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
+use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -38,7 +40,8 @@ pub enum ProcessTopology {
     Split,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AiService {
     Tts,
     Asr,
@@ -61,8 +64,23 @@ impl ProcessTopology {
     }
 }
 
+/// How the Python plugin host is entered. Production uses the versioned SDK
+/// module; tests may point at an explicit local fixture script.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythonHost {
+    Module(String),
+    Script(PathBuf),
+}
+
+impl PythonHost {
+    pub fn managed() -> Self {
+        Self::Module("neuromita_ai_sdk.host".into())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PythonHostConfig {
+    pub host: PythonHost,
     pub python_executable: PathBuf,
     pub sdk_root: PathBuf,
     pub plugins_directory: PathBuf,
@@ -87,6 +105,18 @@ pub enum AiRuntimeError {
     Protocol(String),
     #[error("Python plugin rejected request ({kind}): {message}")]
     Plugin { kind: String, message: String },
+    #[error("worker cannot use device {device}: {reason}")]
+    DeviceUnavailable { device: String, reason: String },
+    #[error("worker device {device} failed its execution probe: {reason}")]
+    DeviceNotExecutable { device: String, reason: String },
+    #[error("plugin {plugin_id} failed to load: {reason}")]
+    ModelLoadFailed { plugin_id: String, reason: String },
+    #[error("selected plugin {plugin_id} did not report the requested runtime profile")]
+    RuntimeProfileNotConfirmed { plugin_id: String },
+    #[error("activation was superseded by a newer selection")]
+    ActivationSuperseded,
+    #[error("activation guard could not read the persisted selection: {0}")]
+    ActivationGuard(String),
 }
 
 #[derive(Deserialize)]
@@ -134,9 +164,15 @@ impl WorkerProcess {
         let python_path = std::env::join_paths(&imports)
             .map_err(|e| AiRuntimeError::Protocol(format!("invalid Python import path: {e}")))?;
         let mut command = Command::new(&config.python_executable);
+        match &config.host {
+            PythonHost::Module(module) => {
+                command.arg("-m").arg(module);
+            }
+            PythonHost::Script(script) => {
+                command.arg(script);
+            }
+        }
         command
-            .arg("-m")
-            .arg("neuromita_ai_sdk.host")
             .arg("--plugins-dir")
             .arg(&config.plugins_directory)
             .env("PYTHONPATH", python_path)
@@ -268,8 +304,17 @@ pub struct ModelActivation {
     pub settings: Value,
 }
 
+struct Activation<'a> {
+    service: AiService,
+    services: &'a [AiService],
+    layers: &'a [PathBuf],
+    models: &'a [ModelActivation],
+    profile: Option<&'a RuntimeProfile>,
+    verify: Option<&'a (dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync)>,
+}
+
 impl AiService {
-    fn kind(self) -> &'static str {
+    pub(crate) fn kind(self) -> &'static str {
         match self {
             Self::Tts => "tts",
             Self::Asr => "asr",
@@ -370,6 +415,58 @@ impl AiSupervisor {
             .await
     }
 
+    /// Prepare a candidate worker for an explicit device profile. The candidate
+    /// must prove device execution and loaded-model readiness, and `verify` runs
+    /// immediately before publication so a superseded selection cannot replace
+    /// the working process.
+    pub async fn activate_hardware(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        profile: &RuntimeProfile,
+        verify: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: Some(profile),
+            verify: Some(verify),
+        })
+        .await
+    }
+
+    /// Inventory a backend layer with a one-shot worker that is stopped before
+    /// returning. No inference worker or model is retained.
+    pub async fn inspect_layers(&self, layers: &[PathBuf]) -> Result<Value, AiRuntimeError> {
+        let mut worker = WorkerProcess::launch(&self.config, layers).await?;
+        let result = worker.request("hardware", &json!({})).await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+        result
+    }
+
+    pub async fn hardware_probe(&self, service: AiService) -> Result<HardwareProbe, AiRuntimeError> {
+        let value = self.call(service, "hardware", json!({})).await?;
+        serde_json::from_value(value)
+            .map_err(|error| AiRuntimeError::Protocol(format!("invalid hardware probe: {error}")))
+    }
+
+    /// Loaded-model readiness reported by the published worker, distinct from
+    /// discovery or file availability.
+    pub async fn readiness(&self, service: AiService) -> Result<Value, AiRuntimeError> {
+        self.call(service, "status", json!({})).await
+    }
+
     async fn reconfigure(
         &self,
         service: AiService,
@@ -377,6 +474,26 @@ impl AiSupervisor {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Uuid, AiRuntimeError> {
+        self.activate(Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile: None,
+            verify: None,
+        })
+        .await
+    }
+
+    async fn activate(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
+        let Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile,
+            verify,
+        } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
         let configured: HashSet<_> = models.iter().map(|model| model.service).collect();
@@ -395,6 +512,34 @@ impl AiSupervisor {
         let _guard = slot.lock().await;
         let mut candidate = WorkerProcess::launch(&self.config, layers).await?;
         let prepare = async {
+            if let Some(profile) = profile {
+                let probe_value = candidate.request("hardware", &json!({})).await?;
+                let probe: HardwareProbe = serde_json::from_value(probe_value).map_err(|error| {
+                    AiRuntimeError::Protocol(format!("invalid hardware probe: {error}"))
+                })?;
+                if let Err(reason) = verify_probe(profile, &probe) {
+                    return Err(AiRuntimeError::DeviceUnavailable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+                let executed = candidate
+                    .request(
+                        "execute",
+                        &json!({
+                            "backend": profile.backend,
+                            "device": profile.device,
+                            "precision": profile.precision,
+                        }),
+                    )
+                    .await?;
+                if let Err(reason) = verify_execution(&executed) {
+                    return Err(AiRuntimeError::DeviceNotExecutable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+            }
             let available = candidate.request("discover", &json!({})).await?;
             let plugins = available
                 .as_array()
@@ -411,17 +556,44 @@ impl AiSupervisor {
                         model.service.kind()
                     )));
                 }
-                let ready = candidate
-                    .request(
-                        "initialize",
-                        &json!({"plugin_id": model.plugin_id, "settings": model.settings}),
-                    )
-                    .await?;
+                let mut args = json!({
+                    "plugin_id": model.plugin_id,
+                    "settings": model.settings,
+                });
+                if let Some(profile) = profile {
+                    args["runtime"] = serde_json::to_value(profile)
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                }
+                let ready = candidate.request("initialize", &args).await.map_err(|error| {
+                    match error {
+                        AiRuntimeError::Plugin { kind, message } => {
+                            AiRuntimeError::ModelLoadFailed {
+                                plugin_id: model.plugin_id.clone(),
+                                reason: format!("{kind}: {message}"),
+                            }
+                        }
+                        other => other,
+                    }
+                })?;
                 if ready["model_ready"] != true {
-                    return Err(AiRuntimeError::Protocol(format!(
-                        "model {} did not report ready",
-                        model.plugin_id
-                    )));
+                    return Err(AiRuntimeError::ModelLoadFailed {
+                        plugin_id: model.plugin_id.clone(),
+                        reason: "model did not report ready".into(),
+                    });
+                }
+                if let Some(profile) = profile {
+                    let echoed = ready.get("runtime").ok_or_else(|| {
+                        AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        }
+                    })?;
+                    let confirmed: RuntimeProfile = serde_json::from_value(echoed.clone())
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                    if &confirmed != profile {
+                        return Err(AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        });
+                    }
                 }
             }
             Ok(())
@@ -431,6 +603,13 @@ impl AiSupervisor {
             let _ = candidate.child.start_kill();
             let _ = candidate.child.wait().await;
             return Err(error);
+        }
+        if let Some(verify) = verify {
+            if let Err(error) = verify() {
+                let _ = candidate.child.start_kill();
+                let _ = candidate.child.wait().await;
+                return Err(error);
+            }
         }
         let generation = candidate.generation;
         let old = self

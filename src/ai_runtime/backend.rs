@@ -1,6 +1,9 @@
 //! Shared, versioned PyTorch and ONNX Runtime layers, installed with an immutable lock.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +25,28 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    fn directory(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TorchCpu => "torch_cpu",
+            Self::TorchCuda => "torch_cuda",
+            Self::OnnxCpu => "onnx_cpu",
+            Self::OnnxCuda => "onnx_cuda",
+            Self::OnnxDirectml => "onnx_directml",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "torch_cpu" => Some(Self::TorchCpu),
+            "torch_cuda" => Some(Self::TorchCuda),
+            "onnx_cpu" => Some(Self::OnnxCpu),
+            "onnx_cuda" => Some(Self::OnnxCuda),
+            "onnx_directml" => Some(Self::OnnxDirectml),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn directory(self) -> &'static str {
         match self {
             Self::TorchCpu => "torch-cpu",
             Self::TorchCuda => "torch-cuda",
@@ -58,7 +82,7 @@ pub struct BackendInstaller {
 }
 
 impl LockedBackend {
-    fn validate(&self) -> Result<(), BackendError> {
+    pub(crate) fn validate(&self) -> Result<(), BackendError> {
         if !valid_segment(&self.revision) {
             return Err(LayerError::Invalid("invalid backend revision".into()));
         }
@@ -90,6 +114,38 @@ impl LockedBackend {
         }
         Ok(())
     }
+}
+
+/// Read the authoritative plan published with an installed backend layer.
+/// Selecting a layer never writes or mutates it.
+pub fn load_installed_backend(
+    backends_directory: &Path,
+    kind: BackendKind,
+    revision: &str,
+) -> Result<(LockedBackend, PathBuf), BackendError> {
+    if !backends_directory.is_absolute() {
+        return Err(LayerError::Invalid("backend root must be absolute".into()));
+    }
+    if !valid_segment(revision) {
+        return Err(LayerError::Invalid("invalid backend revision".into()));
+    }
+    let path = backends_directory.join(kind.directory()).join(revision);
+    let marker = path.join(".neuromita-backend.json");
+    let bytes = std::fs::read(&marker).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            LayerError::NotInstalled(path.display().to_string())
+        } else {
+            LayerError::Io(error)
+        }
+    })?;
+    let locked: LockedBackend = serde_json::from_slice(&bytes).map_err(|_| LayerError::Conflict)?;
+    locked.validate()?;
+    if locked.kind != kind || locked.revision != revision {
+        return Err(LayerError::Invalid(
+            "installed backend does not match the requested kind and revision".into(),
+        ));
+    }
+    Ok((locked, path))
 }
 
 impl BackendInstaller {
