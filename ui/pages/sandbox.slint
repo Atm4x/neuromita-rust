@@ -1,5 +1,5 @@
 import { SandboxTheme, Fa } from "../sandbox/theme.slint";
-import { Caption, Glyph, HeaderButton } from "../sandbox/controls.slint";
+import { Caption, Glyph, HeaderButton, Centered } from "../sandbox/controls.slint";
 import { SandboxChat } from "../sandbox/chat.slint";
 import { SandboxInspector } from "../sandbox/inspector.slint";
 import { ChatRow, ChatStatus } from "../sandbox/models.slint";
@@ -44,22 +44,22 @@ export component SandboxPage inherits Rectangle {
             height: 48px; spacing: 18px;
             HorizontalLayout {
                 spacing: 10px; horizontal-stretch: 1;
-                Glyph { text: "\u{f0c3}"; font-size: 22px; width: 24px; height: 30px; color: #ff6db7; }
+                Glyph { text: "\u{f0c3}"; font-size: 22px; width: 24px; color: #ff6db7; }
                 Caption { text: I18n.i18n("sandbox.hero.title", "Песочница / Sandbox"); font-size: 24px; font-weight: 800; horizontal-stretch: 0; color: #f3efff; }
-                Rectangle {
+                Centered { width: 56px; Rectangle {
                     width: 56px; height: 23px; border-radius: 10px; border-color: #b74b7d4d; border-width: 1px; background: #b74b7d1a;
                     Caption { text: "BETA"; font-size: 10.6667px; font-weight: 800; color: #ffe8f4; horizontal-alignment: center; width: 100%; height: 100%; }
-                }
+                } }
                 Rectangle { horizontal-stretch: 1; }
             }
-            HeaderButton { text: I18n.i18n("sandbox.header.guide", "Руководство"); enabled: false; }
-            HeaderButton { text: I18n.i18n("sandbox.header.wiki", "Вики"); enabled: false; }
-            HeaderButton { text: I18n.i18n("sandbox.header.settings", "Настройки"); activated => { root.settings(); } }
-            HeaderButton {
+            Centered { HeaderButton { text: I18n.i18n("sandbox.header.guide", "Руководство"); enabled: false; } }
+            Centered { HeaderButton { text: I18n.i18n("sandbox.header.wiki", "Вики"); enabled: false; } }
+            Centered { HeaderButton { text: I18n.i18n("sandbox.header.settings", "Настройки"); activated => { root.settings(); } } }
+            Centered { HeaderButton {
                 text: I18n.i18n("sandbox.header.home", "На главную");
                 background: self.pressed ? #a52b65 : self.hovered ? #d4548e : @linear-gradient(90deg, #b74b7d, #c04c80);
                 border-color: #b74b7db3; activated => { root.home(); }
-            }
+            } }
         }
         HorizontalLayout {
             spacing: 12px; vertical-stretch: 1;

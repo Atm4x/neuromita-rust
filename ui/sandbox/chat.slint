@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
-import { Caption, Glyph, GhostButton } from "controls.slint";
+import { Caption, Glyph, GhostButton, Centered } from "controls.slint";
 import { MessageRow } from "message.slint";
 import { ChatRow } from "models.slint";
 import { ActionSurface } from "../components/controls.slint";
@@ -36,11 +36,11 @@ component ChatComposer inherits VerticalLayout {
         border-color: SandboxTheme.border; background: SandboxTheme.input;
         HorizontalLayout {
             padding-left: 12px; padding-top: 6px; padding-bottom: 6px; padding-right: 6px; spacing: 4px;
-            ActionSurface {
+            Centered { width: 32px; ActionSurface {
                 width: 32px; height: 32px; label: I18n.i18n("sandbox.attach", "Прикрепить изображения");
                 enabled: false; border-radius: 9px;
                 Glyph { text: Fa.attach; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
-            }
+            } }
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 if root.draft == "": Caption {
@@ -65,17 +65,17 @@ component ChatComposer inherits VerticalLayout {
                     }
                 }
             }
-            ActionSurface {
+            Centered { width: 32px; ActionSurface {
                 width: 32px; height: 32px; label: I18n.i18n("sandbox.screenshot", "Сделать скриншот экрана");
                 enabled: false; border-radius: 9px;
                 Glyph { text: Fa.camera; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
-            }
-            ActionSurface {
+            } }
+            Centered { width: 32px; ActionSurface {
                 width: 32px; height: 32px; label: I18n.i18n("sandbox.mic", "Микрофон");
                 enabled: false; border-radius: 13px;
                 Glyph { text: Fa.microphone; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 14px; }
-            }
-            ActionSurface {
+            } }
+            Centered { width: 42px; ActionSurface {
                 width: 42px; height: 42px;
                 label: I18n.i18n("sandbox.send", "Отправить сообщение");
                 enabled: root.connected && !root.sending && root.draft != "";
@@ -83,7 +83,7 @@ component ChatComposer inherits VerticalLayout {
                 background: self.enabled ? (self.pressed ? #bc3981 : self.hovered ? #e6539e : SandboxTheme.accent-alt) : #39303f;
                 Glyph { text: Fa.send; color: parent.enabled ? white : #aaaaaf; font-size: 18px; width: parent.width; height: parent.height; }
                 activated => { root.send(root.draft); }
-            }
+            } }
         }
     }
     HorizontalLayout {

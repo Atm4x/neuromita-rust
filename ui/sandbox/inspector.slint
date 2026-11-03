@@ -1,6 +1,6 @@
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
-import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Field } from "controls.slint";
+import { Caption, Glyph, GhostButton, QuickAction, GearButton, Strip, ValueRow, StatusRow, Field, Centered } from "controls.slint";
 import { ActionSurface } from "../components/controls.slint";
 import { I18n } from "../i18n.slint";
 import { Avatar } from "../components/avatar.slint";
@@ -13,10 +13,10 @@ component CharacterSelector inherits Rectangle {
     height: 32px;
     HorizontalLayout {
         padding-left: 7px; padding-right: 5px; spacing: 5px;
-        Avatar {
+        Centered { width: 24px; Avatar {
             source: root.character == 0 ? @image-url("../../assets/avatars/crazy.png") : @image-url("../../assets/avatars/kind.png");
             width: 24px; height: 24px; surface: SandboxTheme.input;
-        }
+        } }
         Caption {
             text: root.character == 0 ? I18n.i18n("sandbox.character.mita", "Мита") : I18n.i18n("sandbox.character.kind", "Добрая Мита");
             font-size: 12px; horizontal-stretch: 1;
@@ -56,7 +56,7 @@ component SessionSelection inherits VerticalLayout {
         spacing: 8px; height: 32px;
         Caption { text: I18n.i18n("sandbox.label.character", "Персонаж"); color: SandboxTheme.muted; font-size: 12px; min-width: 104px; }
         CharacterSelector { character: root.character; horizontal-stretch: 1; selected(id) => { root.selected(id); } }
-        GearButton { label: I18n.i18n("sandbox.settings.character", "Настройки персонажа"); activated => { root.settings(); } }
+        Centered { width: 26px; GearButton { label: I18n.i18n("sandbox.settings.character", "Настройки персонажа"); activated => { root.settings(); } } }
     }
     ValueRow { title: I18n.i18n("sandbox.label.prompt", "Набор промптов"); value: root.preset; }
     ValueRow { title: I18n.i18n("sandbox.label.model", "Модель"); value: root.model == "" ? "—" : root.model; }
@@ -66,12 +66,12 @@ component CaptureRow inherits HorizontalLayout {
     in property <string> title;
     callback settings();
     height: 28px; spacing: 8px; padding: 0px;
-    Rectangle { width: 12px; height: 12px; border-radius: 6px; background: #ffffff12; border-width: 1px; border-color: #ffffff24; }
+    Centered { width: 12px; Rectangle { width: 12px; height: 12px; border-radius: 6px; background: #ffffff12; border-width: 1px; border-color: #ffffff24; } }
     Caption { text: root.title; horizontal-stretch: 1; font-size: 12px; color: SandboxTheme.muted; }
-    Rectangle { width: 40px; height: 20px; border-radius: 10px; background: #ffffff1a;
+    Centered { width: 40px; Rectangle { width: 40px; height: 20px; border-radius: 10px; background: #ffffff1a;
         Rectangle { x: 2px; y: 2px; width: 16px; height: 16px; border-radius: 8px; background: #d1ced8; }
-    }
-    GearButton { label: root.title; activated => { root.settings(); } }
+    } }
+    Centered { width: 26px; GearButton { label: root.title; activated => { root.settings(); } } }
 }
 
 component SessionTab inherits ScrollView {
@@ -116,15 +116,15 @@ component SessionTab inherits ScrollView {
             HorizontalLayout {
                 height: 29px; spacing: 8px;
                 Caption { text: I18n.i18n("sandbox.label.game", "Связь с игрой"); color: SandboxTheme.muted; min-width: 88px; }
-                Rectangle {
+                Centered { width: 80px; Rectangle {
                     width: 80px; height: 20px; background: #ffffff0f; border-radius: 8px;
                     Caption { text: I18n.i18n("sandbox.no-link", "Нет связи"); font-size: 10.6667px; horizontal-alignment: center; color: SandboxTheme.muted; width: 100%; height: 100%; }
-                }
+                } }
                 Rectangle { horizontal-stretch: 1; }
-                Rectangle { width: 40px; height: 20px; border-radius: 10px; background: #ffffff1e;
+                Centered { width: 40px; Rectangle { width: 40px; height: 20px; border-radius: 10px; background: #ffffff1e;
                     Rectangle { x: 2px; y: 2px; width: 16px; height: 16px; border-radius: 8px; background: #d1ced8; }
-                }
-                GearButton { label: I18n.i18n("sandbox.label.game", "Связь с игрой"); activated => { root.settings(); } }
+                } }
+                Centered { width: 26px; GearButton { label: I18n.i18n("sandbox.label.game", "Связь с игрой"); activated => { root.settings(); } } }
             }
             StatusRow {
                 title: I18n.i18n("sandbox.label.voice", "Голос");
@@ -231,7 +231,7 @@ component StateTab inherits ScrollView {
 component CheckRow inherits HorizontalLayout {
     in property <string> title;
     height: 25px; spacing: 9px;
-    Rectangle { width: 15px; height: 15px; background: #080912; border-radius: 4px; border-width: 1px; border-color: #ffffff24; }
+    Centered { width: 15px; Rectangle { width: 15px; height: 15px; background: #080912; border-radius: 4px; border-width: 1px; border-color: #ffffff24; } }
     Caption { text: root.title; font-size: 12px; color: SandboxTheme.muted; horizontal-stretch: 1; }
 }
 
@@ -349,12 +349,12 @@ export component SandboxInspector inherits Rectangle {
                 TabButton { title: I18n.i18n("sandbox.tab.debug", "Отладка"); active: root.tab == 2; activated => { root.tab = 2; } }
                 Rectangle { horizontal-stretch: 1; }
             }
-            ActionSurface {
+            Centered { width: 34px; ActionSurface {
                 label: I18n.i18n("sandbox.collapse", "Свернуть панель");
                 width: 34px; height: 34px; background: self.hovered ? #b74b7d30 : #b74b7d1f; border-radius: 17px;
                 Glyph { text: Fa.collapse; width: parent.width; height: parent.height; font-size: 14px; }
                 activated => { root.collapsed = true; }
-            }
+            } }
         }
         Rectangle { background: #ffffff0d; height: 1px; }
         Rectangle {

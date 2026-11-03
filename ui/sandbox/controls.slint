@@ -6,10 +6,21 @@ export component Caption inherits Text {
     font-size: SandboxTheme.body-size; vertical-alignment: center; overflow: elide;
 }
 
-export component Glyph inherits Text {
-    font-family: "Font Awesome 6 Free Solid"; font-weight: 900;
-    font-size: 14px; color: SandboxTheme.icon;
-    width: 16px; height: 18px; horizontal-alignment: center; vertical-alignment: center;
+export component Centered inherits VerticalLayout {
+    padding: 0px; spacing: 0px; alignment: center; horizontal-stretch: 0;
+    @children
+}
+
+export component Glyph inherits VerticalLayout {
+    in property <string> text;
+    in property <length> font-size: 14px;
+    in property <color> color: SandboxTheme.icon;
+    width: 16px; min-height: 18px; vertical-stretch: 1; padding: 0px; spacing: 0px;
+    Text {
+        text: root.text; font-family: "Font Awesome 6 Free Solid"; font-weight: 900;
+        font-size: root.font-size; color: root.color;
+        width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center;
+    }
 }
 
 export component GhostButton inherits ActionSurface {
@@ -89,13 +100,13 @@ export component StatusRow inherits HorizontalLayout {
     callback settings();
     padding: 0px; spacing: 8px; height: 28px;
     Caption { text: root.title; min-width: 88px; font-weight: 600; color: SandboxTheme.muted; }
-    Rectangle {
+    Centered { Rectangle {
         height: 19px; border-radius: 9px; background: root.active ? #79e78c29 : #ffffff0f;
         HorizontalLayout { padding-left: 10px; padding-right: 10px; Caption { text: root.state; font-size: 11px; color: root.active ? #79e78c : #ffffff73; } }
-    }
+    } }
     Rectangle { horizontal-stretch: 1; min-width: 0px; }
-    Toggle { checked: root.checked; enabled: false; }
-    GearButton { label: root.title; activated => { root.settings(); } }
+    Centered { width: 42px; Toggle { checked: root.checked; enabled: false; } }
+    Centered { width: 26px; GearButton { label: root.title; activated => { root.settings(); } } }
 }
 
 export component Field inherits Rectangle {
