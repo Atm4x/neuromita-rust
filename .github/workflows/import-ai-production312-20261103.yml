@@ -1,0 +1,39 @@
+name: Import exact Python 3.12 production AI Git history
+on:
+  push:
+    branches:
+      - bridge/ai-production-python312-import-20261103
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify authored Git object bundle and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=be712a8782bca528d0bf1260b300e80670129e7e
+          MAIN=63a565ee46d900ed0cf52e6150c9f42abbe6dab3
+          HEAD=6881d59716f13e49ec37289b3625fcaa0934d37b
+          TARGET=refs/heads/codex/ai-engine-install-voice-20261103
+          DIR="$RUNNER_TEMP"
+          base64 --decode bridge_payload/ai-production-python312-pr73.bundle.b64 > "$DIR/ai-production.bundle"
+          test "$(stat -c%s "$DIR/ai-production.bundle")" -eq 13213
+          echo "a8a3df997e0819f35162e2abf9940f2a4daac47db7b4e79dc83e769f9002a760  $DIR/ai-production.bundle" | sha256sum --check
+          git fetch --no-tags origin main
+          git cat-file -e "$BASE^{commit}"
+          git cat-file -e "$MAIN^{commit}"
+          git bundle verify "$DIR/ai-production.bundle"
+          git fetch "$DIR/ai-production.bundle" "$TARGET:refs/heads/ai-production-candidate"
+          test "$(git rev-parse refs/heads/ai-production-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git merge-base --is-ancestor "$MAIN" "$HEAD"
+          CURRENT=$(git ls-remote origin "$TARGET" | cut -f1)
+          test "$CURRENT" = "$BASE"
+          git push origin "$HEAD:$TARGET"
+          REMOTE=$(git ls-remote origin "$TARGET" | cut -f1)
+          test "$REMOTE" = "$HEAD"
