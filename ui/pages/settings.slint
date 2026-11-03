@@ -14,6 +14,7 @@ import { I18n } from "../i18n.slint";
 import { LanguageSettingsPage } from "../settings/language-page.slint";
 import { GameSettingsPage } from "../settings/game-page.slint";
 import { ModelsSettingsPage } from "../settings/models-page.slint";
+import { ImagesSettingsPage } from "../settings/images-page.slint";
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
@@ -504,7 +505,8 @@ export component SettingsPage inherits Rectangle {
                 }
                 if SettingsUi.section == 7: GameSettingsPage {}
                 if SettingsUi.section == 8: ModelsSettingsPage {}
-                if SettingsUi.section > 4 && SettingsUi.section != 7 && SettingsUi.section != 8: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
+                if SettingsUi.section == 9: ImagesSettingsPage {}
+                if SettingsUi.section > 4 && SettingsUi.section != 7 && SettingsUi.section != 8 && SettingsUi.section != 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }
                 }
             }
