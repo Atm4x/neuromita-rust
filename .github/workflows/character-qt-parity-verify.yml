@@ -1,0 +1,21 @@
+name: Verify Slint character settings parity
+on:
+  push:
+    branches:
+      - codex/character-settings-qt-parity-20261103
+    paths:
+      - .github/workflows/character-qt-parity-verify.yml
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - name: Install UI compilation system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxrandr-dev libxi-dev libxext-dev pkg-config
+      - name: Check desktop UI
+        run: cargo check --offline --features gui --bin neuromita-gui
