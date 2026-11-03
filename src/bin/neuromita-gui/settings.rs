@@ -169,10 +169,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             .find(|provider| chosen == provider.id && provider.supported);
         if let Some(provider) =
             trusted.filter(|provider| provider.documentation.starts_with("https://"))
+            && let Err(error) = super::binding::open_external_url(provider.documentation)
         {
-            if let Err(error) = super::binding::open_external_url(provider.documentation) {
-                ui.set_settings_error(error.into());
-            }
+            ui.set_settings_error(error.into());
         }
     });
     let weak = window.as_weak();
