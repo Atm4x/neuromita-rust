@@ -85,6 +85,20 @@ fn id(value: &str) -> Result<PresetId, String> {
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let settings = window.global::<SettingsUi>();
     let weak = window.as_weak();
+    settings.on_search_character(move |search| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let query = search.trim().to_lowercase();
+        let settings = window.global::<SettingsUi>();
+        settings.set_show_mita("мита".contains(&query) || "mita".contains(&query));
+        settings.set_show_kind(
+            "добрая мита".contains(&query)
+                || "kind-mita".contains(&query)
+                || "kind".contains(&query),
+        );
+    });
+    let weak = window.as_weak();
     let send = dispatch.clone();
     settings.on_preset_save(move || {
         let Some(component) = weak.upgrade() else {
