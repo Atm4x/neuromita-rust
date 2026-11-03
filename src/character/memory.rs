@@ -1361,7 +1361,11 @@ mod tests {
         assert_eq!(book.all(), vec![original.clone()]);
 
         apply(&mut book, &[MemoryCommand::Forget { id: original.id }]);
-        assert!(book.resolve(&[seed.clone()]).unwrap().is_empty());
+        assert!(
+            book.resolve(std::slice::from_ref(&seed))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(book.all()[0].state, MemoryState::Forgotten);
         apply(&mut book, &[MemoryCommand::SoftDelete { id: original.id }]);
         assert!(book.resolve(&[seed]).unwrap().is_empty());

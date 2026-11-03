@@ -165,11 +165,12 @@ component StateBar inherits VerticalLayout {
         Caption { text: root.value; font-size: 12px; font-weight: 700; horizontal-alignment: right; }
     }
     Rectangle { height: 8px; background: #ffffff0f; border-radius: 4px;
-        Rectangle { width: max(0px, min(parent.width, parent.width * root.amount / 100)); height: 8px; background: root.fill; border-radius: 4px; }
+        Rectangle { x: 0px; y: 0px; width: max(0px, min(parent.width, parent.width * root.amount / 100)); height: 8px; background: root.fill; border-radius: 4px; }
     }
 }
 
 component StateTab inherits ScrollView {
+    in property <int> character;
     in property <string> attitude;
     in property <string> boredom;
     in property <string> stress;
@@ -210,13 +211,13 @@ component StateTab inherits ScrollView {
                 padding: 14px; spacing: 8px;
                 Caption { text: I18n.i18n("sandbox.state.memory", "Контекст и память"); font-size: 14px; font-weight: 800; }
                 ValueRow { title: I18n.i18n("sandbox.state.messages", "Сообщений в окне"); value: root.message-count; }
-                ValueRow { title: I18n.i18n("sandbox.state.memories", "Воспоминаний"); value: "—"; }
-                ValueRow { title: I18n.i18n("sandbox.state.forgotten", "Забыто (RAG)"); value: "—"; }
+                ValueRow { title: I18n.i18n("sandbox.state.memories", "Воспоминаний"); value: MemoryUi.character == root.character ? MemoryUi.active : "—"; }
+                ValueRow { title: I18n.i18n("sandbox.state.forgotten", "Забыто (RAG)"); value: MemoryUi.character == root.character ? MemoryUi.forgotten : "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.missing", "Без эмбеддинга"); value: "—"; }
-                ValueRow { title: I18n.i18n("sandbox.state.trash", "Корзина"); value: "—"; }
+                ValueRow { title: I18n.i18n("sandbox.state.trash", "Корзина"); value: MemoryUi.character == root.character ? MemoryUi.deleted : "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.last", "Посл. сообщение"); value: "—"; }
                 ValueRow { title: I18n.i18n("sandbox.state.db-size", "Размер БД"); value: "—"; }
-                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { MemoryUi.open = true; } }
+                QuickAction { text: I18n.i18n("sandbox.state.open-memory", "Открыть RAG / память"); activated => { MemoryUi.select(root.character); MemoryUi.open = true; } }
             }
         }
     }
@@ -366,6 +367,7 @@ export component SandboxInspector inherits Rectangle {
                 settings => { root.settings(); }
             }
             if root.tab == 1: StateTab {
+                character: root.character;
                 width: 100%; height: 100%; attitude: root.attitude; boredom: root.boredom; stress: root.stress;
                 accepted: root.accepted; anchor: root.anchor; message-count: root.message-count;
                 settings => { root.settings(); }
