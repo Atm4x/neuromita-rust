@@ -33,7 +33,7 @@ fn public_contract_paths_remain_stable_after_dependency_inversion() {
         TurnIntent::React(_)
     ));
     assert_eq!(
-        serde_json::to_string(&CharacterId::Mita).unwrap(),
+        serde_json::to_string(&CharacterId::Crazy).unwrap(),
         "\"mita\""
     );
 }

@@ -660,7 +660,7 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         .await;
     let accepted = client.accepted(id).await;
     let call = fixture.call().await;
-    assert_eq!(call.context.character_id, CharacterId::KindMita);
+    assert_eq!(call.context.character_id, CharacterId::Kind);
     assert!(call.context.history.events.iter().any(|event| matches!(&event.content, neuromita::timeline::EventContent::PlayerMessage { text } if &**text == "valid after errors")));
     call.finish("accepted");
     assert_eq!(
@@ -857,7 +857,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
             .app
             .presenter()
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -923,7 +923,7 @@ async fn queue_full_rejection_does_not_reserve_a_command_id() {
             .app
             .presenter()
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,

@@ -382,14 +382,15 @@ impl<'a> IndexedWorld<'a> {
         for (branch, cutoff) in &self.lineage {
             let id = branch.0.to_string();
             let ceiling = cutoff.to_string();
+            let previous_id = character.previous_id();
             let character = character.to_string();
             let rows = if let Some(event) = event {
-                self.connection.query("SELECT max(sequence) FROM timeline_acquisitions WHERE branch_id=? AND character_id=? AND event_id=? AND sequence<=?",
-                    &[&id,&character,&event.0.to_string(),&ceiling])?
+                self.connection.query("SELECT max(sequence) FROM timeline_acquisitions WHERE branch_id=? AND character_id IN (?,?) AND event_id=? AND sequence<=?",
+                    &[&id,&character,previous_id,&event.0.to_string(),&ceiling])?
             } else {
                 debug_assert_eq!(table, "timeline_resets");
-                self.connection.query("SELECT max(sequence) FROM timeline_resets WHERE branch_id=? AND character_id=? AND sequence<=?",
-                    &[&id,&character,&ceiling])?
+                self.connection.query("SELECT max(sequence) FROM timeline_resets WHERE branch_id=? AND character_id IN (?,?) AND sequence<=?",
+                    &[&id,&character,previous_id,&ceiling])?
             };
             if let Some(row) = rows.first()
                 && !row[0].is_empty()
@@ -418,7 +419,12 @@ impl WorldLookup for IndexedWorld<'_> {
             None,
         )? {
             if fact.draft.kind == EventKind::CharacterMemoryChanged
-                && fact.draft.actor.as_deref() == Some(&character.to_string())
+                && fact
+                    .draft
+                    .actor
+                    .as_deref()
+                    .and_then(crate::identity::CharacterId::parse)
+                    == Some(character)
             {
                 let change = serde_json::from_value::<crate::memory::MemoryChange>(
                     fact.draft
@@ -610,8 +616,8 @@ fn read_page(
         let limit = remaining.to_string();
         let rows = if let Some(observer) = observer {
             conn.query(
-                "SELECT e.fact_json FROM timeline_events e WHERE e.branch_id=? AND e.sequence>? AND e.sequence<=? AND EXISTS(SELECT 1 FROM timeline_observers o WHERE o.branch_id=e.branch_id AND o.sequence=e.sequence AND o.character_id=?) ORDER BY e.sequence LIMIT ?",
-                &[&id, &lower, &ceiling, &observer.to_string(), &limit],
+                "SELECT e.fact_json FROM timeline_events e WHERE e.branch_id=? AND e.sequence>? AND e.sequence<=? AND EXISTS(SELECT 1 FROM timeline_observers o WHERE o.branch_id=e.branch_id AND o.sequence=e.sequence AND o.character_id IN (?,?)) ORDER BY e.sequence LIMIT ?",
+                &[&id, &lower, &ceiling, &observer.to_string(), observer.previous_id(), &limit],
             )?
         } else {
             conn.query(
@@ -999,7 +1005,7 @@ mod tests {
         let mut first = SqliteTimelineRepository::open(&db.0).unwrap();
         first.create_session(session, branch).unwrap();
         let mut secret = EventDraft::new(EventKind::UnityEvent);
-        secret.observers.insert(CharacterId::Mita);
+        secret.observers.insert(CharacterId::Crazy);
         secret.external_message_id = Some("source:legacy".into());
         let id = secret.id;
         let facts = first
@@ -1021,11 +1027,11 @@ mod tests {
         let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
         assert_eq!(reopened.world(branch).unwrap(), facts);
         assert_eq!(
-            reopened.knows(branch, CharacterId::Mita, id, None),
+            reopened.knows(branch, CharacterId::Crazy, id, None),
             Ok(true)
         );
         assert_eq!(
-            reopened.knows(branch, CharacterId::KindMita, id, None),
+            reopened.knows(branch, CharacterId::Kind, id, None),
             Ok(false)
         );
         let mut duplicate = EventDraft::new(EventKind::UnityEvent);
@@ -1120,19 +1126,19 @@ mod tests {
         let selected = repo.select_branch(branch, None).unwrap();
         let mut source = EventDraft::new(EventKind::PlayerMessage);
         source.actor = Some("player".into());
-        source.observers.insert(CharacterId::Mita);
+        source.observers.insert(CharacterId::Crazy);
         let source_id = source.id;
         repo.append(branch, 0, "source", json!({}), vec![source])
             .unwrap();
         let guard = AppendGuard {
             selection_generation: selected.generation,
-            context: Some((CharacterId::Mita, 0, Some(source_id))),
+            context: Some((CharacterId::Crazy, 0, Some(source_id))),
             accepted_reply_revision: None,
         };
         let reply = || {
             let mut fact = EventDraft::new(EventKind::CharacterMessage);
-            fact.actor = Some(CharacterId::Mita.to_string());
-            fact.observers.insert(CharacterId::Mita);
+            fact.actor = Some(CharacterId::Crazy.to_string());
+            fact.observers.insert(CharacterId::Crazy);
             fact.links.push(crate::timeline::domain::CausalLink {
                 relation: crate::timeline::domain::CausalRelation::ReplyTo,
                 event_id: source_id,
@@ -1140,16 +1146,16 @@ mod tests {
             fact
         };
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         repo.append(branch, 1, "reset", json!({}), vec![reset])
             .unwrap();
-        assert_eq!(repo.context_epoch(branch, CharacterId::Mita), Ok(2));
+        assert_eq!(repo.context_epoch(branch, CharacterId::Crazy), Ok(2));
         assert_eq!(
-            repo.knows(branch, CharacterId::Mita, source_id, Some(1)),
+            repo.knows(branch, CharacterId::Crazy, source_id, Some(1)),
             Ok(true)
         );
         assert_eq!(
-            repo.knows(branch, CharacterId::Mita, source_id, None),
+            repo.knows(branch, CharacterId::Crazy, source_id, None),
             Ok(false)
         );
         assert_eq!(
@@ -1158,7 +1164,7 @@ mod tests {
         );
         assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
         let still_unknown = AppendGuard {
-            context: Some((CharacterId::Mita, 2, Some(source_id))),
+            context: Some((CharacterId::Crazy, 2, Some(source_id))),
             ..guard
         };
         assert_eq!(

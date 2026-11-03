@@ -19,7 +19,11 @@ impl RustSettingsMigration {
     pub fn service() -> MigrationService<Vec<u8>> {
         MigrationService::new(
             SettingsSchema,
-            vec![Box::new(SettingsV1ToV2), Box::new(SettingsV2ToV3)],
+            vec![
+                Box::new(SettingsV1ToV2),
+                Box::new(SettingsV2ToV3),
+                Box::new(SettingsV3ToV4),
+            ],
         )
         .expect("the built-in settings migration plan is valid")
     }
@@ -75,8 +79,12 @@ impl MigrationSchema<Vec<u8>> for SettingsSchema {
             let stored: StoredSettings = match value.version {
                 1 => decode::<StoredSettingsV1>(&value.data)?
                     .upgrade_v2()
+                    .upgrade_v3()
                     .into_current(),
-                2 => decode::<StoredSettingsV2>(&value.data)?.into_current(),
+                2 => decode::<StoredSettingsV2>(&value.data)?
+                    .upgrade_v3()
+                    .into_current(),
+                3 => decode::<StoredSettingsV3>(&value.data)?.into_current(),
                 SETTINGS_SCHEMA_VERSION => decode(&value.data)?,
                 found => return Err(SettingsTransferError::UnsupportedSchema { found }),
             };
@@ -120,6 +128,24 @@ impl MigrationStep<Vec<u8>> for SettingsV2ToV3 {
 
     fn migrate(&self, bytes: Vec<u8>) -> Result<Vec<u8>, MigrationError> {
         let upgraded = decode::<StoredSettingsV2>(&bytes)
+            .map_err(|error| MigrationError::InvalidData(error.to_string()))?
+            .upgrade_v3();
+        serde_json::to_vec(&upgraded)
+            .map_err(|error| MigrationError::InvalidData(error.to_string()))
+    }
+}
+
+struct SettingsV3ToV4;
+
+impl MigrationStep<Vec<u8>> for SettingsV3ToV4 {
+    fn source_version(&self) -> u32 {
+        3
+    }
+    fn target_version(&self) -> u32 {
+        4
+    }
+    fn migrate(&self, bytes: Vec<u8>) -> Result<Vec<u8>, MigrationError> {
+        let upgraded = decode::<StoredSettingsV3>(&bytes)
             .map_err(|error| MigrationError::InvalidData(error.to_string()))?
             .into_current();
         serde_json::to_vec(&upgraded)
@@ -208,7 +234,7 @@ impl StoredSettingsV1 {
                 presets: PresetSettings {
                     active: self.settings.presets.active,
                 },
-                characters: CharactersSettings {
+                characters: CharactersSettingsV2 {
                     mita: CharacterSettings {
                         presets: self.settings.presets.characters.mita,
                     },
@@ -236,25 +262,73 @@ struct StoredSettingsV2 {
 #[serde(deny_unknown_fields)]
 struct AppSettingsV2 {
     presets: PresetSettings,
-    characters: CharactersSettings,
+    characters: CharactersSettingsV2,
     voice: VoiceSettings,
     capture: CaptureSettings,
     interface: InterfaceSettings,
 }
 
 impl StoredSettingsV2 {
-    fn into_current(self) -> StoredSettings {
+    fn upgrade_v3(self) -> StoredSettingsV3 {
         debug_assert_eq!(self.schema_version, 2);
-        StoredSettings {
+        StoredSettingsV3 {
             schema_version: 3,
             revision: self.revision,
-            settings: AppSettings {
+            settings: AppSettingsV3 {
                 presets: self.settings.presets,
                 characters: self.settings.characters,
                 voice: self.settings.voice,
                 capture: self.settings.capture,
                 interface: self.settings.interface,
                 reminders: RemindersSettings::initial_profile(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CharactersSettingsV2 {
+    mita: CharacterSettings,
+    kind_mita: CharacterSettings,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSettingsV3 {
+    schema_version: u32,
+    revision: u64,
+    settings: AppSettingsV3,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppSettingsV3 {
+    presets: PresetSettings,
+    characters: CharactersSettingsV2,
+    voice: VoiceSettings,
+    capture: CaptureSettings,
+    interface: InterfaceSettings,
+    reminders: RemindersSettings,
+}
+
+impl StoredSettingsV3 {
+    fn into_current(self) -> StoredSettings {
+        debug_assert_eq!(self.schema_version, 3);
+        StoredSettings {
+            schema_version: SETTINGS_SCHEMA_VERSION,
+            revision: self.revision,
+            settings: AppSettings {
+                presets: self.settings.presets,
+                characters: CharactersSettings {
+                    crazy: self.settings.characters.mita,
+                    kind: self.settings.characters.kind_mita,
+                    ..CharactersSettings::default()
+                },
+                voice: self.settings.voice,
+                capture: self.settings.capture,
+                interface: self.settings.interface,
+                reminders: self.settings.reminders,
             },
         }
     }

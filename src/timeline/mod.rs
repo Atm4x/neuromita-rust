@@ -1209,13 +1209,13 @@ mod tests {
         let request = RequestId::new();
         let trigger = EventId::new();
         timeline
-            .publish_player_message(CharacterId::Mita, trigger, Arc::from("hello"))
+            .publish_player_message(CharacterId::Crazy, trigger, Arc::from("hello"))
             .unwrap();
         let turn = timeline
-            .capture_turn(CharacterId::Mita, Some(trigger), timeline.anchor())
+            .capture_turn(CharacterId::Crazy, Some(trigger), timeline.anchor())
             .unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         timeline
             .store
             .append(timeline.branch, 1, "reset", json!({}), vec![reset])
@@ -1228,7 +1228,7 @@ mod tests {
                     turn,
                     expected_revision: 0,
                     content: json!("answer"),
-                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    audience: ConversationAudience::private_to(CharacterId::Crazy),
                     effects: Vec::new(),
                 })
                 .is_err()
@@ -1243,10 +1243,10 @@ mod tests {
         key: &str,
     ) {
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         let mut retelling = EventDraft::new(EventKind::PlayerMessage);
         retelling.actor = Some("player".into());
-        retelling.observers.insert(CharacterId::Mita);
+        retelling.observers.insert(CharacterId::Crazy);
         retelling.links.push(CausalLink {
             relation: CausalRelation::CausedBy,
             event_id: original,
@@ -1258,12 +1258,12 @@ mod tests {
             .unwrap();
         assert!(
             !store
-                .knows(branch, CharacterId::Mita, original, None)
+                .knows(branch, CharacterId::Crazy, original, None)
                 .unwrap()
         );
         assert!(
             store
-                .knows(branch, CharacterId::Mita, retelling_id, None)
+                .knows(branch, CharacterId::Crazy, retelling_id, None)
                 .unwrap()
         );
     }
@@ -1276,7 +1276,7 @@ mod tests {
     ) {
         assert!(
             timeline
-                .capture_turn(CharacterId::Mita, Some(original), at)
+                .capture_turn(CharacterId::Crazy, Some(original), at)
                 .is_err()
         );
         assert_eq!(pin.context_head, at.through);
@@ -1284,7 +1284,7 @@ mod tests {
         assert!(
             timeline
                 .store
-                .context_epoch(timeline.branch, CharacterId::Mita)
+                .context_epoch(timeline.branch, CharacterId::Crazy)
                 .unwrap()
                 > 0
         );
@@ -1299,16 +1299,16 @@ mod tests {
         let mut timeline = SessionTimeline::new();
         let original = EventId::new();
         timeline
-            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .publish_player_message(CharacterId::Crazy, original, Arc::from("original"))
             .unwrap();
         let captured = timeline
-            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .capture_context(CharacterId::Crazy, ContextPosition::Latest)
             .unwrap();
         let at = captured.history.at;
         assert_eq!(captured.view.messages()[0].content, "original");
 
         let pin = timeline
-            .capture_turn(CharacterId::Mita, Some(original), at)
+            .capture_turn(CharacterId::Crazy, Some(original), at)
             .unwrap();
         let branch = timeline.branch;
         reset_and_retell(
@@ -1328,7 +1328,7 @@ mod tests {
                 turn: pin,
                 expected_revision: 0,
                 content: json!("reaction"),
-                audience: ConversationAudience::private_to(CharacterId::Mita),
+                audience: ConversationAudience::private_to(CharacterId::Crazy),
                 effects: Vec::new(),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
@@ -1341,18 +1341,18 @@ mod tests {
         let mut timeline = SessionTimeline::new();
         let original = EventId::new();
         timeline
-            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .publish_player_message(CharacterId::Crazy, original, Arc::from("original"))
             .unwrap();
         let at = timeline
-            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .capture_context(CharacterId::Crazy, ContextPosition::Latest)
             .unwrap()
             .history
             .at;
         timeline
-            .publish_player_message(CharacterId::Mita, EventId::new(), Arc::from("later"))
+            .publish_player_message(CharacterId::Crazy, EventId::new(), Arc::from("later"))
             .unwrap();
         let pin = timeline
-            .capture_turn(CharacterId::Mita, Some(original), at)
+            .capture_turn(CharacterId::Crazy, Some(original), at)
             .unwrap();
         assert_eq!(pin.context_head, at.through);
         assert_eq!(pin.context_epoch, 0);
@@ -1374,15 +1374,15 @@ mod tests {
         .unwrap();
         let original = EventId::new();
         timeline
-            .publish_player_message(CharacterId::Mita, original, Arc::from("original"))
+            .publish_player_message(CharacterId::Crazy, original, Arc::from("original"))
             .unwrap();
         let at = timeline
-            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .capture_context(CharacterId::Crazy, ContextPosition::Latest)
             .unwrap()
             .history
             .at;
         let pin = timeline
-            .capture_turn(CharacterId::Mita, Some(original), at)
+            .capture_turn(CharacterId::Crazy, Some(original), at)
             .unwrap();
         let mut external = storage::SqliteTimelineRepository::open(&path).unwrap();
         reset_and_retell(&mut external, branch, original, "remote-reset-and-retell");
@@ -1396,7 +1396,7 @@ mod tests {
                 turn: pin,
                 expected_revision: 0,
                 content: json!("reaction"),
-                audience: ConversationAudience::private_to(CharacterId::Mita),
+                audience: ConversationAudience::private_to(CharacterId::Crazy),
                 effects: Vec::new(),
             }),
             Err(domain::TimelineError::ConcurrentWrite)
@@ -1428,7 +1428,7 @@ mod tests {
             .unwrap();
             if !reopen {
                 timeline
-                    .publish_player_message(CharacterId::Mita, id, Arc::from("independent input"))
+                    .publish_player_message(CharacterId::Crazy, id, Arc::from("independent input"))
                     .unwrap();
             }
             let events = timeline.events();
@@ -1436,7 +1436,7 @@ mod tests {
             assert_eq!(events[0].id, id);
             assert_eq!(events[0].request_id, None);
             let captured = timeline
-                .capture_context(CharacterId::Mita, ContextPosition::Latest)
+                .capture_context(CharacterId::Crazy, ContextPosition::Latest)
                 .unwrap();
             assert_eq!(captured.view.messages()[0].content, "independent input");
         }
@@ -1472,7 +1472,7 @@ mod tests {
                 expires_at_unix_ms: None,
             };
             let turn = timeline
-                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .capture_turn(CharacterId::Crazy, None, timeline.anchor())
                 .unwrap();
             timeline
                 .append_reply(GeneratedReply {
@@ -1481,7 +1481,7 @@ mod tests {
                     turn,
                     expected_revision: 0,
                     content: json!([{"text":"One"}]),
-                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    audience: ConversationAudience::private_to(CharacterId::Crazy),
                     effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
                         original,
                     ))],
@@ -1498,7 +1498,7 @@ mod tests {
                 expires_at_unix_ms: None,
             };
             let turn = timeline
-                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .capture_turn(CharacterId::Crazy, None, timeline.anchor())
                 .unwrap();
             timeline
                 .append_reply(GeneratedReply {
@@ -1507,7 +1507,7 @@ mod tests {
                     turn,
                     expected_revision: 1,
                     content: json!([{"text":"Two"}]),
-                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    audience: ConversationAudience::private_to(CharacterId::Crazy),
                     effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
                         changed,
                     ))],
@@ -1515,7 +1515,7 @@ mod tests {
                 .unwrap();
             updated = timeline.anchor();
             timeline
-                .reset_character_context(timeline.selection(), CharacterId::Mita, EventId::new())
+                .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
                 .unwrap();
         }
         {
@@ -1526,27 +1526,27 @@ mod tests {
             })
             .unwrap();
             let first = timeline
-                .character_memories_at(CharacterId::Mita, initial)
+                .character_memories_at(CharacterId::Crazy, initial)
                 .unwrap()
                 .list();
             assert_eq!(first.len(), 1);
             assert_eq!(first[0].content, "first fact");
             let later = timeline
-                .character_memories_at(CharacterId::Mita, updated)
+                .character_memories_at(CharacterId::Crazy, updated)
                 .unwrap()
                 .list();
             assert_eq!(later[0].id, memory_id);
             assert_eq!(later[0].content, "corrected fact");
             assert_eq!(
                 timeline
-                    .character_memories_at(CharacterId::Mita, timeline.anchor())
+                    .character_memories_at(CharacterId::Crazy, timeline.anchor())
                     .unwrap()
                     .list(),
                 later
             );
             assert!(
                 timeline
-                    .character_memories_at(CharacterId::KindMita, timeline.anchor())
+                    .character_memories_at(CharacterId::Kind, timeline.anchor())
                     .unwrap()
                     .list()
                     .is_empty()
@@ -1579,7 +1579,7 @@ mod tests {
             })
             .unwrap();
             let turn = timeline
-                .capture_turn(CharacterId::Mita, None, timeline.anchor())
+                .capture_turn(CharacterId::Crazy, None, timeline.anchor())
                 .unwrap();
             timeline
                 .append_reply(GeneratedReply {
@@ -1588,7 +1588,7 @@ mod tests {
                     turn,
                     expected_revision: 0,
                     content: json!([{"text":"Hello"}]),
-                    audience: ConversationAudience::private_to(CharacterId::Mita),
+                    audience: ConversationAudience::private_to(CharacterId::Crazy),
                     effects: vec![AppliedEffect::CharacterWorkingStateReplaced(
                         snapshot.clone(),
                     )],
@@ -1597,7 +1597,7 @@ mod tests {
             assert_eq!(timeline.anchor().through, 2);
             original_anchor = timeline.anchor();
             timeline
-                .reset_character_context(timeline.selection(), CharacterId::Mita, EventId::new())
+                .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
                 .unwrap();
             reset_anchor = timeline.anchor();
         }
@@ -1610,25 +1610,25 @@ mod tests {
             .unwrap();
             assert_eq!(
                 timeline
-                    .character_working_state_at(CharacterId::Mita, original_anchor)
+                    .character_working_state_at(CharacterId::Crazy, original_anchor)
                     .unwrap(),
                 snapshot
             );
             assert!(
                 timeline
-                    .character_working_state_at(CharacterId::Mita, reset_anchor)
+                    .character_working_state_at(CharacterId::Crazy, reset_anchor)
                     .unwrap()
                     .is_empty()
             );
             assert!(
                 timeline
-                    .character_working_state_at(CharacterId::KindMita, original_anchor)
+                    .character_working_state_at(CharacterId::Kind, original_anchor)
                     .unwrap()
                     .is_empty()
             );
             assert_eq!(
                 timeline
-                    .character_behavior_at(CharacterId::Mita, reset_anchor)
+                    .character_behavior_at(CharacterId::Crazy, reset_anchor)
                     .unwrap(),
                 CharacterBehavior::default()
             );
@@ -1643,11 +1643,11 @@ mod tests {
         let mut timeline = SessionTimeline::new();
         let event = EventId::new();
         timeline
-            .publish_player_message(CharacterId::Mita, event, Arc::from("hello"))
+            .publish_player_message(CharacterId::Crazy, event, Arc::from("hello"))
             .unwrap();
         assert_eq!(timeline.store.world(timeline.branch).unwrap().len(), 1);
         assert_eq!(timeline.events().len(), 1);
-        assert_eq!(timeline.history(CharacterId::Mita).events.len(), 1);
-        assert!(timeline.history(CharacterId::KindMita).events.is_empty());
+        assert_eq!(timeline.history(CharacterId::Crazy).events.len(), 1);
+        assert!(timeline.history(CharacterId::Kind).events.is_empty());
     }
 }

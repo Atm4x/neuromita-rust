@@ -102,7 +102,9 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     accordion.hide().unwrap();
     let overflow = probe::OverflowProbe::new().unwrap();
     overflow.show().unwrap();
-    overflow.window().set_size(slint::PhysicalSize::new(500, 260));
+    overflow
+        .window()
+        .set_size(slint::PhysicalSize::new(500, 260));
     overflow.window().take_snapshot().unwrap();
     assert!(overflow.get_scrollable());
     assert!(overflow.get_first_height() > 350.0);
@@ -162,6 +164,19 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog));
     window.global::<I18n>().set_locale("ru".into());
+    let catalog = window
+        .global::<super::super::view::CharacterCatalog>()
+        .get_entries();
+    assert_eq!(
+        catalog.row_count(),
+        neuromita::character::CharacterId::ALL.len()
+    );
+    for id in neuromita::character::CharacterId::ALL {
+        let row = catalog.row_data(id.index()).unwrap();
+        assert_eq!(row.id, id.as_str());
+        assert_eq!(row.index, id.index() as i32);
+    }
+    assert_eq!(catalog.row_data(0).unwrap().name, "Безумная Мита");
     window.set_page(PageId::Sandbox);
     window.set_version("v0.1.0".into());
     window.set_core_connected(true);
@@ -318,9 +333,16 @@ fn settings_render_and_bindings(window: &AppWindow) {
     settings.set_settings_persistence(1);
     settings.set_settings_voice_launcher(true);
     settings.set_settings_volume(65);
-    settings.set_mita_reply("active".into());
-    settings.set_mita_react("7".into());
-    settings.set_mita_initiate("active".into());
+    settings.set_character_presets(ModelRc::new(VecModel::from(
+        neuromita::character::CharacterId::ALL
+            .map(|_| super::super::view::CharacterPresets {
+                reply: "active".into(),
+                react: "7".into(),
+                initiate: "active".into(),
+                split: true,
+            })
+            .to_vec(),
+    )));
     let commands = Rc::new(RefCell::new(Vec::new()));
     let sent = commands.clone();
     super::super::settings::bind(
@@ -426,21 +448,21 @@ fn memory_render_and_contract(window: &AppWindow) {
         super::super::settings::execute(
             app.presenter(),
             Command::AssignAllPresets(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 neuromita::settings::PresetSelection::Specific(neuromita::generation::PresetId(0)),
             ),
         )
         .unwrap();
         let after = app.presenter().settings.snapshot().unwrap();
         assert_eq!(after.revision, initial_revision + 1);
-        let assignments = after.values.characters.mita.presets;
+        let assignments = after.values.characters.crazy.presets;
         assert_eq!(assignments.reply, assignments.react);
         assert_eq!(assignments.reply, assignments.initiate);
         assert!(
             super::super::settings::execute(
                 app.presenter(),
                 Command::AssignAllPresets(
-                    CharacterId::Mita,
+                    CharacterId::Crazy,
                     neuromita::settings::PresetSelection::Specific(
                         neuromita::generation::PresetId(999)
                     )
@@ -453,10 +475,10 @@ fn memory_render_and_contract(window: &AppWindow) {
             after.revision
         );
         let characters = &app.presenter().characters;
-        let initial = characters.memories(CharacterId::Mita).await.unwrap();
+        let initial = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 initial,
                 vec![MemoryCommand::Add {
                     priority: MemoryPriority::Normal,
@@ -474,7 +496,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             &state,
         );
         let page = characters
-            .list_memories(CharacterId::Mita, Default::default())
+            .list_memories(CharacterId::Crazy, Default::default())
             .await
             .unwrap();
         memory::render(window, &state, &page);
@@ -488,10 +510,10 @@ fn memory_render_and_contract(window: &AppWindow) {
             .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
         ui.set_content("Изменённый текст".into());
-        let snapshot = characters.memories(CharacterId::Mita).await.unwrap();
+        let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 snapshot,
                 vec![MemoryCommand::Add {
                     priority: MemoryPriority::Normal,
@@ -501,7 +523,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             .await
             .unwrap();
         let page = characters
-            .list_memories(CharacterId::Mita, Default::default())
+            .list_memories(CharacterId::Crazy, Default::default())
             .await
             .unwrap();
         memory::render(window, &state, &page);

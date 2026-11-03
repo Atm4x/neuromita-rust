@@ -121,8 +121,8 @@ mod tests {
             stop.clone(),
             16,
         );
-        let mita = registry.get(CharacterId::Mita).unwrap();
-        let kind = registry.get(CharacterId::KindMita).unwrap();
+        let mita = registry.get(CharacterId::Crazy).unwrap();
+        let kind = registry.get(CharacterId::Kind).unwrap();
         let before = mita.memories().await.unwrap();
         assert!(before.records.is_empty());
         let added = mita
@@ -214,8 +214,8 @@ mod tests {
             stop.clone(),
             16,
         );
-        let mita = registry.get(CharacterId::Mita).unwrap();
-        let kind = registry.get(CharacterId::KindMita).unwrap();
+        let mita = registry.get(CharacterId::Crazy).unwrap();
+        let kind = registry.get(CharacterId::Kind).unwrap();
         let old_mita = mita.memories().await.unwrap();
         kind.edit_memories(
             kind.memories().await.unwrap(),

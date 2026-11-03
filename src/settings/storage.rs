@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
 use super::{RustSettingsMigration, migration::SettingsSchema};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,11 +203,11 @@ mod tests {
         let repo = JsonSettingsRepository::new(path.clone());
         let mut settings = AppSettings::initial_profile();
         settings.presets.active = PresetId(3);
-        settings.characters.mita.presets.react = PresetSelection::Specific(PresetId(7));
-        settings.characters.kind_mita.presets.reply = PresetSelection::Specific(PresetId(11));
+        settings.characters.crazy.presets.react = PresetSelection::Specific(PresetId(7));
+        settings.characters.kind.presets.reply = PresetSelection::Specific(PresetId(11));
         let old_assignments = json!({
-            "mita": settings.characters.mita.presets,
-            "kind_mita": settings.characters.kind_mita.presets,
+            "mita": settings.characters.crazy.presets,
+            "kind_mita": settings.characters.kind.presets,
         });
         let mut old_settings = serde_json::to_value(&settings).unwrap();
         old_settings.as_object_mut().unwrap().remove("characters");

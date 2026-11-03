@@ -117,7 +117,7 @@ impl ApplicationConfig {
         Self {
             releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
-            server: ServerConfig::test_protocol(bind, CharacterId::Mita),
+            server: ServerConfig::test_protocol(bind, CharacterId::Crazy),
             timeline: TimelineConfig::Transient,
             presets,
             generator,

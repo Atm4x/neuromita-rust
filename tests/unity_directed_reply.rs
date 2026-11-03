@@ -94,17 +94,17 @@ fn config(sender: mpsc::UnboundedSender<LlmCall>) -> ApplicationConfig {
 fn character_message(text: &str, witnessed_by: &[CharacterId]) -> ConversationMessage {
     let mut message = ConversationMessage::new(
         "unity:dialogue:source",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!(text),
         witnessed_by.iter().copied(),
     );
     message
         .audience
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+        .insert(ConversationSpeaker::Character(CharacterId::Kind));
     message.audience.participants.extend([
-        ConversationSpeaker::Character(CharacterId::Mita),
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
     message
 }
@@ -114,7 +114,7 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
     let _lock = TEST_LOCK.lock().await;
     let (sent, mut calls) = mpsc::unbounded_channel();
     let app = ApplicationLifecycle::start(config(sent)).await.unwrap();
-    let source = character_message("KindMita, are you ready?", &[CharacterId::KindMita]);
+    let source = character_message("KindMita, are you ready?", &[CharacterId::Kind]);
     let source_id = source.id;
     app.publish_conversation_message(app.timeline_selection(), source)
         .unwrap();
@@ -125,18 +125,18 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
             .is_err()
     );
 
-    let mut audience = ConversationAudience::private_to(CharacterId::KindMita);
+    let mut audience = ConversationAudience::private_to(CharacterId::Kind);
     audience
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::Mita));
+        .insert(ConversationSpeaker::Character(CharacterId::Crazy));
     audience.participants.extend([
-        ConversationSpeaker::Character(CharacterId::Mita),
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
-    audience.seen_by.insert(CharacterId::Mita);
+    audience.seen_by.insert(CharacterId::Crazy);
 
     let handle = ChatApi::reply(
-        ReplyRequest::new(CharacterId::KindMita, source_id, RequestSource::Presenter)
+        ReplyRequest::new(CharacterId::Kind, source_id, RequestSource::Presenter)
             .with_audience(audience),
     )
     .unwrap();
@@ -159,13 +159,13 @@ async fn unity_decides_whether_an_observed_character_message_receives_a_reply() 
     };
     let accepted_id = accepted.event_id;
     let view_mita = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     let view_kind = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -206,7 +206,7 @@ async fn reply_requires_a_target_known_to_the_selected_character() {
     app.publish_conversation_message(app.timeline_selection(), source)
         .unwrap();
     let result = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         source_id,
         RequestSource::Presenter,
     ));
@@ -225,7 +225,7 @@ async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
     let _lock = TEST_LOCK.lock().await;
     let (sent, mut calls) = mpsc::unbounded_channel();
     let app = ApplicationLifecycle::start(config(sent)).await.unwrap();
-    let mut source = SemanticEvent::new(EventKind::UnityEvent, [CharacterId::KindMita]);
+    let mut source = SemanticEvent::new(EventKind::UnityEvent, [CharacterId::Kind]);
     let source_id = source.id;
     source.payload.insert("name".into(), json!("DoorOpened"));
     app.publish_semantic_events(
@@ -240,14 +240,14 @@ async fn react_accepts_an_observed_unity_event_but_reply_rejects_it() {
     );
 
     let rejected = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         source_id,
         RequestSource::Presenter,
     ));
     assert!(matches!(rejected, Err(SubmitError::InvalidTargetEvent)));
     assert_eq!(app.at().through, 1);
     let handle = ChatApi::react(ReactRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         source_id,
         Arc::clone(
             UserInput::new("React verbally to the observed door opening".into())
@@ -300,7 +300,7 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
     let path = std::env::temp_dir().join(format!("neuromita-directed-reply-{}.db", Uuid::new_v4()));
     let session = SessionId::new();
     let root = BranchId::new();
-    let source = character_message("KindMita, over here!", &[CharacterId::KindMita]);
+    let source = character_message("KindMita, over here!", &[CharacterId::Kind]);
     let source_id = source.id;
     let reply_id = {
         let (sent, mut calls) = mpsc::unbounded_channel();
@@ -314,7 +314,7 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
         app.publish_conversation_message(app.timeline_selection(), source)
             .unwrap();
         let handle = ChatApi::reply(ReplyRequest::new(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             source_id,
             RequestSource::Presenter,
         ))
@@ -355,7 +355,7 @@ async fn unity_directed_reply_survives_sqlite_restart_without_player_message() {
             .any(|event| matches!(event.content, EventContent::PlayerMessage { .. }))
     );
     let view = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await

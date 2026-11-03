@@ -89,15 +89,38 @@ pub struct CharacterSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CharactersSettings {
-    pub mita: CharacterSettings,
-    pub kind_mita: CharacterSettings,
+    #[serde(rename = "Crazy")]
+    pub crazy: CharacterSettings,
+    #[serde(rename = "Kind")]
+    pub kind: CharacterSettings,
+    #[serde(rename = "Cappie")]
+    pub cappie: CharacterSettings,
+    #[serde(rename = "ShortHair")]
+    pub short_hair: CharacterSettings,
+    #[serde(rename = "Mila")]
+    pub mila: CharacterSettings,
+    #[serde(rename = "Sleepy")]
+    pub sleepy: CharacterSettings,
+    #[serde(rename = "Ghost")]
+    pub ghost: CharacterSettings,
+    #[serde(rename = "Creepy")]
+    pub creepy: CharacterSettings,
+    #[serde(rename = "GameMaster")]
+    pub game_master: CharacterSettings,
 }
 
 impl CharactersSettings {
     pub fn for_character(&self, id: crate::character::CharacterId) -> &CharacterSettings {
         match id {
-            crate::character::CharacterId::Mita => &self.mita,
-            crate::character::CharacterId::KindMita => &self.kind_mita,
+            crate::character::CharacterId::Crazy => &self.crazy,
+            crate::character::CharacterId::Kind => &self.kind,
+            crate::character::CharacterId::Cappie => &self.cappie,
+            crate::character::CharacterId::ShortHair => &self.short_hair,
+            crate::character::CharacterId::Mila => &self.mila,
+            crate::character::CharacterId::Sleepy => &self.sleepy,
+            crate::character::CharacterId::Ghost => &self.ghost,
+            crate::character::CharacterId::Creepy => &self.creepy,
+            crate::character::CharacterId::GameMaster => &self.game_master,
         }
     }
 
@@ -106,8 +129,15 @@ impl CharactersSettings {
         id: crate::character::CharacterId,
     ) -> &mut CharacterSettings {
         match id {
-            crate::character::CharacterId::Mita => &mut self.mita,
-            crate::character::CharacterId::KindMita => &mut self.kind_mita,
+            crate::character::CharacterId::Crazy => &mut self.crazy,
+            crate::character::CharacterId::Kind => &mut self.kind,
+            crate::character::CharacterId::Cappie => &mut self.cappie,
+            crate::character::CharacterId::ShortHair => &mut self.short_hair,
+            crate::character::CharacterId::Mila => &mut self.mila,
+            crate::character::CharacterId::Sleepy => &mut self.sleepy,
+            crate::character::CharacterId::Ghost => &mut self.ghost,
+            crate::character::CharacterId::Creepy => &mut self.creepy,
+            crate::character::CharacterId::GameMaster => &mut self.game_master,
         }
     }
 }

@@ -88,10 +88,8 @@ pub fn attach(
     });
     let send = dispatch.clone();
     window.on_chat_select_character(move |id| {
-        let character = match id {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => return,
+        let Some(character) = CharacterId::from_index(id) else {
+            return;
         };
         send(Command::Select(character));
     });
@@ -197,10 +195,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
 }
 
 fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
-    window.set_chat_character(match snapshot.character {
-        CharacterId::Mita => 0,
-        CharacterId::KindMita => 1,
-    });
+    window.set_chat_character(snapshot.character.index() as i32);
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
         Ok(model) => {
@@ -275,6 +270,12 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
                 user: message.speaker.as_deref() == Some("player")
                     || (message.speaker.is_none() && message.role == MessageRole::User),
                 speaker: message.speaker.as_deref().unwrap_or_default().into(),
+                character_index: message
+                    .speaker
+                    .as_deref()
+                    .and_then(CharacterId::parse)
+                    .map(|id| id.index() as i32)
+                    .unwrap_or(-1),
                 sequence: format!("#{}", message.sequence).into(),
                 status: ChatStatus::History,
                 ..Default::default()
@@ -298,6 +299,7 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         }
         let mut row = ChatRow {
             request_id: request.metadata.id.to_string().into(),
+            character_index: request.metadata.character_id.index() as i32,
             can_cancel: request.snapshot.can_cancel(),
             ..Default::default()
         };

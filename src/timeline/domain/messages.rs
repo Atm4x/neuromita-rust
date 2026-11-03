@@ -39,7 +39,12 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
     let role = match draft.kind {
         EventKind::PlayerMessage | EventKind::CharacterObservation => MessageRole::User,
         EventKind::CharacterMessage => {
-            if draft.actor.as_deref() == Some(&character.to_string()) {
+            if draft
+                .actor
+                .as_deref()
+                .and_then(crate::identity::CharacterId::parse)
+                == Some(character)
+            {
                 MessageRole::Assistant
             } else {
                 MessageRole::User

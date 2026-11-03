@@ -379,7 +379,7 @@ mod tests {
     use crate::{character::CharacterId, identity::EventId};
 
     fn request() -> ReplyRequest {
-        ReplyRequest::new(CharacterId::Mita, EventId::new(), RequestSource::Presenter)
+        ReplyRequest::new(CharacterId::Crazy, EventId::new(), RequestSource::Presenter)
     }
 
     fn selection() -> TimelineSelection {

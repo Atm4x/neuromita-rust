@@ -49,10 +49,10 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     let _serial = SERIAL.lock().await;
     let app = start().await;
     let presenter = &app.presenter().characters;
-    let before = presenter.memories(CharacterId::Mita).await.unwrap();
+    let before = presenter.memories(CharacterId::Crazy).await.unwrap();
     let after = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             before.clone(),
             vec![
                 MemoryCommand::Add {
@@ -76,7 +76,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     assert!(matches!(
         presenter
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 before,
                 vec![MemoryCommand::Forget {
                     id: after.snapshot.records()[0].id
@@ -88,7 +88,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
 
     let page = presenter
         .list_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             MemoryListQuery {
                 text: Some("МИТА".into()),
                 kind: Some(MemoryKind::Fact),
@@ -108,7 +108,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
 
     let second = presenter
         .list_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             MemoryListQuery {
                 text: Some("мита".into()),
                 kind: Some(MemoryKind::Fact),
@@ -127,7 +127,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     let retained_page = page.clone();
     let edited = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             page.into_snapshot(),
             vec![MemoryCommand::Forget { id: target }],
         )
@@ -151,7 +151,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     assert_eq!(pinned.total_matches(), 0);
     assert_eq!(pinned.summary().active, 3);
     assert_eq!(
-        CharacterApi::get(CharacterId::Mita)
+        CharacterApi::get(CharacterId::Crazy)
             .unwrap()
             .memories()
             .await
@@ -161,7 +161,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     );
     let forgotten = presenter
         .list_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             MemoryListQuery {
                 state: Some(MemoryState::Forgotten),
                 ..MemoryListQuery::default()
@@ -173,7 +173,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
     assert_eq!(forgotten.summary().forgotten, 1);
     assert!(
         presenter
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()
@@ -202,13 +202,13 @@ async fn memory_presenter_rejects_invalid_queries_without_mutating_character() {
         },
     ] {
         assert!(matches!(
-            presenter.list_memories(CharacterId::Mita, query).await,
+            presenter.list_memories(CharacterId::Crazy, query).await,
             Err(CharacterError::InvalidMemory(_))
         ));
     }
     let empty = presenter
         .list_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             MemoryListQuery {
                 offset: usize::MAX,
                 ..MemoryListQuery::default()
@@ -221,7 +221,7 @@ async fn memory_presenter_rejects_invalid_queries_without_mutating_character() {
     assert_eq!(empty.total_matches(), 0);
     assert!(
         presenter
-            .memories(CharacterId::Mita)
+            .memories(CharacterId::Crazy)
             .await
             .unwrap()
             .records()
@@ -236,18 +236,18 @@ async fn memory_observer_refreshes_only_on_committed_character_memory_changes() 
     let app = start().await;
     let presenter = &app.presenter().characters;
     let mut mita = presenter
-        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .observe_memories(CharacterId::Crazy, MemoryListQuery::default())
         .unwrap();
     let mut other = presenter
-        .observe_memories(CharacterId::KindMita, MemoryListQuery::default())
+        .observe_memories(CharacterId::Kind, MemoryListQuery::default())
         .unwrap();
     assert_eq!(mita.next().await.unwrap().total_matches(), 0);
     assert_eq!(other.next().await.unwrap().total_matches(), 0);
 
-    let before = presenter.memories(CharacterId::Mita).await.unwrap();
+    let before = presenter.memories(CharacterId::Crazy).await.unwrap();
     let committed = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             before.clone(),
             vec![MemoryCommand::Add {
                 priority: MemoryPriority::Normal,
@@ -273,7 +273,7 @@ async fn memory_observer_refreshes_only_on_committed_character_memory_changes() 
 
     let stale = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             before,
             vec![MemoryCommand::Forget {
                 id: committed.snapshot.records()[0].id,
@@ -289,8 +289,8 @@ async fn memory_observer_refreshes_only_on_committed_character_memory_changes() 
 
     let changed_other = presenter
         .edit_memories(
-            CharacterId::KindMita,
-            presenter.memories(CharacterId::KindMita).await.unwrap(),
+            CharacterId::Kind,
+            presenter.memories(CharacterId::Kind).await.unwrap(),
             vec![MemoryCommand::Add {
                 priority: MemoryPriority::High,
                 content: "Only another character knows".into(),
@@ -318,10 +318,10 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
     let _serial = SERIAL.lock().await;
     let app = start().await;
     let presenter = &app.presenter().characters;
-    let initial = presenter.memories(CharacterId::Mita).await.unwrap();
+    let initial = presenter.memories(CharacterId::Crazy).await.unwrap();
     let added = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             initial,
             vec![
                 MemoryCommand::Add {
@@ -352,14 +352,14 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
         .unwrap()
         .id;
     let preview = presenter
-        .preview_memory_capacity(CharacterId::Mita, 2)
+        .preview_memory_capacity(CharacterId::Crazy, 2)
         .await
         .unwrap();
     assert_eq!(preview.plan().active_facts(), 3);
     assert_eq!(preview.plan().victims(), &[low]);
     assert_eq!(
         presenter
-            .memories(CharacterId::Mita)
+            .memories(CharacterId::Crazy)
             .await
             .unwrap()
             .records()
@@ -368,16 +368,16 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
     );
     assert!(matches!(
         presenter
-            .apply_memory_capacity(CharacterId::KindMita, preview.clone())
+            .apply_memory_capacity(CharacterId::Kind, preview.clone())
             .await,
         Err(CharacterError::StaleState)
     ));
 
     // A different character's edit does not invalidate Mita's preview.
-    let other = presenter.memories(CharacterId::KindMita).await.unwrap();
+    let other = presenter.memories(CharacterId::Kind).await.unwrap();
     presenter
         .edit_memories(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             other,
             vec![MemoryCommand::Add {
                 priority: MemoryPriority::Normal,
@@ -387,7 +387,7 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
         .await
         .unwrap();
     let committed = presenter
-        .apply_memory_capacity(CharacterId::Mita, preview)
+        .apply_memory_capacity(CharacterId::Crazy, preview)
         .await
         .unwrap()
         .unwrap();
@@ -404,7 +404,7 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
     );
     assert_eq!(
         presenter
-            .preview_memory_capacity(CharacterId::Mita, 2)
+            .preview_memory_capacity(CharacterId::Crazy, 2)
             .await
             .unwrap()
             .plan()
@@ -413,26 +413,26 @@ async fn capacity_preview_requires_confirmation_and_rejects_stale_or_cross_chara
         0
     );
     let noop = presenter
-        .preview_memory_capacity(CharacterId::Mita, 2)
+        .preview_memory_capacity(CharacterId::Crazy, 2)
         .await
         .unwrap();
     assert!(
         presenter
-            .apply_memory_capacity(CharacterId::Mita, noop)
+            .apply_memory_capacity(CharacterId::Crazy, noop)
             .await
             .unwrap()
             .is_none()
     );
 
     let next = presenter
-        .preview_memory_capacity(CharacterId::Mita, 1)
+        .preview_memory_capacity(CharacterId::Crazy, 1)
         .await
         .unwrap();
     assert_eq!(next.plan().victims().len(), 1);
     assert_ne!(next.plan().victims(), &[low]);
     assert_eq!(
         presenter
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()
@@ -449,8 +449,8 @@ async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory()
     let presenter = &app.presenter().characters;
     let added = presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![
                 MemoryCommand::Add {
                     priority: MemoryPriority::Low,
@@ -465,7 +465,7 @@ async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory()
         .await
         .unwrap();
     let preview = presenter
-        .preview_memory_capacity(CharacterId::Mita, 1)
+        .preview_memory_capacity(CharacterId::Crazy, 1)
         .await
         .unwrap();
     assert_eq!(preview.plan().victims().len(), 1);
@@ -478,7 +478,7 @@ async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory()
         .id;
     presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             added.snapshot,
             vec![MemoryCommand::SetProtection {
                 id: low,
@@ -489,13 +489,13 @@ async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory()
         .unwrap();
     assert!(matches!(
         presenter
-            .apply_memory_capacity(CharacterId::Mita, preview)
+            .apply_memory_capacity(CharacterId::Crazy, preview)
             .await,
         Err(CharacterError::StaleState)
     ));
     assert_eq!(
         presenter
-            .memories(CharacterId::Mita)
+            .memories(CharacterId::Crazy)
             .await
             .unwrap()
             .records()
@@ -505,7 +505,7 @@ async fn capacity_plan_stale_write_is_atomic_and_cannot_touch_protected_memory()
         2
     );
     let new_plan = presenter
-        .preview_memory_capacity(CharacterId::Mita, 1)
+        .preview_memory_capacity(CharacterId::Crazy, 1)
         .await
         .unwrap();
     assert_ne!(new_plan.plan().victims(), &[low]);
@@ -526,21 +526,21 @@ async fn capacity_preview_can_commit_a_full_255_fact_reduction_atomically() {
             .collect();
         presenter
             .edit_memories(
-                CharacterId::Mita,
-                presenter.memories(CharacterId::Mita).await.unwrap(),
+                CharacterId::Crazy,
+                presenter.memories(CharacterId::Crazy).await.unwrap(),
                 commands,
             )
             .await
             .unwrap();
     }
     let preview = presenter
-        .preview_memory_capacity(CharacterId::Mita, 1)
+        .preview_memory_capacity(CharacterId::Crazy, 1)
         .await
         .unwrap();
     assert_eq!(preview.plan().active_facts(), 256);
     assert_eq!(preview.plan().victims().len(), 255);
     let result = presenter
-        .apply_memory_capacity(CharacterId::Mita, preview)
+        .apply_memory_capacity(CharacterId::Crazy, preview)
         .await
         .unwrap()
         .unwrap();
@@ -595,8 +595,8 @@ async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
     let presenter = &app.presenter().characters;
     presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![
                 MemoryCommand::Add {
                     priority: MemoryPriority::Low,
@@ -611,12 +611,12 @@ async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
         .await
         .unwrap();
     let preview = presenter
-        .preview_memory_capacity(CharacterId::Mita, 1)
+        .preview_memory_capacity(CharacterId::Crazy, 1)
         .await
         .unwrap();
     let forgotten_id = preview.plan().victims()[0];
     presenter
-        .apply_memory_capacity(CharacterId::Mita, preview)
+        .apply_memory_capacity(CharacterId::Crazy, preview)
         .await
         .unwrap();
     app.shutdown().await.unwrap();
@@ -625,7 +625,7 @@ async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
     let records = reopened
         .presenter()
         .characters
-        .memories(CharacterId::Mita)
+        .memories(CharacterId::Crazy)
         .await
         .unwrap();
     assert_eq!(records.records().len(), 2);
@@ -650,7 +650,7 @@ async fn capacity_forgetting_is_durable_after_sqlite_reopen() {
         reopened
             .presenter()
             .characters
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()
@@ -665,10 +665,10 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
     let _serial = SERIAL.lock().await;
     let app = start().await;
     let presenter = &app.presenter().characters;
-    let initial = presenter.memories(CharacterId::Mita).await.unwrap();
+    let initial = presenter.memories(CharacterId::Crazy).await.unwrap();
     let first = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             initial.clone(),
             vec![MemoryCommand::EnsureFact {
                 priority: MemoryPriority::Low,
@@ -682,7 +682,7 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
     assert!(matches!(
         presenter
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 initial,
                 vec![MemoryCommand::EnsureFact {
                     priority: MemoryPriority::Low,
@@ -694,7 +694,7 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
     ));
     let repeated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             first.snapshot,
             vec![MemoryCommand::EnsureFact {
                 priority: MemoryPriority::Critical,
@@ -707,7 +707,7 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
     assert_eq!(repeated.snapshot.records()[0].priority, MemoryPriority::Low);
     let forgotten = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             repeated.snapshot,
             vec![MemoryCommand::Forget { id }],
         )
@@ -715,7 +715,7 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
         .unwrap();
     let reactivated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             forgotten.snapshot,
             vec![MemoryCommand::EnsureFact {
                 priority: MemoryPriority::High,
@@ -733,7 +733,7 @@ async fn ensure_fact_is_explicit_idempotent_presenter_edit_with_character_isolat
     );
     assert!(
         presenter
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()
@@ -770,8 +770,8 @@ async fn ensure_fact_reactivates_deleted_identity_across_sqlite_reopen() {
     let presenter = &app.presenter().characters;
     let first = presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![MemoryCommand::EnsureFact {
                 priority: MemoryPriority::Low,
                 content: "survives restarts".into(),
@@ -782,7 +782,7 @@ async fn ensure_fact_reactivates_deleted_identity_across_sqlite_reopen() {
     let id = first.snapshot.records()[0].id;
     presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             first.snapshot,
             vec![MemoryCommand::SoftDelete { id }],
         )
@@ -794,8 +794,8 @@ async fn ensure_fact_reactivates_deleted_identity_across_sqlite_reopen() {
     let presenter = &reopened.presenter().characters;
     let restored = presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![MemoryCommand::EnsureFact {
                 priority: MemoryPriority::High,
                 content: "survives restarts".into(),
@@ -820,13 +820,13 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     let app = start().await;
     let presenter = &app.presenter().characters;
     let mut observer = presenter
-        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .observe_memories(CharacterId::Crazy, MemoryListQuery::default())
         .unwrap();
     assert_eq!(observer.next().await.unwrap().total_matches(), 0);
     let first = presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![MemoryCommand::SeedIsland {
                 island: MemoryIsland::Relationship,
                 content: "first story".into(),
@@ -840,7 +840,7 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     assert_eq!(observer.next().await.unwrap().total_matches(), 1);
     let duplicate = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             first.snapshot,
             vec![MemoryCommand::SeedIsland {
                 island: MemoryIsland::Relationship,
@@ -858,7 +858,7 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     );
     let forgotten = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             duplicate.snapshot,
             vec![MemoryCommand::Forget { id }],
         )
@@ -867,7 +867,7 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     assert_eq!(observer.next().await.unwrap().summary().forgotten, 1);
     let repeated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             forgotten.snapshot,
             vec![MemoryCommand::SeedIsland {
                 island: MemoryIsland::Relationship,
@@ -886,8 +886,8 @@ async fn seed_island_is_one_time_per_character_via_presenter() {
     );
     let other = presenter
         .edit_memories(
-            CharacterId::KindMita,
-            presenter.memories(CharacterId::KindMita).await.unwrap(),
+            CharacterId::Kind,
+            presenter.memories(CharacterId::Kind).await.unwrap(),
             vec![MemoryCommand::SeedIsland {
                 island: MemoryIsland::Relationship,
                 content: "other character's story".into(),
@@ -911,14 +911,14 @@ async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_seman
     let app = start().await;
     let presenter = &app.presenter().characters;
     let mut observer = presenter
-        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .observe_memories(CharacterId::Crazy, MemoryListQuery::default())
         .unwrap();
     assert_eq!(observer.next().await.unwrap().total_matches(), 0);
 
-    let empty = presenter.memories(CharacterId::Mita).await.unwrap();
+    let empty = presenter.memories(CharacterId::Crazy).await.unwrap();
     let first = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             empty.clone(),
             vec![MemoryCommand::Add {
                 priority: MemoryPriority::High,
@@ -932,7 +932,7 @@ async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_seman
 
     let updated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             first.snapshot,
             vec![MemoryCommand::AddLexicallyDeduplicated {
                 priority: MemoryPriority::Low,
@@ -953,7 +953,7 @@ async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_seman
     assert!(matches!(
         presenter
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 empty,
                 vec![MemoryCommand::AddLexicallyDeduplicated {
                     priority: MemoryPriority::Normal,
@@ -966,7 +966,7 @@ async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_seman
     ));
     let repeated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             updated.snapshot,
             vec![MemoryCommand::AddLexicallyDeduplicated {
                 priority: MemoryPriority::Low,
@@ -984,7 +984,7 @@ async fn lexical_dedup_via_presenter_keeps_character_identity_and_observer_seman
     );
     assert!(
         presenter
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()
@@ -1022,8 +1022,8 @@ async fn lexical_dedup_preserves_identity_across_persistent_timeline_reopen() {
     let presenter = &app.presenter().characters;
     let first = presenter
         .edit_memories(
-            CharacterId::Mita,
-            presenter.memories(CharacterId::Mita).await.unwrap(),
+            CharacterId::Crazy,
+            presenter.memories(CharacterId::Crazy).await.unwrap(),
             vec![MemoryCommand::Add {
                 priority: MemoryPriority::Normal,
                 content: "играли в шахматы".into(),
@@ -1034,7 +1034,7 @@ async fn lexical_dedup_preserves_identity_across_persistent_timeline_reopen() {
     let id = first.snapshot.records()[0].id;
     let updated = presenter
         .edit_memories(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             first.snapshot,
             vec![MemoryCommand::AddLexicallyDeduplicated {
                 priority: MemoryPriority::High,
@@ -1052,7 +1052,7 @@ async fn lexical_dedup_preserves_identity_across_persistent_timeline_reopen() {
     let stored = reopened
         .presenter()
         .characters
-        .memories(CharacterId::Mita)
+        .memories(CharacterId::Crazy)
         .await
         .unwrap();
     assert_eq!(stored.records().len(), 1);
@@ -1063,7 +1063,7 @@ async fn lexical_dedup_preserves_identity_across_persistent_timeline_reopen() {
         reopened
             .presenter()
             .characters
-            .memories(CharacterId::KindMita)
+            .memories(CharacterId::Kind)
             .await
             .unwrap()
             .records()

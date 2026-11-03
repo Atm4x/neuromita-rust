@@ -187,9 +187,9 @@ async fn observe(
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
-    let mut memories = MemoryWatch::start(administration, CharacterId::Mita)?;
+    let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
-    let mut character = CharacterId::Mita;
+    let mut character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();

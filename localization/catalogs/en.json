@@ -115,14 +115,6 @@
     "source": "Отменить",
     "translation": "Cancel"
   },
-  "sandbox.character.mita": {
-    "source": "Мита",
-    "translation": "Mita"
-  },
-  "sandbox.character.kind": {
-    "source": "Добрая Мита",
-    "translation": "Kind Mita"
-  },
   "sandbox.conversation": {
     "source": "Разговор с ",
     "translation": "Conversation with "
@@ -194,14 +186,6 @@
   "sandbox.context-unavailable": {
     "source": "Контекст: —",
     "translation": "Context: —"
-  },
-  "sandbox.conversation.kind": {
-    "source": "Доброй Митой",
-    "translation": "Kind Mita"
-  },
-  "sandbox.conversation.mita": {
-    "source": "Митой",
-    "translation": "Mita"
   },
   "sandbox.debug.api": {
     "source": "Открыть API-настройки",
@@ -974,5 +958,81 @@
   "settings.section-unavailable": {
     "source": "Этот раздел пока недоступен.",
     "translation": "This section is not available yet."
+  },
+  "character.crazy": {
+    "source": "Безумная Мита",
+    "translation": "Crazy Mita"
+  },
+  "character.crazy.with": {
+    "source": "Безумной Митой",
+    "translation": "Crazy Mita"
+  },
+  "character.kind": {
+    "source": "Добрая Мита",
+    "translation": "Kind Mita"
+  },
+  "character.kind.with": {
+    "source": "Доброй Митой",
+    "translation": "Kind Mita"
+  },
+  "character.cappie": {
+    "source": "Кепочка",
+    "translation": "Cappie"
+  },
+  "character.cappie.with": {
+    "source": "Кепочкой",
+    "translation": "Cappie"
+  },
+  "character.shorthair": {
+    "source": "Коротковолосая Мита",
+    "translation": "Short-haired Mita"
+  },
+  "character.shorthair.with": {
+    "source": "Коротковолосой Митой",
+    "translation": "Short-haired Mita"
+  },
+  "character.mila": {
+    "source": "Мила",
+    "translation": "Mila"
+  },
+  "character.mila.with": {
+    "source": "Милой",
+    "translation": "Mila"
+  },
+  "character.sleepy": {
+    "source": "Сонная Мита",
+    "translation": "Sleepy Mita"
+  },
+  "character.sleepy.with": {
+    "source": "Сонной Митой",
+    "translation": "Sleepy Mita"
+  },
+  "character.ghost": {
+    "source": "Призрачная Мита",
+    "translation": "Ghostly Mita"
+  },
+  "character.ghost.with": {
+    "source": "Призрачной Митой",
+    "translation": "Ghostly Mita"
+  },
+  "character.creepy": {
+    "source": "Жуткая Мита",
+    "translation": "Creepy Mita"
+  },
+  "character.creepy.with": {
+    "source": "Жуткой Митой",
+    "translation": "Creepy Mita"
+  },
+  "character.gamemaster": {
+    "source": "Мастер игры",
+    "translation": "Game Master"
+  },
+  "character.gamemaster.with": {
+    "source": "Мастером игры",
+    "translation": "Game Master"
+  },
+  "settings.preset.unset": {
+    "source": "Не выбран",
+    "translation": "Not selected"
   }
 }

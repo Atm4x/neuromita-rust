@@ -20,7 +20,7 @@ impl RerankProvider for FixedScores {
 fn hit(id: &str, score: f64) -> FusedHit {
     FusedHit {
         key: RetrievalKey {
-            character: CharacterId::Mita,
+            character: CharacterId::Crazy,
             source: RetrievalSource::Memory,
             id: id.to_string(),
         },
@@ -52,7 +52,7 @@ async fn reranker_reorders_only_the_selected_prefix_without_losing_evidence() {
             .collect::<Vec<_>>(),
         vec!["second", "first", "tail"]
     );
-    assert_eq!(hits[0].key.character, CharacterId::Mita);
+    assert_eq!(hits[0].key.character, CharacterId::Crazy);
     assert_eq!(hits[2].score, 0.7);
 }
 
@@ -174,7 +174,7 @@ async fn reranker_reorders_authoritative_memory_selection_after_vector_fusion() 
         })
         .collect::<Vec<_>>();
     let selected = retriever
-        .retrieve(CharacterId::Mita, &records, "query")
+        .retrieve(CharacterId::Crazy, &records, "query")
         .await
         .unwrap();
     assert_eq!(selected.selected_ids, vec![records[1].id, records[0].id]);
@@ -199,7 +199,7 @@ async fn reranker_reorders_authoritative_memory_selection_after_vector_fusion() 
     )
     .unwrap();
     assert!(matches!(
-        failed.retrieve(CharacterId::Mita, &records, "query").await,
+        failed.retrieve(CharacterId::Crazy, &records, "query").await,
         Err(EmbeddingError::Transport(_))
     ));
 }

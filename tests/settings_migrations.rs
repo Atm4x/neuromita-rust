@@ -39,8 +39,8 @@ impl Drop for Directory {
 fn record(revision: u64) -> StoredSettings {
     let mut settings = AppSettings::initial_profile();
     settings.presets.active = PresetId(3);
-    settings.characters.mita.presets.react = PresetSelection::Specific(PresetId(7));
-    settings.characters.kind_mita.presets.reply = PresetSelection::Specific(PresetId(11));
+    settings.characters.crazy.presets.react = PresetSelection::Specific(PresetId(7));
+    settings.characters.kind.presets.reply = PresetSelection::Specific(PresetId(11));
     StoredSettings {
         schema_version: SETTINGS_SCHEMA_VERSION,
         revision,
@@ -57,8 +57,8 @@ fn legacy(stored: &StoredSettings) -> Vec<u8> {
         .remove("characters")
         .unwrap();
     value["settings"]["presets"]["characters"] = json!({
-        "mita": characters["mita"]["presets"],
-        "kind_mita": characters["kind_mita"]["presets"],
+        "mita": characters["Crazy"]["presets"],
+        "kind_mita": characters["Kind"]["presets"],
     });
     value["settings"]
         .as_object_mut()
@@ -116,6 +116,7 @@ fn version_two_documents_gain_only_the_explicit_reminders_defaults() {
     let expected = record(6);
     let mut old = serde_json::to_value(&expected).unwrap();
     old["schema_version"] = json!(2);
+    old["settings"]["characters"] = json!({"mita": expected.settings.characters.crazy, "kind_mita": expected.settings.characters.kind});
     old["settings"].as_object_mut().unwrap().remove("reminders");
     let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
     let stored = migrated.stored();
@@ -138,20 +139,54 @@ fn version_two_documents_gain_only_the_explicit_reminders_defaults() {
 }
 
 #[test]
+fn version_three_preserves_assignments_and_adds_the_complete_catalog() {
+    let expected = record(17);
+    let mut old = serde_json::to_value(&expected).unwrap();
+    old["schema_version"] = json!(3);
+    old["settings"]["characters"] = json!({"mita": expected.settings.characters.crazy, "kind_mita": expected.settings.characters.kind});
+    let migrated = SettingsTransfer::decode(&serde_json::to_vec(&old).unwrap()).unwrap();
+    assert_eq!(migrated.stored(), &expected);
+    let mut incomplete = serde_json::to_value(&expected).unwrap();
+    incomplete["settings"]["characters"]
+        .as_object_mut()
+        .unwrap()
+        .remove("Cappie");
+    assert!(SettingsTransfer::decode(&serde_json::to_vec(&incomplete).unwrap()).is_err());
+    for (index, id) in neuromita::character::CharacterId::ALL
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(
+            neuromita::character::CharacterId::from_index(index as i32),
+            Some(id)
+        );
+        assert_eq!(
+            neuromita::character::CharacterId::parse(id.as_str()),
+            Some(id)
+        );
+        assert_eq!(serde_json::to_value(id).unwrap(), id.as_str());
+    }
+    assert_eq!(
+        serde_json::from_str::<neuromita::character::CharacterId>("\"mita\"").unwrap(),
+        neuromita::character::CharacterId::Crazy
+    );
+}
+
+#[test]
 fn invalid_and_duplicate_documents_are_rejected_without_a_fallback() {
     let source = serde_json::to_string(&record(9)).unwrap();
     let duplicate = source.replacen("\"revision\":9", "\"revision\":9,\"revision\":10", 1);
     let duplicate_schema = source.replacen(
-        "\"schema_version\":3",
-        "\"schema_version\":3,\"schema_version\":3",
+        "\"schema_version\":4",
+        "\"schema_version\":4,\"schema_version\":4",
         1,
     );
     let duplicate_nested = source.replacen("\"volume\":80", "\"volume\":80,\"volume\":81", 1);
     let mut future = serde_json::to_value(record(9)).unwrap();
-    future["schema_version"] = json!(4);
+    future["schema_version"] = json!(5);
     assert!(matches!(
         SettingsTransfer::decode(&serde_json::to_vec(&future).unwrap()),
-        Err(SettingsTransferError::UnsupportedSchema { found: 4 })
+        Err(SettingsTransferError::UnsupportedSchema { found: 5 })
     ));
     for bytes in [
         duplicate.as_bytes(),
@@ -291,7 +326,7 @@ impl StartupMigration for StartupProbe {
     }
     fn run(&self) -> Result<(), MigrationError> {
         let document: Value = serde_json::from_slice(&fs::read(&self.0).unwrap()).unwrap();
-        assert_eq!(document["schema_version"], 3);
+        assert_eq!(document["schema_version"], SETTINGS_SCHEMA_VERSION);
         assert!(SettingsApi::snapshot_all().is_err());
         Err(MigrationError::Storage("injected extension failure".into()))
     }
@@ -303,7 +338,7 @@ async fn live_import_uses_cas_not_file_revision_and_updates_bindings_and_restart
     let path = directory.path("settings.json");
     let repository = Arc::new(JsonSettingsRepository::new(path.clone()));
     let mut unsupported = serde_json::to_value(record(9)).unwrap();
-    unsupported["schema_version"] = json!(4);
+    unsupported["schema_version"] = json!(5);
     let original = serde_json::to_vec(&unsupported).unwrap();
     fs::write(&path, &original).unwrap();
     assert!(
