@@ -1,0 +1,36 @@
+name: Publish exact API preset workflow commit
+on:
+  push:
+    branches:
+      - bridge/api-presets-workflow-publish-20261104
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify bundle and publish preset workflow
+        shell: bash
+        env:
+          BASE_SHA: 13dc29b81ba572d8729264ba898aa4dcb8fe1402
+          TARGET_SHA: 0b7c0243d65d5fe891501174a344bc77db8221e2
+          TARGET_REF: refs/heads/codex/api-presets-pyqt-workflow-20261104
+        run: |
+          set -euo pipefail
+          base64 -d bridge/api-presets-workflow-20261104.bundle.b64 > api-presets.bundle
+          printf '%s  %s\n' '0f9f082be73d5a6f44261fc710afa921d34a23151c170bd2c8e5664476415eca' api-presets.bundle | sha256sum -c -
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git bundle verify api-presets.bundle
+          git fetch api-presets.bundle "${TARGET_REF}:refs/heads/api-presets-verified"
+          test "$(git rev-parse refs/heads/api-presets-verified)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${BASE_SHA}" refs/heads/api-presets-verified
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Target ref moved: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/api-presets-verified:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${TARGET_SHA}"
