@@ -34,4 +34,12 @@ impl PresetsPresenter {
     pub fn delete(&self, id: PresetId) -> Result<(), PresetCatalogError> {
         self.catalog.delete(id)
     }
+
+    pub fn require(&self, id: PresetId) -> Result<(), PresetCatalogError> {
+        if self.catalog.contains(id) {
+            Ok(())
+        } else {
+            Err(PresetCatalogError::NotFound(id))
+        }
+    }
 }

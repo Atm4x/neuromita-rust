@@ -1,3 +1,4 @@
+import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
 import { Caption, Glyph, GhostButton, Centered } from "controls.slint";
@@ -18,9 +19,9 @@ component ConversationStrip inherits Rectangle {
             text: I18n.i18n("sandbox.conversation", "Разговор с ") + (root.character == 0 ? I18n.i18n("sandbox.conversation.mita", "Митой") : I18n.i18n("sandbox.conversation.kind", "Доброй Митой"));
             font-weight: 700; font-size: 13.3333px; horizontal-stretch: 1;
         }
-        GhostButton { text: I18n.i18n("sandbox.history", "История"); glyph: Fa.database; enabled: false; }
+        GhostButton { text: I18n.i18n("sandbox.history", "История"); glyph: Fa.database; activated => { ConversationUi.history = true; } }
         GhostButton { text: I18n.i18n("sandbox.refresh", "Обновить"); glyph: Fa.refresh; activated => { root.refresh(); } }
-        GhostButton { text: I18n.i18n("sandbox.clear-chat", "Очистить чат"); glyph: Fa.trash; enabled: false; }
+        GhostButton { text: I18n.i18n("sandbox.clear-chat", "Очистить чат"); glyph: Fa.trash; activated => { ConversationUi.preview(1); } }
     }
 }
 

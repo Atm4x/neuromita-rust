@@ -1,7 +1,8 @@
 mod characters;
 mod chat;
+mod connections;
+mod conversation;
 mod presets;
-mod sandbox;
 mod settings;
 
 pub use characters::{
@@ -10,15 +11,20 @@ pub use characters::{
 };
 pub(crate) use chat::PresenterRunner;
 pub use chat::{ChatModel, ChatPresenter, PresenterError, RequestView};
+pub use connections::ConnectionsPresenter;
+pub use conversation::{
+    ConversationChange, ConversationChangePreview, ConversationError, ConversationPresenter,
+    ConversationSnapshot,
+};
 pub use presets::PresetsPresenter;
-pub use sandbox::{SandboxError, SandboxPresenter, SandboxSnapshot};
 pub use settings::{
-    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
+    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter, PresetSlot,
     PresetsSettingsPresenter, PropertyObserver, SettingsPresenter, VoiceSettingsPresenter,
 };
 
 pub struct GuiPresenter {
-    pub sandbox: SandboxPresenter,
+    pub connections: ConnectionsPresenter,
+    pub conversation: ConversationPresenter,
     pub chat: ChatPresenter,
     pub settings: SettingsPresenter,
     pub presets: PresetsPresenter,

@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import importlib.util
 import json
+import platform
 from pathlib import Path
 import sys
 
@@ -45,7 +46,10 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--settings", required=True)
+    parser.add_argument("--python-version", required=True)
     args = parser.parse_args()
+    if platform.python_version() != args.python_version:
+        raise ValueError("installer Python does not match the locked Python version")
     settings = json.loads(args.settings)
     if not isinstance(settings, dict):
         raise ValueError("install settings must be an object")

@@ -1,13 +1,16 @@
+import { MemoryDialog, MemoryUi, MemoryItem } from "sandbox/memory.slint";
+import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
+import { SettingsPage, SettingsUi, PresetItem } from "pages/settings.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 
-export { PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita — макет интерфейса");
@@ -27,7 +30,11 @@ export component AppWindow inherits Window {
     in property <bool> client-selected;
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
+    in property <int> chat-clients;
+    in property <bool> chat-server-running;
     in property <bool> core-connected;
+    in property <bool> chat-generation-ready;
+    in property <string> chat-generation-error;
     in property <bool> core-connecting;
     in property <bool> chat-sending;
     in property <int> chat-character;
@@ -46,7 +53,6 @@ export component AppWindow inherits Window {
     in-out property <string> chat-draft;
     in-out property <string> chat-model-input;
     in-out property <bool> chat-follow-tail: true;
-    callback chat-connect(string);
     callback chat-send(string);
     callback chat-cancel(string);
     callback chat-select-character(int);
@@ -85,14 +91,15 @@ export component AppWindow inherits Window {
             }
             if root.page == PageId.sandbox: SandboxPage {
                 width: parent.width; height: parent.height;
+                clients: root.chat-clients; server-running: root.chat-server-running;
                 messages: root.chat-messages; connected: root.core-connected; connecting: root.core-connecting;
                 sending: root.chat-sending; character: root.chat-character;
+                generation-ready: root.chat-generation-ready; generation-error: root.chat-generation-error;
                 model: root.chat-model; preset: root.chat-preset; address: root.chat-address;
                 error: root.chat-error; anchor: root.chat-anchor; active: root.chat-active;
                 volume: root.chat-volume; voice-enabled: root.chat-voice;
                 attitude: root.chat-attitude; boredom: root.chat-boredom; stress: root.chat-stress; accepted: root.chat-accepted;
                 draft <=> root.chat-draft; model-input <=> root.chat-model-input; follow-tail <=> root.chat-follow-tail;
-                connect(model) => { root.chat-connect(model); }
                 send(text) => { root.chat-send(text); }
                 cancel(id) => { root.chat-cancel(id); }
                 select-character(id) => { root.chat-select-character(id); }
@@ -102,12 +109,17 @@ export component AppWindow inherits Window {
                 home => { root.navigate(PageId.home); }
                 settings => { root.navigate(PageId.settings); }
             }
-            if root.page != PageId.home && root.page != PageId.sandbox: PlaceholderPage {
+            if root.page == PageId.settings: SettingsPage {
+                width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
+                home => { root.navigate(PageId.home); }
+            }
+            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.settings: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
                 home => { root.navigate(PageId.home); }
             }
+            if MemoryUi.open: MemoryDialog { width: 100%; height: 100%; }
             if root.notice != "": Rectangle {
                 x: (parent.width - self.width) / 2; y: 24px; width: min(650px, parent.width - 56px); height: 64px;
                 border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;
