@@ -1,0 +1,45 @@
+name: Import verified Slint memory GUI bundle
+on:
+  push:
+    branches:
+      - bridge/slint-memory-gui-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact Git object and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=.github/bridge/slint-memory-gui-20261103.bundle.b64
+          if [[ ! -f "$FILE" ]]; then
+            echo "Awaiting bundle payload"
+            exit 0
+          fi
+          base64 --decode "$FILE" >/tmp/verified-memory-gui.bundle
+          echo "81d503fd8c862229f4aeca9c60a613b902b9510dddfbed00614cedac07b45344  /tmp/verified-memory-gui.bundle" | sha256sum -c -
+          git fetch origin refs/heads/codex/character-memory-slint-rebased-20261103:refs/remotes/origin/verified-base
+          BASE=b640b17798d315ce4286d75995f8a70763484295
+          HEAD=e5abf7d617a766e4691106940f37b4b9463bbfb4
+          TREE=8cc06cc8116657f795d19ac4eb6115c195da53b8
+          test "$(git rev-parse refs/remotes/origin/verified-base)" = "$BASE"
+          git bundle verify /tmp/verified-memory-gui.bundle
+          git fetch /tmp/verified-memory-gui.bundle refs/heads/codex/slint-character-memory-20261103:refs/heads/gui-memory-candidate
+          test "$(git rev-parse refs/heads/gui-memory-candidate)" = "$HEAD"
+          test "$(git rev-parse refs/heads/gui-memory-candidate^)" = "$BASE"
+          test "$(git rev-parse refs/heads/gui-memory-candidate^{tree})" = "$TREE"
+          test "$(git show -s --format='%an <%ae>' "$HEAD")" = "Atm4x <mrtaktplay@gmail.com>"
+          test "$(git show -s --format='%cn <%ce>' "$HEAD")" = "Atm4x <mrtaktplay@gmail.com>"
+          TARGET=refs/heads/codex/slint-character-memory-20261103
+          if REMOTE="$(git ls-remote --heads origin "$TARGET")" && [[ -n "$REMOTE" ]]; then
+            test "${REMOTE%%[[:space:]]*}" = "$HEAD"
+            echo "Target already matches exact expected commit"
+          else
+            git push origin refs/heads/gui-memory-candidate:"$TARGET"
+          fi
+          echo "Published exact Atm4x authored and committed Git object"
