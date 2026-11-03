@@ -65,3 +65,17 @@ jobs:
           mkdir -p .cargo
           printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "vendor"\n' > .cargo/config.toml
           cargo +1.98.1 check --offline --features gui --bin neuromita-gui
+      - name: Render tested Slint pages
+        shell: bash
+        env:
+          NEUROMITA_GUI_CAPTURE_DIR: ${{ github.workspace }}/ui-captures
+        run: |
+          cargo +1.98.1 test --offline --features gui --bin neuromita-gui existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision -- --nocapture
+      - name: Publish Slint screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: releases-about-sandbox-screenshots-20261103
+          path: ui-captures/*.ppm
+          if-no-files-found: warn
+          retention-days: 4
