@@ -817,6 +817,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "model".into(),
                 relative_path: "weights.bin".into(),
@@ -953,6 +954,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
             backend: None,
