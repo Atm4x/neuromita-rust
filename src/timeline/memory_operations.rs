@@ -72,6 +72,7 @@ impl SessionTimeline {
                 accepted_reply_revision: None,
             },
         )?;
+        self.notify_memory_changed(character);
         Ok(())
     }
 }

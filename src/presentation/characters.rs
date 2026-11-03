@@ -1,3 +1,5 @@
+use tokio::sync::watch;
+
 use crate::{
     character::{
         CharacterError, CharacterHandle, CharacterId, CharacterMemorySnapshot, CharacterRegistry,
@@ -28,6 +30,30 @@ impl Default for MemoryListQuery {
             offset: 0,
             limit: 50,
         }
+    }
+}
+
+impl MemoryListQuery {
+    fn validate(&self) -> Result<(), CharacterError> {
+        if !(1..=100).contains(&self.limit) {
+            return Err(CharacterError::InvalidMemory(
+                "memory page limit must be 1..100",
+            ));
+        }
+        if self
+            .text
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .chars()
+            .count()
+            > 200
+        {
+            return Err(CharacterError::InvalidMemory(
+                "memory search text exceeds 200 characters",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -84,17 +110,8 @@ impl MemoryListPage {
         snapshot: CharacterMemorySnapshot,
         query: MemoryListQuery,
     ) -> Result<Self, CharacterError> {
-        if !(1..=100).contains(&query.limit) {
-            return Err(CharacterError::InvalidMemory(
-                "memory page limit must be 1..100",
-            ));
-        }
+        query.validate()?;
         let search = query.text.as_deref().map(str::trim).unwrap_or_default();
-        if search.chars().count() > 200 {
-            return Err(CharacterError::InvalidMemory(
-                "memory search text exceeds 200 characters",
-            ));
-        }
         let normalized_search = search.to_lowercase();
         let mut summary = MemorySummary::default();
         let mut matching = Vec::new();
@@ -134,6 +151,32 @@ impl MemoryListPage {
     }
 }
 
+/// Coalescing observer of character memory changes committed by this Core.
+/// The signal contains no memory data: every observation rebuilds its page
+/// from the same authoritative CharacterHandle used for ordinary reads.
+pub struct MemoryObserver {
+    character: CharacterHandle,
+    updates: watch::Receiver<u64>,
+    query: MemoryListQuery,
+    first: bool,
+}
+
+impl MemoryObserver {
+    pub async fn next(&mut self) -> Result<MemoryListPage, CharacterError> {
+        if !self.first {
+            self.updates
+                .changed()
+                .await
+                .map_err(|_| CharacterError::Unavailable)?;
+        }
+        self.updates.borrow_and_update();
+        let result =
+            MemoryListPage::from_snapshot(self.character.memories().await?, self.query.clone());
+        self.first = result.is_err();
+        result
+    }
+}
+
 #[derive(Clone)]
 pub struct CharactersPresenter {
     registry: CharacterRegistry,
@@ -145,6 +188,21 @@ impl CharactersPresenter {
     fn get(&self, id: CharacterId) -> Result<CharacterHandle, CharacterError> {
         self.registry.get(id).ok_or(CharacterError::Unavailable)
     }
+    pub fn observe_memories(
+        &self,
+        id: CharacterId,
+        query: MemoryListQuery,
+    ) -> Result<MemoryObserver, CharacterError> {
+        query.validate()?;
+        let character = self.get(id)?;
+        Ok(MemoryObserver {
+            updates: character.memory_updates(),
+            character,
+            query,
+            first: true,
+        })
+    }
+
     pub async fn memories(
         &self,
         id: CharacterId,

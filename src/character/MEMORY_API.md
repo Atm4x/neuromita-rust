@@ -25,3 +25,26 @@ snapshot repeatedly without re-reading concurrent updates. The client must
 explicitly refresh to observe newer memory, and edits using a stale token are
 rejected by the Character owner. These types do not depend on Slint, IPC or a
 particular UI toolkit. There is no separate memory cache or write endpoint.
+
+## Observable Presenter memory list (#21)
+
+`CharactersPresenter::observe_memories(character, query)` returns a `MemoryObserver`.
+Its `next()` immediately provides the first authoritative bounded page, then waits
+for committed in-process memory changes. A notification is a coalescing
+**invalidation hint**, not a second source of memory data or a durable revision.
+Each page is reconstructed through the same `CharacterHandle` and carries its
+normal opaque edit snapshot. The observer retries a failed read on its next call.
+
+Notifications are emitted **after a successful Timeline commit** from user edits,
+LLM memory effects, TTL expiration, administrative purge/restore and branch
+selection. Unrelated character changes and ordinary chat messages do not
+invalidate a memory list. Failed writes and no-op TTL passes emit nothing.
+The watcher closes with its owning Core. Notifications can coalesce, so clients
+must not interpret them as one event per memory command.
+
+This watch channel is **in-process only**: writes from a separate Core process,
+external SQLite connection or an uninstrumented repository writer are not
+pushed to this presenter. Such clients must explicitly refresh or use a
+separately coordinated IPC/revision contract. It has no permission to invoke
+administrative purge; that remains internal until a real authenticated client
+boundary exists. No Slint or AI Engine dependency is introduced.

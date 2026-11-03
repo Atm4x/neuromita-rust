@@ -12,6 +12,8 @@ use neuromita::{
     presentation::MemoryListQuery,
 };
 
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn limits() -> RuntimeLimits {
     RuntimeLimits {
         request_queue: NonZeroUsize::new(4).unwrap(),
@@ -44,6 +46,7 @@ async fn start() -> ApplicationLifecycle {
 
 #[tokio::test]
 async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
+    let _serial = SERIAL.lock().await;
     let app = start().await;
     let presenter = &app.presenter().characters;
     let before = presenter.memories(CharacterId::Mita).await.unwrap();
@@ -181,6 +184,7 @@ async fn presenter_memory_projection_filters_pages_and_keeps_edit_token() {
 
 #[tokio::test]
 async fn memory_presenter_rejects_invalid_queries_without_mutating_character() {
+    let _serial = SERIAL.lock().await;
     let app = start().await;
     let presenter = &app.presenter().characters;
     for query in [
@@ -224,4 +228,87 @@ async fn memory_presenter_rejects_invalid_queries_without_mutating_character() {
             .is_empty()
     );
     app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn memory_observer_refreshes_only_on_committed_character_memory_changes() {
+    let _serial = SERIAL.lock().await;
+    let app = start().await;
+    let presenter = &app.presenter().characters;
+    let mut mita = presenter
+        .observe_memories(CharacterId::Mita, MemoryListQuery::default())
+        .unwrap();
+    let mut other = presenter
+        .observe_memories(CharacterId::KindMita, MemoryListQuery::default())
+        .unwrap();
+    assert_eq!(mita.next().await.unwrap().total_matches(), 0);
+    assert_eq!(other.next().await.unwrap().total_matches(), 0);
+
+    let before = presenter.memories(CharacterId::Mita).await.unwrap();
+    let committed = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            before.clone(),
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "Remember the winter festival".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    let refreshed = tokio::time::timeout(Duration::from_secs(2), mita.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.total_matches(), 1);
+    assert_eq!(
+        refreshed.records()[0].content,
+        "Remember the winter festival"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), other.next())
+            .await
+            .is_err()
+    );
+
+    let stale = presenter
+        .edit_memories(
+            CharacterId::Mita,
+            before,
+            vec![MemoryCommand::Forget {
+                id: committed.snapshot.records()[0].id,
+            }],
+        )
+        .await;
+    assert!(matches!(stale, Err(CharacterError::StaleState)));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), mita.next())
+            .await
+            .is_err()
+    );
+
+    let changed_other = presenter
+        .edit_memories(
+            CharacterId::KindMita,
+            presenter.memories(CharacterId::KindMita).await.unwrap(),
+            vec![MemoryCommand::Add {
+                priority: MemoryPriority::High,
+                content: "Only another character knows".into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed_other.snapshot.records().len(), 1);
+    assert_eq!(other.next().await.unwrap().total_matches(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), mita.next())
+            .await
+            .is_err()
+    );
+
+    app.shutdown().await.unwrap();
+    assert!(matches!(
+        mita.next().await,
+        Err(CharacterError::Unavailable)
+    ));
 }
