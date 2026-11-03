@@ -1,0 +1,310 @@
+{
+  "fleurs": {
+    "dataset": "google/fleurs",
+    "config": [
+      "ru_ru",
+      "en_us"
+    ],
+    "split": "validation",
+    "license": "CC BY 4.0",
+    "note": "six 4-10 s clips per language; speech intervals are provisional energy-based, not human annotation"
+  },
+  "esc10": {
+    "dataset": "karolpiczak/ESC-50 (ESC-10 subset)",
+    "license": "CC BY 3.0",
+    "note": "six clips of dog, rooster, rain, sea waves, fire, clock tick; absence of speech not yet verified by listening"
+  },
+  "fixtures": [
+    {
+      "id": "fleurs-ru-1554",
+      "category": "ru",
+      "wav": "ru-01.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 29760,
+          "end_sample": 96000
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "он сказал что создал дверной звонок работающий от wifi",
+      "sha256": "3dcfab9c5172cfa3cf21e6d877d0f9cef48f4f315337128ae4a37d59f6621067",
+      "samples": 119040
+    },
+    {
+      "id": "fleurs-ru-1615",
+      "category": "ru",
+      "wav": "ru-02.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 10080,
+          "end_sample": 43200
+        },
+        {
+          "start_sample": 50880,
+          "end_sample": 97440
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "тысячи лет назад человек по имени аристарх сказал что солнечная система вращается вокруг солнца",
+      "sha256": "43f0f7ebfeaf1c1a0b92b28998121338bfcd59448b330dd4d92d68c97e4ba097",
+      "samples": 116160
+    },
+    {
+      "id": "fleurs-ru-1587",
+      "category": "ru",
+      "wav": "ru-03.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 12000,
+          "end_sample": 41760
+        },
+        {
+          "start_sample": 45600,
+          "end_sample": 70560
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "о первых случаях заболевания в этом сезоне было сообщено в июле",
+      "sha256": "7aa5df63707a0176b32be205c92e9f48ac018606c0c856954e4773e129ede758",
+      "samples": 76800
+    },
+    {
+      "id": "fleurs-ru-1651",
+      "category": "ru",
+      "wav": "ru-04.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 10560,
+          "end_sample": 85440
+        },
+        {
+          "start_sample": 91680,
+          "end_sample": 118560
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "вариант становящийся всё более популярным для тех кто планирует взять академический год это путешествовать и учиться",
+      "sha256": "54af094ce5fc1c881770da4907e80230cd8bf99ce69b1134bc94e4cd0641de3b",
+      "samples": 134400
+    },
+    {
+      "id": "fleurs-ru-1560",
+      "category": "ru",
+      "wav": "ru-05.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 15360,
+          "end_sample": 44160
+        },
+        {
+          "start_sample": 51360,
+          "end_sample": 75360
+        },
+        {
+          "start_sample": 84000,
+          "end_sample": 90240
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "как только вы выйдете из течения плыть обратно будет не труднее чем обычно",
+      "sha256": "ae6f6cd7e0e2b24f18dc9e32dec9e3b0e9b88900728c32aad09aebe21e08d1c4",
+      "samples": 113280
+    },
+    {
+      "id": "fleurs-ru-1534",
+      "category": "ru",
+      "wav": "ru-06.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 17280,
+          "end_sample": 59520
+        },
+        {
+          "start_sample": 66720,
+          "end_sample": 74880
+        },
+        {
+          "start_sample": 86400,
+          "end_sample": 121440
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "в связи со своей относительной недоступностью тимбукту стал метафорой экзотической дальней земли",
+      "sha256": "d3d2fafe0b94c320ce776a7a622d6e98a89a7cb9fab4ff9d7af670e1e259eb50",
+      "samples": 145920
+    },
+    {
+      "id": "fleurs-en-1548",
+      "category": "en",
+      "wav": "en-01.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 18240,
+          "end_sample": 33120
+        },
+        {
+          "start_sample": 36960,
+          "end_sample": 45120
+        },
+        {
+          "start_sample": 70080,
+          "end_sample": 77760
+        },
+        {
+          "start_sample": 81120,
+          "end_sample": 83520
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "when you call someone who is thousands of miles away you are using a satellite",
+      "sha256": "3185719fcf7baff179a1b947d766d00c6d28c28df5a0bc51621e3d9d68c0ee0a",
+      "samples": 104640
+    },
+    {
+      "id": "fleurs-en-1510",
+      "category": "en",
+      "wav": "en-02.wav",
+      "role": "calibration",
+      "speech": [
+        {
+          "start_sample": 12960,
+          "end_sample": 112800
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "the u.n. also hopes to finalize a fund to help countries affected by global warming to cope with the impacts",
+      "sha256": "280b618ed8e3d8c34eb25d71c761dd82951f03048b806ea989533833dace619a",
+      "samples": 126720
+    },
+    {
+      "id": "fleurs-en-1578",
+      "category": "en",
+      "wav": "en-03.wav",
+      "role": "calibration",
+      "speech": [],
+      "provisional_intervals": true,
+      "transcription": "then lakkha singh took the lead in singing the bhajans",
+      "sha256": "6955377e273f344226e5b18da1d3202a8e12198b2dc5d9ab5e1abbcecc2d2f52",
+      "samples": 66240
+    },
+    {
+      "id": "fleurs-en-1652",
+      "category": "en",
+      "wav": "en-04.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": true,
+      "transcription": "the major religion in moldova is orthodox christian",
+      "sha256": "82255733c0f54b900976afdd9e41da8a676b809868b6cc5dd670ae50ef373919",
+      "samples": 78720
+    },
+    {
+      "id": "fleurs-en-1531",
+      "category": "en",
+      "wav": "en-05.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": true,
+      "transcription": "the east african islands are in the indian ocean off the eastern coast of africa",
+      "sha256": "00bf33a4d80df75b37d7af93522026040c5b0e9ef8f6582dcfd1f52604d6a08b",
+      "samples": 71040
+    },
+    {
+      "id": "fleurs-en-1528",
+      "category": "en",
+      "wav": "en-06.wav",
+      "role": "heldout",
+      "speech": [
+        {
+          "start_sample": 5760,
+          "end_sample": 54720
+        },
+        {
+          "start_sample": 60000,
+          "end_sample": 98880
+        },
+        {
+          "start_sample": 104640,
+          "end_sample": 107520
+        }
+      ],
+      "provisional_intervals": true,
+      "transcription": "some festivals have special camping areas for families with young children",
+      "sha256": "4041e2cbbfaf38a18aea2db8aa2ec6ca4a0e723c15de5a30fb384bb605f8356c",
+      "samples": 109440
+    },
+    {
+      "id": "esc10-dog",
+      "category": "noise",
+      "wav": "noise-01-dog.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "0d6d2eb06558f0e7fa21bb8111621b79c14686326a8f9c6e68367b62c3fa53b5",
+      "samples": 80000
+    },
+    {
+      "id": "esc10-crackling_fire",
+      "category": "noise",
+      "wav": "noise-02-crackling_fire.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "e7e6368edfed111eb0e226e77b4c7b3c644aedf786edcb2241540a0ac8ac7dbb",
+      "samples": 80000
+    },
+    {
+      "id": "esc10-rain",
+      "category": "noise",
+      "wav": "noise-03-rain.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "c08063a062168f6156dcb20930861e6061370c191d486262e4f28bdbfedb6c75",
+      "samples": 80000
+    },
+    {
+      "id": "esc10-clock_tick",
+      "category": "noise",
+      "wav": "noise-04-clock_tick.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "a97ef1c04dafcff6e86a1e0872b9db270af3eaea5e9c0735c68afd276deca027",
+      "samples": 80000
+    },
+    {
+      "id": "esc10-rooster",
+      "category": "noise",
+      "wav": "noise-05-rooster.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "2a8c368ddc03fa23e441fb905d469a82dc368a3f50644054a57fcbe2d389756c",
+      "samples": 80000
+    },
+    {
+      "id": "esc10-sea_waves",
+      "category": "noise",
+      "wav": "noise-06-sea_waves.wav",
+      "role": "heldout",
+      "speech": [],
+      "provisional_intervals": false,
+      "transcription": "",
+      "sha256": "6827f8622b6dd8d71cf6977edbd3e44deecb67d97cfefd65ad975de322d045ae",
+      "samples": 80000
+    }
+  ]
+}
