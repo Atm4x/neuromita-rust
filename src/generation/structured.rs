@@ -166,7 +166,7 @@ impl StructuredResponse {
             });
         }
         for raw in self.memory_delete.iter().flatten() {
-            commands.push(MemoryCommand::Delete { id: parse_id(raw)? });
+            commands.push(MemoryCommand::SoftDelete { id: parse_id(raw)? });
         }
         for raw in self.memory_merge.iter().flatten() {
             let (ids, content) = raw
