@@ -24,12 +24,25 @@ samples»: политика сегментации больше не выраж�
 на один кадр захвата (16 мс). Это видимая часть endpoint latency, а не удвоение
 политики: 3 кадра onset остаются 48 мс, 28 кадров тишины — 448 мс.
 
+Задержка учтена в самом сегментаторе: `VoiceGate::decision_lag_frames` сообщает,
+сколько кадров провайдер отдаёт решение позже, и ровно на столько расширяется
+буфер pre-roll. Без этого при `pre_roll_samples = 0` терялся первый речевой кадр,
+попавший в первую половину 512-сэмплового окна. Это закрыто тестом
+`wide_provider_onset_survives_disabled_pre_roll`.
+
+Ошибка провайдера больше не выходит из `run()` через `?`: она превращается в
+`break Err(...)` основного цикла, поэтому worker отменяется и сессия проходит
+штатный путь завершения. Тест:
+`provider_failure_ends_the_session_through_the_normal_shutdown_path`.
+
 ## Проверки
 
-- `cargo test --lib audio::` — 22 passed, 0 failed (включая новый
-  `wide_score_provider_keeps_policy_durations_in_real_time`).
+- `cargo test --lib audio::` — 24 passed, 0 failed (включая новые
+  `wide_score_provider_keeps_policy_durations_in_real_time`,
+  `wide_provider_onset_survives_disabled_pre_roll` и
+  `provider_failure_ends_the_session_through_the_normal_shutdown_path`).
 - `cargo test --test audio_pipeline` — 1 passed.
-- Полный default suite: **441 passed, 0 failed, 2 ignored** (46 test-бинарников).
+- Полный default suite: **443 passed, 0 failed, 2 ignored** (46 test-бинарников).
 - `cargo clippy --all-targets -- -D warnings` — PASS.
 - `cargo fmt --all -- --check` — PASS.
 

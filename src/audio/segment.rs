@@ -56,6 +56,14 @@ pub const MAX_SEGMENT_SAMPLES: usize = 625 * FRAME_SAMPLES;
 
 pub trait VoiceGate: Send {
     fn inspect(&mut self, frame: &MonoPcm16Frame) -> Result<VoiceDecision, ScoreError>;
+
+    /// Capture frames between a provider window completing and its score becoming
+    /// observable. A wide provider defers its first decision by this many frames,
+    /// so the pre-roll buffer must keep that many extra frames to preserve onset.
+    fn decision_lag_frames(&self) -> usize {
+        0
+    }
+
     fn reset(&mut self);
 }
 
@@ -117,6 +125,13 @@ impl<P: VadScoreProvider + Send> VoiceGate for ScoreGate<P> {
         Ok(self.latest)
     }
 
+    fn decision_lag_frames(&self) -> usize {
+        self.frames
+            .frame_samples()
+            .div_ceil(FRAME_SAMPLES)
+            .saturating_sub(1)
+    }
+
     fn reset(&mut self) {
         self.frames.reset();
         self.unscored.clear();
@@ -164,6 +179,7 @@ impl SpeechSegment {
 pub struct SpeechSegmenter<G: VoiceGate> {
     gate: G,
     config: SegmentConfig,
+    retained_frames: usize,
     pre_roll: VecDeque<MonoPcm16Frame>,
     active: Vec<i16>,
     voice_run: usize,
@@ -186,10 +202,12 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         let retained_frames = config
             .pre_roll_samples
             .max(config.start_voice_samples)
-            .div_ceil(FRAME_SAMPLES);
+            .div_ceil(FRAME_SAMPLES)
+            .saturating_add(gate.decision_lag_frames());
         Ok(Self {
             gate,
             config,
+            retained_frames,
             pre_roll: VecDeque::with_capacity(retained_frames),
             active: Vec::new(),
             voice_run: 0,
@@ -213,12 +231,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
                 let voice = self.gate.inspect(&frame)?.speech;
                 if self.active.is_empty() {
                     {
-                        let retained = self
-                            .config
-                            .pre_roll_samples
-                            .max(self.config.start_voice_samples)
-                            .div_ceil(FRAME_SAMPLES);
-                        if self.pre_roll.len() == retained {
+                        if self.pre_roll.len() == self.retained_frames {
                             self.pre_roll.pop_front();
                         }
                         self.pre_roll.push_back(frame);
@@ -378,6 +391,53 @@ mod tests {
         // so the trail keeps at most the 32 ms provider window, never 2x policy.
         assert!(segment.samples.len() >= voiced_frames * FRAME_SAMPLES / 2);
         assert!(segment.samples.len() <= (voiced_frames + 4) * FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn wide_provider_onset_survives_disabled_pre_roll() {
+        let threshold = VoiceThreshold::new(0.5).unwrap();
+        let gate = ScoreGate::new(
+            WideProvider {
+                window: 512,
+                marker: 5,
+            },
+            threshold,
+        )
+        .unwrap();
+        assert_eq!(gate.decision_lag_frames(), 1);
+        let mut segmenter = SpeechSegmenter::new(
+            gate,
+            SegmentConfig {
+                pre_roll_samples: 0,
+                start_voice_samples: 3 * FRAME_SAMPLES,
+                end_silence_samples: 2 * FRAME_SAMPLES,
+                min_segment_samples: FRAME_SAMPLES,
+                max_segment_samples: 100 * FRAME_SAMPLES,
+                ..config(SpeechMode::Automatic)
+            },
+        )
+        .unwrap();
+
+        // Speech starts on the first half of a 512-sample window and is only
+        // scored once its second half arrives.
+        let mut published = None;
+        for frame in 0..10 {
+            let samples = if frame < 4 {
+                [5; FRAME_SAMPLES]
+            } else {
+                [0; FRAME_SAMPLES]
+            };
+            if let Some(segment) = segmenter.process(samples).unwrap() {
+                published = Some(segment);
+            }
+        }
+        let segment = published.expect("onset must still publish a segment");
+        let leading = segment
+            .samples
+            .iter()
+            .take_while(|sample| **sample == 5)
+            .count();
+        assert_eq!(leading, 4 * FRAME_SAMPLES);
     }
 
     fn config(mode: SpeechMode) -> SegmentConfig {

@@ -426,8 +426,15 @@ impl SpeechInputHandler {
                                 segmenter.suppress_playback_echo();
                                 continue;
                             }
-                            if let Some(segment) = segmenter.process(frame)?
-                                && let Err(error) = queue_segment(&send, &stream, segment) { break Err(error); }
+                            match segmenter.process(frame) {
+                                Ok(Some(segment)) => {
+                                    if let Err(error) = queue_segment(&send, &stream, segment) {
+                                        break Err(error);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(error) => break Err(error.into()),
+                            }
                         }
                         Ok(None) => {
                             if let Some(segment) = segmenter.flush()
@@ -466,7 +473,7 @@ mod tests {
         segment::{SegmentConfig, SpeechMode},
         vad::{FRAME_SAMPLES, MonoPcm16Frame, VoiceDecision},
     };
-    use std::sync::Mutex;
+    use std::{sync::Mutex, time::Duration};
 
     struct Gate;
     impl VoiceGate for Gate {
@@ -552,6 +559,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&*delivered.lock().unwrap(), &["hello from microphone"]);
+    }
+
+    struct FailingGate;
+    impl VoiceGate for FailingGate {
+        fn inspect(&mut self, _: &MonoPcm16Frame) -> Result<VoiceDecision, ScoreError> {
+            Err(ScoreError::Provider("detector failed".into()))
+        }
+        fn reset(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn provider_failure_ends_the_session_through_the_normal_shutdown_path() {
+        let session = SpeechInputHandler::new(
+            SpeechRoute {
+                character: CharacterId::Mita,
+                source: RequestSource::Presenter,
+            },
+            Arc::new(Asr),
+            Arc::new(Chat(Arc::new(Mutex::new(Vec::new())))),
+            Arc::new(SilentPlayback),
+        );
+        let config = SegmentConfig {
+            mode: SpeechMode::Automatic,
+            ..SegmentConfig::default()
+        };
+        let (_send, controls) = mpsc::channel(2);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.run(
+                Capture(vec![[100; FRAME_SAMPLES]; 3]),
+                SpeechSegmenter::new(FailingGate, config).unwrap(),
+                controls,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a provider failure must not hang shutdown");
+        assert!(matches!(result, Err(SpeechSessionError::Segment(_))));
     }
 
     enum CaptureCommand {
