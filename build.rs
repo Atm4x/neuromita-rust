@@ -7,6 +7,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/bin/neuromita-gui");
     println!("cargo:rerun-if-changed=ui");
     println!("cargo:rerun-if-changed=localization");
+    println!("cargo:rerun-if-changed=src/character/model.rs");
     let messages = extract::extract_sources(&root).expect("extract localization declarations");
     std::fs::write(
         output.join("localization-messages.json"),

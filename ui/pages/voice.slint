@@ -227,7 +227,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
                 SettingsText { text: I18n.i18n("voice.enabled", "Использовать озвучку"); font-weight: 700; }
                 SettingsText { text: VoiceUi.enabled ? I18n.i18n("voice.on", "Озвучка включена") : I18n.i18n("voice.off", "Озвучка выключена"); color: SettingsTheme.muted; font-size: 10px; }
             }
-            Rectangle { width: 294px; height: 46px; border-radius: 11px; background: SettingsTheme.field;
+            Rectangle { width: 344px; height: 46px; border-radius: 11px; background: SettingsTheme.field;
                 HorizontalLayout { padding: 4px; spacing: 3px;
                     for mode[index] in ["Telegram", I18n.i18n("voice.local", "Локальная"), "API"]: VoiceButton {
                         text: mode; glyph: index == 0 ? "\u{f1d8}" : index == 1 ? "\u{f108}" : "\u{f0c2}";
@@ -241,7 +241,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
             StatusPill { width: 240px; message: VoiceUi.enabled ? I18n.i18n("voice.on", "Озвучка включена") : I18n.i18n("voice.off", "Озвучка выключена"); }
         }
     }
-    HorizontalLayout { spacing: 16px; vertical-stretch: 1; alignment: start;
+    HorizontalLayout { spacing: 16px; vertical-stretch: 1;
         if VoiceUi.backend == 0: VoiceCard { horizontal-stretch: 3; min-width: 0px;
             VerticalLayout { padding: 17px; spacing: 11px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.telegram.title", "Подключение Telegram"); description: I18n.i18n("voice.telegram.description", "Синтез через выбранного Telegram-бота."); glyph: "\u{f1d8}"; }

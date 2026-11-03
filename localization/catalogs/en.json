@@ -619,10 +619,6 @@
     "source": "Инициатива",
     "translation": "Initiative"
   },
-  "settings.voice.description": {
-    "source": "Параметры голоса и места озвучивания.",
-    "translation": "Voice and playback settings."
-  },
   "settings.voice.launcher": {
     "source": "Озвучивать в лаунчере",
     "translation": "Speak in launcher"
@@ -630,14 +626,6 @@
   "settings.voice.game": {
     "source": "Озвучивать в игре",
     "translation": "Speak in game"
-  },
-  "settings.voice.volume": {
-    "source": "Громкость",
-    "translation": "Volume"
-  },
-  "settings.voice.id": {
-    "source": "Идентификатор голоса",
-    "translation": "Voice ID"
   },
   "conversation.clear.title": {
     "source": "Очистить видимую историю?",
@@ -1034,5 +1022,229 @@
   "settings.preset.unset": {
     "source": "Не выбран",
     "translation": "Not selected"
+  },
+  "voice.title": {
+    "source": "Настройки озвучки",
+    "translation": "Voice settings"
+  },
+  "voice.subtitle": {
+    "source": "Голоса персонажей, подключение и воспроизведение.",
+    "translation": "Character voices, connections and playback."
+  },
+  "voice.enabled": {
+    "source": "Использовать озвучку",
+    "translation": "Enable voice"
+  },
+  "voice.on": {
+    "source": "Озвучка включена",
+    "translation": "Voice enabled"
+  },
+  "voice.off": {
+    "source": "Озвучка выключена",
+    "translation": "Voice disabled"
+  },
+  "voice.telegram.title": {
+    "source": "Подключение Telegram",
+    "translation": "Telegram connection"
+  },
+  "voice.telegram.description": {
+    "source": "Синтез через выбранного Telegram-бота.",
+    "translation": "Synthesis through the selected Telegram bot."
+  },
+  "voice.telegram.auto": {
+    "source": "Автоподключение Telegram",
+    "translation": "Connect to Telegram automatically"
+  },
+  "voice.telegram.connect": {
+    "source": "Подключиться к Telegram",
+    "translation": "Connect to Telegram"
+  },
+  "voice.telegram.service": {
+    "source": "Канал/Сервис",
+    "translation": "Channel / Service"
+  },
+  "voice.telegram.wait": {
+    "source": "Макс. ожидание (сек)",
+    "translation": "Max. wait (seconds)"
+  },
+  "voice.telegram.interval": {
+    "source": "Мин. интервал запросов (сек)",
+    "translation": "Min. request interval (seconds)"
+  },
+  "voice.telegram.api": {
+    "source": "Настройки Telegram API",
+    "translation": "Telegram API settings"
+  },
+  "voice.telegram.api-id": {
+    "source": "api_id из my.telegram.org",
+    "translation": "api_id from my.telegram.org"
+  },
+  "voice.telegram.hash": {
+    "source": "api_hash из my.telegram.org",
+    "translation": "api_hash from my.telegram.org"
+  },
+  "voice.telegram.phone": {
+    "source": "Номер телефона",
+    "translation": "Phone number"
+  },
+  "voice.telegram.status-title": {
+    "source": "Состояние подключения",
+    "translation": "Connection status"
+  },
+  "voice.telegram.disconnected": {
+    "source": "Telegram не подключён",
+    "translation": "Telegram not connected"
+  },
+  "voice.telegram.hint": {
+    "source": "При первом подключении Telegram запросит код входа.",
+    "translation": "Telegram will ask for a sign-in code on the first connection."
+  },
+  "voice.local": {
+    "source": "Локальная",
+    "translation": "Local"
+  },
+  "voice.local.title": {
+    "source": "Локальный движок озвучки",
+    "translation": "Local speech engine"
+  },
+  "voice.local.description": {
+    "source": "Выберите установленную модель и способ её загрузки.",
+    "translation": "Select an installed model and how to load it."
+  },
+  "voice.local.model": {
+    "source": "Локальная модель",
+    "translation": "Local model"
+  },
+  "voice.local.choose": {
+    "source": "Выберите модель",
+    "translation": "Select model"
+  },
+  "voice.local.language": {
+    "source": "Язык локальной озвучки",
+    "translation": "Local speech language"
+  },
+  "voice.local.auto": {
+    "source": "Автозагрузка модели",
+    "translation": "Automatically load model"
+  },
+  "voice.local.lazy": {
+    "source": "Инициализировать модель при запросе",
+    "translation": "Initialize model on request"
+  },
+  "voice.local.restart": {
+    "source": "Перезапустить озвучку",
+    "translation": "Restart voice"
+  },
+  "voice.local.engine": {
+    "source": "Настройки ИИ-движка",
+    "translation": "AI engine settings"
+  },
+  "voice.local.status-title": {
+    "source": "Состояние модели",
+    "translation": "Model status"
+  },
+  "voice.local.status-hint": {
+    "source": "Готовность выбранной модели к синтезу.",
+    "translation": "Selected model readiness for synthesis."
+  },
+  "voice.local.not-ready": {
+    "source": "Требуется инициализация",
+    "translation": "Initialization required"
+  },
+  "voice.local.initialize": {
+    "source": "Инициализировать",
+    "translation": "Initialize"
+  },
+  "voice.local.model-hint": {
+    "source": "Параметры синтеза и голоса — в настройках выбранной модели.",
+    "translation": "Synthesis and voice parameters are in the selected model settings."
+  },
+  "voice.output.title": {
+    "source": "Вывод и громкость",
+    "translation": "Output and volume"
+  },
+  "voice.output.volume": {
+    "source": "Громкость озвучки",
+    "translation": "Voice volume"
+  },
+  "voice.output.chat": {
+    "source": "Озвучивать в чате",
+    "translation": "Play voice in chat"
+  },
+  "voice.api.title": {
+    "source": "Профиль API озвучки",
+    "translation": "Voice API profile"
+  },
+  "voice.api.description": {
+    "source": "Подключение к провайдеру и голоса персонажей.",
+    "translation": "Provider connection and character voices."
+  },
+  "voice.api.profile": {
+    "source": "Профиль",
+    "translation": "Profile"
+  },
+  "voice.api.choose": {
+    "source": "Выберите профиль",
+    "translation": "Select profile"
+  },
+  "voice.api.key": {
+    "source": "API ключ",
+    "translation": "API key"
+  },
+  "voice.api.key-hint": {
+    "source": "Ключ провайдера",
+    "translation": "Provider key"
+  },
+  "voice.api.model": {
+    "source": "Модель",
+    "translation": "Model"
+  },
+  "voice.api.model-choose": {
+    "source": "Выберите модель",
+    "translation": "Select model"
+  },
+  "voice.api.usage": {
+    "source": "Бесплатные и платные модели зависят от выбранного провайдера.",
+    "translation": "Free and paid models depend on the selected provider."
+  },
+  "voice.api.speed": {
+    "source": "Скорость",
+    "translation": "Speed"
+  },
+  "voice.api.characters": {
+    "source": "Голоса персонажей",
+    "translation": "Character voices"
+  },
+  "voice.api.all": {
+    "source": "Все персонажи",
+    "translation": "All characters"
+  },
+  "voice.api.unknown": {
+    "source": "Не выбран",
+    "translation": "Not selected"
+  },
+  "voice.api.voice-catalog": {
+    "source": "Где искать голос? Каталог провайдера",
+    "translation": "Where to find a voice? Provider catalog"
+  },
+  "voice.api.voice-id": {
+    "source": "Идентификатор голоса",
+    "translation": "Voice identifier"
+  },
+  "voice.api.test-title": {
+    "source": "Проверка голоса",
+    "translation": "Test voice"
+  },
+  "voice.api.test-hint": {
+    "source": "Прослушайте голос выбранного персонажа.",
+    "translation": "Listen to the selected character’s voice."
+  },
+  "voice.api.test-button": {
+    "source": "Проверить и прослушать",
+    "translation": "Test and listen"
+  },
+  "voice.api.paid": {
+    "source": "Проверка отправляет текст провайдеру. Платные модели расходуют баланс API.",
+    "translation": "The test sends text to the provider. Paid models consume API balance."
   }
 }

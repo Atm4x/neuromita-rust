@@ -37,7 +37,6 @@ pub fn bind(window: &AppWindow) {
     let ui = window.global::<VoiceUi>();
     let draft = Rc::new(RefCell::new(BTreeMap::<i32, slint::SharedString>::new()));
     let drafts = draft.clone();
-    let weak = window.as_weak();
     ui.on_voice_id_changed(move |character, value| {
         drafts.borrow_mut().insert(character, value);
     });
@@ -45,7 +44,9 @@ pub fn bind(window: &AppWindow) {
     ui.on_select_character(move |character| {
         if let Some(window) = weak_selection.upgrade() {
             let ui = window.global::<VoiceUi>();
-            draft.borrow_mut().insert(ui.get_character(), ui.get_voice_id());
+            draft
+                .borrow_mut()
+                .insert(ui.get_character(), ui.get_voice_id());
             let value = draft.borrow().get(&character).cloned().unwrap_or_default();
             ui.set_character(character);
             ui.set_voice_id(value);
