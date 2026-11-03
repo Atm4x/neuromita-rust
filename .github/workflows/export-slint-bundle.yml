@@ -1,0 +1,31 @@
+name: Export Slint Rust Git bundle
+on:
+  push:
+    branches:
+      - ci/slint-bundle-export-20261103
+  workflow_dispatch:
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create and verify full Slint branch bundle
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/heads/codex/slint-gui-20261103:refs/heads/slint-snapshot"
+          git bundle create slint-gui-20261103.bundle slint-snapshot
+          git bundle verify slint-gui-20261103.bundle
+          sha256sum slint-gui-20261103.bundle > slint-gui-20261103.bundle.sha256
+          git rev-parse slint-snapshot > slint-gui-20261103.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-slint-git-bundle
+          path: |
+            slint-gui-20261103.bundle
+            slint-gui-20261103.bundle.sha256
+            slint-gui-20261103.commit
+          retention-days: 7
