@@ -151,6 +151,13 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    /// Explicit lexical Jaccard dedup on active facts only. This does not run inference.
+    /// A threshold of 800 represents Python MEMORY_DEDUP_THRESHOLD=0.8.
+    AddLexicallyDeduplicated {
+        priority: MemoryPriority,
+        content: String,
+        threshold_per_mille: u16,
+    },
     Update {
         id: MemoryId,
         priority: Option<MemoryPriority>,
@@ -452,7 +459,41 @@ impl CharacterMemories {
         let mut changes = Vec::new();
         for command in commands {
             match command {
-                MemoryCommand::Add { priority, content } => {
+                MemoryCommand::Add { priority, content }
+                | MemoryCommand::AddLexicallyDeduplicated {
+                    priority, content, ..
+                } => {
+                    if let MemoryCommand::AddLexicallyDeduplicated {
+                        threshold_per_mille,
+                        ..
+                    } = command
+                    {
+                        if content.trim().is_empty() || content.chars().count() > 2000 {
+                            return Err("invalid memory record");
+                        }
+                        let duplicate = super::lexical_dedup::best_active_fact(
+                            next.records.values(),
+                            content,
+                            *threshold_per_mille,
+                        )?;
+                        if let Some(id) = duplicate {
+                            let previous = next.get(id).expect("dedup candidate from records");
+                            if previous.protected {
+                                return Err(
+                                    "protected memory cannot be edited before unprotecting",
+                                );
+                            }
+                            let mut changed = previous.clone();
+                            changed.content = content.clone();
+                            changed.priority = changed.priority.max(*priority);
+                            if changed != *previous {
+                                let change = MemoryChange::Upsert(changed);
+                                next.apply_committed(&change)?;
+                                changes.push(change);
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(previous) = next.records.values().find(|record| {
                         record.kind == MemoryKind::Fact
                             && record.state != MemoryState::Deleted

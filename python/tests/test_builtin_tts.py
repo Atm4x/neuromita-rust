@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from neuromita_ai_sdk import InstallPlan
 from neuromita_ai_sdk.host import PluginHost
@@ -38,6 +38,51 @@ class BuiltinTtsTests(unittest.TestCase):
                 probe = self.host.dispatch("probe_install", {"plugin_id": plugin_id})
                 self.assertFalse(probe["installed"])
 
+    def test_silero_packages_are_required_local_assets_and_change_with_language(self):
+        for plugin_id in ("silero_rvc_cuda", "silero_rvc_onnx"):
+            with self.subTest(plugin_id=plugin_id):
+                ru = self.host.dispatch("install_plan", {"plugin_id": plugin_id})
+                en = self.host.dispatch("install_plan", {"plugin_id": plugin_id, "settings": {"language": "en"}})
+                self.assertIn("silero/v5_ru.pt", [a["relative_path"] for a in ru["assets"]])
+                self.assertEqual(next(a["sha256"] for a in ru["assets"] if a["role"] == "silero_tts_model"),
+                                 "7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4")
+                self.assertEqual(next(a["sha256"] for a in en["assets"] if a["role"] == "silero_tts_model"),
+                                 "02b71034d9f13bc4001195017bac9db1c6bb6115e03fea52983e8abcff13b665")
+                self.assertIn("silero/v3_en.pt", [a["relative_path"] for a in en["assets"]])
+                self.assertNotIn("silero/v5_ru.pt", [a["relative_path"] for a in en["assets"]])
+                self.assertNotIn("edge-tts>=6.1.9,<8", ru["requirements"])
+                with tempfile.TemporaryDirectory() as root, patch.dict("os.environ", {"NEUROMITA_AI_MODELS_DIR": root}):
+                    self.assertIn("silero/v3_en.pt", plans.probe(plugin_id, {"language": "en"})["missing_assets"])
+                with self.assertRaises(ValueError):
+                    plans.plan(plugin_id, {"language": "de"})
+
+    def test_silero_initializes_from_explicit_package_not_torch_hub(self):
+        import sys
+        import types
+        plugin = VoicePlugin("silero_rvc_onnx")
+        importer = MagicMock()
+        model = MagicMock()
+        model.speakers = ["kseniya"]
+        importer.return_value.load_pickle.return_value = model
+        torch = types.ModuleType("torch")
+        package = types.ModuleType("torch.package")
+        package.PackageImporter = importer
+        torch.package = package
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "silero_rvc_onnx/silero").mkdir(parents=True)
+            (root / "silero_rvc_onnx/silero/v5_ru.pt").write_bytes(b"nonempty")
+            with patch.dict("os.environ", {"NEUROMITA_AI_MODELS_DIR": directory}), \
+                 patch.dict(sys.modules, {"torch": torch, "torch.package": package}), \
+                 patch.object(plugin, "probe_install_for_settings", return_value={"installed": True}), \
+                 patch.object(plugin, "_init_rvc", return_value=MagicMock()):
+                result = plugin.initialize({})
+        self.assertTrue(result["model_ready"])
+        importer.assert_called_once()
+        self.assertTrue(Path(importer.call_args.args[0]).parts[-2:] == ("silero", "v5_ru.pt"))
+        importer.return_value.load_pickle.assert_called_once_with("tts_models", "model")
+        model.to.assert_called_once_with("cpu")
+
     def test_rvc_variants_use_explicit_asset_extensions_and_pitch(self):
         for plugin_id in plans.VARIANTS:
             if "rvc" not in plugin_id:
@@ -49,9 +94,32 @@ class BuiltinTtsTests(unittest.TestCase):
                 self.assertTrue(required[0].endswith(".onnx" if plugin_id.endswith("onnx") else ".pth"))
                 self.assertEqual(plans.settings(plugin_id)["rvc.pitch_shift_semitones"]["default"], 6.0)
 
+    def test_tts_backend_is_selected_from_device_for_every_variant(self):
+        for plugin_id, (engine, mode, _, _) in plans.VARIANTS.items():
+            with self.subTest(plugin_id=plugin_id):
+                expected = {
+                    "cuda": "torch-cuda",
+                    "onnx": "onnx-cpu",
+                    "torch": "torch-cpu",
+                }[mode]
+                self.assertEqual(plans.plan(plugin_id).supported_backends, (expected,))
+                if mode == "onnx":
+                    selected = plans.plan(plugin_id, {"device": "dml"})
+                    self.assertEqual(selected.supported_backends, ("onnx-directml",))
+                    self.assertIn("tts-with-rvc-onnx[dml]", selected.requirements)
+                    self.assertIn("tts-with-rvc-onnx", plans.plan(plugin_id).requirements)
+                    self.assertNotIn("tts-with-rvc-onnx[dml]", plans.plan(plugin_id).requirements)
+                    with self.assertRaises(ValueError):
+                        plans.plan(plugin_id, {"device": "cuda:0"})
+                elif mode == "torch":
+                    self.assertEqual(plans.plan(plugin_id, {"device": "cuda:0"}).supported_backends, ("torch-cuda",))
+                else:
+                    with self.assertRaises(ValueError):
+                        plans.plan(plugin_id, {"device": "cpu"})
+
     def test_tts_has_no_hidden_voice_fallback(self):
         plugin = VoicePlugin("f5_tts_ru")
-        with patch.object(plugin, "probe_install", return_value={"installed": True}), patch.dict("sys.modules", {}, clear=False):
+        with patch.object(plugin, "probe_install_for_settings", return_value={"installed": True}), patch.dict("sys.modules", {}, clear=False):
             with self.assertRaises((ImportError, FileNotFoundError, ModuleNotFoundError)):
                 plugin.initialize({"device": "cpu"})
         self.assertFalse(plugin.initialized)

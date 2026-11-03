@@ -1,4 +1,4 @@
-import { MemoryDialog, MemoryUi, MemoryItem } from "sandbox/memory.slint";
+import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
@@ -9,11 +9,13 @@ import { PlaceholderPage } from "pages/placeholder.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
+import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
+import { AboutPage } from "pages/about.slint";
 
-export { MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PageId, ComponentCard, ReleaseItem, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
-    title: I18n.i18n("app.window.title", "Чат с NeuroMita — макет интерфейса");
+    title: I18n.i18n("app.window.title", "Чат с NeuroMita");
     icon: @image-url("../assets/launcher_ui/NM_Logo.png");
     preferred-width: 1560px; preferred-height: 918px;
     min-width: 1180px; min-height: 680px;
@@ -26,6 +28,12 @@ export component AppWindow inherits Window {
     in property <ComponentCard> backend;
     in property <ComponentCard> client;
     in property <[ReleaseItem]> releases;
+    in property <[ReleaseEntry]> release-prereleases;
+    in property <[ReleaseEntry]> release-releases;
+    in property <bool> release-loading: false;
+    in property <string> release-error;
+    in property <string> release-repository: "Atm4x/NeuroMita";
+    in-out property <int> release-revision: 0;
     in property <bool> backend-selected;
     in property <bool> client-selected;
     in property <string> notice;
@@ -68,6 +76,8 @@ export component AppWindow inherits Window {
     callback play();
     callback launcher-action(LauncherMenuAction);
     callback dismiss-notice();
+    callback releases-refresh();
+    callback external-link(string);
     HorizontalLayout {
         padding: 0px; spacing: 0px;
         Sidebar {
@@ -108,18 +118,32 @@ export component AppWindow inherits Window {
                 dismiss-error => { root.chat-dismiss-error(); }
                 home => { root.navigate(PageId.home); }
                 settings => { root.navigate(PageId.settings); }
+                open-memory(id) => { SettingsUi.section = 2; SettingsUi.selected-character = id; MemoryUi.open = true; MemoryUi.select(id); root.navigate(PageId.settings); }
             }
             if root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
+                wiki => { root.navigate(PageId.wiki); }
+                guide => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
+                language-selected(code) => { root.language-selected(code); }
             }
-            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.settings: PlaceholderPage {
+            if root.page == PageId.releases: ReleasesPage {
+                width: parent.width; height: parent.height;
+                prereleases: root.release-prereleases; releases: root.release-releases;
+                loading: root.release-loading; error: root.release-error; repository: root.release-repository;
+                refresh => { root.releases-refresh(); }
+                open-url(url) => { root.external-link(url); }
+            }
+            if root.page == PageId.about: AboutPage {
+                width: parent.width; height: parent.height; version: root.version;
+                open-url(url) => { root.external-link(url); }
+            }
+            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
                 home => { root.navigate(PageId.home); }
             }
-            if MemoryUi.open: MemoryDialog { width: 100%; height: 100%; }
             if root.notice != "": Rectangle {
                 x: (parent.width - self.width) / 2; y: 24px; width: min(650px, parent.width - 56px); height: 64px;
                 border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;

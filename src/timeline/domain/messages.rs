@@ -45,7 +45,7 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
                 MessageRole::User
             }
         }
-        EventKind::SessionNote => MessageRole::System,
+        EventKind::SessionNote | EventKind::ReminderToolResult => MessageRole::System,
         _ => return None,
     };
     let mut fields = draft

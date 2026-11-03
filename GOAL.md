@@ -185,3 +185,7 @@ The implementation and exact remaining limitations are tracked in [AI Engine imp
 - [ ] Real GigaAM CTC/RNNT checkpoint export and ORT inference on Windows/CPU/DirectML are **not verified**; production uv/bootstrap/install/activation/AI Hub orchestration is still open.
 
 Implementation and limitations: [AI asset generation](future/ai-asset-hooks-20261103.md).
+
+## AI audio pipeline / streaming transport / model source catalog (2026-11-03)
+
+A typed application-owned speech session (FFmpeg PCM input → Earshot VAD/PTT → ASR → ChatApi → TTS → FFplay output), bounded post-inference TTS streaming IPC and SHA-256-pinned source catalog with `ModelAssets::Catalog` have been implemented. **These are code-level integration increments, not complete end-user parity.** Normal Slint Desktop does not yet select and activate AI models or expose physical mic/PTT controls; the source catalog intentionally contains no unverified model URLs/hashes, and TTS streaming only chunks WAV *after* model inference. See [audio-pipeline-streaming-catalog](future/audio-pipeline-streaming-catalog-20261103.md).

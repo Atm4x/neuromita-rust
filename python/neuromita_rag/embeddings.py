@@ -28,6 +28,7 @@ def schema() -> dict:
 def plan() -> InstallPlan:
     return InstallPlan(
         requirements=("numpy==1.26.0", "transformers>=4.40,<5", "torch>=2.3,<3", "safetensors>=0.4,<1"),
+        supported_backends=("torch-cpu", "torch-cuda"),
         supported_python_minors=("3.11", "3.12"),
         assets=(AssetRequirement("hf_config", "config.json"),),
     )

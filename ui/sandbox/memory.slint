@@ -26,59 +26,114 @@ export global MemoryUi {
     callback apply(int);
 }
 
-export component MemoryDialog inherits Rectangle {
-    background: #00000099; TouchArea { }
-    Rectangle {
-        x: (parent.width - self.width) / 2; y: 30px; width: parent.width - 56px; height: parent.height - 60px;
-        background: SandboxTheme.panel.with-alpha(1); border-radius: 16px; border-width: 1px; border-color: SandboxTheme.border;
-        VerticalLayout { padding: 20px; spacing: 14px;
-            HorizontalLayout { height: 38px;
-                Caption { text: I18n.i18n("sandbox.state.memory", "Контекст и память"); font-size: 21px; font-weight: 700; horizontal-stretch: 1; }
-                Centered { HeaderButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { MemoryUi.open = false; MemoryUi.delete-confirm = false; } } }
-            }
-            HorizontalLayout { height: 38px; spacing: 10px;
-                for name[index] in [I18n.i18n("sandbox.character.mita", "Мита"), I18n.i18n("sandbox.character.kind", "Добрая Мита")]: HeaderButton {
-                    text: name; selected: MemoryUi.character == index; activated => { MemoryUi.edit-id = ""; MemoryUi.content = ""; MemoryUi.delete-confirm = false; MemoryUi.select(index); }
+export component MemoryPanel inherits Rectangle {
+    background: #0a0a18;
+    border-width: 1px;
+    border-color: SandboxTheme.border;
+    border-radius: 10px;
+    height: 548px;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 12px;
+        HorizontalLayout {
+            height: 25px;
+            Caption { text: I18n.i18n("sandbox.state.memory", "Контекст и память"); font-size: 15px; font-weight: 700; horizontal-stretch: 1; }
+            Caption { text: MemoryUi.total; color: SandboxTheme.muted; }
+        }
+        Caption {
+            text: I18n.i18n("memory.summary", "Активных / забытых / удалённых") + ": " + MemoryUi.active + " / " + MemoryUi.forgotten + " / " + MemoryUi.deleted;
+            color: SandboxTheme.muted;
+        }
+        if MemoryUi.error != "": Text {
+            text: MemoryUi.error; color: #ff8bb3;
+            font-family: SandboxTheme.font-family; font-size: 12px; wrap: word-wrap;
+        }
+        Caption { text: I18n.i18n("memory.page", "Записей на странице: до 50. Всего") + " " + MemoryUi.total; color: SandboxTheme.muted; }
+        HorizontalLayout {
+            spacing: 14px;
+            VerticalLayout {
+                width: 290px;
+                spacing: 8px;
+                HorizontalLayout {
+                    height: 38px; spacing: 6px;
+                    Field { text <=> MemoryUi.search; placeholder: I18n.i18n("memory.search", "Найти"); horizontal-stretch: 1; }
+                    HeaderButton { text: I18n.i18n("memory.search", "Найти"); activated => { MemoryUi.page(0, MemoryUi.search); } }
                 }
-                Rectangle { horizontal-stretch: 1; }
-            }
-            Caption { text: I18n.i18n("memory.summary", "Активных / забытых / удалённых") + ": " + MemoryUi.active + " / " + MemoryUi.forgotten + " / " + MemoryUi.deleted; color: SandboxTheme.muted; }
-            if MemoryUi.error != "": Text { text: MemoryUi.error; color: #ff8bb3; font-family: SandboxTheme.font-family; font-size: 12px; wrap: word-wrap; }
-            HorizontalLayout { spacing: 18px;
-                VerticalLayout { width: parent.width * 0.48; spacing: 10px;
-                    HorizontalLayout { height: 34px; spacing: 8px; Field { text <=> MemoryUi.search; horizontal-stretch: 1; } HeaderButton { text: I18n.i18n("memory.search", "Найти"); activated => { MemoryUi.page(0, MemoryUi.search); } } }
-                    QuickAction { text: I18n.i18n("memory.add", "Добавить воспоминание"); activated => { MemoryUi.edit(""); MemoryUi.delete-confirm = false; } }
-                    ScrollView { content-width: self.visible-width;
-                        VerticalLayout { padding: 0px; padding-right: 10px; spacing: 8px; alignment: start;
-                            for item in MemoryUi.items: Rectangle { background: MemoryUi.edit-id == item.id ? #b74b7d33 : #080912; border-radius: 10px; border-width: 1px; border-color: SandboxTheme.border;
-                                VerticalLayout { padding: 12px; spacing: 6px;
-                                    Caption { text: (item.state == 0 ? I18n.i18n("memory.active", "Активно") : item.state == 1 ? I18n.i18n("memory.forgotten", "Забыто") : I18n.i18n("memory.deleted", "Удалено")) + " · " + (item.priority == 0 ? I18n.i18n("memory.priority.low", "Низкий") : item.priority == 1 ? I18n.i18n("memory.priority.normal", "Обычный") : item.priority == 2 ? I18n.i18n("memory.priority.high", "Высокий") : I18n.i18n("memory.priority.critical", "Критический")) + (item.protected ? " · " + I18n.i18n("memory.protected", "Защищено") : ""); font-size: 11px; color: SandboxTheme.muted; }
-                                    Text { text: item.text; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap; }
+                QuickAction {
+                    text: I18n.i18n("memory.add", "Добавить воспоминание");
+                    activated => { MemoryUi.edit(""); MemoryUi.delete-confirm = false; }
+                }
+                ScrollView {
+                    content-width: self.visible-width;
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 0px; padding-right: 8px; spacing: 6px; alignment: start;
+                        for item in MemoryUi.items: Rectangle {
+                            background: MemoryUi.edit-id == item.id ? #b74b7d33 : #080912;
+                            border-radius: 8px; border-width: 1px; border-color: SandboxTheme.border;
+                            min-height: 61px;
+                            VerticalLayout {
+                                padding: 9px; spacing: 4px;
+                                Caption {
+                                    text: (item.state == 0 ? I18n.i18n("memory.active", "Активно") : item.state == 1 ? I18n.i18n("memory.forgotten", "Забыто") : I18n.i18n("memory.deleted", "Удалено")) + " · " + (item.priority == 0 ? I18n.i18n("memory.priority.low", "Низкий") : item.priority == 1 ? I18n.i18n("memory.priority.normal", "Обычный") : item.priority == 2 ? I18n.i18n("memory.priority.high", "Высокий") : I18n.i18n("memory.priority.critical", "Критический")) + (item.protected ? " · " + I18n.i18n("memory.protected", "Защищено") : "");
+                                    font-size: 10px; color: SandboxTheme.muted;
                                 }
-                                TouchArea { mouse-cursor: pointer; clicked => { MemoryUi.edit(item.id); MemoryUi.delete-confirm = false; } }
+                                Text { text: item.text; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 12px; wrap: word-wrap; }
                             }
+                            TouchArea { mouse-cursor: pointer; clicked => { MemoryUi.edit(item.id); MemoryUi.delete-confirm = false; } }
                         }
-                    }
-                    Caption { text: I18n.i18n("memory.page", "Записей на странице: до 50. Всего") + ": " + MemoryUi.total; color: SandboxTheme.muted; font-size: 11px; }
-                    HorizontalLayout { height: 38px; spacing: 8px;
-                        HeaderButton { text: I18n.i18n("memory.previous", "Назад"); enabled: MemoryUi.offset > 0; activated => { MemoryUi.page(max(0, MemoryUi.offset - 50), MemoryUi.search); } }
-                        HeaderButton { text: I18n.i18n("memory.next", "Далее"); enabled: MemoryUi.next >= 0; activated => { MemoryUi.page(MemoryUi.next, MemoryUi.search); } }
                     }
                 }
-                VerticalLayout { spacing: 12px; horizontal-stretch: 1;
-                    Caption { text: I18n.i18n("memory.content", "Содержимое воспоминания"); font-weight: 700; }
-                    Rectangle { background: #080912; border-radius: 10px; border-width: 1px; border-color: SandboxTheme.border; min-height: 130px; vertical-stretch: 1;
-                        ScrollView { x: 12px; y: 12px; width: parent.width - 24px; height: parent.height - 24px; content-width: self.visible-width;
-                            TextInput { enabled: MemoryUi.editing; text <=> MemoryUi.content; color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap; single-line: false; }
+                HorizontalLayout {
+                    height: 36px; spacing: 8px;
+                    HeaderButton {
+                        text: I18n.i18n("memory.previous", "Назад");
+                        enabled: MemoryUi.offset > 0;
+                        activated => { MemoryUi.page(max(0, MemoryUi.offset - 50), MemoryUi.search); }
+                    }
+                    HeaderButton {
+                        text: I18n.i18n("memory.next", "Далее");
+                        enabled: MemoryUi.next >= 0;
+                        activated => { MemoryUi.page(MemoryUi.next, MemoryUi.search); }
+                    }
+                }
+            }
+            VerticalLayout {
+                horizontal-stretch: 1; spacing: 8px;
+                Caption { text: I18n.i18n("memory.content", "Содержимое воспоминания"); font-weight: 700; }
+                Rectangle {
+                    background: SandboxTheme.input; border-radius: 8px;
+                    border-width: 1px; border-color: SandboxTheme.border;
+                    min-height: 112px; vertical-stretch: 1;
+                    ScrollView {
+                        x: 10px; y: 10px; width: parent.width - 20px; height: parent.height - 20px;
+                        content-width: self.visible-width;
+                        TextInput {
+                            enabled: MemoryUi.editing;
+                            text <=> MemoryUi.content;
+                            color: SandboxTheme.text; font-family: SandboxTheme.font-family;
+                            font-size: 12px; wrap: word-wrap; single-line: false;
                         }
                     }
-                    QuickAction { text: I18n.i18n("settings.save", "Сохранить"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(0); } }
-                    if MemoryUi.edit-id != "": VerticalLayout { spacing: 8px;
+                }
+                QuickAction {
+                    text: I18n.i18n("settings.save", "Сохранить");
+                    enabled: MemoryUi.editing;
+                    activated => { MemoryUi.apply(0); }
+                }
+                if MemoryUi.edit-id != "": VerticalLayout {
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 8px;
                         QuickAction { text: I18n.i18n("memory.forget", "Забыть"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(1); } }
                         QuickAction { text: I18n.i18n("memory.restore", "Восстановить"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(3); } }
-                        QuickAction { text: I18n.i18n("memory.protect", "Переключить защиту"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(4); } }
-                        QuickAction { text: I18n.i18n("settings.delete", "Удалить"); enabled: MemoryUi.editing; activated => { MemoryUi.delete-confirm = true; } }
-                        if MemoryUi.delete-confirm: QuickAction { text: I18n.i18n("memory.delete.confirm", "Подтвердить перенос в корзину"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(2); MemoryUi.delete-confirm = false; } }
+                    }
+                    QuickAction { text: I18n.i18n("memory.protect", "Переключить защиту"); enabled: MemoryUi.editing; activated => { MemoryUi.apply(4); } }
+                    QuickAction { text: I18n.i18n("settings.delete", "Удалить"); enabled: MemoryUi.editing; activated => { MemoryUi.delete-confirm = true; } }
+                    if MemoryUi.delete-confirm: QuickAction {
+                        text: I18n.i18n("memory.delete.confirm", "Подтвердить перенос в корзину");
+                        enabled: MemoryUi.editing;
+                        activated => { MemoryUi.apply(2); MemoryUi.delete-confirm = false; }
                     }
                 }
             }

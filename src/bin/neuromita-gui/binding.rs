@@ -1,9 +1,9 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc};
 
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
 };
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
     presenter::{
@@ -44,7 +44,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
     }
-    window.set_version("v2026.10.15.3".into());
+    window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
     let releases = presenter
         .borrow()
         .home()
@@ -100,7 +100,19 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         render(&window, &presenter, &catalog.borrow());
     });
     let handler = dispatch.clone();
-    window.on_navigate(move |page| handler(ShellCommand::Navigate(from_view(page))));
+    let nav_window = window.as_weak();
+    window.on_navigate(move |page| {
+        handler(ShellCommand::Navigate(from_view(page)));
+        if page == PageId::Releases
+            && let Some(window) = nav_window.upgrade()
+            && !window.get_release_loading()
+            && window.get_release_prereleases().row_count() == 0
+            && window.get_release_releases().row_count() == 0
+            && window.get_release_error().is_empty()
+        {
+            window.invoke_releases_refresh();
+        }
+    });
     let handler = dispatch.clone();
     window.on_language_selected(move |code| {
         handler(match LocaleId::new(&code) {
@@ -122,6 +134,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
+    let link_window = window.as_weak();
+    window.on_external_link(move |url| {
+        if let Err(error) = open_project_url(&url)
+            && let Some(window) = link_window.upgrade()
+        {
+            window.set_notice(error.into());
+        }
+    });
     window.run()?;
     Ok(())
 }
@@ -267,6 +287,7 @@ fn from_view(page: PageId) -> Page {
         PageId::Gallery => Page::Gallery,
         PageId::Wiki => Page::Wiki,
         PageId::Logs => Page::Logs,
+        PageId::About => Page::About,
     }
 }
 fn to_view(page: Page) -> PageId {
@@ -278,9 +299,45 @@ fn to_view(page: Page) -> PageId {
         Page::Gallery => PageId::Gallery,
         Page::Wiki => PageId::Wiki,
         Page::Logs => PageId::Logs,
+        Page::About => PageId::About,
     }
 }
 
 #[cfg(test)]
 #[path = "binding_tests.rs"]
 mod tests;
+
+fn open_project_url(url: &str) -> Result<(), String> {
+    let permitted = [
+        "https://github.com/Atm4x/NeuroMita",
+        "https://github.com/Atm4x/neuromita-rust",
+    ];
+    if !permitted
+        .iter()
+        .any(|base| url == *base || url.starts_with(&format!("{base}/")))
+    {
+        return Err("Недопустимая ссылка на внешний ресурс".into());
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        command.arg(url);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command
+        .spawn()
+        .map_err(|error| format!("Не удалось открыть ссылку: {error}"))?;
+    Ok(())
+}

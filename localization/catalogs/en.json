@@ -1,7 +1,7 @@
 {
   "app.window.title": {
-    "source": "Чат с NeuroMita — макет интерфейса",
-    "translation": "Chat with NeuroMita — UI preview"
+    "source": "Чат с NeuroMita",
+    "translation": "Chat with NeuroMita"
   },
   "navigation.sandbox": {
     "source": "Песочница",
@@ -508,8 +508,8 @@
     "translation": "Active preset"
   },
   "settings.subtitle": {
-    "source": "Параметры NeuroMita: персонажи, модели и озвучка.",
-    "translation": "NeuroMita settings: characters, models and voice."
+    "source": "Все параметры NeuroMita в одном месте: персонажи, голос, модели ИИ, память и обновления.",
+    "translation": "Every NeuroMita setting in one place: characters, voice, AI models, memory and updates."
   },
   "settings.general": {
     "source": "Общие",
@@ -620,8 +620,8 @@
     "translation": "Delete this preset? Assignments remain unchanged and require an existing preset."
   },
   "settings.characters.description": {
-    "source": "Назначение пресетов для разных видов генерации.",
-    "translation": "Preset assignments for each generation operation."
+    "source": "Профили, шаблоны поведения и история выбранного персонажа.",
+    "translation": "Profiles, behavior presets and selected character history."
   },
   "settings.operation.reply": {
     "source": "Ответ на сообщение",
@@ -754,5 +754,225 @@
   "memory.protected": {
     "source": "Защищено",
     "translation": "Protected"
+  },
+  "navigation.about": {
+    "source": "О приложении",
+    "translation": "About"
+  },
+  "navigation.releases": {
+    "source": "Релизы",
+    "translation": "Releases"
+  },
+  "page.about.title": {
+    "source": "О приложении",
+    "translation": "About NeuroMita"
+  },
+  "page.releases.title": {
+    "source": "Релизы NeuroMita",
+    "translation": "NeuroMita releases"
+  },
+  "releases.open-release": {
+    "source": "Открыть релиз",
+    "translation": "Open release"
+  },
+  "releases.collapse": {
+    "source": "Свернуть",
+    "translation": "Collapse"
+  },
+  "releases.subtitle-prefix": {
+    "source": "Лента публичных релизов с GitHub (",
+    "translation": "GitHub release feed ("
+  },
+  "releases.subtitle-suffix": {
+    "source": "): changelog, бета-сборки и ссылки на полные заметки.",
+    "translation": "): changelog, beta builds and links to full notes."
+  },
+  "releases.refresh": {
+    "source": "Обновить",
+    "translation": "Refresh"
+  },
+  "releases.github": {
+    "source": "Открыть на GitHub",
+    "translation": "Open on GitHub"
+  },
+  "releases.filter.all": {
+    "source": "Все",
+    "translation": "All"
+  },
+  "releases.filter.release": {
+    "source": "Релизы",
+    "translation": "Releases"
+  },
+  "releases.filter.pre": {
+    "source": "Пререлизы",
+    "translation": "Pre-releases"
+  },
+  "releases.loading": {
+    "source": "Загрузка релизов…",
+    "translation": "Loading releases…"
+  },
+  "releases.empty": {
+    "source": "Релизы пока не найдены.",
+    "translation": "No releases found."
+  },
+  "releases.section.pre": {
+    "source": "ПРЕРЕЛИЗЫ",
+    "translation": "PRE-RELEASES"
+  },
+  "releases.section.release": {
+    "source": "РЕЛИЗЫ",
+    "translation": "RELEASES"
+  },
+  "about.title": {
+    "source": "О приложении",
+    "translation": "About"
+  },
+  "about.version": {
+    "source": "Версия",
+    "translation": "Version"
+  },
+  "about.project": {
+    "source": "О проекте",
+    "translation": "About the project"
+  },
+  "about.description": {
+    "source": "NeuroMita — лаунчер и приложение для взаимодействия с персонажами MiSide. Интерфейс этого клиента реализован на Rust с использованием Slint.",
+    "translation": "NeuroMita is a launcher and application for interacting with MiSide characters. This client interface is built with Rust and Slint."
+  },
+  "about.links": {
+    "source": "Ссылки на проект",
+    "translation": "Project links"
+  },
+  "about.repository": {
+    "source": "Исходники NeuroMita",
+    "translation": "NeuroMita source code"
+  },
+  "about.rust-repository": {
+    "source": "Rust-версия NeuroMita",
+    "translation": "NeuroMita Rust edition"
+  },
+  "settings.characters.library": {
+    "source": "Библиотека персонажей",
+    "translation": "Character library"
+  },
+  "settings.characters.search": {
+    "source": "Поиск персонажей…",
+    "translation": "Search characters…"
+  },
+  "settings.characters.prompt-set": {
+    "source": "Набор промптов",
+    "translation": "Prompt set"
+  },
+  "settings.characters.prompt-unavailable": {
+    "source": "Каталог наборов промптов не подключён",
+    "translation": "Prompt sets are unavailable"
+  },
+  "settings.characters.generation-presets": {
+    "source": "Пресеты генерации",
+    "translation": "Generation presets"
+  },
+  "settings.characters.split-presets": {
+    "source": "Отдельные пресеты для разных видов генерации",
+    "translation": "Separate presets for each generation operation"
+  },
+  "settings.characters.generation-preset": {
+    "source": "Пресет генерации",
+    "translation": "Generation preset"
+  },
+  "settings.characters.provider": {
+    "source": "Провайдер для персонажа",
+    "translation": "Character provider"
+  },
+  "settings.characters.provider-note": {
+    "source": "Провайдер задаётся выбранным пресетом генерации.",
+    "translation": "The provider is selected by the generation preset."
+  },
+  "settings.characters.history": {
+    "source": "История персонажа и память",
+    "translation": "Character history and memory"
+  },
+  "settings.characters.history-actions": {
+    "source": "Управляйте воспоминаниями этого персонажа.",
+    "translation": "Manage this character’s memories."
+  },
+  "settings.characters.maintenance": {
+    "source": "Обслуживание",
+    "translation": "Maintenance"
+  },
+  "settings.characters.maintenance-note": {
+    "source": "Операции обслуживания пока недоступны.",
+    "translation": "Maintenance operations are not available yet."
+  },
+  "settings.characters.danger": {
+    "source": "Опасная зона — все персонажи",
+    "translation": "Danger zone — all characters"
+  },
+  "settings.characters.danger-note": {
+    "source": "Глобальные операции удаления пока недоступны.",
+    "translation": "Global deletion operations are not available yet."
+  },
+  "releases.no-description": {
+    "source": "Без описания.",
+    "translation": "No description."
+  },
+  "settings.characters.title": {
+    "source": "Настройки персонажей",
+    "translation": "Character settings"
+  },
+  "settings.characters.author": {
+    "source": "Автор:",
+    "translation": "Author:"
+  },
+  "settings.characters.version": {
+    "source": "Версия:",
+    "translation": "Version:"
+  },
+  "settings.characters.prompt-description": {
+    "source": "Описание:",
+    "translation": "Description:"
+  },
+  "settings.characters.open-prompt-folder": {
+    "source": "Открыть папку набора",
+    "translation": "Open prompt set folder"
+  },
+  "settings.characters.reload": {
+    "source": "Перезагрузить",
+    "translation": "Reload"
+  },
+  "settings.language": {
+    "source": "Язык",
+    "translation": "Language"
+  },
+  "settings.ai-engine": {
+    "source": "ИИ-движок",
+    "translation": "AI engine"
+  },
+  "settings.game": {
+    "source": "Игра",
+    "translation": "Game"
+  },
+  "settings.models": {
+    "source": "Модели",
+    "translation": "Models"
+  },
+  "settings.images": {
+    "source": "Изображения",
+    "translation": "Images"
+  },
+  "settings.updates": {
+    "source": "Обновления",
+    "translation": "Updates"
+  },
+  "settings.data": {
+    "source": "Сбор данных",
+    "translation": "Data collection"
+  },
+  "settings.open-updates": {
+    "source": "Открыть обновления",
+    "translation": "Open updates"
+  },
+  "settings.section-unavailable": {
+    "source": "Этот раздел пока недоступен.",
+    "translation": "This section is not available yet."
   }
 }

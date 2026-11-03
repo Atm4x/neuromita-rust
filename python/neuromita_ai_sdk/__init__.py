@@ -39,6 +39,7 @@ class InstallPlan:
     assets: tuple[AssetRequirement, ...] = ()
     backend: str | None = None
     supported_backends: tuple[str, ...] = ()
+    required_backends: tuple[str, ...] = ()
     requirements: tuple[str, ...] = ()
     supported_python_minors: tuple[str, ...] = ()
     actions: tuple[InstallerAction, ...] = ()
@@ -50,6 +51,7 @@ class InstallPlan:
             "assets": [vars(item) for item in self.assets],
             "backend": self.backend,
             "supported_backends": list(self.supported_backends),
+            "required_backends": list(self.required_backends),
             "requirements": list(self.requirements),
             "supported_python_minors": list(self.supported_python_minors),
             "actions": [vars(action) for action in self.actions],

@@ -3,6 +3,7 @@
 mod binding;
 mod memory;
 mod presenter;
+mod releases;
 mod runtime;
 mod sandbox;
 mod settings;

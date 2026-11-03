@@ -54,6 +54,7 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     let send = dispatch.clone();
     window.global::<ConversationUi>().on_preview(move |kind| {
@@ -122,6 +123,8 @@ pub fn attach(
 
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::Releases(snapshot) => super::releases::render(window, &snapshot),
+        Update::ReleaseError(error) => window.set_release_error(error.into()),
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
         Update::MemoryError(error) => window.global::<MemoryUi>().set_error(error.into()),
         Update::MemorySaved(edit_id) => super::memory::saved(window, memory_editor, edit_id),

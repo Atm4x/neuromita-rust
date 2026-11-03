@@ -20,7 +20,7 @@ use crate::{
         AiService,
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
     },
-    character::{CharacterHandle, CharacterId, CharacterRegistry},
+    character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -38,8 +38,9 @@ use crate::{
     migration::{MigrationError, StartupMigrationError, StartupMigrations},
     presentation::{
         CharactersPresenter, ConnectionsPresenter, ConversationPresenter, GuiPresenter,
-        PresenterRunner, PresetsPresenter, SettingsPresenter,
+        PresenterRunner, PresetsPresenter, ReleasesPresenter, SettingsPresenter,
     },
+    reminders::{ReminderConfig, ReminderService},
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
@@ -82,6 +83,7 @@ pub struct AiRerankSelection {
 }
 
 pub struct ApplicationConfig {
+    pub releases: Arc<dyn crate::releases::ReleaseFeed>,
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
     pub generator: ResponseGenerator,
@@ -93,6 +95,7 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub reminders: ReminderConfig,
 }
 
 impl ApplicationConfig {
@@ -112,6 +115,7 @@ impl ApplicationConfig {
         bind: std::net::SocketAddr,
     ) -> Self {
         Self {
+            releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Mita),
             timeline: TimelineConfig::Transient,
@@ -126,6 +130,7 @@ impl ApplicationConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            reminders: ReminderConfig::system(),
         }
     }
 
@@ -223,6 +228,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -292,7 +298,10 @@ impl RequestIngress for TimelineRequestIngress {
 }
 
 struct ApplicationOwner {
+    releases_task: Option<JoinHandle<Result<(), std::convert::Infallible>>>,
     bindings: Arc<ApiBindings>,
+    reminders_stop: CancellationToken,
+    reminders_task: Option<JoinHandle<()>>,
     workers_stop: CancellationToken,
     owners_stop: CancellationToken,
     presenter_stop: CancellationToken,
@@ -312,6 +321,7 @@ impl ApplicationLifecycle {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
+            releases: release_feed,
             migrations,
             presets,
             generator,
@@ -323,6 +333,7 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            reminders: reminders_config,
         } = config;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
@@ -337,12 +348,17 @@ impl ApplicationLifecycle {
         .map_err(|error| ApplicationError::Task(error.to_string()))?;
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
+        let settings_owner = settings.owner();
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let ai_runtime = match ai_runtime {
             Some(configuration) => Some(Box::pin(configuration.activate()).await?),
             None => None,
         };
+        let speech = ai_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.speech_recognizer())
+            .map(Arc::new);
         let voice = match &ai_runtime {
             Some(runtime) if runtime.has_service(AiService::Tts) => runtime.voice_provider(),
             _ => voice,
@@ -378,15 +394,22 @@ impl ApplicationLifecycle {
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
-        let (characters, owners) = CharacterRegistry::spawn(
+        let (releases, release_lifecycle) = ReleasesPresenter::new(release_feed);
+        let releases_task = tokio::spawn(release_lifecycle.run(presenter_stop.child_token()));
+        let reminders_wake = Arc::new(tokio::sync::Notify::new());
+        let (characters, owners) = CharacterRegistry::spawn_with_reminders(
             Arc::clone(&timeline),
             owners_stop.clone(),
             limits.character_commands.get(),
+            ReminderBridge {
+                settings: Arc::clone(&settings_owner),
+                wake: Arc::clone(&reminders_wake),
+                clock: Arc::clone(&reminders_config.clock),
+            },
         );
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
-        let settings_owner = settings.owner();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -415,6 +438,15 @@ impl ApplicationLifecycle {
             timeline: Arc::clone(&timeline),
         });
         let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
+        let reminders_stop = CancellationToken::new();
+        let (reminders, reminders_task) = ReminderService::start(
+            Arc::clone(&timeline),
+            Arc::clone(&api),
+            Arc::clone(&settings_owner),
+            reminders_config,
+            reminders_wake,
+            reminders_stop.clone(),
+        );
         let discovery = api.registry.observe();
         let (chat, runner) = PresenterRunner::new(
             Arc::clone(&api),
@@ -432,9 +464,13 @@ impl ApplicationLifecycle {
             characters,
             settings: settings_owner,
             presets: Arc::clone(&presets),
+            reminders,
         });
         let mut owner = ApplicationOwner {
+            releases_task: Some(releases_task),
             bindings: Arc::clone(&bindings),
+            reminders_stop,
+            reminders_task: Some(reminders_task),
             workers_stop,
             owners_stop,
             presenter_stop,
@@ -462,6 +498,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                releases,
                 connections: ConnectionsPresenter::new(server.clone()),
                 conversation: ConversationPresenter::new(
                     chat.clone(),
@@ -478,10 +515,28 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            speech,
             id,
             stop,
             completion: Some(completion),
         })
+    }
+
+    /// An ASR-powered microphone session is available only when ASR was explicitly activated.
+    /// Its cancellation token is a child of the application's lifecycle token.
+    pub fn speech_session(
+        &self,
+        character: CharacterId,
+        source: crate::request::RequestSource,
+        playback: Arc<dyn crate::audio::device::AudioPlayback>,
+    ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
+        let recognizer = self.speech.as_ref()?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>,
+            Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
+            playback,
+        );
+        Some((handler, self.stop.child_token()))
     }
 
     pub fn presenter(&self) -> &GuiPresenter {
@@ -677,6 +732,14 @@ impl ApplicationOwner {
                 Err(error) => failure = Some(ApplicationError::Task(error.to_string())),
             }
         }
+        // Stop the reminder scheduler before character workers so an in-flight
+        // delivery is interrupted with the Shutdown cause and stays pending.
+        self.reminders_stop.cancel();
+        if let Some(task) = self.reminders_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         self.workers_stop.cancel();
         for worker in self.workers.drain(..) {
             if let Err(error) = worker.await {
@@ -691,6 +754,11 @@ impl ApplicationOwner {
             }
         }
         self.presenter_stop.cancel();
+        if let Some(task) = self.releases_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         if let Some(task) = self.presenter_task.take()
             && let Err(error) = task.await
         {
@@ -728,7 +796,11 @@ impl Drop for ApplicationOwner {
         self.bindings.chat.registry.close();
         self.workers_stop.cancel();
         self.presenter_stop.cancel();
+        if let Some(task) = &self.releases_task {
+            task.abort();
+        }
         self.server_stop.cancel();
+        self.reminders_stop.cancel();
         self.bindings.settings.close();
         self.settings_stop.cancel();
         self.owners_stop.cancel();
@@ -741,6 +813,9 @@ impl Drop for ApplicationOwner {
             task.abort();
         }
         if let Some(task) = &self.server_task {
+            task.abort();
+        }
+        if let Some(task) = &self.reminders_task {
             task.abort();
         }
         if let Some(task) = &self.settings_task {

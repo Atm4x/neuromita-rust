@@ -97,6 +97,66 @@
       "items": {
         "type": "string"
       }
+    },
+    "reminder_add": {
+      "description": "Add a reminder: due_iso|text; due_iso is local ISO or RFC 3339",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reminder_delete": {
+      "description": "Delete a reminder by its numeric N",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "timer_add": {
+      "description": "Start an autonomous timer: delay_seconds|instruction",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tool_call": {
+      "description": "Invoke the reminder tool; other tools are rejected",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Must be reminder"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["list", "add", "timer", "delete", "update"]
+            },
+            "text": {
+              "type": "string"
+            },
+            "due": {
+              "type": "string"
+            },
+            "n": {
+              "type": "integer"
+            },
+            "delay_seconds": {
+              "type": "number"
+            },
+            "instruction": {
+              "type": "string"
+            },
+            "repeat": {
+              "type": "string",
+              "description": "once, daily, weekly, or every N seconds"
+            }
+          }
+        }
+      },
+      "required": ["name"]
     }
   },
   "type": "object",

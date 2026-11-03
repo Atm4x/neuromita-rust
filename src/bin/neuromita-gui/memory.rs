@@ -39,7 +39,21 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         editor.offset = 0;
         editor.search.clear();
         if let Some(window) = weak.upgrade() {
-            window.global::<MemoryUi>().set_editing(false);
+            let ui = window.global::<MemoryUi>();
+            ui.set_character(id);
+            ui.set_editing(false);
+            ui.set_edit_id("".into());
+            ui.set_content("".into());
+            ui.set_error("".into());
+            ui.set_delete_confirm(false);
+            ui.set_search("".into());
+            ui.set_offset(0);
+            ui.set_next(-1);
+            ui.set_active("0".into());
+            ui.set_forgotten("0".into());
+            ui.set_deleted("0".into());
+            ui.set_total("0".into());
+            ui.set_items(ModelRc::new(VecModel::from(Vec::<MemoryItem>::new())));
         }
         let character = match id {
             0 => neuromita::character::CharacterId::Mita,

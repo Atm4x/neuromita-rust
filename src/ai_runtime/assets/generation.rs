@@ -302,6 +302,7 @@ mod tests {
             }],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
             asset_hooks: if hooks {

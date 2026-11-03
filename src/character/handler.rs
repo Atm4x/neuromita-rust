@@ -6,7 +6,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -22,6 +22,8 @@ use crate::{
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     memory::MemoryCommand,
+    reminders::{ReminderProjection, resolve_requests},
+    settings::{RemindersSettings, SettingsOwner},
     timeline::domain::{AppliedEffect, CharacterBehavior},
     timeline::{
         ContextAnchor, ContextCaptureError, ContextPosition, EventId, GeneratedReply,
@@ -32,6 +34,15 @@ use crate::{
     turn::{ResponseEffect, ResponseSegment, TurnProposal},
     voice::AudioArtifact,
 };
+
+/// Runtime coupling that lets an accepted reply commit reminder effects and
+/// wake the owned scheduler without a second schedule authority.
+#[derive(Clone)]
+pub(crate) struct ReminderBridge {
+    pub(crate) settings: Arc<SettingsOwner>,
+    pub(crate) wake: Arc<Notify>,
+    pub(crate) clock: Arc<dyn crate::reminders::Clock>,
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum CharacterError {
@@ -213,12 +224,28 @@ pub(crate) struct CharacterRegistry {
 }
 
 impl CharacterRegistry {
+    #[cfg(test)]
     pub(crate) fn spawn(
         timeline: Arc<Mutex<SessionTimeline>>,
         stop: CancellationToken,
         capacity: usize,
     ) -> (Self, Vec<JoinHandle<()>>) {
-        Self::spawn_with_maintenance_interval(timeline, stop, capacity, Duration::from_secs(60))
+        Self::spawn_inner(timeline, stop, capacity, Duration::from_secs(60), None)
+    }
+
+    pub(crate) fn spawn_with_reminders(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        reminders: ReminderBridge,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        Self::spawn_inner(
+            timeline,
+            stop,
+            capacity,
+            Duration::from_secs(60),
+            Some(reminders),
+        )
     }
 
     fn maintenance_pass(
@@ -242,11 +269,22 @@ impl CharacterRegistry {
             .unwrap_or(u64::MAX)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_with_maintenance_interval(
         timeline: Arc<Mutex<SessionTimeline>>,
         stop: CancellationToken,
         capacity: usize,
         interval: Duration,
+    ) -> (Self, Vec<JoinHandle<()>>) {
+        Self::spawn_inner(timeline, stop, capacity, interval, None)
+    }
+
+    fn spawn_inner(
+        timeline: Arc<Mutex<SessionTimeline>>,
+        stop: CancellationToken,
+        capacity: usize,
+        interval: Duration,
+        reminders: Option<ReminderBridge>,
     ) -> (Self, Vec<JoinHandle<()>>) {
         assert!(
             !interval.is_zero(),
@@ -269,6 +307,7 @@ impl CharacterRegistry {
             let handler = CharacterHandler {
                 character,
                 timeline: Arc::clone(&timeline),
+                reminders: reminders.clone(),
             };
             let memory_updates = timeline
                 .lock()
@@ -315,6 +354,7 @@ impl CharacterRegistry {
 struct CharacterHandler {
     character: Character,
     timeline: Arc<Mutex<SessionTimeline>>,
+    reminders: Option<ReminderBridge>,
 }
 
 impl CharacterHandler {
@@ -467,6 +507,15 @@ impl CharacterHandler {
         let now = CharacterRegistry::now_unix_ms();
         let memories = captured.memories.list_at(now);
         let memory_islands = captured.memories.islands_at(now);
+        let reminders = match &self.reminders {
+            Some(_) => crate::reminders::projection::prompt_reminders_at(
+                &timeline,
+                anchor,
+                self.character.id,
+            )
+            .map_err(|error| CharacterError::Internal(error.to_string()))?,
+            None => Vec::new(),
+        };
         let reaction = match intent {
             TurnIntent::Reply(event) | TurnIntent::React(event) => Some(
                 captured
@@ -514,6 +563,7 @@ impl CharacterHandler {
             memory_islands,
             history: captured.history,
             view: captured.view,
+            reminders,
             current_input: guidance,
             focus: GenerationFocus { intent, reaction },
             anchor,
@@ -543,6 +593,26 @@ impl CharacterHandler {
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
+        if let TurnIntent::React(cause) = context.intent
+            && self.reminders.is_some()
+        {
+            let selection = timeline.selection();
+            let facts = timeline
+                .reminder_facts(selection)
+                .map_err(|error| CharacterError::Internal(error.to_string()))?;
+            let projection =
+                ReminderProjection::from_facts(selection.branch_id, self.character.id, &facts)
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+            if let Some(delivery) = projection.delivery_by_event(cause)
+                && !matches!(
+                    delivery.state,
+                    crate::reminders::DeliveryState::Pending
+                        | crate::reminders::DeliveryState::Retrying
+                )
+            {
+                return Err(CharacterError::StaleState);
+            }
+        }
         let current_behavior = CharacterBehavior {
             attitude: self.character.state.attitude,
             boredom: self.character.state.boredom,
@@ -571,6 +641,65 @@ impl CharacterHandler {
                             .map(AppliedEffect::CharacterMemoryChanged),
                     );
                 }
+                ResponseEffect::MutateReminders(requests) => {
+                    let Some(bridge) = &self.reminders else {
+                        return Err(CharacterError::Internal(
+                            "reminder settings are not wired".into(),
+                        ));
+                    };
+                    let settings = bridge
+                        .settings
+                        .snapshot::<RemindersSettings>()
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?
+                        .value;
+                    let now = bridge.clock.now();
+                    if !settings.enabled {
+                        return Err(CharacterError::Internal(
+                            "reminders are disabled in settings".into(),
+                        ));
+                    }
+                    let selection = timeline.selection();
+                    let facts = timeline
+                        .reminder_facts(selection)
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let mut projection = ReminderProjection::from_facts(
+                        selection.branch_id,
+                        self.character.id,
+                        &facts,
+                    )
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let captured_anchor = ContextAnchor {
+                        branch_id: context.turn.selection.branch_id.0,
+                        through: context.turn.context_head,
+                    };
+                    let captured_facts = timeline
+                        .reminder_facts_at(captured_anchor)
+                        .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    let captured = ReminderProjection::from_facts(
+                        context.turn.selection.branch_id,
+                        self.character.id,
+                        &captured_facts,
+                    )
+                    .map_err(|error| CharacterError::Internal(error.to_string()))?;
+                    if captured.reminder_state() != projection.reminder_state() {
+                        return Err(CharacterError::StaleState);
+                    }
+                    let (changes, diagnostic) = resolve_requests(
+                        &mut projection,
+                        self.character.id,
+                        requests,
+                        now,
+                        &settings.timezone,
+                        settings.policy,
+                    )
+                    .map_err(|error| {
+                        CharacterError::Internal(format!("invalid reminder effects: {error}"))
+                    })?;
+                    effects.extend(changes.into_iter().map(AppliedEffect::ReminderChanged));
+                    if let Some(text) = diagnostic {
+                        effects.push(AppliedEffect::ReminderToolResult(text));
+                    }
+                }
             }
         }
         let event_id = timeline
@@ -592,6 +721,14 @@ impl CharacterHandler {
                 other => CharacterError::Internal(other.to_string()),
             })?;
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
+        if proposed
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ResponseEffect::MutateReminders(_)))
+            && let Some(bridge) = &self.reminders
+        {
+            bridge.wake.notify_one();
+        }
         Ok(AcceptedResponse {
             state_after: self.character.state.clone(),
             text: Arc::clone(proposed.text()),
@@ -644,6 +781,7 @@ mod turn_tests {
         CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(SessionTimeline::new())),
+            reminders: None,
         }
     }
 
@@ -821,6 +959,7 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             accept_with_state_change(&mut handler, request, acceptance(&context), 3.2, -1.0, 2.0)
@@ -1047,6 +1186,7 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             accept(&mut handler, request, acceptance(&context)).unwrap();
@@ -1065,6 +1205,7 @@ mod turn_tests {
             let mut handler = CharacterHandler {
                 character: Character::create(CharacterId::Mita),
                 timeline: Arc::new(Mutex::new(timeline)),
+                reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             assert_eq!(context.state.accepted_replies, 1);
@@ -1146,6 +1287,7 @@ mod turn_tests {
         let mut handler = CharacterHandler {
             character: Character::create(CharacterId::Mita),
             timeline: Arc::new(Mutex::new(timeline)),
+            reminders: None,
         };
         let (request, context) = prepare(&mut handler);
         let token = acceptance(&context);

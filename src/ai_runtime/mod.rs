@@ -1,4 +1,7 @@
 //! Rust-owned process lifecycle and correlated JSON-lines IPC for Python AI plugins.
+//!
+//! Dropping an in-flight IPC request retires and terminates its worker. Shared
+//! topology requires restarting the shared worker; split isolates that service.
 
 pub mod application;
 pub mod assets;
@@ -10,6 +13,7 @@ pub mod install;
 mod layer;
 pub mod managed;
 pub mod overlay;
+pub mod production;
 pub mod resolver;
 pub mod speech;
 pub mod uv;
@@ -278,6 +282,84 @@ impl WorkerProcess {
         let outcome = in_flight.worker.request_inner(operation, args).await;
         in_flight.completed = true;
         outcome
+    }
+
+    async fn stream_wav(&mut self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        let mut transaction = InFlightRequest {
+            worker: self,
+            completed: false,
+        };
+        let result = transaction.worker.stream_wav_inner(input).await;
+        transaction.completed = result.is_ok();
+        result
+    }
+
+    async fn stream_wav_inner(&mut self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
+        let head = self
+            .request_inner(
+                "infer_stream_start",
+                &json!({"kind": "tts", "input": input}),
+            )
+            .await?;
+        let stream_id = head
+            .get("stream_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AiRuntimeError::Protocol("missing stream identity".into()))?;
+        if stream_id.len() != 32
+            || !stream_id.bytes().all(|b| b.is_ascii_hexdigit())
+            || head.get("format").and_then(Value::as_str) != Some("wav")
+        {
+            return Err(AiRuntimeError::Protocol("invalid stream metadata".into()));
+        }
+        let length = head
+            .get("length")
+            .and_then(Value::as_u64)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(|| AiRuntimeError::Protocol("invalid stream size".into()))?;
+        if !(44..=MAX_STREAM_BYTES).contains(&length) {
+            return Err(AiRuntimeError::Protocol("stream size exceeds limit".into()));
+        }
+        let mut audio = Vec::with_capacity(length);
+        while audio.len() < length {
+            let response = self
+                .request_inner("infer_stream_next", &json!({"stream_id": stream_id}))
+                .await?;
+            if response.get("stream_id").and_then(Value::as_str) != Some(stream_id) {
+                return Err(AiRuntimeError::Protocol("stream identity changed".into()));
+            }
+            let encoded = response
+                .get("chunk_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AiRuntimeError::Protocol("missing stream chunk".into()))?;
+            if encoded.len() > 70_000 {
+                return Err(AiRuntimeError::Protocol("stream chunk too large".into()));
+            }
+            let chunk = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+            if chunk.is_empty() || chunk.len() > 48 * 1024 || chunk.len() > length - audio.len() {
+                return Err(AiRuntimeError::Protocol(
+                    "invalid stream chunk length".into(),
+                ));
+            }
+            audio.extend_from_slice(&chunk);
+            let done = response
+                .get("done")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| AiRuntimeError::Protocol("missing stream completion flag".into()))?;
+            if done != (audio.len() == length) {
+                return Err(AiRuntimeError::Protocol(
+                    "inconsistent stream completion".into(),
+                ));
+            }
+        }
+        if &audio[..4] != b"RIFF" || &audio[8..12] != b"WAVE" {
+            return Err(AiRuntimeError::Protocol(
+                "stream did not contain WAV".into(),
+            ));
+        }
+        Ok(audio)
     }
 
     async fn request_inner(
@@ -581,6 +663,36 @@ impl AiSupervisor {
         result
     }
 
+    pub async fn synthesize_streamed_wav(&self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
+        let service = AiService::Tts;
+        let worker = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned()
+            .ok_or(AiRuntimeError::NotRunning)?;
+        let mut locked = worker.lock().await;
+        let generation = locked.generation;
+        let result = locked.stream_wav(input).await;
+        drop(locked);
+        let current = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned();
+        let current_generation = if let Some(current) = current {
+            Some(current.lock().await.generation)
+        } else {
+            None
+        };
+        if current_generation != Some(generation) {
+            return Err(AiRuntimeError::StaleGeneration);
+        }
+        result
+    }
+
     pub async fn discover(&self, service: AiService) -> Result<Value, AiRuntimeError> {
         self.call(service, "discover", json!({})).await
     }
@@ -722,32 +834,11 @@ impl VoiceProvider for PythonVoiceProvider {
                     input["reference_text"] = Value::String(reference);
                 }
             }
-            let result = self
+            let decoded = self
                 .supervisor
-                .call(
-                    self.service,
-                    "infer",
-                    json!({
-                        "kind": "tts", "input": input
-                    }),
-                )
+                .synthesize_streamed_wav(input)
                 .await
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
-            if result.get("format").and_then(Value::as_str) != Some("wav") {
-                return Err(VoiceError::Generation("unsupported audio format".into()));
-            }
-            let encoded = result
-                .get("audio_base64")
-                .and_then(Value::as_str)
-                .ok_or_else(|| VoiceError::Generation("missing audio payload".into()))?;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| VoiceError::Generation(error.to_string()))?;
-            if decoded.len() < 44 || &decoded[..4] != b"RIFF" || &decoded[8..12] != b"WAVE" {
-                return Err(VoiceError::Generation(
-                    "Python TTS returned invalid WAV".into(),
-                ));
-            }
             Ok(AudioArtifact {
                 format: AudioFormat::Wave,
                 bytes: decoded.into(),
@@ -763,6 +854,96 @@ mod tests {
     fn test_python() -> String {
         std::env::var("NEUROMITA_TEST_PYTHON")
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned())
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_retires_worker_before_a_late_reply_can_be_reused() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let temp = std::env::temp_dir().join(format!("nm-cancel-{}", Uuid::new_v4()));
+        let plugin = temp.join("mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def initialize(self, settings):\n";
+        assert!(code.contains(needle));
+        let code = code.replace(
+            needle,
+            "    def initialize(self, settings):\n        if settings.get('block'):\n            from pathlib import Path\n            import time\n            Path(settings['entered']).write_text('entered', encoding='utf-8')\n            while True:\n                time.sleep(0.01)\n",
+        );
+        tokio::fs::write(plugin.join("plugin.py"), code)
+            .await
+            .unwrap();
+        let config = PythonHostConfig {
+            python_executable: test_python().into(),
+            sdk_root: source,
+            plugins_directory: temp.clone(),
+            models_directory: None,
+            request_timeout: Duration::from_secs(10),
+        };
+        let entered = temp.join("entered");
+        let mut worker = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
+        let generation = worker.generation;
+        let args = json!({"plugin_id":"mock_tts", "settings":{"block":true, "entered":entered}});
+        {
+            let pending = worker.request("initialize", &args);
+            tokio::pin!(pending);
+            timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut pending => panic!("blocking fixture returned: {result:?}"),
+                    _ = async {
+                        while !tokio::fs::try_exists(&entered).await.unwrap() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .expect("plugin must enter the in-flight call");
+        }
+        assert!(
+            worker.failed,
+            "dropping an in-flight request must retire its worker"
+        );
+        timeout(Duration::from_secs(5), worker.child.wait())
+            .await
+            .expect("cancelled worker must be terminated")
+            .unwrap();
+        assert!(matches!(
+            worker.request("discover", &json!({})).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        let mut fresh = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
+        assert_ne!(fresh.generation, generation);
+        assert!(matches!(
+            fresh.request("unknown_operation", &json!({})).await,
+            Err(AiRuntimeError::Plugin { .. })
+        ));
+        assert!(!fresh.failed, "a complete plugin error preserves framing");
+        let oversized = json!({"text": "x".repeat(MAX_REQUEST_BYTES)});
+        assert!(matches!(
+            fresh.request("infer", &oversized).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "request exceeds size limit"
+        ));
+        assert!(!fresh.failed, "local validation must not retire the worker");
+        let ready = fresh
+            .request(
+                "initialize",
+                &json!({"plugin_id":"mock_tts", "settings":{}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready["model_ready"], true);
+        fresh.child.start_kill().unwrap();
+        fresh.child.wait().await.unwrap();
+        tokio::fs::remove_dir_all(temp).await.unwrap();
     }
 
     #[test]
@@ -828,6 +1009,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
         };
@@ -959,6 +1141,7 @@ class Plugin:
             requirements: vec![],
             backend: None,
             supported_backends: vec![],
+            required_backends: vec![],
             supported_python_minors: vec![],
             actions: vec![],
             assets: vec![ModelAssetRequirement {

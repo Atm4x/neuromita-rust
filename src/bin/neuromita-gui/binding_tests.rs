@@ -3,10 +3,30 @@ use super::*;
 mod probe {
     slint::slint! {
         import { I18n } from "../../../ui/i18n.slint";
+        import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
+        import { SettingsTheme } from "../../../ui/settings/theme.slint";
         export { I18n }
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
             out property <string> more: I18n.i18n("launcher.actions.more", "Дополнительно");
+        }
+        export component AccordionProbe inherits Window {
+            background: SettingsTheme.panel;
+            preferred-width: 500px;
+            preferred-height: 600px;
+            in-out property <bool> expanded;
+            out property <length> section-height: section.height;
+            out property <length> next-top: next.y;
+            VerticalLayout {
+                padding: 0px; spacing: 12px;
+                section := CollapsibleSettingsSection {
+                    title: "Geometry probe";
+                    expanded: root.expanded;
+                    Rectangle { height: 300px; }
+                }
+                next := Rectangle { height: 50px; }
+                Rectangle { vertical-stretch: 1; }
+            }
         }
     }
 }
@@ -24,6 +44,38 @@ impl slint::platform::Platform for TestPlatform {
 #[test]
 fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let accordion = probe::AccordionProbe::new().unwrap();
+    accordion.show().unwrap();
+    accordion
+        .window()
+        .set_size(slint::PhysicalSize::new(500, 600));
+    accordion.window().take_snapshot().unwrap();
+    let closed = (accordion.get_section_height(), accordion.get_next_top());
+    assert!((closed.0 - 50.0).abs() < 1.0);
+    accordion.set_expanded(true);
+    let expanded = accordion.window().take_snapshot().unwrap();
+    assert!(accordion.get_next_top() > closed.1 + 300.0);
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * expanded.width() as usize + x) * 4;
+        &expanded.as_bytes()[offset..offset + 3]
+    };
+    assert_ne!(
+        pixel(250, 20),
+        pixel(250, 100),
+        "expanded body must retain its QSS background layer"
+    );
+    assert_ne!(
+        pixel(0, 100),
+        pixel(250, 100),
+        "content must not paint over the section border"
+    );
+    accordion.set_expanded(false);
+    accordion.window().take_snapshot().unwrap();
+    assert_eq!(
+        (accordion.get_section_height(), accordion.get_next_top()),
+        closed
+    );
+    accordion.hide().unwrap();
     let catalog = Rc::new(RefCell::new(
         Localizer::bundled(FallbackPolicy::EnglishThenSource).unwrap(),
     ));
@@ -56,7 +108,7 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
 }
 
 fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
-    use super::super::view::{ChatRow, ChatStatus};
+    use super::super::view::{ChatRow, ChatStatus, ReleaseEntry};
     let window = AppWindow::new().unwrap();
     window
         .global::<I18n>()
@@ -141,6 +193,43 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     }
     window.set_page(PageId::Home);
     window.window().take_snapshot().unwrap();
+    window.set_release_releases(ModelRc::new(VecModel::from(vec![
+        ReleaseEntry {
+            id: "2026.11.01".into(),
+            title: "NeuroMita v2026.11.01".into(),
+            date: "2026-11-01".into(),
+            summary: "Тестовый интеграционный релиз / Integration test release.".into(),
+            details: "Релиз включает обновления интерфейса и основные исправления.".into(),
+            url: "https://github.com/Atm4x/NeuroMita/releases/tag/v2026.11.01".into(),
+            prerelease: false,
+        },
+        ReleaseEntry {
+            id: "2026.10.22".into(),
+            title: "NeuroMita v2026.10.22".into(),
+            date: "2026-10-22".into(),
+            summary: "Тестовая сборка / Test build.".into(),
+            details: String::new().into(),
+            url: "https://github.com/Atm4x/NeuroMita/releases/tag/v2026.10.22".into(),
+            prerelease: false,
+        },
+    ])));
+    for (page, filename) in [
+        (PageId::Releases, "releases-ru.ppm"),
+        (PageId::About, "about-ru.ppm"),
+    ] {
+        window.set_page(page);
+        let image = window.window().take_snapshot().unwrap();
+        assert_eq!((image.width(), image.height()), (1560, 918));
+        if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+            for rgba in image.as_bytes().as_chunks::<4>().0 {
+                ppm.extend_from_slice(&rgba[..3]);
+            }
+            std::fs::write(directory.join(filename), ppm).unwrap();
+        }
+    }
     window.set_page(PageId::Sandbox);
     window.set_core_connected(false);
     window.set_chat_error("Core is not connected".into());
@@ -285,6 +374,36 @@ fn memory_render_and_contract(window: &AppWindow) {
         ))
         .await
         .unwrap();
+        let initial_revision = app.presenter().settings.snapshot().unwrap().revision;
+        super::super::settings::execute(
+            app.presenter(),
+            Command::AssignAllPresets(
+                CharacterId::Mita,
+                neuromita::settings::PresetSelection::Specific(neuromita::generation::PresetId(0)),
+            ),
+        )
+        .unwrap();
+        let after = app.presenter().settings.snapshot().unwrap();
+        assert_eq!(after.revision, initial_revision + 1);
+        let assignments = after.values.characters.mita.presets;
+        assert_eq!(assignments.reply, assignments.react);
+        assert_eq!(assignments.reply, assignments.initiate);
+        assert!(
+            super::super::settings::execute(
+                app.presenter(),
+                Command::AssignAllPresets(
+                    CharacterId::Mita,
+                    neuromita::settings::PresetSelection::Specific(
+                        neuromita::generation::PresetId(999)
+                    )
+                )
+            )
+            .is_err()
+        );
+        assert_eq!(
+            app.presenter().settings.snapshot().unwrap().revision,
+            after.revision
+        );
         let characters = &app.presenter().characters;
         let initial = characters.memories(CharacterId::Mita).await.unwrap();
         characters
@@ -313,6 +432,12 @@ fn memory_render_and_contract(window: &AppWindow) {
         memory::render(window, &state, &page);
         let ui = window.global::<MemoryUi>();
         ui.set_open(true);
+        window
+            .global::<super::super::view::SettingsUi>()
+            .set_section(2);
+        window
+            .global::<super::super::view::SettingsUi>()
+            .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
         ui.set_content("Изменённый текст".into());
         let snapshot = characters.memories(CharacterId::Mita).await.unwrap();
