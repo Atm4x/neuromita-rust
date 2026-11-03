@@ -1,0 +1,47 @@
+name: Export pinned Release and About UI sources
+on:
+  push:
+    branches:
+      - bridge/ui-release-about-export-20261103
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pinned Rust presenter
+        uses: actions/checkout@v4
+        with:
+          ref: 98ffea7ace324f20f66916ddc961257112c183d9
+          path: rust-repo
+          persist-credentials: false
+      - name: Checkout pinned Python UI
+        uses: actions/checkout@v4
+        with:
+          repository: Atm4x/NeuroMita
+          ref: 2b47a793becc860845c72d5f826f805d52744c89
+          path: python-repo
+          persist-credentials: false
+      - name: Assemble pinned source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p package/rust package/python
+          for path in Cargo.toml Cargo.lock build.rs .cargo ui src assets/icons assets/launcher_ui future/gui-reference future/sandbox-ui-port-20261103.md docs/02-ui docs/01-functional/launcher-and-updates.md; do
+            if test -e "rust-repo/$path"; then
+              mkdir -p "package/rust/$(dirname "$path")"
+              cp -a "rust-repo/$path" "package/rust/$path"
+            fi
+          done
+          for path in src/ui/pages src/ui/widgets/launcher_dashboard_helpers.py src/ui/widgets/launcher_shell_sidebar.py src/ui/widgets/launcher_shell_theme.py src/styles/shell/launcher_shell.py src/controllers/gui src/services/release_catalog.py src/_version.py assets/launcher_ui; do
+            if test -e "python-repo/$path"; then
+              mkdir -p "package/python/$(dirname "$path")"
+              cp -a "python-repo/$path" "package/python/$path"
+            fi
+          done
+          printf 'RUST_SHA=%s\nPYTHON_SHA=%s\n' "$(git -C rust-repo rev-parse HEAD)" "$(git -C python-repo rev-parse HEAD)" > package/manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-about-ui-source-20261103
+          path: package/
+          retention-days: 3
