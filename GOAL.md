@@ -156,3 +156,12 @@ Keep #24 (worker lifecycle), #42 (installable lifecycle), #59 (dynamic plugin co
 - [ ] Реальные измерения на представительном корпусе с явно предоставленным Gemini API key, точные billing tokens/USD, GUI/пресеты и расширенные RAG/knowledge graph операции.
 
 Технический контракт: [src/generation/SEMANTIC_RETRIEVAL.md](src/generation/SEMANTIC_RETRIEVAL.md).
+
+### AI Runtime TTS SDK implementations — 2026-11-03
+
+- [x] Добавлены двенадцать Python TTS plugin variants, **использующих** нейтральный `neuromita_ai_sdk`: Edge+RVC CUDA/ONNX, Silero+RVC CUDA/ONNX, F5 RU/EN с RVC и без, Fish regular/compiled/RVC, OmniVoice. `installplan.py` доступен без тяжёлых импортов, конкретная реализация находится в `python/neuromita_voice`, а не в SDK.
+- [x] В `PluginInstallPlan` добавлены Python requirement specs (точные пины и ограничения); Rust `DependencyResolver` применяет `uv pip compile` с ограничениями backend layers. Python-реализации сохраняют `numpy==1.26.0` и `scipy==1.12.0` вместо неявной установки NumPy 2.x. Для RVC нужен совместимый managed Python (исходная модель рекомендует 3.11; прежний тестовый Python 3.13.5 не production-default).
+- [x] 10 Python contract tests и 88 Rust library tests без default features PASS локально; Clippy `-D warnings` PASS. Проверены manifest discovery, install plans, settings, отсутствие фиктивной readiness и отказ от неверных assets/settings.
+- [ ] **Не считать TTS port готовой production parity:** реальные model weights и pip packages не загружались; inference на GPU не запускался. RVC native runtimes, Fish Speech compile hooks, platform-specific installs и F5/Omni asset download требуют реальных end-to-end проверок.
+- [ ] Задать/проверить backend lock с `torch` + `torchaudio` + `numpy==1.26.0` и подходящими CUDA wheel indexes, вместо установки одного `torch` с неограниченными transitive deps. Реализовать installer hooks и verified downloads, Python distribution probes, plugin-specific voice profile paths; затем воспроизвести реальный синтез.
+- [ ] Разделить сообщение о наличии каталога/контракта TTS от доказанной работоспособности конкретных моделей; не считать полный аудио pipeline рабочим по mock tests.
