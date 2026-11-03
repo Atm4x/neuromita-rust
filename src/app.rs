@@ -16,7 +16,7 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
-    character::{CharacterHandle, CharacterId, CharacterRegistry},
+    character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     generation::{
         EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
         PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
@@ -29,6 +29,7 @@ use crate::{
     presentation::{
         CharactersPresenter, GuiPresenter, PresenterRunner, PresetsPresenter, SettingsPresenter,
     },
+    reminders::{ReminderConfig, ReminderService},
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
@@ -67,6 +68,7 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub reminders: ReminderConfig,
 }
 
 impl ApplicationConfig {
@@ -89,6 +91,7 @@ impl ApplicationConfig {
                 source: SettingsSource::Initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            reminders: ReminderConfig::system(),
         }
     }
 
@@ -223,6 +226,8 @@ impl RequestIngress for TimelineRequestIngress {
 
 struct ApplicationOwner {
     bindings: Arc<ApiBindings>,
+    reminders_stop: CancellationToken,
+    reminders_task: Option<JoinHandle<()>>,
     workers_stop: CancellationToken,
     owners_stop: CancellationToken,
     presenter_stop: CancellationToken,
@@ -250,6 +255,7 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            reminders: reminders_config,
         } = config;
         let mut startup = StartupMigrations::new();
         if matches!(&settings.source, SettingsSource::Stored) {
@@ -264,6 +270,7 @@ impl ApplicationLifecycle {
         .map_err(|error| ApplicationError::Task(error.to_string()))?;
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
+        let settings_owner = settings.owner();
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let registry = Arc::new(RequestRegistry::new(limits.discovery_buffer.get()));
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
@@ -274,15 +281,20 @@ impl ApplicationLifecycle {
         let workers_stop = CancellationToken::new();
         let owners_stop = CancellationToken::new();
         let presenter_stop = CancellationToken::new();
-        let (characters, owners) = CharacterRegistry::spawn(
+        let reminders_wake = Arc::new(tokio::sync::Notify::new());
+        let (characters, owners) = CharacterRegistry::spawn_with_reminders(
             Arc::clone(&timeline),
             owners_stop.clone(),
             limits.character_commands.get(),
+            ReminderBridge {
+                settings: Arc::clone(&settings_owner),
+                wake: Arc::clone(&reminders_wake),
+                clock: Arc::clone(&reminders_config.clock),
+            },
         );
         let generator = Arc::new(generator);
         let knowledge = Arc::new(knowledge);
         let presets = Arc::new(presets);
-        let settings_owner = settings.owner();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -311,6 +323,15 @@ impl ApplicationLifecycle {
             timeline: Arc::clone(&timeline),
         });
         let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
+        let reminders_stop = CancellationToken::new();
+        let (reminders, reminders_task) = ReminderService::start(
+            Arc::clone(&timeline),
+            Arc::clone(&api),
+            Arc::clone(&settings_owner),
+            reminders_config,
+            reminders_wake,
+            reminders_stop.clone(),
+        );
         let discovery = api.registry.observe();
         let (chat, runner) = PresenterRunner::new(
             Arc::clone(&api),
@@ -328,9 +349,12 @@ impl ApplicationLifecycle {
             characters,
             settings: settings_owner,
             presets: Arc::clone(&presets),
+            reminders,
         });
         let mut owner = ApplicationOwner {
             bindings: Arc::clone(&bindings),
+            reminders_stop,
+            reminders_task: Some(reminders_task),
             workers_stop,
             owners_stop,
             presenter_stop,
@@ -564,6 +588,14 @@ impl ApplicationOwner {
                 Err(error) => failure = Some(ApplicationError::Task(error.to_string())),
             }
         }
+        // Stop the reminder scheduler before character workers so an in-flight
+        // delivery is interrupted with the Shutdown cause and stays pending.
+        self.reminders_stop.cancel();
+        if let Some(task) = self.reminders_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         self.workers_stop.cancel();
         for worker in self.workers.drain(..) {
             if let Err(error) = worker.await {
@@ -611,6 +643,7 @@ impl Drop for ApplicationOwner {
         self.workers_stop.cancel();
         self.presenter_stop.cancel();
         self.server_stop.cancel();
+        self.reminders_stop.cancel();
         self.bindings.settings.close();
         self.settings_stop.cancel();
         self.owners_stop.cancel();
@@ -623,6 +656,9 @@ impl Drop for ApplicationOwner {
             task.abort();
         }
         if let Some(task) = &self.server_task {
+            task.abort();
+        }
+        if let Some(task) = &self.reminders_task {
             task.abort();
         }
         if let Some(task) = &self.settings_task {

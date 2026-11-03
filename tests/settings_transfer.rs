@@ -97,9 +97,16 @@ fn export_is_a_complete_canonical_envelope() {
     section_keys.sort_unstable();
     assert_eq!(
         section_keys,
-        ["capture", "characters", "interface", "presets", "voice"]
+        [
+            "capture",
+            "characters",
+            "interface",
+            "presets",
+            "reminders",
+            "voice"
+        ]
     );
-    assert_eq!(object["schema_version"], 2);
+    assert_eq!(object["schema_version"], 3);
     assert_eq!(object["revision"], 12);
 
     assert_eq!(fs::read(&store_path).unwrap(), backup);
@@ -195,8 +202,8 @@ fn decode_classifies_rejections() {
         Err(SettingsTransferError::NotFullSettingsTransfer(_))
     ));
     assert!(matches!(
-        SettingsTransfer::decode(complete(3, 4).as_bytes()),
-        Err(SettingsTransferError::UnsupportedSchema { found: 3 })
+        SettingsTransfer::decode(complete(4, 4).as_bytes()),
+        Err(SettingsTransferError::UnsupportedSchema { found: 4 })
     ));
     assert!(matches!(
         SettingsTransfer::decode(complete(0, 4).as_bytes()),
@@ -272,7 +279,7 @@ fn invalid_imports_leave_the_destination_untouched() {
     let before = fs::read(&destination_path).unwrap();
 
     let fixtures = [
-        complete(3, 5),
+        complete(4, 5),
         complete(0, 5),
         complete(2, 5).replace("\"volume\":80", "\"volume\":101"),
         complete(2, 5).replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
@@ -362,10 +369,10 @@ fn repository_save_rejects_invalid_settings_without_writing() {
     assert_eq!(fs::read(&store_path).unwrap(), before);
 
     let mut future = stored(2, 81);
-    future.schema_version = 3;
+    future.schema_version = 4;
     assert!(matches!(
         store.save(&future),
-        Err(SettingsError::Storage(message)) if message.contains("unsupported settings schema 3")
+        Err(SettingsError::Storage(message)) if message.contains("unsupported settings schema 4")
     ));
     assert_eq!(fs::read(&store_path).unwrap(), before);
     assert!(temporary_files(&directory.path).is_empty());
@@ -377,7 +384,7 @@ fn load_rejects_future_foreign_and_duplicate_documents() {
     let store_path = directory.path("store.json");
     let store = JsonSettingsRepository::new(store_path.clone());
     let fixtures = [
-        complete(3, 1),
+        complete(4, 1),
         complete(2, 1).replace("\"voice\":{", "\"voice\":{\"pitch\":1,"),
         format!(
             "{{\"schema_version\":2,\"revision\":1,\"revision\":2,\"settings\":{}}}",
