@@ -103,6 +103,40 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
             std::fs::write(directory.join(format!("{name}.ppm")), ppm).unwrap();
         }
     }
+    window
+        .window()
+        .set_size(slint::PhysicalSize::new(1560, 918));
+    window.window().take_snapshot().unwrap();
+    for (x, name) in [
+        (1260.0, "sandbox-state"),
+        (1365.0, "sandbox-debug"),
+        (1500.0, "sandbox-collapsed"),
+    ] {
+        let position = slint::LogicalPosition { x, y: 111.0 };
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerPressed {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::PointerReleased {
+                position,
+                button: slint::platform::PointerEventButton::Left,
+            });
+        let image = window.window().take_snapshot().unwrap();
+        if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+            for rgba in image.as_bytes().chunks_exact(4) {
+                ppm.extend_from_slice(&rgba[..3]);
+            }
+            std::fs::write(PathBuf::from(directory).join(format!("{name}.ppm")), ppm).unwrap();
+        }
+    }
     window.global::<I18n>().set_locale("en".into());
     window.window().take_snapshot().unwrap();
     window.hide().unwrap();

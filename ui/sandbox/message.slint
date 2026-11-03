@@ -41,6 +41,7 @@ export component MessageRow inherits VerticalLayout {
     in property <ChatRow> item;
     in property <string> character-name;
     in property <image> avatar;
+    in property <length> bubble-width;
     callback cancel(string);
     padding: 0px; padding-top: 4px; padding-bottom: 4px; spacing: 4px;
     vertical-stretch: 0;
@@ -56,7 +57,7 @@ export component MessageRow inherits VerticalLayout {
         }
         BubbleFrame {
             user: root.item.user; provisional: root.item.can-cancel;
-            horizontal-stretch: 1; preferred-width: 0px; max-width: SandboxTheme.max-bubble-width;
+            width: root.bubble-width; horizontal-stretch: 0;
             VerticalLayout {
                 padding-left: root.item.user ? 12px : 20px;
                 padding-right: root.item.user ? 20px : 12px;

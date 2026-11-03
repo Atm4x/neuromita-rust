@@ -1,5 +1,7 @@
 # Sandbox: WIP checkpoint, 2026-11-03
 
+> **Статус checkpoint:** этот документ зафиксировал прерванное состояние на исходном HEAD `9011649`. Продолжение переноса и проверенные результаты находятся в [sandbox-ui-port-20261103.md](sandbox-ui-port-20261103.md). Утверждения ниже о том, что `ui/pages/sandbox.slint` отсутствует и GUI не собирается, относятся только к исторической точке восстановления.
+
 Branch: `codex/sandbox-presenter-20261103`, based on main `6c7e88ca`.
 
 ## Latest user instruction

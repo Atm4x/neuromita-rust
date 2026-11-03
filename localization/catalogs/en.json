@@ -1,74 +1,522 @@
 {
-  "app.window.title": { "source": "Чат с NeuroMita — макет интерфейса", "translation": "Chat with NeuroMita — UI preview" },
-  "navigation.sandbox": { "source": "Песочница", "translation": "Sandbox" },
-  "navigation.logs": { "source": "Логи", "translation": "Logs" },
-  "launcher.actions.more": { "source": "Дополнительно", "translation": "More" },
-  "launcher.actions.install": { "source": "Установить / обновить Unity", "translation": "Install / update Unity" },
-  "launcher.actions.verify": { "source": "Проверить файлы Unity", "translation": "Verify Unity files" },
-  "launcher.releases.title": { "source": "ПОСЛЕДНИЕ РЕЛИЗЫ", "translation": "LATEST RELEASES" },
-  "placeholder.description": { "source": "Страница подготовлена для будущей реализации.", "translation": "This page is ready for its implementation." },
-  "page.sandbox.title": { "source": "Песочница / Sandbox", "translation": "Sandbox" },
-  "preview.play.unavailable": { "source": "Макет интерфейса: запуск игры пока не подключён.", "translation": "UI preview: game launch is not connected yet." },
-  "preview.action.unavailable": { "source": "Макет интерфейса: «{action}» пока не подключено.", "translation": "UI preview: {action} is not connected yet." },
-  "preview.social.unavailable": { "source": "Макет интерфейса: ссылка {name} пока не подключена.", "translation": "UI preview: the {name} link is not connected yet." },
-  "localization.reload": { "source": "Перечитать переводы", "translation": "Reload translations" },
-  "localization.reload.unconfigured": { "source": "Каталог внешних переводов не задан.", "translation": "No external translation directory was configured." },
-  "localization.reload.success": { "source": "Переводы обновлены.", "translation": "Translations reloaded." },
-  "localization.error": { "source": "Ошибка локализации: {error}", "translation": "Localization error: {error}" },
-  "sandbox.author.you": { "source": "Вы", "translation": "You" },
-  "sandbox.observation": { "source": "Наблюдение", "translation": "Observation" },
-  "sandbox.avatar.you": { "source": "В", "translation": "Y" },
-  "sandbox.status.pending": { "source": "В очереди", "translation": "Queued" },
-  "sandbox.status.text": { "source": "Генерация ответа…", "translation": "Generating a response…" },
-  "sandbox.status.text-ready": { "source": "Предварительный ответ", "translation": "Provisional response" },
-  "sandbox.status.voice": { "source": "Подготовка озвучки · ответ ещё не принят", "translation": "Preparing voice · response not yet accepted" },
-  "sandbox.status.accepting": { "source": "Принятие ответа…", "translation": "Accepting response…" },
-  "sandbox.status.cancelled": { "source": "Запрос отменён · ответ не принят", "translation": "Request cancelled · response not accepted" },
-  "sandbox.status.voice-error": { "source": "Текст принят, озвучка не удалась", "translation": "Text accepted, voice generation failed" },
-  "sandbox.status.success": { "source": "Ответ принят", "translation": "Response accepted" },
-  "sandbox.status.failed": { "source": "Запрос завершился с ошибкой", "translation": "Request failed" },
-  "sandbox.cancel": { "source": "Отменить", "translation": "Cancel" },
-  "sandbox.character.mita": { "source": "Мита", "translation": "Mita" },
-  "sandbox.character.kind": { "source": "Добрая Мита", "translation": "Kind Mita" },
-  "sandbox.home": { "source": "На главную", "translation": "Home" },
-  "sandbox.conversation": { "source": "Беседа", "translation": "Conversation" },
-  "sandbox.refresh": { "source": "Обновить", "translation": "Refresh" },
-  "sandbox.empty.ready": { "source": "Начните беседу с Митой", "translation": "Start a conversation with Mita" },
-  "sandbox.empty.disconnected": { "source": "Подключите генерацию в панели сессии справа", "translation": "Connect generation in the session panel on the right" },
-  "sandbox.active": { "source": "Активные запросы", "translation": "Active requests" },
-  "sandbox.follow": { "source": "Следовать за ответами", "translation": "Follow responses" },
-  "sandbox.input.placeholder": { "source": "Напиши что-нибудь Мите…", "translation": "Write something to Mita…" },
-  "sandbox.send": { "source": "Отправить", "translation": "Send" },
-  "sandbox.tab.session": { "source": "Сессия", "translation": "Session" },
-  "sandbox.tab.state": { "source": "Состояние", "translation": "State" },
-  "sandbox.tab.debug": { "source": "Отладка", "translation": "Debug" },
-  "sandbox.session.active": { "source": "Активная сессия", "translation": "Active session" },
-  "sandbox.character": { "source": "Персонаж", "translation": "Character" },
-  "sandbox.preset": { "source": "Пресет", "translation": "Preset" },
-  "sandbox.model": { "source": "Модель", "translation": "Model" },
-  "sandbox.connection": { "source": "Подключение", "translation": "Connection" },
-  "sandbox.core": { "source": "Ядро", "translation": "Core" },
-  "sandbox.ready": { "source": "Работает", "translation": "Running" },
-  "sandbox.starting": { "source": "Запускается…", "translation": "Starting…" },
-  "sandbox.stopped": { "source": "Не запущено", "translation": "Stopped" },
-  "sandbox.setup": { "source": "Укажите модель Gemini. Ключ читается из GEMINI_API_KEY; он не сохраняется в интерфейсе.", "translation": "Enter a Gemini model. The key is read from GEMINI_API_KEY and is not saved in the interface." },
-  "sandbox.model.placeholder": { "source": "Идентификатор модели", "translation": "Model identifier" },
-  "sandbox.connect": { "source": "Подключить", "translation": "Connect" },
-  "sandbox.voice": { "source": "Озвучка", "translation": "Voice" },
-  "sandbox.voice.requested": { "source": "Запрошена", "translation": "Requested" },
-  "sandbox.off": { "source": "Выкл.", "translation": "Off" },
-  "sandbox.voice.unavailable": { "source": "TTS-провайдер и воспроизведение ещё не подключены к этому запуску.", "translation": "A TTS provider and audio playback are not connected to this launch yet." },
-  "sandbox.retrieval.lexical": { "source": "Лексический поиск", "translation": "Lexical retrieval" },
-  "sandbox.capture": { "source": "Захват", "translation": "Capture" },
-  "sandbox.microphone": { "source": "Микрофон", "translation": "Microphone" },
-  "sandbox.screen": { "source": "Экран / камера", "translation": "Screen / camera" },
-  "sandbox.not-connected": { "source": "Не подключён", "translation": "Not connected" },
-  "sandbox.actions": { "source": "Быстрые действия", "translation": "Quick actions" },
-  "sandbox.refresh-session": { "source": "Обновить сессию", "translation": "Refresh session" },
-  "sandbox.all-settings": { "source": "Полные настройки", "translation": "All settings" },
-  "sandbox.character-state": { "source": "Состояние персонажа", "translation": "Character state" },
-  "sandbox.accepted": { "source": "Ответов принято", "translation": "Accepted replies" },
-  "sandbox.volume": { "source": "Громкость", "translation": "Volume" },
-  "sandbox.diagnostics": { "source": "Диагностика сессии", "translation": "Session diagnostics" },
-  "sandbox.diagnostics.note": { "source": "История — проекция Timeline. Незавершённые ответы показаны отдельно и не становятся историей до принятия.", "translation": "History is a Timeline projection. Unfinished responses are shown separately and enter history only after acceptance." }
+  "app.window.title": {
+    "source": "Чат с NeuroMita — макет интерфейса",
+    "translation": "Chat with NeuroMita — UI preview"
+  },
+  "navigation.sandbox": {
+    "source": "Песочница",
+    "translation": "Sandbox"
+  },
+  "navigation.logs": {
+    "source": "Логи",
+    "translation": "Logs"
+  },
+  "launcher.actions.more": {
+    "source": "Дополнительно",
+    "translation": "More"
+  },
+  "launcher.actions.install": {
+    "source": "Установить / обновить Unity",
+    "translation": "Install / update Unity"
+  },
+  "launcher.actions.verify": {
+    "source": "Проверить файлы Unity",
+    "translation": "Verify Unity files"
+  },
+  "launcher.releases.title": {
+    "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
+    "translation": "LATEST RELEASES"
+  },
+  "placeholder.description": {
+    "source": "Страница подготовлена для будущей реализации.",
+    "translation": "This page is ready for its implementation."
+  },
+  "page.sandbox.title": {
+    "source": "Песочница / Sandbox",
+    "translation": "Sandbox"
+  },
+  "preview.play.unavailable": {
+    "source": "Макет интерфейса: запуск игры пока не подключён.",
+    "translation": "UI preview: game launch is not connected yet."
+  },
+  "preview.action.unavailable": {
+    "source": "Макет интерфейса: «{action}» пока не подключено.",
+    "translation": "UI preview: {action} is not connected yet."
+  },
+  "preview.social.unavailable": {
+    "source": "Макет интерфейса: ссылка {name} пока не подключена.",
+    "translation": "UI preview: the {name} link is not connected yet."
+  },
+  "localization.reload": {
+    "source": "Перечитать переводы",
+    "translation": "Reload translations"
+  },
+  "localization.reload.unconfigured": {
+    "source": "Каталог внешних переводов не задан.",
+    "translation": "No external translation directory was configured."
+  },
+  "localization.reload.success": {
+    "source": "Переводы обновлены.",
+    "translation": "Translations reloaded."
+  },
+  "localization.error": {
+    "source": "Ошибка локализации: {error}",
+    "translation": "Localization error: {error}"
+  },
+  "sandbox.author.you": {
+    "source": "Вы",
+    "translation": "You"
+  },
+  "sandbox.observation": {
+    "source": "Наблюдение",
+    "translation": "Observation"
+  },
+  "sandbox.avatar.you": {
+    "source": "В",
+    "translation": "Y"
+  },
+  "sandbox.status.pending": {
+    "source": "В очереди",
+    "translation": "Queued"
+  },
+  "sandbox.status.text": {
+    "source": "Генерация ответа…",
+    "translation": "Generating a response…"
+  },
+  "sandbox.status.text-ready": {
+    "source": "Предварительный ответ",
+    "translation": "Provisional response"
+  },
+  "sandbox.status.voice": {
+    "source": "Подготовка озвучки · ответ ещё не принят",
+    "translation": "Preparing voice · response not yet accepted"
+  },
+  "sandbox.status.accepting": {
+    "source": "Принятие ответа…",
+    "translation": "Accepting response…"
+  },
+  "sandbox.status.cancelled": {
+    "source": "Запрос отменён · ответ не принят",
+    "translation": "Request cancelled · response not accepted"
+  },
+  "sandbox.status.voice-error": {
+    "source": "Текст принят, озвучка не удалась",
+    "translation": "Text accepted, voice generation failed"
+  },
+  "sandbox.status.success": {
+    "source": "Ответ принят",
+    "translation": "Response accepted"
+  },
+  "sandbox.status.failed": {
+    "source": "Запрос завершился с ошибкой",
+    "translation": "Request failed"
+  },
+  "sandbox.cancel": {
+    "source": "Отменить",
+    "translation": "Cancel"
+  },
+  "sandbox.character.mita": {
+    "source": "Мита",
+    "translation": "Mita"
+  },
+  "sandbox.character.kind": {
+    "source": "Добрая Мита",
+    "translation": "Kind Mita"
+  },
+  "sandbox.conversation": {
+    "source": "Разговор с ",
+    "translation": "Conversation with "
+  },
+  "sandbox.refresh": {
+    "source": "Обновить",
+    "translation": "Refresh"
+  },
+  "sandbox.send": {
+    "source": "Отправить сообщение",
+    "translation": "Send message"
+  },
+  "sandbox.tab.session": {
+    "source": "Сессия",
+    "translation": "Session"
+  },
+  "sandbox.tab.state": {
+    "source": "Состояние",
+    "translation": "State"
+  },
+  "sandbox.tab.debug": {
+    "source": "Отладка",
+    "translation": "Debug"
+  },
+  "sandbox.action.character": {
+    "source": "Настройки персонажа",
+    "translation": "Character settings"
+  },
+  "sandbox.action.last": {
+    "source": "Посмотреть последний запрос",
+    "translation": "View last request"
+  },
+  "sandbox.action.reset": {
+    "source": "Сбросить персонажа",
+    "translation": "Reset character"
+  },
+  "sandbox.action.settings": {
+    "source": "Полные настройки",
+    "translation": "All settings"
+  },
+  "sandbox.attach": {
+    "source": "Прикрепить изображения",
+    "translation": "Attach images"
+  },
+  "sandbox.capture.auto": {
+    "source": "Авто-прикрепление",
+    "translation": "Automatic attachment"
+  },
+  "sandbox.capture.camera": {
+    "source": "Захват с камеры",
+    "translation": "Camera capture"
+  },
+  "sandbox.capture.screen": {
+    "source": "Захват экрана",
+    "translation": "Screen capture"
+  },
+  "sandbox.clear-chat": {
+    "source": "Очистить чат",
+    "translation": "Clear chat"
+  },
+  "sandbox.collapse": {
+    "source": "Свернуть панель",
+    "translation": "Collapse panel"
+  },
+  "sandbox.connected": {
+    "source": "Подключено",
+    "translation": "Connected"
+  },
+  "sandbox.connecting": {
+    "source": "Подключение…",
+    "translation": "Connecting…"
+  },
+  "sandbox.context-unavailable": {
+    "source": "Контекст: —",
+    "translation": "Context: —"
+  },
+  "sandbox.conversation.kind": {
+    "source": "Доброй Митой",
+    "translation": "Kind Mita"
+  },
+  "sandbox.conversation.mita": {
+    "source": "Митой",
+    "translation": "Mita"
+  },
+  "sandbox.debug.api": {
+    "source": "Открыть API-настройки",
+    "translation": "Open API settings"
+  },
+  "sandbox.debug.as-user": {
+    "source": "Как пользователь [Системное]: (видно Gemini)",
+    "translation": "As user [System]: (visible to Gemini)"
+  },
+  "sandbox.debug.camera": {
+    "source": "Камера",
+    "translation": "Camera"
+  },
+  "sandbox.debug.capture": {
+    "source": "Сохранять вход генерации",
+    "translation": "Save generation input"
+  },
+  "sandbox.debug.context": {
+    "source": "Контекст сессии",
+    "translation": "Session context"
+  },
+  "sandbox.debug.db": {
+    "source": "Открыть DB персонажа",
+    "translation": "Open character DB"
+  },
+  "sandbox.debug.diagnostics": {
+    "source": "Диагностика",
+    "translation": "Diagnostics"
+  },
+  "sandbox.debug.display": {
+    "source": "Отображение сообщений",
+    "translation": "Message display"
+  },
+  "sandbox.debug.expanded": {
+    "source": "Развёрнуто по умолчанию",
+    "translation": "Expanded by default"
+  },
+  "sandbox.debug.insert": {
+    "source": "Вставить system-сообщение в историю",
+    "translation": "Insert system message into history"
+  },
+  "sandbox.debug.insert-placeholder": {
+    "source": "Текст system-сообщения…",
+    "translation": "System message text…"
+  },
+  "sandbox.debug.limits": {
+    "source": "Ограничивать structured output в sandbox",
+    "translation": "Limit structured output in Sandbox"
+  },
+  "sandbox.debug.load": {
+    "source": "Загрузить snapshot",
+    "translation": "Load snapshot"
+  },
+  "sandbox.debug.logs": {
+    "source": "Открыть страницу логов",
+    "translation": "Open logs page"
+  },
+  "sandbox.debug.memory": {
+    "source": "Память",
+    "translation": "Memory"
+  },
+  "sandbox.debug.off": {
+    "source": "Выкл",
+    "translation": "Off"
+  },
+  "sandbox.debug.params": {
+    "source": "Параметры отладки",
+    "translation": "Debug settings"
+  },
+  "sandbox.debug.prompts": {
+    "source": "Промпты",
+    "translation": "Prompts"
+  },
+  "sandbox.debug.rag": {
+    "source": "RAG-режим",
+    "translation": "RAG mode"
+  },
+  "sandbox.debug.refresh": {
+    "source": "Обновить сводку",
+    "translation": "Refresh summary"
+  },
+  "sandbox.debug.save": {
+    "source": "Сохранить snapshot",
+    "translation": "Save snapshot"
+  },
+  "sandbox.debug.snapshot": {
+    "source": "Snapshot истории",
+    "translation": "History snapshot"
+  },
+  "sandbox.debug.structured": {
+    "source": "Structured output (дебаг)",
+    "translation": "Structured output (debug)"
+  },
+  "sandbox.debug.submit-system": {
+    "source": "Отправить системное",
+    "translation": "Send system message"
+  },
+  "sandbox.debug.system": {
+    "source": "Показывать системные сообщения",
+    "translation": "Show system messages"
+  },
+  "sandbox.debug.thinking": {
+    "source": "Показывать мышление",
+    "translation": "Show reasoning"
+  },
+  "sandbox.debug.timestamps": {
+    "source": "Показывать время сообщений",
+    "translation": "Show message timestamps"
+  },
+  "sandbox.debug.tokens": {
+    "source": "Показывать статистику токенов/стоимости",
+    "translation": "Show token/cost statistics"
+  },
+  "sandbox.debug.view-request": {
+    "source": "Посмотреть последний запрос",
+    "translation": "View last request"
+  },
+  "sandbox.debug.view-response": {
+    "source": "Посмотреть последний ответ",
+    "translation": "View last response"
+  },
+  "sandbox.debug.viewer": {
+    "source": "Просмотр контекста запроса",
+    "translation": "View request context"
+  },
+  "sandbox.disconnected": {
+    "source": "Не подключено",
+    "translation": "Disconnected"
+  },
+  "sandbox.error.dismiss": {
+    "source": "Закрыть",
+    "translation": "Dismiss"
+  },
+  "sandbox.expand": {
+    "source": "Развернуть панель",
+    "translation": "Expand panel"
+  },
+  "sandbox.header.guide": {
+    "source": "Руководство",
+    "translation": "Guide"
+  },
+  "sandbox.header.home": {
+    "source": "На главную",
+    "translation": "Home"
+  },
+  "sandbox.header.settings": {
+    "source": "Настройки",
+    "translation": "Settings"
+  },
+  "sandbox.header.wiki": {
+    "source": "Вики",
+    "translation": "Wiki"
+  },
+  "sandbox.hero.title": {
+    "source": "Песочница / Sandbox",
+    "translation": "Sandbox"
+  },
+  "sandbox.history": {
+    "source": "История",
+    "translation": "History"
+  },
+  "sandbox.label.active": {
+    "source": "Активных запросов",
+    "translation": "Active requests"
+  },
+  "sandbox.label.character": {
+    "source": "Персонаж",
+    "translation": "Character"
+  },
+  "sandbox.label.connection": {
+    "source": "Подключение",
+    "translation": "Connection"
+  },
+  "sandbox.label.game": {
+    "source": "Связь с игрой",
+    "translation": "Game connection"
+  },
+  "sandbox.label.microphone": {
+    "source": "Микрофон",
+    "translation": "Microphone"
+  },
+  "sandbox.label.model": {
+    "source": "Модель",
+    "translation": "Model"
+  },
+  "sandbox.label.prompt": {
+    "source": "Набор промптов",
+    "translation": "Prompt set"
+  },
+  "sandbox.label.voice": {
+    "source": "Голос",
+    "translation": "Voice"
+  },
+  "sandbox.mic": {
+    "source": "Микрофон",
+    "translation": "Microphone"
+  },
+  "sandbox.no-link": {
+    "source": "Нет связи",
+    "translation": "No connection"
+  },
+  "sandbox.placeholder": {
+    "source": "Напиши что-нибудь Мите…",
+    "translation": "Write something to Mita…"
+  },
+  "sandbox.runtime.model": {
+    "source": "Модель для запуска Core",
+    "translation": "Model to start Core"
+  },
+  "sandbox.runtime.setup": {
+    "source": "Подключение модели",
+    "translation": "Model connection"
+  },
+  "sandbox.runtime.start": {
+    "source": "Подключить",
+    "translation": "Connect"
+  },
+  "sandbox.screenshot": {
+    "source": "Сделать скриншот экрана",
+    "translation": "Capture screenshot"
+  },
+  "sandbox.section.capture": {
+    "source": "Захват",
+    "translation": "Capture"
+  },
+  "sandbox.section.last-request": {
+    "source": "Последний запрос",
+    "translation": "Last request"
+  },
+  "sandbox.section.quick": {
+    "source": "Быстрые действия",
+    "translation": "Quick actions"
+  },
+  "sandbox.section.session": {
+    "source": "Активная сессия",
+    "translation": "Active session"
+  },
+  "sandbox.section.status": {
+    "source": "Статус",
+    "translation": "Status"
+  },
+  "sandbox.settings.character": {
+    "source": "Настройки персонажа",
+    "translation": "Character settings"
+  },
+  "sandbox.state.accepted": {
+    "source": "Принято ответов",
+    "translation": "Accepted replies"
+  },
+  "sandbox.state.attitude": {
+    "source": "Отношение",
+    "translation": "Attitude"
+  },
+  "sandbox.state.boredom": {
+    "source": "Скука",
+    "translation": "Boredom"
+  },
+  "sandbox.state.db-size": {
+    "source": "Размер БД",
+    "translation": "Database size"
+  },
+  "sandbox.state.forgotten": {
+    "source": "Забыто (RAG)",
+    "translation": "Forgotten (RAG)"
+  },
+  "sandbox.state.last": {
+    "source": "Посл. сообщение",
+    "translation": "Last message"
+  },
+  "sandbox.state.memories": {
+    "source": "Воспоминаний",
+    "translation": "Memories"
+  },
+  "sandbox.state.memory": {
+    "source": "Контекст и память",
+    "translation": "Context and memory"
+  },
+  "sandbox.state.messages": {
+    "source": "Сообщений в окне",
+    "translation": "Visible messages"
+  },
+  "sandbox.state.missing": {
+    "source": "Без эмбеддинга",
+    "translation": "Missing embeddings"
+  },
+  "sandbox.state.open-memory": {
+    "source": "Открыть RAG / память",
+    "translation": "Open RAG / memory"
+  },
+  "sandbox.state.stress": {
+    "source": "Стресс",
+    "translation": "Stress"
+  },
+  "sandbox.state.title": {
+    "source": "Состояние персонажа",
+    "translation": "Character state"
+  },
+  "sandbox.state.trash": {
+    "source": "Корзина",
+    "translation": "Trash"
+  },
+  "sandbox.state.variables": {
+    "source": "Все переменные",
+    "translation": "All variables"
+  },
+  "sandbox.status.not-ready": {
+    "source": "Не готово",
+    "translation": "Not ready"
+  },
+  "sandbox.status.off": {
+    "source": "Выкл.",
+    "translation": "Off"
+  }
 }
