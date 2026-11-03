@@ -1,0 +1,36 @@
+name: Publish character memory observer exact Git commit
+on:
+  push:
+    branches: [bridge/character-memory-observer-publish-20261103]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate and import exact Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/bridge/memory-observer.bundle.b64 ]; then
+            echo "No bundle payload yet"; exit 0
+          fi
+          git fetch origin 'refs/heads/codex/slint-character-memory-20261103:refs/remotes/origin/memory-base'
+          BASE='b078f706dd9af8c86eb2262289c2b1293f41723d'
+          HEAD='f52ced98a27dd8bc3f0c9490e8b9fea7c5167849'
+          TREE='e37fd9698239d7942606ffae7f78d1a796b0ea13'
+          test "$(git rev-parse refs/remotes/origin/memory-base)" = "$BASE"
+          base64 --decode .github/bridge/memory-observer.bundle.b64 >/tmp/memory-observer.bundle
+          echo 'c26974c80841a3b071ce5d7b7623f8e28cbcd78277b104f041b1d31d68328715  /tmp/memory-observer.bundle' | sha256sum -c
+          git bundle verify /tmp/memory-observer.bundle
+          git fetch /tmp/memory-observer.bundle 'refs/heads/codex/character-memory-observer-20261103:refs/heads/memory-candidate'
+          test "$(git rev-parse refs/heads/memory-candidate)" = "$HEAD"
+          test "$(git rev-parse "$HEAD^{tree}")" = "$TREE"
+          test "$(git rev-parse "$HEAD^")" = "$BASE"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          test "$(git log -1 --format='%an <%ae>|%cn <%ce>' "$HEAD")" = 'Atm4x <mrtaktplay@gmail.com>|Atm4x <mrtaktplay@gmail.com>'
+          git push origin 'refs/heads/memory-candidate:refs/heads/codex/character-memory-observer-20261103'
+          git ls-remote --exit-code origin 'refs/heads/codex/character-memory-observer-20261103' | grep "^$HEAD"
