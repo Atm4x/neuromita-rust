@@ -54,6 +54,7 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::ai_engine::bind(window);
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     let send = dispatch.clone();

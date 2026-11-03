@@ -1,3 +1,4 @@
+mod ai_engine;
 mod characters;
 mod chat;
 mod connections;
@@ -6,6 +7,9 @@ mod presets;
 mod releases;
 mod settings;
 
+pub use ai_engine::{
+    AiEngineSettingsPresenter, AiEngineSettingsSnapshot, AiHardwareDevice, AiHardwareSnapshot,
+};
 pub use characters::{
     CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
     MemorySummary,
@@ -29,6 +33,7 @@ pub use settings::{
 };
 
 pub struct GuiPresenter {
+    pub ai_engine: AiEngineSettingsPresenter,
     pub releases: ReleasesPresenter,
     pub connections: ConnectionsPresenter,
     pub conversation: ConversationPresenter,

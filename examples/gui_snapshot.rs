@@ -1,7 +1,7 @@
 use std::{cell::RefCell, error::Error, path::PathBuf, rc::Rc, time::Duration};
 
 use neuromita::localization::{FallbackPolicy, LocaleId, Localizer, i18n};
-use neuromita::presentation::PresetsPresenter;
+use neuromita::presentation::{AiEngineSettingsPresenter, PresetsPresenter};
 use slint::ComponentHandle;
 
 mod view {
@@ -40,7 +40,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(2)
         .unwrap_or_else(|| "characters".into());
     let settings = window.global::<view::SettingsUi>();
-    settings.set_section(if mode.starts_with("api") { 1 } else { 2 });
+    settings.set_section(if mode.starts_with("api") {
+        1
+    } else if mode == "ai-engine" {
+        6
+    } else {
+        2
+    });
     if mode.starts_with("api") {
         let templates = PresetsPresenter::providers()
             .into_iter()
@@ -77,10 +83,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings.set_preset_parameters(slint::ModelRc::new(slint::VecModel::from(parameters)));
         settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
     }
+    if mode == "ai-engine" {
+        let presentation = AiEngineSettingsPresenter::new();
+        let snapshot = presentation.snapshot();
+        let hardware = presentation.hardware();
+        let engine = window.global::<view::AiEngineUi>();
+        engine.set_process_mode(snapshot.process_mode.into());
+        engine.set_process_status(snapshot.process_status.into());
+        engine.set_mode_locked(!snapshot.process_control_available);
+        engine.set_maintenance_status(snapshot.maintenance_status.into());
+        engine.set_hardware_error(hardware.error.unwrap_or_default().into());
+        engine.set_devices(slint::ModelRc::new(slint::VecModel::from(
+            hardware
+                .devices
+                .into_iter()
+                .map(|device| view::AiHardwareDevice {
+                    name: device.name.into(),
+                    vendor: device.vendor.into(),
+                    cuda: device.cuda.into(),
+                    directml: device.directml.into(),
+                    capability: device.capability.into(),
+                    vram: device.vram.into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    }
     window.show()?;
-    window
-        .window()
-        .set_size(slint::PhysicalSize::new(1560, 918));
+    window.window().set_size(slint::PhysicalSize::new(
+        1560,
+        if mode == "ai-engine" { 958 } else { 918 },
+    ));
     let result = Rc::new(RefCell::new(None));
     let completed = result.clone();
     let weak = window.as_weak();

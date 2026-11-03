@@ -13,8 +13,9 @@ import { I18n } from "../i18n.slint";
 
 import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem } from "../settings/presets-state.slint";
 import { ApiPresetsWorkspace } from "../settings/api-presets.slint";
+import { AiEngineWorkspace, AiEngineUi, AiHardwareDevice } from "../settings/ai-engine.slint";
 import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "../settings/form-controls.slint";
-export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem }
+export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, AiEngineUi, AiHardwareDevice }
 
 component PresetChoice inherits Rectangle {
     in property <string> value;
@@ -322,7 +323,8 @@ export component SettingsPage inherits Rectangle {
                         }
                     }
                 }
-                if SettingsUi.section > 4: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
+                if SettingsUi.section == 6: AiEngineWorkspace { width: parent.width; }
+                if SettingsUi.section > 4 && SettingsUi.section != 6: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }
                 }
             }
