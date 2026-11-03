@@ -38,7 +38,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "silero" => {
             #[cfg(feature = "vad-silero")]
             {
-                use neuromita::audio::score::{SileroScores, VerifiedSileroAsset, init_onnx_runtime};
+                use neuromita::audio::score::{
+                    SileroScores, VerifiedSileroAsset, init_onnx_runtime,
+                };
 
                 let model = env::var("NEUROMITA_SILERO_MODEL")?;
                 let library = env::var("NEUROMITA_ORT_DLL")?;
