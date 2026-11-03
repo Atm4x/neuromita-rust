@@ -1,0 +1,33 @@
+name: Verify upstream direct Silero packages (hash only)
+on:
+  push:
+    branches:
+      - bridge/silero-direct-hashes-20261103
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch official Silero TTS packages, pin hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          for info in "v5_ru ru/v5_ru.pt" "v3_en en/v3_en.pt"; do
+            set -- $info
+            name="$1"
+            route="$2"
+            curl --fail --location --retry 2 --max-time 240 --output "source/$name.pt" "https://models.silero.ai/models/tts/$route"
+            test "$(stat -c%s "source/$name.pt")" -gt 1000000
+            file "source/$name.pt"
+            hash=$(sha256sum "source/$name.pt" | cut -d' ' -f1)
+            bytes=$(stat -c%s "source/$name.pt")
+            printf '%s %s %s\n' "$name" "$bytes" "$hash" >> hashes.txt
+          done
+          cat hashes.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: silero-tts-pinned-hashes-20261103
+          path: hashes.txt
+          retention-days: 3
