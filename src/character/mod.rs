@@ -1,4 +1,5 @@
 mod handler;
+mod lexical_dedup;
 pub mod memory;
 pub(crate) mod memory_access;
 mod model;
