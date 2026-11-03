@@ -103,16 +103,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let nav_window = window.as_weak();
     window.on_navigate(move |page| {
         handler(ShellCommand::Navigate(from_view(page)));
-        if page == PageId::Releases {
-            if let Some(window) = nav_window.upgrade() {
-                if !window.get_release_loading()
-                    && window.get_release_prereleases().row_count() == 0
-                    && window.get_release_releases().row_count() == 0
-                    && window.get_release_error().is_empty()
-                {
-                    window.invoke_releases_refresh();
-                }
-            }
+        if page == PageId::Releases
+            && let Some(window) = nav_window.upgrade()
+            && !window.get_release_loading()
+            && window.get_release_prereleases().row_count() == 0
+            && window.get_release_releases().row_count() == 0
+            && window.get_release_error().is_empty()
+        {
+            window.invoke_releases_refresh();
         }
     });
     let handler = dispatch.clone();
@@ -138,10 +136,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
     let link_window = window.as_weak();
     window.on_external_link(move |url| {
-        if let Err(error) = open_project_url(&url) {
-            if let Some(window) = link_window.upgrade() {
-                window.set_notice(error.into());
-            }
+        if let Err(error) = open_project_url(&url)
+            && let Some(window) = link_window.upgrade()
+        {
+            window.set_notice(error.into());
         }
     });
     window.run()?;

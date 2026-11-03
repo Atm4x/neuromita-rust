@@ -3,10 +3,30 @@ use super::*;
 mod probe {
     slint::slint! {
         import { I18n } from "../../../ui/i18n.slint";
+        import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
+        import { SettingsTheme } from "../../../ui/settings/theme.slint";
         export { I18n }
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
             out property <string> more: I18n.i18n("launcher.actions.more", "Дополнительно");
+        }
+        export component AccordionProbe inherits Window {
+            background: SettingsTheme.panel;
+            preferred-width: 500px;
+            preferred-height: 600px;
+            in-out property <bool> expanded;
+            out property <length> section-height: section.height;
+            out property <length> next-top: next.y;
+            VerticalLayout {
+                padding: 0px; spacing: 12px;
+                section := CollapsibleSettingsSection {
+                    title: "Geometry probe";
+                    expanded: root.expanded;
+                    Rectangle { height: 300px; }
+                }
+                next := Rectangle { height: 50px; }
+                Rectangle { vertical-stretch: 1; }
+            }
         }
     }
 }
@@ -24,6 +44,38 @@ impl slint::platform::Platform for TestPlatform {
 #[test]
 fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let accordion = probe::AccordionProbe::new().unwrap();
+    accordion.show().unwrap();
+    accordion
+        .window()
+        .set_size(slint::PhysicalSize::new(500, 600));
+    accordion.window().take_snapshot().unwrap();
+    let closed = (accordion.get_section_height(), accordion.get_next_top());
+    assert!((closed.0 - 50.0).abs() < 1.0);
+    accordion.set_expanded(true);
+    let expanded = accordion.window().take_snapshot().unwrap();
+    assert!(accordion.get_next_top() > closed.1 + 300.0);
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * expanded.width() as usize + x) * 4;
+        &expanded.as_bytes()[offset..offset + 3]
+    };
+    assert_ne!(
+        pixel(250, 20),
+        pixel(250, 100),
+        "expanded body must retain its QSS background layer"
+    );
+    assert_ne!(
+        pixel(0, 100),
+        pixel(250, 100),
+        "content must not paint over the section border"
+    );
+    accordion.set_expanded(false);
+    accordion.window().take_snapshot().unwrap();
+    assert_eq!(
+        (accordion.get_section_height(), accordion.get_next_top()),
+        closed
+    );
+    accordion.hide().unwrap();
     let catalog = Rc::new(RefCell::new(
         Localizer::bundled(FallbackPolicy::EnglishThenSource).unwrap(),
     ));

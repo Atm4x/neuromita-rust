@@ -25,6 +25,9 @@ export component Glyph inherits VerticalLayout {
 
 export component GhostButton inherits ActionSurface {
     in property <string> text;
+    in property <string> font-family: SandboxTheme.font-family;
+    in property <int> font-weight: 600;
+    in property <length> horizontal-padding: 12px;
     in property <string> glyph;
     in property <bool> left-aligned;
     label: root.text; height: 28px; horizontal-stretch: 0;
@@ -32,9 +35,10 @@ export component GhostButton inherits ActionSurface {
     border-color: self.hovered ? #b74b7d47 : #ffffff0f;
     background: self.pressed ? #b74b7d2e : self.hovered ? #b74b7d1a : #0a0a189e;
     HorizontalLayout {
-        padding-left: 12px; padding-right: 12px; padding-top: 5px; padding-bottom: 5px; spacing: 5px;
+        alignment: root.left-aligned ? start : center;
+        padding-left: root.horizontal-padding; padding-right: root.horizontal-padding; padding-top: 5px; padding-bottom: 5px; spacing: 5px;
         if root.glyph != "": Glyph { text: root.glyph; font-size: 12px; color: root.enabled ? SandboxTheme.icon : SandboxTheme.muted; }
-        Caption { text: root.text; font-size: 12px; font-weight: 600; horizontal-alignment: root.left-aligned ? left : center; color: root.enabled ? SandboxTheme.text : SandboxTheme.muted; }
+        Caption { text: root.text; horizontal-stretch: root.left-aligned ? 1 : 0; font-family: root.font-family; font-size: 12px; font-weight: root.font-weight; horizontal-alignment: root.left-aligned ? left : center; color: root.enabled ? SandboxTheme.text : SandboxTheme.muted; }
     }
 }
 
@@ -105,13 +109,13 @@ export component StyledCheckbox inherits ActionSurface {
     HorizontalLayout {
         padding: 2px;
         spacing: 9px;
-        Rectangle {
+        Centered { width: 19px; Rectangle {
             width: 19px; height: 19px; border-radius: 5px;
             border-width: 1px;
             border-color: root.checked ? SandboxTheme.accent-alt : SandboxTheme.border;
             background: root.checked ? SandboxTheme.accent : #080912;
             if root.checked: Glyph { text: "\u{f00c}"; width: 100%; height: 100%; font-size: 11px; color: white; }
-        }
+        } }
         Caption { text: root.text; horizontal-stretch: 1; font-size: 12px; font-weight: 600; }
     }
 }
@@ -137,11 +141,15 @@ export component Field inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
     in property <bool> enabled: true;
+    in property <string> font-family: SandboxTheme.font-family;
+    in property <string> leading-glyph;
+    out property <bool> focused: editor.has-focus;
     height: 34px; background: #080912; border-radius: 8px;
     border-width: 1px; border-color: editor.has-focus ? SandboxTheme.accent : SandboxTheme.border;
-    if root.text == "": Caption { x: 10px; width: parent.width - 20px; height: parent.height; text: root.placeholder; color: SandboxTheme.muted; }
-    editor := TextInput { x: 10px; width: parent.width - 20px; height: parent.height; text <=> root.text; enabled: root.enabled;
-        font-family: SandboxTheme.font-family; font-size: 12px; color: SandboxTheme.text;
+    if root.leading-glyph != "": Glyph { x: 8px; width: 16px; height: parent.height; text: root.leading-glyph; color: SandboxTheme.muted; }
+    if root.text == "": Caption { x: root.leading-glyph == "" ? 10px : 38px; width: parent.width - self.x - 10px; height: parent.height; text: root.placeholder; font-family: root.font-family; color: SandboxTheme.muted; }
+    editor := TextInput { x: root.leading-glyph == "" ? 10px : 38px; width: parent.width - self.x - 10px; height: parent.height; text <=> root.text; enabled: root.enabled;
+        font-family: root.font-family; font-size: 12px; color: SandboxTheme.text;
         single-line: true; vertical-alignment: center; selection-background-color: SandboxTheme.accent; selection-foreground-color: white;
     }
 }
