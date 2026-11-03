@@ -1,0 +1,36 @@
+name: Publish exact API presets Slint parity commit
+on:
+  push:
+    branches:
+      - bridge/api-presets-publish-20261103
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish Git Bridge bundle
+        shell: bash
+        env:
+          SOURCE_SHA: ae046a2be3c788dda67005f7e7b1bf129c04ef8b
+          TARGET_SHA: 6d96c411d9089f10282523d8cd5ed9e35e58fbf5
+          TARGET_REF: refs/heads/codex/api-presets-pyqt-slint-parity-20261103
+        run: |
+          set -euo pipefail
+          base64 -d bridge/api-presets-outgoing.bundle.b64 > api-presets.bundle
+          printf '%s  %s\n' '2b6473ca6aaa5ac14f63abf221a6c00ef27fe86a179e66503f9d2f1187e07675' api-presets.bundle | sha256sum -c -
+          git cat-file -e "${SOURCE_SHA}^{commit}"
+          git bundle verify api-presets.bundle
+          git fetch api-presets.bundle "${TARGET_REF}:refs/heads/api-presets-verified"
+          test "$(git rev-parse refs/heads/api-presets-verified)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${SOURCE_SHA}" refs/heads/api-presets-verified
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${SOURCE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Remote target moved: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/api-presets-verified:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${TARGET_SHA}"
