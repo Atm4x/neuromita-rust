@@ -67,6 +67,9 @@ class VoicePlugin:
                 model_id = "v3_en" if language == "en" else "v5_ru"
                 self.engine, _ = silero_tts(language=language, speaker=model_id)
                 self.engine.to("cpu" if mode == "onnx" else self.options["device"])
+                speakers = getattr(self.engine, "speakers", None)
+                if speakers is not None and self.options["speaker"] not in speakers:
+                    raise ValueError("Silero speaker is not present in the loaded model")
             elif engine == "f5":
                 from .pipelines.f5_pipeline import F5TTSPipeline
                 if cross:
@@ -125,8 +128,11 @@ class VoicePlugin:
         device = self.options["device"]
         if mode == "onnx" and device.startswith("cuda"):
             raise ValueError("ONNX RVC requires a supported ONNX device")
-        return module.TTS_RVC(model_path=str(root / "rvc" / f"voice.{ext}"),
-                              device=device, f0_method=self.options["f0_method"])
+        runtime = module.TTS_RVC(model_path=str(root / "rvc" / f"voice.{ext}"),
+                                 device=device, f0_method=self.options["f0_method"])
+        index = root / "rvc" / "voice.index"
+        runtime.set_index_path(str(index) if index.is_file() else "")
+        return runtime
 
     def _rvc_convert(self, input_file):
         output = self.rvc.voiceover_file(
