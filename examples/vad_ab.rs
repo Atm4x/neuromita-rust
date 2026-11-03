@@ -8,8 +8,9 @@
 
 use std::{env, error::Error, path::Path};
 
-use neuromita::audio::eval::evaluate;
+use neuromita::audio::eval::evaluate_endpoint;
 use neuromita::audio::score::DirectEarshotScores;
+use neuromita::audio::segment::SegmentConfig;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -20,14 +21,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest = Path::new(manifest);
 
     let report = match provider.as_str() {
-        "direct" => evaluate(manifest, DirectEarshotScores::default, threshold)?,
+        "direct" => evaluate_endpoint(
+            manifest,
+            DirectEarshotScores::default,
+            threshold,
+            SegmentConfig::default(),
+        )?,
         "wavekat" => {
             #[cfg(feature = "vad-wavekat")]
             {
-                evaluate(
+                evaluate_endpoint(
                     manifest,
                     neuromita::audio::score::WavekatEarshotScores::new,
                     threshold,
+                    SegmentConfig::default(),
                 )?
             }
             #[cfg(not(feature = "vad-wavekat"))]
@@ -46,10 +53,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let library = env::var("NEUROMITA_ORT_DLL")?;
                 init_onnx_runtime(Path::new(&library))?;
                 let asset = VerifiedSileroAsset::open(Path::new(&model))?;
-                evaluate(
+                evaluate_endpoint(
                     manifest,
                     || SileroScores::from_verified(&asset).expect("verified model"),
                     threshold,
+                    SegmentConfig::default(),
                 )?
             }
             #[cfg(not(feature = "vad-silero"))]

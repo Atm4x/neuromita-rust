@@ -8,7 +8,7 @@
       "speech": [
         {
           "start_sample": 29760,
-          "end_sample": 96000
+          "end_sample": 96480
         }
       ]
     },
@@ -36,10 +36,6 @@
       "speech": [
         {
           "start_sample": 12000,
-          "end_sample": 41760
-        },
-        {
-          "start_sample": 45600,
           "end_sample": 70560
         }
       ]
@@ -52,11 +48,11 @@
       "speech": [
         {
           "start_sample": 10560,
-          "end_sample": 85440
+          "end_sample": 85920
         },
         {
           "start_sample": 91680,
-          "end_sample": 118560
+          "end_sample": 119040
         }
       ]
     },
@@ -88,7 +84,7 @@
       "speech": [
         {
           "start_sample": 17280,
-          "end_sample": 59520
+          "end_sample": 60000
         },
         {
           "start_sample": 66720,
@@ -108,19 +104,11 @@
       "speech": [
         {
           "start_sample": 18240,
-          "end_sample": 33120
+          "end_sample": 62400
         },
         {
-          "start_sample": 36960,
-          "end_sample": 45120
-        },
-        {
-          "start_sample": 70080,
-          "end_sample": 77760
-        },
-        {
-          "start_sample": 81120,
-          "end_sample": 83520
+          "start_sample": 68640,
+          "end_sample": 86880
         }
       ]
     },
@@ -132,7 +120,7 @@
       "speech": [
         {
           "start_sample": 12960,
-          "end_sample": 112800
+          "end_sample": 117120
         }
       ]
     },
@@ -141,21 +129,40 @@
       "category": "en",
       "wav": "en-03.wav",
       "role": "calibration",
-      "speech": []
+      "speech": [
+        {
+          "start_sample": 6240,
+          "end_sample": 41760
+        },
+        {
+          "start_sample": 49440,
+          "end_sample": 57600
+        }
+      ]
     },
     {
       "id": "fleurs-en-1652",
       "category": "en",
       "wav": "en-04.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [
+        {
+          "start_sample": 12000,
+          "end_sample": 57120
+        }
+      ]
     },
     {
       "id": "fleurs-en-1531",
       "category": "en",
       "wav": "en-05.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [
+        {
+          "start_sample": 1440,
+          "end_sample": 64320
+        }
+      ]
     },
     {
       "id": "fleurs-en-1528",
