@@ -11,7 +11,7 @@ use neuromita::{
         device::{AudioCapture, AudioPlayback, DeviceFuture},
         segment::{SegmentConfig, SpeechMode, SpeechSegment, SpeechSegmenter, VoiceGate},
         session::{
-            ChatReplyTarget, SpeechConversation, SpeechFuture, SpeechInputHandler,
+            ChatReplyTarget, SpeechConversation, SpeechFuture, SpeechInputHandler, SpeechRoute,
             SpeechTranscriber,
         },
         vad::{FRAME_SAMPLES, MonoPcm16Frame, VoiceDecision},
@@ -108,8 +108,7 @@ impl AudioPlayback for Playback {
     }
 }
 
-#[tokio::test]
-async fn microphone_vad_asr_player_message_generation_tts_playback() {
+fn application_config() -> ApplicationConfig {
     let limits = RuntimeLimits {
         request_queue: NonZeroUsize::new(8).unwrap(),
         discovery_buffer: NonZeroUsize::new(32).unwrap(),
@@ -133,14 +132,24 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
     let mut settings = AppSettings::initial_profile();
     settings.voice.in_launcher = true;
     config.settings.source = SettingsSource::Initial(settings);
-    let app = ApplicationLifecycle::start(config).await.unwrap();
+    config
+}
+
+#[tokio::test]
+async fn fixture_audio_pipeline_and_old_target_cannot_publish_into_restarted_core() {
+    let app = ApplicationLifecycle::start(application_config())
+        .await
+        .unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
+    let route = SpeechRoute {
+        character: CharacterId::Mita,
+        source: RequestSource::Presenter,
+    };
+    let old_target = Arc::new(ChatReplyTarget::capture(route).unwrap());
     let handler = SpeechInputHandler::new(
+        route,
         Arc::new(Transcriber),
-        Arc::new(ChatReplyTarget {
-            character: CharacterId::Mita,
-            source: RequestSource::Presenter,
-        }) as Arc<dyn SpeechConversation>,
+        Arc::new(ChatReplyTarget::capture(route).unwrap()) as Arc<dyn SpeechConversation>,
         Arc::new(Playback(Arc::clone(&recorded))),
     );
     let config = SegmentConfig {
@@ -191,4 +200,52 @@ async fn microphone_vad_asr_player_message_generation_tts_playback() {
             .any(|m| m.content == "Answer from Mita")
     );
     app.shutdown().await.unwrap();
+    let next = ApplicationLifecycle::start(application_config())
+        .await
+        .unwrap();
+    let before = next
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Mita)
+        .await
+        .unwrap();
+    let handler = SpeechInputHandler::new(
+        route,
+        Arc::new(Transcriber),
+        old_target,
+        Arc::new(Playback(Arc::new(Mutex::new(Vec::new())))),
+    );
+    let (_tx, rx) = mpsc::channel(2);
+    let result = handler
+        .run(
+            Capture(vec![[200; FRAME_SAMPLES]; 3]),
+            SpeechSegmenter::new(Gate, config).unwrap(),
+            rx,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(neuromita::audio::session::SpeechSessionError::Conversation(
+            _
+        ))
+    ));
+    let after = next
+        .presenter()
+        .conversation
+        .snapshot(CharacterId::Mita)
+        .await
+        .unwrap();
+    assert_eq!(
+        before.messages.len(),
+        after.messages.len(),
+        "old target changed Core B facts"
+    );
+    assert!(
+        !after
+            .messages
+            .iter()
+            .any(|message| message.content == "Speech from player")
+    );
+    next.shutdown().await.unwrap();
 }

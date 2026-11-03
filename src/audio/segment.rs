@@ -106,6 +106,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
     pub fn new(gate: G, config: SegmentConfig) -> Result<Self, SegmentError> {
         if config.pre_roll_frames > config.max_segment_frames
             || config.start_voice_frames == 0
+            || config.start_voice_frames > config.max_segment_frames
             || config.end_silence_frames == 0
             || config.min_segment_frames == 0
             || config.max_segment_frames < config.min_segment_frames
@@ -116,7 +117,9 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         Ok(Self {
             gate,
             config,
-            pre_roll: VecDeque::with_capacity(config.pre_roll_frames),
+            pre_roll: VecDeque::with_capacity(
+                config.pre_roll_frames.max(config.start_voice_frames),
+            ),
             active: Vec::new(),
             voice_run: 0,
             silence_run: 0,
@@ -135,8 +138,12 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
             SpeechMode::Automatic => {
                 let voice = self.gate.inspect(&frame).speech;
                 if self.active.is_empty() {
-                    if self.config.pre_roll_frames > 0 {
-                        if self.pre_roll.len() == self.config.pre_roll_frames {
+                    {
+                        let retained = self
+                            .config
+                            .pre_roll_frames
+                            .max(self.config.start_voice_frames);
+                        if self.pre_roll.len() == retained {
                             self.pre_roll.pop_front();
                         }
                         self.pre_roll.push_back(frame);
@@ -297,5 +304,78 @@ mod tests {
             result = segmenter.process([1; FRAME_SAMPLES]);
         }
         assert_eq!(result.unwrap().samples.len(), 30 * FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn onset_frames_survive_short_or_disabled_pre_roll() {
+        for pre_roll_frames in [0, 1, 2] {
+            let mut segmenter = SpeechSegmenter::new(
+                DeterministicGate,
+                SegmentConfig {
+                    pre_roll_frames,
+                    start_voice_frames: 4,
+                    ..config(SpeechMode::Automatic)
+                },
+            )
+            .unwrap();
+            for _ in 0..8 {
+                assert!(segmenter.process([0; FRAME_SAMPLES]).is_none());
+            }
+            for marker in 1..=4 {
+                assert!(segmenter.process([marker; FRAME_SAMPLES]).is_none());
+            }
+            let segment = segmenter.flush().unwrap();
+            assert_eq!(segment.samples.len(), 4 * FRAME_SAMPLES);
+            for (frame, marker) in segment
+                .samples
+                .as_chunks::<FRAME_SAMPLES>()
+                .0
+                .iter()
+                .zip(1..=4)
+            {
+                assert!(frame.iter().all(|sample| *sample == marker));
+            }
+        }
+    }
+
+    #[test]
+    fn onset_cannot_exceed_bounded_segment_capacity() {
+        assert!(matches!(
+            SpeechSegmenter::new(
+                DeterministicGate,
+                SegmentConfig {
+                    start_voice_frames: 31,
+                    ..config(SpeechMode::Automatic)
+                },
+            ),
+            Err(SegmentError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn continuous_voice_across_maximum_preserves_each_frame_once() {
+        let mut segmenter = SpeechSegmenter::new(
+            DeterministicGate,
+            SegmentConfig {
+                pre_roll_frames: 0,
+                start_voice_frames: 3,
+                min_segment_frames: 1,
+                max_segment_frames: 5,
+                ..config(SpeechMode::Automatic)
+            },
+        )
+        .unwrap();
+        let mut samples = Vec::new();
+        for marker in 1..=13 {
+            if let Some(segment) = segmenter.process([marker; FRAME_SAMPLES]) {
+                assert!(segment.samples.len() <= 5 * FRAME_SAMPLES);
+                samples.extend(segment.samples);
+            }
+        }
+        samples.extend(segmenter.flush().unwrap().samples);
+        let expected: Vec<_> = (1..=13)
+            .flat_map(|marker| [marker; FRAME_SAMPLES])
+            .collect();
+        assert_eq!(samples, expected);
     }
 }

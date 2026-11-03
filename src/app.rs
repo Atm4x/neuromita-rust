@@ -531,9 +531,14 @@ impl ApplicationLifecycle {
         playback: Arc<dyn crate::audio::device::AudioPlayback>,
     ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
         let recognizer = self.speech.as_ref()?;
+        let route = crate::audio::session::SpeechRoute { character, source };
         let handler = crate::audio::session::SpeechInputHandler::new(
+            route,
             Arc::clone(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>,
-            Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
+            Arc::new(crate::audio::session::ChatReplyTarget::bound(
+                Arc::clone(&self.bindings.chat),
+                route,
+            )),
             playback,
         );
         Some((handler, self.stop.child_token()))
