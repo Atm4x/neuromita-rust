@@ -170,7 +170,7 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
             let directory = PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
-            let mut ppm = format!("P6\\n{} {}\\n255\\n", image.width(), image.height()).into_bytes();
+            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
             for rgba in image.as_bytes().as_chunks::<4>().0 {
                 ppm.extend_from_slice(&rgba[..3]);
             }
