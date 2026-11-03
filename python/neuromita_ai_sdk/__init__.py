@@ -25,12 +25,14 @@ class InstallPlan:
     packages: tuple[PackageRequirement, ...] = ()
     assets: tuple[AssetRequirement, ...] = ()
     backend: str | None = None
+    requirements: tuple[str, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "packages": [vars(item) for item in self.packages],
             "assets": [vars(item) for item in self.assets],
             "backend": self.backend,
+            "requirements": list(self.requirements),
         }
 
 
