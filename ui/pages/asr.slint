@@ -38,6 +38,10 @@ export global AsrUi {
     callback recognizer-changed(string);
     callback refresh-models();
     callback refresh-devices();
+    callback session-toggle(bool);
+    callback push-to-talk(bool);
+    in-out property <string> worker-status;
+    in-out property <string> session-status;
 }
 
 component AsrCard inherits Rectangle {
@@ -170,7 +174,7 @@ component AsrToolbar inherits AsrCard {
     VerticalLayout { padding: 15px; spacing: 12px;
         if root.width >= 850px: HorizontalLayout { height: 44px; spacing: 15px;
             HorizontalLayout { horizontal-stretch: 1; spacing: 12px;
-                SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready; toggled(v) => { AsrUi.active = v; } }
+                SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready || AsrUi.active; toggled(v) => { AsrUi.session-toggle(v); } }
                 VerticalLayout { spacing: 2px; alignment: center;
                     SettingsText { text: I18n.i18n("asr.active", "Микрофон активен"); font-size: 13px; font-weight: 650; }
                     SettingsText { text: AsrUi.active ? I18n.i18n("asr.recognition.enabled", "Распознавание включено") : I18n.i18n("asr.recognition.disabled", "Распознавание выключено"); font-size: 11px; color: SettingsTheme.muted; }
@@ -184,13 +188,32 @@ component AsrToolbar inherits AsrCard {
         }
         if root.width < 850px: VerticalLayout { spacing: 10px;
             HorizontalLayout { spacing: 12px; height: 36px;
-                SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready; toggled(v) => { AsrUi.active = v; } }
+                SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready || AsrUi.active; toggled(v) => { AsrUi.session-toggle(v); } }
                 SettingsText { text: I18n.i18n("asr.active", "Микрофон активен"); font-weight: 650; horizontal-stretch: 1; }
                 SettingsText { text: AsrUi.active ? I18n.i18n("asr.recognition.enabled", "Распознавание включено") : I18n.i18n("asr.recognition.disabled", "Распознавание выключено"); color: SettingsTheme.muted; }
             }
             HorizontalLayout { spacing: 9px;
                 AsrStatus { horizontal-stretch: 1; }
                 AsrButton { title: I18n.i18n("asr.restart", "Перезапустить"); glyph: "\u{f2f9}"; enabled: false; }
+            }
+        }
+        if AsrUi.input-mode == "Нажать для разговора": Rectangle {
+            height: 38px;
+            min-width: 180px;
+            background: SettingsTheme.button;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: SettingsTheme.button-border;
+            SettingsText {
+                text: I18n.i18n("asr.ptt", "Удерживайте для записи");
+                color: AsrUi.active ? SettingsTheme.text : SettingsTheme.muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            TouchArea {
+                enabled: AsrUi.active;
+                mouse-cursor: pointer;
+                changed pressed => { AsrUi.push-to-talk(self.pressed); }
             }
         }
         Rectangle { height: 1px; background: SettingsTheme.border; vertical-stretch: 0; }

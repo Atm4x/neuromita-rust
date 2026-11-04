@@ -8,6 +8,7 @@ pub mod assets;
 pub mod backend;
 pub mod bootstrap;
 pub mod composition;
+pub mod constraints;
 mod distribution;
 pub mod hardware;
 pub mod install;
@@ -21,6 +22,7 @@ pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
 pub mod speech_selection;
+pub mod system_hardware;
 pub mod uv;
 pub mod voice_profile;
 
@@ -767,6 +769,30 @@ impl AiSupervisor {
         result
     }
 
+    pub async fn inspect_plugin_constraints(
+        &self,
+        layers: &[PathBuf],
+        plugin_id: &str,
+        settings: &Value,
+        runtime: Option<&Value>,
+    ) -> Result<Vec<constraints::ConfigurationConstraint>, AiRuntimeError> {
+        let mut worker = WorkerProcess::launch(&self.config, layers, &[]).await?;
+        let result = worker
+            .request(
+                "configuration_constraints",
+                &json!({
+                    "plugin_id": plugin_id, "settings": settings, "runtime": runtime,
+                }),
+            )
+            .await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+        let items: Vec<constraints::ConfigurationConstraint> = serde_json::from_value(result?)
+            .map_err(|error| AiRuntimeError::Protocol(format!("invalid constraints: {error}")))?;
+        constraints::validate_constraints(&items).map_err(AiRuntimeError::Protocol)?;
+        Ok(items)
+    }
+
     pub async fn hardware_probe(
         &self,
         service: AiService,
@@ -1230,7 +1256,16 @@ pub async fn fetch_speech_plugin_inspection(
         if fields.contains_key("language")
             && let Some(language) = language_hint
         {
-            selected.insert("language".into(), Value::String(language.into()));
+            let language = Value::String(language.into());
+            if selected
+                .get("language")
+                .is_some_and(|value| value != &language)
+            {
+                return Err(AiRuntimeError::Protocol(
+                    "conflicting language selection and model override".into(),
+                ));
+            }
+            selected.insert("language".into(), language);
         }
         let requested = Value::Object(selected);
         let effective = worker

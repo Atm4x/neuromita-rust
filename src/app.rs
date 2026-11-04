@@ -264,6 +264,7 @@ pub struct ApplicationLifecycle {
     server: ServerHandle,
     finetune: Option<FineTuneCollector>,
     speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
+    speech_controller: tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -588,8 +589,12 @@ impl ApplicationLifecycle {
             let result = owner.shutdown().await;
             let _ = completed.send(result);
         });
+        let speech_controller = crate::audio::controller::SpeechSessionController::default();
+        let speech_view =
+            crate::presentation::SpeechSessionPresenter::new(speech_controller.observe());
         Ok(Self {
             presenter: GuiPresenter {
+                speech: speech_view,
                 ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
@@ -610,6 +615,7 @@ impl ApplicationLifecycle {
             server,
             finetune,
             speech,
+            speech_controller: tokio::sync::Mutex::new(speech_controller),
             id,
             stop,
             completion: Some(completion),
@@ -631,6 +637,50 @@ impl ApplicationLifecycle {
             playback,
         );
         Some((handler, self.stop.child_token()))
+    }
+
+    /// Starts capture only if an ASR worker was explicitly provided to this application.
+    pub async fn start_speech_capture(
+        &self,
+        config: crate::audio::controller::SpeechCaptureConfig,
+        character: CharacterId,
+    ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
+        let runtime = self.presenter.ai_runtime.refresh_status().await;
+        if runtime.service(crate::ai_runtime::AiService::Asr).phase
+            != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
+        {
+            return Err(crate::audio::controller::SpeechCaptureError::Invalid(
+                "ASR model must be initialized before capturing audio".into(),
+            ));
+        }
+        let playback = crate::audio::controller::playback(&config);
+        let (handler, stop) = self
+            .speech_session(
+                character,
+                crate::request::RequestSource::Presenter,
+                playback,
+            )
+            .ok_or_else(|| {
+                crate::audio::controller::SpeechCaptureError::Invalid(
+                    "ASR worker has not been activated".into(),
+                )
+            })?;
+        self.speech_controller
+            .lock()
+            .await
+            .start(handler, stop, config)
+            .await
+    }
+
+    pub async fn stop_speech_capture(&self) {
+        self.speech_controller.lock().await.stop().await;
+    }
+
+    pub async fn press_speech_button(
+        &self,
+        pressed: bool,
+    ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
+        self.speech_controller.lock().await.press(pressed).await
     }
 
     pub fn presenter(&self) -> &GuiPresenter {
@@ -802,6 +852,7 @@ impl ApplicationLifecycle {
 
     pub async fn shutdown(mut self) -> Result<(), ApplicationError> {
         self.request_stop();
+        self.stop_speech_capture().await;
         self.completion
             .take()
             .expect("application owns its completion")

@@ -5,7 +5,7 @@ import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
-import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets } from "pages/settings.slint";
+import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
@@ -15,7 +15,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -39,6 +39,9 @@ export component AppWindow inherits Window {
     in-out property <int> release-revision: 0;
     in property <bool> backend-selected;
     in property <bool> client-selected;
+    in property <bool> game-running;
+    in property <bool> launcher-inspected;
+    in property <bool> unity-installed;
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
     in property <int> chat-clients;
@@ -94,8 +97,10 @@ export component AppWindow inherits Window {
             horizontal-stretch: 1; min-width: 0px; clip: true;
             if root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
-                backend: root.backend; client: root.client; releases: root.releases;
-                backend-selected: root.backend-selected; client-selected: root.client-selected;
+                backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
+                client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
+                releases: root.releases;
+                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }
                 play => { root.play(); }

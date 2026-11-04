@@ -2,10 +2,12 @@ mod characters;
 mod chat;
 mod connections;
 mod conversation;
+pub mod hardware;
 mod presets;
 mod releases;
 mod runtime;
 mod settings;
+mod speech;
 
 pub use characters::{
     CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
@@ -30,8 +32,10 @@ pub use settings::{
     InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
     SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
 };
+pub use speech::SpeechSessionPresenter;
 
 pub struct GuiPresenter {
+    pub speech: SpeechSessionPresenter,
     pub ai_runtime: RuntimeStatePresenter,
     pub releases: ReleasesPresenter,
     pub connections: ConnectionsPresenter,

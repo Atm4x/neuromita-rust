@@ -5,7 +5,7 @@ use slint::{ModelRc, VecModel};
 
 use super::{
     runtime::Command,
-    view::{AppWindow, ReleaseEntry},
+    view::{AppWindow, ReleaseEntry, ReleaseItem},
 };
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
@@ -13,6 +13,18 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
 }
 
 pub fn render(window: &AppWindow, snapshot: &ReleasesSnapshot) {
+    window.set_releases(ModelRc::new(VecModel::from(
+        snapshot
+            .records
+            .iter()
+            .take(3)
+            .map(|record| ReleaseItem {
+                title: record.title.as_str().into(),
+                date: record.date.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+
     window.set_release_loading(
         !snapshot.closed && matches!(snapshot.state, ReleaseLoadState::Loading),
     );

@@ -2,11 +2,14 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
-        runtime_status::RuntimeSnapshot,
+        runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
-    audio::input_catalog::{AudioInputCatalog, AudioInputDevice},
+    audio::{
+        controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
+        input_catalog::{AudioInputCatalog, AudioInputDevice},
+    },
     character::CharacterId,
     generation::PresetRecord,
     generation::{
@@ -49,6 +52,7 @@ pub enum Command {
     SaveAsr(AsrPreferences, String),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     Select(CharacterId),
@@ -56,10 +60,14 @@ pub enum Command {
     Cancel(RequestId),
     Refresh,
     Volume(u8),
+    SpeechSessionEnabled(bool),
+    SpeechPushToTalk(bool),
 }
 
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
+    SpeechSessionStatus(SpeechSessionSnapshot),
+    Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
@@ -143,6 +151,64 @@ async fn discover_input_devices(directory: &std::path::Path) -> Vec<AudioInputDe
     AudioInputCatalog::discover(executable.as_deref()).await
 }
 
+fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> Option<PathBuf> {
+    [
+        std::env::var_os(variable).map(PathBuf::from),
+        Some(directory.join("AIData/bin").join(filename)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_absolute() && path.is_file())
+}
+
+async fn enable_speech_session(
+    app: &ApplicationLifecycle,
+    directory: &std::path::Path,
+    character: CharacterId,
+) -> Result<(), String> {
+    let administration = app.presenter();
+    let runtime = administration.ai_runtime.refresh_status().await;
+    if runtime.service(neuromita::ai_runtime::AiService::Asr).phase != RuntimePhase::ModelReady {
+        return Err("ASR модель не инициализирована; выберите и активируйте её в AI Engine".into());
+    }
+    let settings = administration
+        .settings
+        .snapshot()
+        .map_err(|e| e.to_string())?;
+    let preferences = &settings.values.speech.asr;
+    let devices = discover_input_devices(directory).await;
+    if !devices.iter().any(|device| {
+        device.id == preferences.device_id && device.backend == preferences.audio_backend
+    }) {
+        return Err("Выбранное устройство ввода не найдено или не соответствует backend".into());
+    }
+    let ffmpeg = find_binary(
+        directory,
+        "NEUROMITA_FFMPEG",
+        if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        },
+    )
+    .ok_or("FFmpeg не найден; укажите абсолютный путь к исполняемому файлу")?;
+    let ffplay = find_binary(
+        directory,
+        "NEUROMITA_FFPLAY",
+        if cfg!(windows) {
+            "ffplay.exe"
+        } else {
+            "ffplay"
+        },
+    )
+    .ok_or("FFplay не найден; укажите абсолютный путь к исполняемому файлу")?;
+    let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
+        .map_err(|e| e.to_string())?;
+    app.start_speech_capture(config, character)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn start(
     directory: &std::path::Path,
     model: Option<&str>,
@@ -205,10 +271,11 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(hardware_snapshot().await);
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(app.presenter(), &catalog, &mut receive, &stop, &publish).await {
+    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -218,12 +285,14 @@ async fn run(
 }
 
 async fn observe(
-    administration: &GuiPresenter,
+    app: &ApplicationLifecycle,
+    directory: &std::path::Path,
     catalog: &SpeechModelCatalog,
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
 ) -> Result<(), String> {
+    let administration = app.presenter();
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
@@ -235,6 +304,7 @@ async fn observe(
     let mut presets = presenter.observe_presets();
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     let mut runtime_status = administration.ai_runtime.observe();
+    let mut speech_status = administration.speech.observe();
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -258,6 +328,9 @@ async fn observe(
             Err(error) => publish(Update::Error(error.to_string())),
         }
         publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
+        publish(Update::SpeechSessionStatus(
+            administration.speech.snapshot(),
+        ));
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
@@ -278,6 +351,22 @@ async fn observe(
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+                Some(Command::SpeechSessionEnabled(enabled)) => {
+                    let result = if enabled {
+                        enable_speech_session(app, directory, character).await
+                    } else {
+                        app.stop_speech_capture().await;
+                        Ok(())
+                    };
+                    if let Err(error) = result { publish(Update::AdminError(error)); }
+                    publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                },
+                Some(Command::SpeechPushToTalk(pressed)) => {
+                    if let Err(error) = app.press_speech_button(pressed).await && pressed {
+                        publish(Update::AdminError(error.to_string()));
+                    }
+                },
+                Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
                     publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
                 },
@@ -328,6 +417,10 @@ async fn observe(
                 },
             },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
+            result = speech_status.changed() => {
+                result.map_err(|_| "Speech session observation closed")?;
+                publish(Update::SpeechSessionStatus(speech_status.borrow_and_update().clone()));
+            },
             result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
             result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
@@ -406,4 +499,17 @@ impl Drop for MemoryWatch {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+async fn hardware_snapshot() -> Update {
+    let inventory =
+        tokio::task::spawn_blocking(neuromita::ai_runtime::system_hardware::SystemHardware::detect)
+            .await
+            .unwrap_or_else(
+                |error| neuromita::ai_runtime::system_hardware::SystemHardware {
+                    adapters: Vec::new(),
+                    errors: vec![error.to_string()],
+                },
+            );
+    Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
 }

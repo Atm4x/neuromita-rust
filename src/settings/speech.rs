@@ -104,9 +104,7 @@ impl Default for AsrPreferences {
 pub struct SpeechSettings {
     pub tts: TtsPreferences,
     pub asr: AsrPreferences,
-    #[serde(default)]
     pub tts_model_options: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
     pub asr_model_options: BTreeMap<String, serde_json::Value>,
 }
 
@@ -141,6 +139,12 @@ impl SpeechSettings {
                 ));
             }
             for (plugin_id, options) in models {
+                if options.get("language").is_some() {
+                    return Err(SettingsError::Validation(
+                        "language belongs to the typed language preference, not model overrides"
+                            .into(),
+                    ));
+                }
                 if plugin_id.is_empty()
                     || plugin_id.len() > 128
                     || !plugin_id.is_ascii()
@@ -222,15 +226,12 @@ mod model_options_tests {
     use super::*;
 
     #[test]
-    fn legacy_speech_settings_remain_readable_and_new_options_are_bounded() {
+    fn model_options_are_required_and_bounded() {
         let mut json = serde_json::to_value(SpeechSettings::default()).unwrap();
         json.as_object_mut().unwrap().remove("tts_model_options");
         json.as_object_mut().unwrap().remove("asr_model_options");
-        let decoded: SpeechSettings = serde_json::from_value(json).unwrap();
-        assert!(decoded.tts_model_options.is_empty());
-        assert!(decoded.asr_model_options.is_empty());
-        assert!(decoded.validate().is_ok());
-        let mut invalid = decoded;
+        assert!(serde_json::from_value::<SpeechSettings>(json).is_err());
+        let mut invalid = SpeechSettings::default();
         invalid
             .asr_model_options
             .insert("whisper".into(), json!({"nested": {"unsafe": 1}}));
@@ -239,5 +240,9 @@ mod model_options_tests {
             .asr_model_options
             .insert("whisper".into(), json!({"beam_size": 5}));
         assert!(invalid.validate().is_ok());
+        invalid
+            .asr_model_options
+            .insert("whisper".into(), json!({"language":"en"}));
+        assert!(invalid.validate().is_err());
     }
 }

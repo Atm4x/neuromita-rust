@@ -1,8 +1,15 @@
 use std::rc::Rc;
 
 use neuromita::{
-    ai_runtime::{AiService, runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory},
-    audio::input_catalog::AudioInputDevice,
+    ai_runtime::{
+        AiService,
+        runtime_status::{RuntimePhase, RuntimeSnapshot},
+        speech_catalog::SpeechInventory,
+    },
+    audio::{
+        controller::{SpeechSessionPhase, SpeechSessionSnapshot},
+        input_catalog::AudioInputDevice,
+    },
     settings::AsrPreferences,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -157,7 +164,11 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     ui.on_recognizer_changed(move |value| send(Command::SelectAsrRecognizer(model_id(&value))));
     let send = dispatch.clone();
     ui.on_refresh_models(move || send(Command::RefreshSpeechInventory));
-    ui.on_refresh_devices(move || dispatch(Command::RefreshSpeechInventory));
+    let refresh = dispatch.clone();
+    ui.on_refresh_devices(move || refresh(Command::RefreshSpeechInventory));
+    let send = dispatch.clone();
+    ui.on_session_toggle(move |enabled| send(Command::SpeechSessionEnabled(enabled)));
+    ui.on_push_to_talk(move |pressed| dispatch(Command::SpeechPushToTalk(pressed)));
 }
 
 pub fn render(window: &AppWindow, settings: &AsrPreferences) {
@@ -200,8 +211,6 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
     ui.set_pre_buffer(format!("{:.2}", settings.pre_buffer_ms as f64 / 1000.0).into());
     ui.set_max_speech(format!("{:.2}", settings.max_speech_ms as f64 / 1000.0).into());
     ui.set_min_speech(format!("{:.2}", settings.min_speech_ms as f64 / 1000.0).into());
-    ui.set_runtime_ready(false);
-    ui.set_active(false);
 }
 
 pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[AudioInputDevice]) {
@@ -250,7 +259,6 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[Aud
         "Выберите устройство ввода".into()
     });
     ui.set_draft_enabled(true);
-    ui.set_runtime_ready(false);
 }
 
 pub fn preview(window: &AppWindow) {
@@ -280,9 +288,35 @@ mod tests {
 }
 
 pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
-    let status = super::speech_status::describe(&snapshot.service(AiService::Asr));
+    let service = snapshot.service(AiService::Asr);
     let ui = window.global::<AsrUi>();
-    ui.set_status(format!("{status} · Микрофон не запущен").into());
-    ui.set_runtime_ready(false);
-    ui.set_active(false);
+    ui.set_runtime_ready(service.phase == RuntimePhase::ModelReady);
+    ui.set_worker_status(super::speech_status::describe(&service).into());
+    display_status(&ui);
+}
+
+pub fn session_status(window: &AppWindow, snapshot: &SpeechSessionSnapshot) {
+    let ui = window.global::<AsrUi>();
+    ui.set_active(snapshot.phase == SpeechSessionPhase::Listening);
+    let message = match snapshot.phase {
+        SpeechSessionPhase::Stopped => "Микрофон остановлен".to_owned(),
+        SpeechSessionPhase::Starting => "Запуск микрофона".to_owned(),
+        SpeechSessionPhase::Listening => {
+            "Микрофон слушает (максимум 10 секунд на фразу)".to_owned()
+        }
+        SpeechSessionPhase::Stopping => "Остановка микрофона".to_owned(),
+        SpeechSessionPhase::Failed => format!(
+            "Ошибка микрофона: {}",
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or("неизвестная ошибка")
+        ),
+    };
+    ui.set_session_status(message.into());
+    display_status(&ui);
+}
+
+fn display_status(ui: &AsrUi) {
+    ui.set_status(format!("{} · {}", ui.get_session_status(), ui.get_worker_status()).into());
 }

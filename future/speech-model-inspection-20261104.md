@@ -1,10 +1,11 @@
 # Speech plugin inspection and activation resolution (2026-11-04)
 
-Base: main `2dcf12774a526c6a987770fd1273c2f372d19e9f` (includes #82 GUI integration).
+Original base: main `2dcf1277`. Reviewed integration follows `c3e0c3c2` (#83).
 
 ## Boundaries
 
 - `SpeechSettings` owns per-plugin overrides for each service. `SettingsPresenter.tts/asr.model_options` provides the existing observable, atomically persisted settings boundary.
+- Both model-options maps are required by the current strict settings format. No historical deserialization defaults are retained. Stored overrides cannot contain `language`: the typed TTS language preference and per-model ASR language preference remain its only owners. Standalone inspection rejects conflicting explicit language values instead of overwriting one.
 - `SpeechModelCatalog` remains the single read-only file/receipt inventory. No duplicate inventory database is created.
 - `select_speech_model` selects the configured plugin and a single verified revision (ambiguous revisions are errors). Telegram and API TTS do not select local workers.
 - `fetch_speech_plugin_inspection` uses a short-lived Python SDK host, reads `discover`, `settings_schema`, `validate_config`, `install_plan`, `probe_install`, then stops. Python never initializes the plugin model and never installs packages from this API.
@@ -21,5 +22,12 @@ Base: main `2dcf12774a526c6a987770fd1273c2f372d19e9f` (includes #82 GUI integrat
 ## Validation
 
 - `cargo check --locked --offline --lib` passed.
-- Speech tests validate schema/probe errors, model selection, default activation mapping and legacy persistence.
-- One existing global library test requires Python 3.12; the test environment currently exposes Python 3.13, so full-suite success cannot be claimed.
+- Speech tests validate schema/probe errors, model selection, default activation mapping, strict persistence and conflicting language inputs.
+- Review host uses Python 3.12.9; fixtures use the repository's existing platform-aware test-interpreter convention. Final combined checks are recorded after integration.
+
+Reviewed result: 511 default tests, 16 GUI/localization tests passed. Default and
+GUI all-target Clippy with warnings denied, fmt and offline GUI binaries build pass.
+SDK remains at 86 passing Python 3.12.9 tests from the preceding hardware/launcher
+checkpoint. The local document was explicitly extended with empty required model
+override maps from the Core initial profile and imported after preserving a backup.
+No automatic compatibility conversion is implemented in startup.

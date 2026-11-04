@@ -88,7 +88,7 @@ mod tests {
         PythonHostConfig {
             python_executable: std::env::var_os("NEUROMITA_TEST_PYTHON")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/usr/bin/python3")),
+                .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "python" } else { "python3" })),
             sdk_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
             plugins_directory: root.join("plugins"),
             models_directory: Some(root.join("models")),
@@ -165,6 +165,19 @@ class InstallContract:
                 Some("en"),
                 None,
                 &[],
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            fetch_speech_plugin_inspection(
+                &host,
+                AiService::Asr,
+                "demo_asr",
+                json!({"language":"ru"}),
+                Some("en"),
+                None,
+                &[]
             )
             .await
             .is_err()

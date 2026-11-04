@@ -57,6 +57,7 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::ai_engine::bind(window, dispatch.clone());
     super::voice::bind(window, dispatch.clone());
     super::asr::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
@@ -148,6 +149,7 @@ pub(super) fn render_catalog(
 
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
@@ -184,6 +186,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .global::<ConversationUi>()
                 .set_diagnostics(value.into());
         }
+        Update::Hardware(snapshot) => super::ai_engine::render(window, snapshot),
         Update::Connections(snapshot) => {
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
@@ -206,6 +209,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);
             super::asr::runtime_status(window, &stopped);
+            super::asr::session_status(window, &Default::default());
             window.set_core_connected(false);
             window.set_core_connecting(false);
             window.set_chat_sending(false);

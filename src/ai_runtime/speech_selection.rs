@@ -245,7 +245,7 @@ mod tests {
         let config = PythonHostConfig {
             python_executable: std::env::var_os("NEUROMITA_TEST_PYTHON")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| "/usr/bin/python3".into()),
+                .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into()),
             sdk_root: root.clone(),
             plugins_directory: root.join("plugins/builtin"),
             models_directory: None,
