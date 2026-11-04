@@ -1,0 +1,1060 @@
+{
+  "threshold": 0.5,
+  "validated_only": true,
+  "fixtures": [
+    {
+      "id": "fleurs-ru-1554",
+      "category": "ru",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 119040,
+      "scored_samples": 118784,
+      "unscored_tail_samples": 256,
+      "endpoint_unprocessed_tail_samples": 0,
+      "metrics": {
+        "scored_samples": 118784,
+        "true_positive_samples": 65248,
+        "false_positive_samples": 1312,
+        "false_negative_samples": 1472,
+        "precision": 0.98028845,
+        "recall": 0.97793764,
+        "f1": 0.9791116,
+        "false_positive_seconds": 0.082
+      },
+      "boundary": {
+        "annotated": 1,
+        "detected": 2,
+        "covered": 1,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 1,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 1,
+          "detected": 1,
+          "covered": 1,
+          "matched": 1,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": -20.0,
+          "audio_end_error_ms": 546.0
+        },
+        "onset_decision_delay_ms": 188.0,
+        "silence_emission_delay_ms": 546.0,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 29440,
+          "end_sample": 105216,
+          "onset_decided_at_sample": 32768,
+          "emitted_at_sample": 105216,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1615",
+      "category": "ru",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 116160,
+      "scored_samples": 115712,
+      "unscored_tail_samples": 448,
+      "endpoint_unprocessed_tail_samples": 192,
+      "metrics": {
+        "scored_samples": 115712,
+        "true_positive_samples": 80603,
+        "false_positive_samples": 7461,
+        "false_negative_samples": 0,
+        "precision": 0.91527754,
+        "recall": 1.0,
+        "f1": 0.95576495,
+        "false_positive_seconds": 0.4663125
+      },
+      "boundary": {
+        "annotated": 2,
+        "detected": 2,
+        "covered": 2,
+        "matched": 2,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": -81.0,
+        "audio_end_error_ms": 152.15625
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 2,
+          "detected": 1,
+          "covered": 2,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 7424,
+          "end_sample": 106752,
+          "onset_decided_at_sample": 10752,
+          "emitted_at_sample": 106752,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1587",
+      "category": "ru",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 76800,
+      "scored_samples": 76800,
+      "unscored_tail_samples": 0,
+      "endpoint_unprocessed_tail_samples": 0,
+      "metrics": {
+        "scored_samples": 76800,
+        "true_positive_samples": 57248,
+        "false_positive_samples": 2144,
+        "false_negative_samples": 1793,
+        "precision": 0.96390086,
+        "recall": 0.96963125,
+        "f1": 0.9667576,
+        "false_positive_seconds": 0.134
+      },
+      "boundary": {
+        "annotated": 1,
+        "detected": 2,
+        "covered": 1,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 1,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 1,
+          "detected": 1,
+          "covered": 1,
+          "matched": 1,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": -63.9375,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": 144.0625,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 1,
+        "eof_censored_audio_end_error_ms": 390.0,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 10496,
+          "end_sample": 76800,
+          "onset_decided_at_sample": 13824,
+          "emitted_at_sample": 76800,
+          "end_reason": "eof"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1651",
+      "category": "ru",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 134400,
+      "scored_samples": 134144,
+      "unscored_tail_samples": 256,
+      "endpoint_unprocessed_tail_samples": 0,
+      "metrics": {
+        "scored_samples": 134144,
+        "true_positive_samples": 102528,
+        "false_positive_samples": 6016,
+        "false_negative_samples": 192,
+        "precision": 0.9445755,
+        "recall": 0.99813086,
+        "f1": 0.97061497,
+        "false_positive_seconds": 0.376
+      },
+      "boundary": {
+        "annotated": 2,
+        "detected": 2,
+        "covered": 2,
+        "matched": 2,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 5.0,
+        "audio_end_error_ms": 187.0
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 2,
+          "detected": 1,
+          "covered": 2,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 8448,
+          "end_sample": 128256,
+          "onset_decided_at_sample": 11776,
+          "emitted_at_sample": 128256,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1560",
+      "category": "ru",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 113280,
+      "scored_samples": 113152,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 113152,
+        "true_positive_samples": 62623,
+        "false_positive_samples": 5473,
+        "false_negative_samples": 744,
+        "precision": 0.91962814,
+        "recall": 0.9882589,
+        "f1": 0.95270914,
+        "false_positive_seconds": 0.3420625
+      },
+      "boundary": {
+        "annotated": 3,
+        "detected": 3,
+        "covered": 3,
+        "matched": 3,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 15.5,
+        "audio_end_error_ms": 114.020836
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 3,
+          "detected": 1,
+          "covered": 3,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 13056,
+          "end_sample": 101632,
+          "onset_decided_at_sample": 16384,
+          "emitted_at_sample": 101632,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-ru-1534",
+      "category": "ru",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 145920,
+      "scored_samples": 145920,
+      "unscored_tail_samples": 0,
+      "endpoint_unprocessed_tail_samples": 0,
+      "metrics": {
+        "scored_samples": 145920,
+        "true_positive_samples": 86336,
+        "false_positive_samples": 5824,
+        "false_negative_samples": 5057,
+        "precision": 0.93680555,
+        "recall": 0.9446675,
+        "f1": 0.9407201,
+        "false_positive_seconds": 0.364
+      },
+      "boundary": {
+        "annotated": 3,
+        "detected": 3,
+        "covered": 3,
+        "matched": 3,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 105.354164,
+        "audio_end_error_ms": 121.333336
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 3,
+          "detected": 2,
+          "covered": 3,
+          "matched": 1,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": -0.0625,
+          "audio_end_error_ms": 554.0
+        },
+        "onset_decision_delay_ms": 207.9375,
+        "silence_emission_delay_ms": 554.0,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 14592,
+          "end_sample": 84224,
+          "onset_decided_at_sample": 17920,
+          "emitted_at_sample": 84224,
+          "end_reason": "silence"
+        },
+        {
+          "start_sample": 84224,
+          "end_sample": 130304,
+          "onset_decided_at_sample": 87552,
+          "emitted_at_sample": 130304,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1548",
+      "category": "en",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 104640,
+      "scored_samples": 104448,
+      "unscored_tail_samples": 192,
+      "endpoint_unprocessed_tail_samples": 192,
+      "metrics": {
+        "scored_samples": 104448,
+        "true_positive_samples": 61216,
+        "false_positive_samples": 3808,
+        "false_negative_samples": 1184,
+        "precision": 0.941437,
+        "recall": 0.98102564,
+        "f1": 0.9608237,
+        "false_positive_seconds": 0.238
+      },
+      "boundary": {
+        "annotated": 2,
+        "detected": 2,
+        "covered": 2,
+        "matched": 2,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 37.0,
+        "audio_end_error_ms": 119.0
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 2,
+          "detected": 1,
+          "covered": 2,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 16640,
+          "end_sample": 96000,
+          "onset_decided_at_sample": 19968,
+          "emitted_at_sample": 96000,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1510",
+      "category": "en",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 126720,
+      "scored_samples": 126464,
+      "unscored_tail_samples": 256,
+      "endpoint_unprocessed_tail_samples": 0,
+      "metrics": {
+        "scored_samples": 126464,
+        "true_positive_samples": 103136,
+        "false_positive_samples": 1312,
+        "false_negative_samples": 1024,
+        "precision": 0.98743874,
+        "recall": 0.990169,
+        "f1": 0.988802,
+        "false_positive_seconds": 0.082
+      },
+      "boundary": {
+        "annotated": 1,
+        "detected": 2,
+        "covered": 1,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 1,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 1,
+          "detected": 1,
+          "covered": 1,
+          "matched": 1,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": -154.0,
+          "audio_end_error_ms": 536.0
+        },
+        "onset_decision_delay_ms": 54.0,
+        "silence_emission_delay_ms": 536.0,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 10496,
+          "end_sample": 125696,
+          "onset_decided_at_sample": 13824,
+          "emitted_at_sample": 125696,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1578",
+      "category": "en",
+      "role": "calibration",
+      "annotation_status": "manual",
+      "audio_samples": 66240,
+      "scored_samples": 66048,
+      "unscored_tail_samples": 192,
+      "endpoint_unprocessed_tail_samples": 192,
+      "metrics": {
+        "scored_samples": 66048,
+        "true_positive_samples": 40704,
+        "false_positive_samples": 6912,
+        "false_negative_samples": 2976,
+        "precision": 0.8548387,
+        "recall": 0.93186814,
+        "f1": 0.8916929,
+        "false_positive_seconds": 0.432
+      },
+      "boundary": {
+        "annotated": 2,
+        "detected": 2,
+        "covered": 2,
+        "matched": 2,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 84.0,
+        "audio_end_error_ms": 207.0
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 2,
+          "detected": 1,
+          "covered": 2,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 1,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 6912,
+          "end_sample": 66048,
+          "onset_decided_at_sample": 10240,
+          "emitted_at_sample": 66048,
+          "end_reason": "eof"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1652",
+      "category": "en",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 78720,
+      "scored_samples": 78336,
+      "unscored_tail_samples": 384,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 78336,
+        "true_positive_samples": 41248,
+        "false_positive_samples": 2272,
+        "false_negative_samples": 3872,
+        "precision": 0.94779414,
+        "recall": 0.9141844,
+        "f1": 0.93068594,
+        "false_positive_seconds": 0.142
+      },
+      "boundary": {
+        "annotated": 1,
+        "detected": 1,
+        "covered": 1,
+        "matched": 1,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": 242.0,
+        "audio_end_error_ms": 142.0
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 1,
+          "detected": 1,
+          "covered": 1,
+          "matched": 1,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": 98.0,
+          "audio_end_error_ms": 606.0
+        },
+        "onset_decision_delay_ms": 306.0,
+        "silence_emission_delay_ms": 606.0,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 13568,
+          "end_sample": 66816,
+          "onset_decided_at_sample": 16896,
+          "emitted_at_sample": 66816,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1531",
+      "category": "en",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 71040,
+      "scored_samples": 70656,
+      "unscored_tail_samples": 384,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 70656,
+        "true_positive_samples": 32576,
+        "false_positive_samples": 3776,
+        "false_negative_samples": 30304,
+        "precision": 0.89612675,
+        "recall": 0.51806617,
+        "f1": 0.6565624,
+        "false_positive_seconds": 0.236
+      },
+      "boundary": {
+        "annotated": 1,
+        "detected": 5,
+        "covered": 1,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 1,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 1,
+          "detected": 2,
+          "covered": 1,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 1,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 1,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 20224,
+          "end_sample": 36096,
+          "onset_decided_at_sample": 23552,
+          "emitted_at_sample": 36096,
+          "end_reason": "silence"
+        },
+        {
+          "start_sample": 36096,
+          "end_sample": 70912,
+          "onset_decided_at_sample": 36864,
+          "emitted_at_sample": 70912,
+          "end_reason": "eof"
+        }
+      ]
+    },
+    {
+      "id": "fleurs-en-1528",
+      "category": "en",
+      "role": "heldout",
+      "annotation_status": "manual",
+      "audio_samples": 109440,
+      "scored_samples": 109056,
+      "unscored_tail_samples": 384,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 109056,
+        "true_positive_samples": 65613,
+        "false_positive_samples": 11187,
+        "false_negative_samples": 0,
+        "precision": 0.85433596,
+        "recall": 1.0,
+        "f1": 0.92144674,
+        "false_positive_seconds": 0.6991875
+      },
+      "boundary": {
+        "annotated": 2,
+        "detected": 3,
+        "covered": 2,
+        "matched": 2,
+        "missed": 0,
+        "spurious": 1,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": -36.5625,
+        "audio_end_error_ms": 233.03125
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 2,
+          "detected": 1,
+          "covered": 2,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 1,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 10496,
+          "end_sample": 101120,
+          "onset_decided_at_sample": 13824,
+          "emitted_at_sample": 101120,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "esc10-dog",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 0,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.0
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 0,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 0,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": []
+    },
+    {
+      "id": "esc10-crackling_fire",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 0,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.0
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 0,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 0,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": []
+    },
+    {
+      "id": "esc10-rain",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 0,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.0
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 0,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 0,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": []
+    },
+    {
+      "id": "esc10-clock_tick",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 3072,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.192
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 2,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 2,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 1,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 1,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": 0.768
+      },
+      "emitted_segments": [
+        {
+          "start_sample": 5888,
+          "end_sample": 18176,
+          "onset_decided_at_sample": 9216,
+          "emitted_at_sample": 18176,
+          "end_reason": "silence"
+        }
+      ]
+    },
+    {
+      "id": "esc10-rooster",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 0,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.0
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 0,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 0,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": []
+    },
+    {
+      "id": "esc10-sea_waves",
+      "category": "noise",
+      "role": "heldout",
+      "annotation_status": "verified_noise",
+      "audio_samples": 80000,
+      "scored_samples": 79872,
+      "unscored_tail_samples": 128,
+      "endpoint_unprocessed_tail_samples": 128,
+      "metrics": {
+        "scored_samples": 79872,
+        "true_positive_samples": 0,
+        "false_positive_samples": 0,
+        "false_negative_samples": 0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_positive_seconds": 0.0
+      },
+      "boundary": {
+        "annotated": 0,
+        "detected": 0,
+        "covered": 0,
+        "matched": 0,
+        "missed": 0,
+        "spurious": 0,
+        "merged": 0,
+        "split": 0,
+        "audio_start_error_ms": null,
+        "audio_end_error_ms": null
+      },
+      "endpoint": {
+        "boundary": {
+          "annotated": 0,
+          "detected": 0,
+          "covered": 0,
+          "matched": 0,
+          "missed": 0,
+          "spurious": 0,
+          "merged": 0,
+          "split": 0,
+          "audio_start_error_ms": null,
+          "audio_end_error_ms": null
+        },
+        "onset_decision_delay_ms": null,
+        "silence_emission_delay_ms": null,
+        "eof_censored_ends": 0,
+        "eof_censored_audio_end_error_ms": null,
+        "spurious_seconds": -0.0
+      },
+      "emitted_segments": []
+    }
+  ]
+}

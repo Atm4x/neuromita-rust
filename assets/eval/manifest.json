@@ -11,7 +11,7 @@
           "end_sample": 96480
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-ru-1615",
@@ -21,14 +21,14 @@
       "speech": [
         {
           "start_sample": 10080,
-          "end_sample": 43200
+          "end_sample": 44123
         },
         {
           "start_sample": 50880,
           "end_sample": 97440
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-ru-1587",
@@ -37,11 +37,11 @@
       "role": "calibration",
       "speech": [
         {
-          "start_sample": 12000,
+          "start_sample": 11519,
           "end_sample": 70560
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-ru-1651",
@@ -58,7 +58,7 @@
           "end_sample": 119040
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-ru-1560",
@@ -71,15 +71,15 @@
           "end_sample": 44160
         },
         {
-          "start_sample": 51360,
+          "start_sample": 50788,
           "end_sample": 75360
         },
         {
-          "start_sample": 84000,
-          "end_sample": 90240
+          "start_sample": 82612,
+          "end_sample": 92607
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-ru-1534",
@@ -88,19 +88,19 @@
       "role": "heldout",
       "speech": [
         {
-          "start_sample": 17280,
+          "start_sample": 15619,
           "end_sample": 60000
         },
         {
-          "start_sample": 66720,
+          "start_sample": 65083,
           "end_sample": 74880
         },
         {
-          "start_sample": 86400,
+          "start_sample": 84225,
           "end_sample": 121440
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1548",
@@ -117,7 +117,7 @@
           "end_sample": 86880
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1510",
@@ -130,7 +130,7 @@
           "end_sample": 117120
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1578",
@@ -147,7 +147,7 @@
           "end_sample": 57600
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1652",
@@ -160,7 +160,7 @@
           "end_sample": 57120
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1531",
@@ -173,7 +173,7 @@
           "end_sample": 64320
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "fleurs-en-1528",
@@ -182,19 +182,15 @@
       "role": "heldout",
       "speech": [
         {
-          "start_sample": 5760,
+          "start_sample": 13874,
           "end_sample": 54720
         },
         {
           "start_sample": 60000,
-          "end_sample": 98880
-        },
-        {
-          "start_sample": 104640,
-          "end_sample": 107520
+          "end_sample": 84767
         }
       ],
-      "annotation_status": "heuristic"
+      "annotation_status": "manual"
     },
     {
       "id": "esc10-dog",
@@ -202,7 +198,7 @@
       "wav": "noise-01-dog.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     },
     {
       "id": "esc10-crackling_fire",
@@ -210,7 +206,7 @@
       "wav": "noise-02-crackling_fire.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     },
     {
       "id": "esc10-rain",
@@ -218,7 +214,7 @@
       "wav": "noise-03-rain.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     },
     {
       "id": "esc10-clock_tick",
@@ -226,7 +222,7 @@
       "wav": "noise-04-clock_tick.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     },
     {
       "id": "esc10-rooster",
@@ -234,7 +230,7 @@
       "wav": "noise-05-rooster.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     },
     {
       "id": "esc10-sea_waves",
@@ -242,7 +238,7 @@
       "wav": "noise-06-sea_waves.wav",
       "role": "heldout",
       "speech": [],
-      "annotation_status": "unknown"
+      "annotation_status": "verified_noise"
     }
   ]
 }

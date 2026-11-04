@@ -12,12 +12,16 @@
 
 ## Annotation status and strict evaluation
 
-The twelve speech clips use `annotation_status: "heuristic"`: their intervals
-come from an energy detector, not manual listening. The six ESC noise clips use
-`unknown`; absence of speech has not been verified. No manual labels were added.
+The current manifest contains the user's completed review, imported on 2026-11-04:
+twelve `manual` speech clips and six `verified_noise` clips. Five speech clips have
+edited intervals; the remaining intervals were explicitly confirmed. These are
+one listener's annotations, not independent multi-rater reference labels.
 `provisional_intervals` in sources.json is provenance; the evaluator reads status
 from the manifest. The original manifest is preserved byte-for-byte in
 `manifest-heuristic-v1.json`; without status the new evaluator treats it as unknown.
+`manifest-heuristic-v2.json` preserves the status-aware 12 heuristic / 6 unknown
+input of the previous run. WAV bytes are unchanged. Manual-run reports and the
+before/after comparison are in `future/evidence/issue60-manual-20261104/`.
 
 - `unknown` (also a missing status): suppress quality metrics even if speech
   intervals exist. Missing speech labels never prove silence.
@@ -33,12 +37,13 @@ to 1 MiB. Reads stop at the byte limit even if the file grows during reading.
 
 ```sh
 cargo run --locked --offline --example vad_ab -- assets/eval/manifest.json direct 0.5
-cargo run --locked --offline --example vad_ab -- manual-manifest.json direct 0.5 --validated-only
+cargo run --locked --offline --example vad_ab -- assets/eval/manifest.json direct 0.5 --validated-only
 ```
 
 `--validated-only` rejects the entire manifest if any fixture is neither manual
-nor verified_noise, before constructing score providers. The current corpus is
-expected to fail strict mode. Thresholds remain explicit, never tuned here.
+nor verified_noise, before constructing score providers. The reviewed corpus
+passes strict mode; the heuristic archives intentionally do not. Thresholds remain
+explicit, never tuned here.
 Wavekat requires vad-wavekat; Silero requires vad-silero and explicit local
 model/ORT DLL paths. Provider factories return Result, including Silero creation;
 construction errors propagate without expect/panic.
@@ -72,14 +77,14 @@ Timing means exclude ambiguous merge/split pairs. These are stream sample times,
 not wall-clock inference or ASR benchmarks. Unknown fixtures still report raw
 emitted segments and processing coverage, but metrics/boundary/endpoint are null.
 
-Historical A/B reports use different formulas and cannot establish backend
-acceptance. A new comparison needs a validated corpus and a fresh run.
+The oldest A/B reports use different formulas and cannot establish backend
+acceptance. The status-aware review run and the subsequent manual run use the
+same evaluator; their speech F1 differences isolate the changed annotations.
 
-The six unknown noise clips are excluded from all quality metrics, while every
-clip retains its raw emitted segment metadata in the report. Previous noise-quality
-numbers cannot be reproduced as verified quality measurements until those clips
-are listened to and explicitly annotated as manual or verified_noise. Category
-names alone do not establish absence of speech.
+In the archived heuristic input, six unknown noise clips are excluded from quality
+metrics. In the current manifest the user explicitly confirmed absence of speech;
+quality metrics are now available for those same WAV files. Category names alone
+never establish absence of speech.
 
 Signed PCM boundary errors describe early/late saved audio, not detection latency.
 Decision and emission delays use the corresponding actual event timestamps;

@@ -10,6 +10,10 @@
 
 SHA-256 входного `assets/eval/manifest.json`:
 `a75817404ff8eb2a1b37ddc982c4c8b785a9cf626590ecb8b3fdefb1b2a7d3f9`.
+После ручной проверки этот вход сохранён как `assets/eval/manifest-heuristic-v2.json`;
+для воспроизведения данного исторического прогона передавайте архивный путь вместо
+обновлённого `manifest.json`. Итоговый ручной прогон — в соседнем
+`issue60-manual-20261104/`.
 Все 18 WAV сохранены без изменений. Происхождение, лицензии и SHA-256 каждого WAV
 указаны в `assets/eval/sources.json`. Модель и runtime, их размер и SHA-256 описаны
 в `future/issue-60-review-fixes-20261104.md`.
