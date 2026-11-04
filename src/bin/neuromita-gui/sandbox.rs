@@ -9,7 +9,7 @@ use neuromita::{
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
     timeline::domain::MessageRole,
 };
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
@@ -183,6 +183,23 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             }
         }
         Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
+        Update::MicrophoneTestStatus(snapshot) => {
+            let ui = window.global::<super::view::AsrUi>();
+            ui.set_testing(snapshot.running);
+            ui.set_mic_level(i32::from(snapshot.level));
+            ui.set_monitored_device(
+                ui.get_device_entries()
+                    .iter()
+                    .find(|entry| entry.id == snapshot.device.as_str())
+                    .map(|entry| entry.caption)
+                    .unwrap_or_else(|| snapshot.device.into()),
+            );
+            if let Some(error) = snapshot.error {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+            }
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
@@ -282,7 +299,10 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
         Ok(model) => {
-            window.set_chat_model(model.as_str().into());
+            window.set_chat_model(match &snapshot.preset_name {
+                Some(name) => format!("{name} ({model})").into(),
+                None => model.as_str().into(),
+            });
             window.set_chat_generation_error("".into());
         }
         Err(error) => {

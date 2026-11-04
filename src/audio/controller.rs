@@ -20,7 +20,6 @@ use super::{
 };
 
 const FRAME_MS: usize = 16;
-const MAX_SPEECH_FRAMES: usize = 625;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpeechSessionPhase {
@@ -52,6 +51,8 @@ pub enum SpeechCaptureError {
     AlreadyRunning,
     #[error("speech session is not running")]
     NotRunning,
+    #[error("suspended speech session was invalidated by another stop or model change")]
+    StaleSuspension,
     #[error("invalid speech capture configuration: {0}")]
     Invalid(String),
     #[error(transparent)]
@@ -60,7 +61,9 @@ pub enum SpeechCaptureError {
     Task(String),
 }
 
+#[derive(Clone)]
 pub struct SpeechCaptureConfig {
+    pub native_host: Option<String>,
     pub ffmpeg: PathBuf,
     pub ffplay: PathBuf,
     pub backend: CaptureBackend,
@@ -81,6 +84,7 @@ impl SpeechCaptureConfig {
             "alsa" => CaptureBackend::Alsa,
             "dshow" => CaptureBackend::Dshow,
             "avfoundation" => CaptureBackend::Avfoundation,
+            other if cpal::ALL_HOSTS.iter().any(|id| id.name() == other) => CaptureBackend::Native,
             other => {
                 return Err(SpeechCaptureError::Invalid(format!(
                     "unsupported backend: {other}"
@@ -96,7 +100,11 @@ impl SpeechCaptureConfig {
                 )));
             }
         };
-        if !ffmpeg.is_absolute() || !ffplay.is_absolute() || !ffmpeg.is_file() || !ffplay.is_file()
+        if backend != CaptureBackend::Native
+            && (!ffmpeg.is_absolute()
+                || !ffplay.is_absolute()
+                || !ffmpeg.is_file()
+                || !ffplay.is_file())
         {
             return Err(SpeechCaptureError::Invalid(
                 "explicit FFmpeg and FFplay binaries are required".into(),
@@ -113,8 +121,7 @@ impl SpeechCaptureConfig {
         let threshold = VoiceThreshold::new(f32::from(preferences.vad_threshold_milli) / 1000.0)
             .map_err(|error| SpeechCaptureError::Invalid(error.to_string()))?;
         let frames = |ms: u32| -> usize { (ms as usize).div_ceil(FRAME_MS) };
-        // The IPC request and WAV bounds currently limit an individual phrase to 10 seconds.
-        let max_frames = frames(preferences.max_speech_ms).min(MAX_SPEECH_FRAMES);
+        let max_frames = frames(preferences.max_speech_ms);
         let min_frames = frames(preferences.min_speech_ms).max(1);
         let segment = SegmentConfig {
             mode,
@@ -133,6 +140,8 @@ impl SpeechCaptureConfig {
             ));
         }
         Ok(Self {
+            native_host: (backend == CaptureBackend::Native)
+                .then(|| preferences.audio_backend.clone()),
             ffmpeg,
             ffplay,
             backend,
@@ -145,12 +154,22 @@ impl SpeechCaptureConfig {
 }
 
 struct ActiveSession {
+    restart: SuspendedCapture,
     stop: CancellationToken,
     control: mpsc::Sender<SpeechControl>,
     task: JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct SuspendedCapture {
+    epoch: uuid::Uuid,
+    handler: SpeechInputHandler,
+    stop: CancellationToken,
+    config: SpeechCaptureConfig,
+}
+
 pub struct SpeechSessionController {
+    epoch: uuid::Uuid,
     sender: watch::Sender<SpeechSessionSnapshot>,
     active: Option<ActiveSession>,
 }
@@ -159,6 +178,7 @@ impl Default for SpeechSessionController {
     fn default() -> Self {
         let (sender, _) = watch::channel(SpeechSessionSnapshot::default());
         Self {
+            epoch: uuid::Uuid::new_v4(),
             sender,
             active: None,
         }
@@ -193,9 +213,25 @@ impl SpeechSessionController {
             phase: SpeechSessionPhase::Starting,
             last_error: None,
         });
+        let restart = SuspendedCapture {
+            epoch: self.epoch,
+            handler: handler.clone(),
+            stop: stop.clone(),
+            config: config.clone(),
+        };
         let setup = (|| {
-            let capture = FfmpegCapture::start(config.ffmpeg, config.backend, &config.device)
-                .map_err(SpeechSessionError::from)?;
+            let capture: Box<dyn super::device::AudioCapture> =
+                if let Some(host) = &config.native_host {
+                    Box::new(
+                        super::native::NativeCapture::start(host, &config.device)
+                            .map_err(SpeechSessionError::from)?,
+                    )
+                } else {
+                    Box::new(
+                        FfmpegCapture::start(config.ffmpeg, config.backend, &config.device)
+                            .map_err(SpeechSessionError::from)?,
+                    )
+                };
             let segmenter =
                 SpeechSegmenter::new(EarshotVad::new(config.threshold), config.segment)?;
             Ok::<_, SpeechSessionError>((capture, segmenter))
@@ -217,7 +253,8 @@ impl SpeechSessionController {
                 .map_err(|error| SpeechCaptureError::Invalid(error.to_string()))?;
         }
         let sender = self.sender.clone();
-        let run_stop = stop.clone();
+        let run_stop = stop.child_token();
+        let session_stop = run_stop.clone();
         let task = tokio::spawn(async move {
             let result = handler
                 .run(capture, segmenter, receive, run_stop.clone())
@@ -232,7 +269,8 @@ impl SpeechSessionController {
             });
         });
         self.active = Some(ActiveSession {
-            stop,
+            restart,
+            stop: session_stop,
             control,
             task,
         });
@@ -253,7 +291,24 @@ impl SpeechSessionController {
             .map_err(|_| SpeechCaptureError::NotRunning)
     }
 
+    pub async fn suspend(&mut self) -> Option<SuspendedCapture> {
+        self.reap().await;
+        let mut restart = self.active.as_ref()?.restart.clone();
+        self.stop().await;
+        restart.epoch = self.epoch;
+        Some(restart)
+    }
+
+    pub async fn resume(&mut self, suspended: SuspendedCapture) -> Result<(), SpeechCaptureError> {
+        if suspended.epoch != self.epoch {
+            return Err(SpeechCaptureError::StaleSuspension);
+        }
+        self.start(suspended.handler, suspended.stop, suspended.config)
+            .await
+    }
+
     pub async fn stop(&mut self) {
+        self.epoch = uuid::Uuid::new_v4();
         if let Some(active) = self.active.take() {
             self.sender.send_replace(SpeechSessionSnapshot {
                 phase: SpeechSessionPhase::Stopping,
@@ -287,6 +342,9 @@ impl Drop for SpeechSessionController {
 }
 
 pub fn playback(config: &SpeechCaptureConfig) -> Arc<dyn super::device::AudioPlayback> {
+    if config.native_host.is_some() {
+        return Arc::new(super::monitor::NativePlayback);
+    }
     Arc::new(FfplayOutput {
         binary: config.ffplay.clone(),
     })
@@ -309,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_profile_maps_saved_modes_and_caps_ipc_segments() {
+    fn capture_profile_preserves_configured_duration_and_modes() {
         let binary = std::env::current_exe().unwrap();
         let mut settings = AsrPreferences {
             device_id: "mic0".into(),
@@ -321,7 +379,15 @@ mod tests {
             SpeechCaptureConfig::from_preferences(&settings, binary.clone(), binary.clone())
                 .unwrap();
         assert_eq!(automatic.segment.mode, SpeechMode::Automatic);
-        assert_eq!(automatic.segment.max_segment_frames, MAX_SPEECH_FRAMES);
+        assert_eq!(
+            automatic.segment.max_segment_frames,
+            (settings.max_speech_ms as usize).div_ceil(FRAME_MS)
+        );
+        settings.max_speech_ms = 600_000;
+        let long = SpeechCaptureConfig::from_preferences(&settings, binary.clone(), binary.clone())
+            .unwrap();
+        assert_eq!(long.segment.max_segment_frames, 37_500);
+        assert!(SpeechSegmenter::new(EarshotVad::new(long.threshold), long.segment).is_ok());
         assert_eq!(automatic.segment.pre_roll_frames, 25);
         settings.input_mode = "radio".into();
         let radio =

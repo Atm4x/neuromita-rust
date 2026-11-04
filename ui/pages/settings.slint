@@ -125,11 +125,11 @@ component CharacterWorkspace inherits HorizontalLayout {
                     SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }
                 }
             }
-            SettingsScrollView {
+            character-scroll := SettingsScrollView {
                 vertical-stretch: 1;
                 content-height: sections.preferred-height;
                 sections := VerticalLayout {
-                    width: parent.width;
+                    width: character-scroll.visible-width;
                     padding: 0px; spacing: 12px; alignment: start;
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
 VerticalLayout {
@@ -305,11 +305,11 @@ export component SettingsPage inherits Rectangle {
                         Centered { SettingsButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { SettingsUi.settings-error = ""; } } }
                     }
                 }
-                if SettingsUi.section == 0: SettingsScrollView {
+                if SettingsUi.section == 0: general-scroll := SettingsScrollView {
                     content-height: general-content.preferred-height;
                     general-content := VerticalLayout {
-                        width: parent.width;
-                        padding: 2px; padding-right: 10px;
+                        width: general-scroll.visible-width;
+                        padding: 2px;
                         spacing: SettingsTheme.section-gap; alignment: start;
                         CollapsibleSettingsSection {
                             title: I18n.i18n("settings.general.visible-sections", "Видимые разделы");
@@ -389,10 +389,10 @@ export component SettingsPage inherits Rectangle {
                     padding: 2px; spacing: 12px;
                     CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
                 }
-                if SettingsUi.section == 3: SettingsScrollView {
+                if SettingsUi.section == 3: voice-scroll := SettingsScrollView {
                     content-height: voice-page.preferred-height;
                     voice-page := VoiceSettingsPage {
-                        width: parent.width;
+                        width: voice-scroll.visible-width;
                         connected: root.connected;
                         volume: SettingsUi.settings-volume;
                         in-chat: SettingsUi.settings-voice-launcher;
@@ -402,7 +402,6 @@ export component SettingsPage inherits Rectangle {
                 }
                 if SettingsUi.section == 6: AiEngineWorkspace {}
                 if SettingsUi.section == 5: asr-scroll := SettingsScrollView {
-                    viewport-width: self.width - SettingsTheme.scrollbar-width;
                     content-height: asr-page.preferred-height;
                     asr-page := AsrSettingsPage { width: asr-scroll.visible-width; }
                 }

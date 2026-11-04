@@ -339,6 +339,11 @@ pub fn preview(window: &AppWindow, mode: VoicePreviewMode) {
     ui.set_sample_text("Привет! Я Мита. Давай проверим, как звучит мой голос.".into());
 }
 
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
+    window.global::<VoiceUi>().set_runtime_status(text.into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::VoicePreviewMode;
@@ -359,9 +364,4 @@ mod tests {
         );
         assert!(VoicePreviewMode::parse("other").is_err());
     }
-}
-
-pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
-    let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
-    window.global::<VoiceUi>().set_runtime_status(text.into());
 }

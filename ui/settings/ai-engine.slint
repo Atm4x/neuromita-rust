@@ -83,12 +83,13 @@ component EngineCardSubtitle inherits SettingsLabel {
 export component AiEngineWorkspace inherits VerticalLayout {
     spacing: 12px;
 
-    SettingsScrollView {
+    engine-scroll := SettingsScrollView {
         vertical-stretch: 1;
         content-height: content.preferred-height;
         content := VerticalLayout {
-            width: parent.width;
-            padding-right: 8px;
+            width: engine-scroll.visible-width;
+            padding-left: 2px;
+            padding-right: 2px;
             padding-bottom: 2px;
             spacing: 14px;
             alignment: start;

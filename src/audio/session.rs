@@ -149,6 +149,7 @@ fn queue_segment(
     })
 }
 
+#[derive(Clone)]
 pub struct SpeechInputHandler {
     transcriber: Arc<dyn SpeechTranscriber>,
     conversation: Arc<dyn SpeechConversation>,

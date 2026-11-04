@@ -17,7 +17,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
     runtime::Command,
-    view::{AppWindow, AsrUi, SettingsUi},
+    view::{AppWindow, AsrUi, AudioDeviceEntry, SettingsUi},
 };
 
 fn model_id(label: &str) -> String {
@@ -109,6 +109,22 @@ fn read(window: &AppWindow) -> Result<(AsrPreferences, Option<String>), String> 
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let ui = window.global::<AsrUi>();
+    let weak_device = window.as_weak();
+    ui.on_select_device(move |caption| {
+        if let Some(window) = weak_device.upgrade() {
+            let ui = window.global::<AsrUi>();
+            if let Some(entry) = ui
+                .get_device_entries()
+                .iter()
+                .find(|entry| entry.caption == caption)
+            {
+                ui.set_device(entry.id);
+                ui.set_device_caption(entry.caption);
+                ui.set_audio_backend(entry.backend);
+                ui.invoke_persist();
+            }
+        }
+    });
     let weak_numbers = window.as_weak();
     ui.on_step_number(move |value, minimum, maximum, step, decimals, up| {
         let parsed = value
@@ -173,6 +189,18 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     ui.on_refresh_devices(move || refresh(Command::RefreshSpeechInventory));
     let send = dispatch.clone();
     ui.on_session_toggle(move |enabled| send(Command::SpeechSessionEnabled(enabled)));
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    ui.on_test_microphone(move |enabled| {
+        if let Some(window) = weak.upgrade() {
+            let ui = window.global::<AsrUi>();
+            send(Command::MicrophoneTest(
+                enabled,
+                ui.get_audio_backend().into(),
+                ui.get_device().into(),
+            ));
+        }
+    });
     ui.on_push_to_talk(move |pressed| dispatch(Command::SpeechPushToTalk(pressed)));
 }
 
@@ -186,6 +214,13 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
     ui.set_recognition_available(available);
     ui.set_recognizer(chosen.unwrap_or_else(|| "".into()));
     ui.set_device(settings.device_id.clone().into());
+    ui.set_device_caption(
+        ui.get_device_entries()
+            .iter()
+            .find(|entry| entry.id == settings.device_id.as_str())
+            .map(|entry| entry.caption)
+            .unwrap_or_else(|| settings.device_id.clone().into()),
+    );
     ui.set_audio_backend(settings.audio_backend.clone().into());
     ui.set_instant_send(settings.instant_send);
     ui.set_delayed_send(settings.delayed_send);
@@ -262,23 +297,32 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[Aud
     ui.set_devices(ModelRc::new(VecModel::from(
         devices
             .iter()
-            .map(|device| device.id.clone().into())
+            .map(|device| format!("{} ({})", device.name, device.backend).into())
             .collect::<Vec<_>>(),
     )));
+    ui.set_device_entries(ModelRc::new(VecModel::from(
+        devices
+            .iter()
+            .map(|device| AudioDeviceEntry {
+                id: device.id.clone().into(),
+                caption: format!("{} ({})", device.name, device.backend).into(),
+                backend: device.backend.clone().into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_device_caption(
+        ui.get_device_entries()
+            .iter()
+            .find(|entry| entry.id == ui.get_device())
+            .map(|entry| entry.caption)
+            .unwrap_or_else(|| ui.get_device()),
+    );
     let mut backends = devices
         .iter()
         .map(|device| device.backend.as_str())
         .collect::<Vec<_>>();
     backends.sort_unstable();
     backends.dedup();
-    if backends.is_empty() {
-        #[cfg(target_os = "windows")]
-        backends.push("dshow");
-        #[cfg(target_os = "linux")]
-        backends.extend(["pulse", "alsa"]);
-        #[cfg(target_os = "macos")]
-        backends.push("avfoundation");
-    }
     ui.set_audio_backends(ModelRc::new(VecModel::from(
         backends.into_iter().map(Into::into).collect::<Vec<_>>(),
     )));
@@ -315,9 +359,7 @@ pub fn session_status(window: &AppWindow, snapshot: &SpeechSessionSnapshot) {
     let message = match snapshot.phase {
         SpeechSessionPhase::Stopped => "Микрофон остановлен".to_owned(),
         SpeechSessionPhase::Starting => "Запуск микрофона".to_owned(),
-        SpeechSessionPhase::Listening => {
-            "Микрофон слушает (максимум 10 секунд на фразу)".to_owned()
-        }
+        SpeechSessionPhase::Listening => "Микрофон слушает".to_owned(),
         SpeechSessionPhase::Stopping => "Остановка микрофона".to_owned(),
         SpeechSessionPhase::Failed => format!(
             "Ошибка микрофона: {}",

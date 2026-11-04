@@ -285,6 +285,7 @@ pub struct ApplicationLifecycle {
     server: ServerHandle,
     finetune: Option<FineTuneCollector>,
     speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
+    audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     speech_startup_warning: Option<String>,
     id: Uuid,
@@ -379,6 +380,10 @@ struct ApplicationOwner {
 
 impl ApplicationLifecycle {
     pub async fn start(config: ApplicationConfig) -> Result<Self, ApplicationError> {
+        Box::pin(Self::start_inner(config)).await
+    }
+
+    async fn start_inner(config: ApplicationConfig) -> Result<Self, ApplicationError> {
         let lease = RuntimeLease::reserve().ok_or(ApplicationError::Busy)?;
         let id = lease.id();
         let ApplicationConfig {
@@ -663,6 +668,9 @@ impl ApplicationLifecycle {
         let speech_view = crate::presentation::SpeechSessionPresenter::new(
             speech_controller.lock().await.observe(),
         );
+        let audio_input = Arc::new(crate::audio::input_owner::AudioInputOwner::new(Arc::clone(
+            &speech_controller,
+        )));
         let speech_watch_task = live_speech.as_ref().map(|live| {
             tokio::spawn(watch_speech_settings(
                 Arc::clone(live),
@@ -708,6 +716,9 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                audio_input: crate::presentation::AudioInputPresenter::new(Arc::clone(
+                    &audio_input,
+                )),
                 speech: speech_view,
                 ai_runtime: ai_runtime_status,
                 releases,
@@ -729,6 +740,7 @@ impl ApplicationLifecycle {
             server,
             finetune,
             speech,
+            audio_input,
             speech_controller,
             speech_startup_warning,
             id,
@@ -761,7 +773,6 @@ impl ApplicationLifecycle {
         config: crate::audio::controller::SpeechCaptureConfig,
         conversation: Arc<dyn crate::audio::session::SpeechConversation>,
     ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
-        let mut controller = self.speech_controller.lock().await;
         let runtime = self.presenter.ai_runtime.refresh_status().await;
         if runtime.service(crate::ai_runtime::AiService::Asr).phase
             != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
@@ -780,8 +791,8 @@ impl ApplicationLifecycle {
             conversation,
             crate::audio::controller::playback(&config),
         );
-        controller
-            .start(handler, self.stop.child_token(), config)
+        self.audio_input
+            .start_capture(handler, self.stop.child_token(), config)
             .await
     }
 
@@ -791,7 +802,6 @@ impl ApplicationLifecycle {
         config: crate::audio::controller::SpeechCaptureConfig,
         character: CharacterId,
     ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
-        let mut controller = self.speech_controller.lock().await;
         let runtime = self.presenter.ai_runtime.refresh_status().await;
         if runtime.service(crate::ai_runtime::AiService::Asr).phase
             != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
@@ -812,11 +822,11 @@ impl ApplicationLifecycle {
                     "ASR worker has not been activated".into(),
                 )
             })?;
-        controller.start(handler, stop, config).await
+        self.audio_input.start_capture(handler, stop, config).await
     }
 
     pub async fn stop_speech_capture(&self) {
-        self.speech_controller.lock().await.stop().await;
+        self.audio_input.stop_capture().await;
     }
 
     pub async fn press_speech_button(

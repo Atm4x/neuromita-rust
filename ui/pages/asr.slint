@@ -23,7 +23,12 @@ export global AsrTheme {
     out property <length> column-breakpoint: 850px;
 }
 
+export struct AudioDeviceEntry { id: string, caption: string, backend: string }
+
 export global AsrUi {
+    in-out property <[AudioDeviceEntry]> device-entries;
+    in-out property <string> device-caption;
+    callback select-device(string);
     in-out property <bool> recognition-available;
     in-out property <bool> worker-idle: true;
     in-out property <bool> worker-failed;
@@ -66,9 +71,11 @@ export global AsrUi {
     callback refresh-devices();
     callback session-toggle(bool);
     callback push-to-talk(bool);
+    callback test-microphone(bool);
     in-out property <string> worker-status;
     in-out property <string> session-status;
 }
+
 
 component AsrCard inherits Rectangle {
     background: SettingsTheme.panel;
@@ -297,14 +304,14 @@ component AsrToolbar inherits AsrCard {
         if root.width >= AsrTheme.column-breakpoint: HorizontalLayout { spacing: 14px; vertical-stretch: 0;
             AsrTopField { horizontal-stretch: 3; title: I18n.i18n("asr.recognizer", "Модель распознавания");
                 HorizontalLayout { spacing: 7px;
-                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.recognizers; selected: AsrUi.recognizer; placeholder: I18n.i18n("asr.models.empty", "Нет установленных моделей"); chosen(v) => { AsrUi.recognizer = v; AsrUi.recognizer-changed(v); } }
+                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.recognizers; selected: AsrUi.recognizer; placeholder: AsrUi.recognizers.length == 0 ? I18n.i18n("asr.models.empty", "Нет установленных моделей") : I18n.i18n("asr.models.choose", "Выберите модель распознавания"); chosen(v) => { AsrUi.recognizer = v; AsrUi.recognizer-changed(v); } }
                     AsrButton { width: 38px; title: ""; glyph: "\u{f021}"; enabled: true; activated => { AsrUi.refresh-models(); } }
                     AsrButton { title: I18n.i18n("asr.catalog", "Каталог моделей"); glyph: "\u{f1b3}"; enabled: false; }
                 }
             }
             AsrTopField { horizontal-stretch: 4; title: I18n.i18n("asr.input-device", "Устройство ввода");
                 HorizontalLayout { spacing: 7px;
-                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.devices; selected: AsrUi.device; placeholder: I18n.i18n("asr.device.empty", "Нет доступных устройств"); chosen(v) => { AsrUi.device = v; AsrUi.persist(); } }
+                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.devices; selected: AsrUi.device-caption; placeholder: AsrUi.devices.length == 0 ? I18n.i18n("asr.device.empty", "Нет доступных устройств") : I18n.i18n("asr.device.choose", "Выберите устройство ввода"); chosen(v) => { AsrUi.select-device(v); } }
                     AsrButton { width: 38px; title: ""; glyph: "\u{f021}"; enabled: true; activated => { AsrUi.refresh-devices(); } }
                 }
             }
@@ -315,14 +322,14 @@ component AsrToolbar inherits AsrCard {
         if root.width < AsrTheme.column-breakpoint: VerticalLayout { spacing: 12px;
             AsrTopField { title: I18n.i18n("asr.recognizer", "Модель распознавания");
                 HorizontalLayout { spacing: 7px;
-                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.recognizers; selected: AsrUi.recognizer; placeholder: I18n.i18n("asr.models.empty", "Нет установленных моделей"); chosen(v) => { AsrUi.recognizer = v; AsrUi.recognizer-changed(v); } }
+                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.recognizers; selected: AsrUi.recognizer; placeholder: AsrUi.recognizers.length == 0 ? I18n.i18n("asr.models.empty", "Нет установленных моделей") : I18n.i18n("asr.models.choose", "Выберите модель распознавания"); chosen(v) => { AsrUi.recognizer = v; AsrUi.recognizer-changed(v); } }
                     AsrButton { width: 38px; title: ""; glyph: "\u{f021}"; enabled: true; activated => { AsrUi.refresh-models(); } }
                     AsrButton { title: I18n.i18n("asr.catalog", "Каталог моделей"); glyph: "\u{f1b3}"; enabled: false; }
                 }
             }
             AsrTopField { title: I18n.i18n("asr.input-device", "Устройство ввода");
                 HorizontalLayout { spacing: 7px;
-                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.devices; selected: AsrUi.device; placeholder: I18n.i18n("asr.device.empty", "Нет доступных устройств"); chosen(v) => { AsrUi.device = v; AsrUi.persist(); } }
+                    AsrSelect { horizontal-stretch: 1; choices: AsrUi.devices; selected: AsrUi.device-caption; placeholder: AsrUi.devices.length == 0 ? I18n.i18n("asr.device.empty", "Нет доступных устройств") : I18n.i18n("asr.device.choose", "Выберите устройство ввода"); chosen(v) => { AsrUi.select-device(v); } }
                     AsrButton { width: 38px; title: ""; glyph: "\u{f021}"; enabled: true; activated => { AsrUi.refresh-devices(); } }
                 }
             }
@@ -392,7 +399,7 @@ component AsrMonitorCard inherits AsrCard {
                 SettingsText { text: I18n.i18n("asr.microphone-level", "Уровень микрофона"); font-size: 15px; font-weight: 600; }
                 SettingsText { text: I18n.i18n("asr.monitor.note", "Во время теста вы слышите себя. Распознавание временно приостановлено."); color: SettingsTheme.muted; font-size: 12px; wrap: word-wrap; overflow: clip; }
             }
-            AsrButton { title: AsrUi.testing ? I18n.i18n("asr.monitor.stop", "Остановить тест") : I18n.i18n("asr.monitor.start", "Проверить микрофон"); glyph: "\u{f025}"; enabled: false; }
+            AsrButton { title: AsrUi.testing ? I18n.i18n("asr.monitor.stop", "Остановить тест") : I18n.i18n("asr.monitor.start", "Проверить микрофон"); glyph: "\u{f025}"; enabled: AsrUi.testing || (AsrUi.draft-enabled && AsrUi.device != "" && AsrUi.audio-backend != ""); activated => { AsrUi.test-microphone(!AsrUi.testing); } }
         }
         meter := Rectangle {
             height: 30px;

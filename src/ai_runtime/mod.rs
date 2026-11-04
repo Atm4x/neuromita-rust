@@ -50,7 +50,7 @@ use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
 use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -9,7 +9,8 @@ use neuromita::{
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
         controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
-        input_catalog::{AudioInputCatalog, AudioInputDevice},
+        input_catalog::AudioInputDevice,
+        monitor::MonitorSnapshot,
         session::{SpeechConversation, SpeechFuture, SpeechSessionError},
     },
     character::CharacterId,
@@ -64,11 +65,13 @@ pub enum Command {
     Volume(u8),
     SpeechSessionEnabled(bool),
     SpeechPushToTalk(bool),
+    MicrophoneTest(bool, String, String),
 }
 
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
     SpeechSessionStatus(SpeechSessionSnapshot),
+    MicrophoneTestStatus(MonitorSnapshot),
     RecognizedText {
         text: String,
         auto_send_after: Option<Duration>,
@@ -144,20 +147,6 @@ impl Drop for DesktopRuntime {
     }
 }
 
-async fn discover_input_devices(directory: &std::path::Path) -> Vec<AudioInputDevice> {
-    let configured = std::env::var_os("NEUROMITA_FFMPEG").map(PathBuf::from);
-    let candidates = [
-        configured,
-        Some(directory.join("AIData/bin/ffmpeg.exe")),
-        Some(directory.join("AIData/bin/ffmpeg")),
-    ];
-    let executable = candidates
-        .into_iter()
-        .flatten()
-        .find(|path| path.is_absolute() && path.is_file());
-    AudioInputCatalog::discover(executable.as_deref()).await
-}
-
 fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> Option<PathBuf> {
     [
         std::env::var_os(variable).map(PathBuf::from),
@@ -209,7 +198,11 @@ async fn enable_speech_session(
         .snapshot()
         .map_err(|e| e.to_string())?;
     let preferences = &settings.values.speech.asr;
-    let devices = discover_input_devices(directory).await;
+    let devices = administration
+        .audio_input
+        .devices()
+        .await
+        .map_err(|error| error.to_string())?;
     if !devices.iter().any(|device| {
         device.id == preferences.device_id && device.backend == preferences.audio_backend
     }) {
@@ -224,7 +217,7 @@ async fn enable_speech_session(
             "ffmpeg"
         },
     )
-    .ok_or("FFmpeg не найден; укажите абсолютный путь к исполняемому файлу")?;
+    .unwrap_or_default();
     let ffplay = find_binary(
         directory,
         "NEUROMITA_FFPLAY",
@@ -234,7 +227,7 @@ async fn enable_speech_session(
             "ffplay"
         },
     )
-    .ok_or("FFplay не найден; укажите абсолютный путь к исполняемому файлу")?;
+    .unwrap_or_default();
     let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
         .map_err(|e| e.to_string())?;
     app.start_speech_capture_routed(config, conversation)
@@ -301,10 +294,6 @@ async fn run(
 ) {
     publish(Update::Connecting);
     let catalog = SpeechModelCatalog::for_desktop(directory.clone());
-    publish(Update::SpeechInventory(
-        Box::new(catalog.snapshot().await),
-        discover_input_devices(&directory).await,
-    ));
     let app = match start(&directory, initial_model.as_deref()).await {
         Ok(app) => app,
         Err(error) => {
@@ -314,6 +303,13 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    match app.presenter().audio_input.devices().await {
+        Ok(devices) => publish(Update::SpeechInventory(
+            Box::new(catalog.snapshot().await),
+            devices,
+        )),
+        Err(error) => publish(Update::AdminError(error.to_string())),
+    }
     if let Some(problem) = app.speech_startup_warning() {
         publish(Update::AdminError(format!("Speech runtime: {problem}")));
     }
@@ -351,34 +347,39 @@ async fn observe(
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
+    let mut microphone_test = administration.audio_input.observe_test();
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
     let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh_views = true;
     loop {
-        publish(Update::Releases(releases.borrow_and_update().clone()));
-        publish(Update::Connections(connections.borrow_and_update().clone()));
-        requests.borrow_and_update();
-        settings.borrow_and_update();
-        presets.borrow_and_update();
-        selection.borrow_and_update();
-        match administration.settings.snapshot() {
-            Ok(settings) => publish(Update::Administration(Box::new(
-                super::settings::AdministrationSnapshot {
-                    settings,
-                    presets: administration.presets.snapshot(),
-                },
-            ))),
-            Err(error) => publish(Update::AdminError(error.to_string())),
+        if refresh_views {
+            publish(Update::Releases(releases.borrow_and_update().clone()));
+            publish(Update::Connections(connections.borrow_and_update().clone()));
+            requests.borrow_and_update();
+            settings.borrow_and_update();
+            presets.borrow_and_update();
+            selection.borrow_and_update();
+            match administration.settings.snapshot() {
+                Ok(settings) => publish(Update::Administration(Box::new(
+                    super::settings::AdministrationSnapshot {
+                        settings,
+                        presets: administration.presets.snapshot(),
+                    },
+                ))),
+                Err(error) => publish(Update::AdminError(error.to_string())),
+            }
+            match presenter.snapshot(character).await {
+                Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
+                Err(error) => publish(Update::Error(error.to_string())),
+            }
+            publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
+            publish(Update::SpeechSessionStatus(
+                administration.speech.snapshot(),
+            ));
         }
-        match presenter.snapshot(character).await {
-            Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
-            Err(error) => publish(Update::Error(error.to_string())),
-        }
-        publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
-        publish(Update::SpeechSessionStatus(
-            administration.speech.snapshot(),
-        ));
+        refresh_views = true;
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
@@ -414,9 +415,20 @@ async fn observe(
                         publish(Update::AdminError(error.to_string()));
                     }
                 },
+                Some(Command::MicrophoneTest(enabled, backend, device)) => {
+                    let result = if enabled {
+                        administration.audio_input.start_test(&backend, &device).await
+                    } else {
+                        administration.audio_input.stop_test().await
+                    };
+                    if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
+                },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
-                    publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
+                    match administration.audio_input.devices().await {
+                        Ok(devices) => publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices)),
+                        Err(error) => publish(Update::AdminError(error.to_string())),
+                    }
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
@@ -481,6 +493,11 @@ async fn observe(
             result = speech_status.changed() => {
                 result.map_err(|_| "Speech session observation closed")?;
                 publish(Update::SpeechSessionStatus(speech_status.borrow_and_update().clone()));
+            },
+            result = microphone_test.changed() => {
+                result.map_err(|_| "Microphone test observation closed")?;
+                publish(Update::MicrophoneTestStatus(microphone_test.borrow_and_update().clone()));
+                refresh_views = false;
             },
             result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },

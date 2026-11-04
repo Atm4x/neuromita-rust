@@ -49,7 +49,7 @@ export component ImagesSettingsPage inherits SettingsScrollView {
     content-height: content.preferred-height;
 
     content := VerticalLayout {
-        width: parent.width; padding: 2px; padding-right: 10px;
+        width: root.visible-width; padding: 2px;
         spacing: SettingsTheme.section-gap; alignment: start;
 
         CollapsibleSettingsSection {

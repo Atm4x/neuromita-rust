@@ -160,7 +160,7 @@ export component HomePage inherits Rectangle {
             Rectangle { vertical-stretch: 1; }
             HorizontalLayout {
                 height: 80px; spacing: 12px; padding: 0px;
-                StatusCard { model: root.backend; icon: Icons.python; icon-color: #ffd86b; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
+                StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.text; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
             PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }

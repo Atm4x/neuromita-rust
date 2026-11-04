@@ -1,4 +1,6 @@
+mod audio_input;
 mod characters;
+pub use audio_input::AudioInputPresenter;
 mod chat;
 mod connections;
 mod conversation;
@@ -35,6 +37,7 @@ pub use settings::{
 pub use speech::SpeechSessionPresenter;
 
 pub struct GuiPresenter {
+    pub audio_input: AudioInputPresenter,
     pub speech: SpeechSessionPresenter,
     pub ai_runtime: RuntimeStatePresenter,
     pub releases: ReleasesPresenter,

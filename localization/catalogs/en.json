@@ -1,4 +1,16 @@
 {
+  "asr.device.choose": {
+    "source": "Выберите устройство ввода",
+    "translation": "Select an input device"
+  },
+  "asr.models.choose": {
+    "source": "Выберите модель распознавания",
+    "translation": "Select a recognition model"
+  },
+  "asr.ptt": {
+    "source": "Удерживайте для записи",
+    "translation": "Hold to record"
+  },
   "app.window.title": {
     "source": "Чат с NeuroMita",
     "translation": "Chat with NeuroMita"

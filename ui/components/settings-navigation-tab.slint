@@ -5,7 +5,7 @@ import { SettingsTheme } from "../settings/theme.slint";
 export component SettingsNavigationTab inherits ActionSurface {
     in property <string> glyph;
     in property <bool> active;
-    property <length> content-width: tab-caption.preferred-width + 42px;
+    property <length> content-width: tab-caption.preferred-width + 54px;
     min-width: max(54px, root.content-width);
     preferred-width: max(54px, root.content-width);
     height: 42px;
@@ -16,18 +16,19 @@ export component SettingsNavigationTab inherits ActionSurface {
     background: root.pressed ? #b74b7d24 : root.hovered ? #b74b7d14 : transparent;
 
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
+        padding-left: 14px;
+        padding-right: 14px;
         padding-top: 9px;
         padding-bottom: 9px;
         spacing: 6px;
 
         Rectangle {
-            width: 16px;
+            width: 20px;
+            horizontal-stretch: 0;
             height: 100%;
             Glyph {
                 y: (parent.height - self.height) / 2;
-                width: 16px;
+                width: 20px;
                 height: 18px;
                 vertical-stretch: 0;
                 text: root.glyph;
