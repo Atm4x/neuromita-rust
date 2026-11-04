@@ -1624,8 +1624,8 @@
     "translation": "Input device"
   },
   "asr.device.empty": {
-    "source": "Нет данных об устройствах",
-    "translation": "No input device data"
+    "source": "Нет доступных устройств",
+    "translation": "No input devices available"
   },
   "asr.audio-backend": {
     "source": "Аудиобэкенд",
@@ -1790,10 +1790,6 @@
   "asr.description": {
     "source": "Устройства ввода, распознавание речи и проверка микрофона.",
     "translation": "Input devices, speech recognition and microphone testing."
-  },
-  "asr.device.manual": {
-    "source": "Укажите идентификатор устройства вручную",
-    "translation": "Enter the input device identifier manually"
   },
   "settings.preset.url-model-placeholder": {
     "source": "Укажите модель для формирования URL",
