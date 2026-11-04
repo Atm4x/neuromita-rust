@@ -61,6 +61,7 @@ impl CaptureBackend {
 pub struct FfmpegCapture {
     child: Child,
     stdout: Pcm16Frames<ChildStdout>,
+    finite: bool,
 }
 
 struct Pcm16Frames<R> {
@@ -139,6 +140,7 @@ impl FfmpegCapture {
         Ok(Self {
             child,
             stdout: Pcm16Frames::new(stdout),
+            finite: backend == CaptureBackend::Lavfi,
         })
     }
 }
@@ -150,7 +152,7 @@ impl AudioCapture for FfmpegCapture {
                 Some(frame) => Ok(Some(frame)),
                 None => {
                     let status = self.child.wait().await?;
-                    if status.success() {
+                    if status.success() && self.finite {
                         Ok(None)
                     } else {
                         Err(DeviceError::Stopped(format!("capture ended: {status}")))

@@ -247,6 +247,7 @@ pub struct ApplicationLifecycle {
     server: ServerHandle,
     finetune: Option<FineTuneCollector>,
     speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
+    speech_input: crate::audio::session::SpeechInputOwner,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -571,6 +572,7 @@ impl ApplicationLifecycle {
             server,
             finetune,
             speech,
+            speech_input: crate::audio::session::SpeechInputOwner::new(),
             id,
             stop,
             completion: Some(completion),
@@ -584,8 +586,14 @@ impl ApplicationLifecycle {
         character: CharacterId,
         source: crate::request::RequestSource,
         playback: Arc<dyn crate::audio::device::AudioPlayback>,
-    ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
-        let recognizer = self.speech.as_ref()?;
+        gate: crate::audio::input_gate::GateConfig,
+    ) -> Result<
+        Option<(crate::audio::session::SpeechInputHandler, CancellationToken)>,
+        crate::audio::session::SpeechSessionError,
+    > {
+        let Some(recognizer) = self.speech.as_ref() else {
+            return Ok(None);
+        };
         let route = crate::audio::session::SpeechRoute { character, source };
         let handler = crate::audio::session::SpeechInputHandler::new(
             route,
@@ -595,8 +603,10 @@ impl ApplicationLifecycle {
                 route,
             )),
             playback,
-        );
-        Some((handler, self.stop.child_token()))
+        )
+        .with_gate(gate)?
+        .with_owner(&self.speech_input)?;
+        Ok(Some((handler, self.stop.child_token())))
     }
 
     pub fn presenter(&self) -> &GuiPresenter {

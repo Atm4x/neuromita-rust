@@ -12,7 +12,10 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::{
+    sync::mpsc,
+    time::{Instant, sleep_until},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,9 +29,11 @@ use crate::{
     voice::AudioArtifact,
 };
 
+pub use super::input_gate::GateCommand as SpeechControl;
 use super::{
     device::{AudioCapture, AudioPlayback, DeviceError},
-    segment::{SegmentError, SpeechSegment, SpeechSegmenter, VoiceGate},
+    input_gate::{GateConfig, GateError, InputGate, InputMode},
+    segment::{SegmentError, SpeechMode, SpeechSegment, SpeechSegmenter, VoiceGate},
 };
 
 /// After capture ends, in-flight dispatch may finish within this window; a stuck
@@ -51,6 +56,35 @@ pub enum SpeechSessionError {
     QueueFull,
     #[error("speech task failed: {0}")]
     Task(String),
+    #[error("the application already owns an active speech input session")]
+    InputBusy,
+    #[error(transparent)]
+    InputGate(#[from] GateError),
+}
+
+/// One application-owned admission point, acquired before the host opens capture.
+#[derive(Clone, Default)]
+pub struct SpeechInputOwner(Arc<AtomicBool>);
+
+impl SpeechInputOwner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn claim(&self) -> Result<SpeechInputLease, SpeechSessionError> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| SpeechSessionError::InputBusy)?;
+        Ok(SpeechInputLease(Arc::clone(&self.0)))
+    }
+}
+
+struct SpeechInputLease(Arc<AtomicBool>);
+
+impl Drop for SpeechInputLease {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 pub type SpeechFuture<'a, T> =
@@ -287,17 +321,19 @@ impl SpeechConversation for ChatReplyTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpeechControl {
-    PushToTalk(bool),
-    Reset,
-    CancelPlayback,
+#[derive(Default)]
+struct PlaybackWindow {
+    active: bool,
+    until: Option<Instant>,
 }
 
-struct PlaybackState(Arc<AtomicBool>);
+struct PlaybackState(Arc<Mutex<PlaybackWindow>>);
+
 impl Drop for PlaybackState {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        let mut window = self.0.lock().expect("playback window poisoned");
+        window.active = false;
+        window.until = Some(Instant::now() + Duration::from_millis(400));
     }
 }
 
@@ -326,6 +362,8 @@ pub struct SpeechInputHandler {
     transcriber: Arc<dyn SpeechTranscriber>,
     conversation: Arc<dyn SpeechConversation>,
     playback: Arc<dyn AudioPlayback>,
+    input_lease: Option<SpeechInputLease>,
+    gate: Option<GateConfig>,
 }
 
 impl SpeechInputHandler {
@@ -340,21 +378,51 @@ impl SpeechInputHandler {
             transcriber,
             conversation,
             playback,
+            input_lease: None,
+            gate: None,
         }
     }
 
+    pub fn with_owner(mut self, owner: &SpeechInputOwner) -> Result<Self, SpeechSessionError> {
+        if self.input_lease.is_some() {
+            return Err(SpeechSessionError::InputBusy);
+        }
+        self.input_lease = Some(owner.claim()?);
+        Ok(self)
+    }
+
+    pub fn with_gate(mut self, config: GateConfig) -> Result<Self, SpeechSessionError> {
+        InputGate::new(config)?;
+        self.gate = Some(config);
+        Ok(self)
+    }
+
     pub async fn run<G: VoiceGate + 'static>(
-        self,
-        mut capture: impl AudioCapture,
+        mut self,
+        capture: impl AudioCapture,
         mut segmenter: SpeechSegmenter<G>,
         mut controls: mpsc::Receiver<SpeechControl>,
         stop: CancellationToken,
     ) -> Result<(), SpeechSessionError> {
+        let _input_lease = self.input_lease.take();
+        let mut capture = capture;
+        let mut gate = InputGate::new(self.gate.unwrap_or(GateConfig {
+            mode: if segmenter.mode() == SpeechMode::PushToTalk {
+                InputMode::PushToTalk
+            } else {
+                InputMode::Automatic
+            },
+            enabled: true,
+            pause_while_speaking: true,
+            manual_lease: Duration::from_secs(3),
+            speaking_tail: Duration::from_millis(400),
+        }))?;
+        let route = self.route;
         let stream = SpeechStream::new(self.route, stop.clone());
         let _lifetime = StreamLifetime(Arc::clone(&stream));
         let (send, mut receive) = mpsc::channel::<QueuedSpeech>(2);
         let worker_stop = stop.clone();
-        let playing = Arc::new(AtomicBool::new(false));
+        let playing = Arc::new(Mutex::new(PlaybackWindow::default()));
         let worker_playing = Arc::clone(&playing);
         let worker = tokio::spawn(async move {
             while let Some(QueuedSpeech { ticket, segment }) = receive.recv().await {
@@ -386,10 +454,16 @@ impl SpeechInputHandler {
                 }
                 if let Some(audio) = audio {
                     let playing_token = turn_stop.child_token();
-                    worker_playing.store(true, Ordering::Release);
+                    worker_playing
+                        .lock()
+                        .expect("playback window poisoned")
+                        .active = true;
                     let _playing = PlaybackState(Arc::clone(&worker_playing));
-                    let result = self.playback.play(audio, playing_token).await;
-                    result?;
+                    tokio::select! {
+                        biased;
+                        _ = turn_stop.cancelled() => continue,
+                        result = self.playback.play(audio, playing_token) => result?,
+                    }
                 }
             }
             Ok::<(), SpeechSessionError>(())
@@ -397,8 +471,36 @@ impl SpeechInputHandler {
         let mut worker = tokio_util::task::AbortOnDropHandle::new(worker);
         let mut worker_finished = None;
         let mut controls_open = true;
-        let mut ptt_pressed = false;
-        let capture_result = loop {
+        let mut previous = gate.snapshot(Instant::now());
+        segmenter.set_mode(if previous.mode == InputMode::PushToTalk {
+            SpeechMode::PushToTalk
+        } else {
+            SpeechMode::Automatic
+        });
+        let capture_result: Result<(), SpeechSessionError> = async { loop {
+            let state = gate.snapshot(Instant::now());
+                if state.mode == InputMode::PushToTalk && !segmenter.has_ptt_policy() {
+                    return Err(SegmentError::InvalidConfiguration.into());
+                }
+            if state.epoch != previous.epoch {
+                stream.invalidate();
+                if !(state.manual_active && !previous.manual_active && state.mode == previous.mode) {
+                    segmenter.reset();
+                }
+            }
+            segmenter.set_mode(if state.mode == InputMode::PushToTalk { SpeechMode::PushToTalk } else { SpeechMode::Automatic });
+            if state.manual_active != previous.manual_active && state.permitted {
+                let segment = match state.mode {
+                    InputMode::PushToTalk => segmenter.set_pressed(state.manual_active),
+                    InputMode::Radio if !state.manual_active && state.epoch == previous.epoch => segmenter.finish_input(),
+                    _ => None,
+                };
+                if let Some(segment) = segment {
+                    queue_segment(&send, &stream, segment)?;
+                }
+            }
+            previous = state;
+            let deadline = gate.next_deadline();
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break Ok(()),
@@ -408,29 +510,39 @@ impl SpeechInputHandler {
                 }
                 control = controls.recv(), if controls_open => {
                     match control {
-                        Some(SpeechControl::PushToTalk(pressed)) => {
-                            if pressed && !ptt_pressed {
-                                stream.invalidate();
-                            }
-                            ptt_pressed = pressed;
-                            if let Some(segment) = segmenter.set_pressed(pressed)
-                                && let Err(error) = queue_segment(&send, &stream, segment) { break Err(error); }
+                        Some(SpeechControl::Manual(event))
+                            if matches!(route.source, RequestSource::Client(id) if id != event.session) => {}
+                        Some(SpeechControl::SourceDisconnected(source))
+                            if route.source == RequestSource::Client(source) => {
+                            stop.cancel();
+                            break Ok(());
                         }
-                        Some(SpeechControl::Reset | SpeechControl::CancelPlayback) => {
-                            stream.invalidate();
-                            ptt_pressed = false;
-                            segmenter.reset();
-                        },
-                        None => controls_open = false,
+                        Some(command) => gate.apply(command, Instant::now())?,
+                        None => {
+                            controls_open = false;
+                            if state.mode != InputMode::Automatic {
+                                gate.apply(SpeechControl::SetEnabled(false), Instant::now())?;
+                            }
+                        }
                     }
                 }
+                _ = async {
+                    if let Some(deadline) = deadline { sleep_until(deadline).await }
+                    else { std::future::pending::<()>().await }
+                } => {}
                 frame = capture.next_frame() => {
                     match frame {
                         Ok(Some(frame)) => {
-                            if playing.load(Ordering::Acquire) {
-                                if let Err(error) = segmenter.discard_playback_frame() {
-                                    break Err(error.into());
-                                }
+                            let local_playback = {
+                                let window = playing.lock().expect("playback window poisoned");
+                                window.active || window.until.is_some_and(|until| until > Instant::now())
+                            };
+                            if !state.permitted || local_playback {
+                                segmenter.discard_playback_frame()?;
+                                continue;
+                            }
+                            if state.mode == InputMode::Radio && !state.allowed {
+                                segmenter.buffer_idle_frame(frame)?;
                                 continue;
                             }
                             match segmenter.process(frame) {
@@ -452,7 +564,8 @@ impl SpeechInputHandler {
                     }
                 }
             }
-        };
+        }}.await;
+        drop(capture);
         drop(send);
         if capture_result.is_err() || stop.is_cancelled() {
             stop.cancel();
@@ -545,6 +658,69 @@ mod tests {
                 Ok(None)
             })
         }
+    }
+
+    fn test_session(delivered: Arc<Mutex<Vec<String>>>) -> SpeechInputHandler {
+        SpeechInputHandler::new(
+            SpeechRoute {
+                character: CharacterId::Crazy,
+                source: RequestSource::Presenter,
+            },
+            Arc::new(Asr),
+            Arc::new(Chat(delivered)),
+            Arc::new(SilentPlayback),
+        )
+    }
+
+    fn short_segmenter() -> SpeechSegmenter<Gate> {
+        SpeechSegmenter::new(
+            Gate,
+            SegmentConfig {
+                pre_roll_samples: FRAME_SAMPLES,
+                start_voice_samples: FRAME_SAMPLES,
+                end_silence_samples: FRAME_SAMPLES,
+                min_segment_samples: FRAME_SAMPLES,
+                max_segment_samples: 8 * FRAME_SAMPLES,
+                ..SegmentConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn input_owner_rejects_another_handler_before_capture_opens() {
+        let owner = SpeechInputOwner::new();
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let first = test_session(Arc::clone(&delivered))
+            .with_owner(&owner)
+            .unwrap();
+        assert!(matches!(
+            test_session(Arc::clone(&delivered)).with_owner(&owner.clone()),
+            Err(SpeechSessionError::InputBusy)
+        ));
+        drop(first);
+        assert!(test_session(delivered).with_owner(&owner).is_ok());
+    }
+
+    #[tokio::test]
+    async fn abort_releases_the_input_owner_after_the_worker_is_dropped() {
+        let owner = SpeechInputOwner::new();
+        let session = test_session(Arc::new(Mutex::new(Vec::new())))
+            .with_owner(&owner)
+            .unwrap();
+        let (frames, receive_frames) = mpsc::channel(2);
+        let (_controls, receive_controls) = mpsc::channel(2);
+        let task = tokio::spawn(session.run(
+            ControlledCapture(receive_frames),
+            short_segmenter(),
+            receive_controls,
+            CancellationToken::new(),
+        ));
+        capture_barrier(&frames).await;
+        assert!(matches!(owner.claim(), Err(SpeechSessionError::InputBusy)));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(owner.claim().is_ok());
     }
     #[tokio::test]
     async fn automatic_session_sends_single_segment_through_asr_and_chat() {
@@ -706,6 +882,7 @@ mod tests {
     enum CaptureCommand {
         Frame(Box<MonoPcm16Frame>),
         Barrier(tokio::sync::oneshot::Sender<()>),
+        Disconnected,
     }
 
     struct ControlledCapture(mpsc::Receiver<CaptureCommand>);
@@ -718,6 +895,9 @@ mod tests {
                         Some(CaptureCommand::Frame(frame)) => return Ok(Some(*frame)),
                         Some(CaptureCommand::Barrier(ack)) => {
                             let _ = ack.send(());
+                        }
+                        Some(CaptureCommand::Disconnected) => {
+                            return Err(DeviceError::Stopped("test device unplugged".into()));
                         }
                         None => return Ok(None),
                     }
@@ -747,6 +927,138 @@ mod tests {
         let (ack, received) = tokio::sync::oneshot::channel();
         send.send(CaptureCommand::Barrier(ack)).await.unwrap();
         received.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ptt_expiry_discards_partial_audio_and_release_tail_keeps_next_turn() {
+        use crate::audio::{input_gate::ManualCapture, segment::PttPolicy};
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let session = test_session(Arc::clone(&delivered));
+        let mut segmenter = short_segmenter()
+            .with_ptt_policy(PttPolicy {
+                pre_roll_samples: 0,
+                tail_samples: FRAME_SAMPLES,
+                min_voiced_samples: FRAME_SAMPLES,
+                require_release_after_max: true,
+            })
+            .unwrap();
+        segmenter.set_mode(SpeechMode::PushToTalk);
+        let (frames, receive_frames) = mpsc::channel(4);
+        let (controls, receive_controls) = mpsc::channel(4);
+        let task = tokio::spawn(session.run(
+            ControlledCapture(receive_frames),
+            segmenter,
+            receive_controls,
+            CancellationToken::new(),
+        ));
+        let mut press = ManualCapture {
+            session: Uuid::new_v4(),
+            generation: 1,
+            active: true,
+            cancelled: false,
+            renew: false,
+        };
+        controls.send(SpeechControl::Manual(press)).await.unwrap();
+        frames
+            .send(CaptureCommand::Frame(Box::new([1; FRAME_SAMPLES])))
+            .await
+            .unwrap();
+        capture_barrier(&frames).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        capture_barrier(&frames).await;
+        press.active = false;
+        controls.send(SpeechControl::Manual(press)).await.unwrap();
+        capture_barrier(&frames).await;
+        assert!(delivered.lock().unwrap().is_empty());
+        press.generation = 2;
+        press.active = true;
+        controls.send(SpeechControl::Manual(press)).await.unwrap();
+        frames
+            .send(CaptureCommand::Frame(Box::new([2; FRAME_SAMPLES])))
+            .await
+            .unwrap();
+        capture_barrier(&frames).await;
+        press.active = false;
+        controls.send(SpeechControl::Manual(press)).await.unwrap();
+        capture_barrier(&frames).await;
+        assert!(delivered.lock().unwrap().is_empty());
+        frames
+            .send(CaptureCommand::Frame(Box::new([0; FRAME_SAMPLES])))
+            .await
+            .unwrap();
+        drop(frames);
+        task.await.unwrap().unwrap();
+        assert_eq!(&*delivered.lock().unwrap(), &["hello from microphone"]);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_pending_asr_and_explicit_restart_uses_a_fresh_stream() {
+        let owner = SpeechInputOwner::new();
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let (complete, completion) = tokio::sync::oneshot::channel();
+        let asr = Arc::new(StalledAsr {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            started: tokio::sync::Notify::new(),
+            completion: Mutex::new(Some(completion)),
+        });
+        let session = SpeechInputHandler::new(
+            SpeechRoute {
+                character: CharacterId::Crazy,
+                source: RequestSource::Presenter,
+            },
+            Arc::clone(&asr) as Arc<dyn SpeechTranscriber>,
+            Arc::new(Chat(Arc::clone(&delivered))),
+            Arc::new(SilentPlayback),
+        )
+        .with_owner(&owner)
+        .unwrap();
+        let (frames, receive_frames) = mpsc::channel(4);
+        let (_controls, receive_controls) = mpsc::channel(2);
+        let task = tokio::spawn(session.run(
+            ControlledCapture(receive_frames),
+            short_segmenter(),
+            receive_controls,
+            CancellationToken::new(),
+        ));
+        for sample in [1, 0] {
+            frames
+                .send(CaptureCommand::Frame(Box::new([sample; FRAME_SAMPLES])))
+                .await
+                .unwrap();
+        }
+        asr.started.notified().await;
+        frames.send(CaptureCommand::Disconnected).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(SpeechSessionError::Audio(DeviceError::Stopped(_)))
+        ));
+        assert!(
+            complete
+                .send(Transcript {
+                    text: "late unplugged audio".into(),
+                    language: None
+                })
+                .is_err()
+        );
+        assert!(delivered.lock().unwrap().is_empty());
+        let session = test_session(Arc::clone(&delivered))
+            .with_owner(&owner)
+            .unwrap();
+        let (_controls, receive_controls) = mpsc::channel(1);
+        session
+            .run(
+                Capture(vec![[1; FRAME_SAMPLES], [0; FRAME_SAMPLES]]),
+                short_segmenter(),
+                receive_controls,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(&*delivered.lock().unwrap(), &["hello from microphone"]);
     }
 
     async fn invalidate_with_queued_audio(control: SpeechControl) {
@@ -833,10 +1145,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ptt_press_discards_two_queued_segments_and_late_asr() {
+    async fn mute_discards_two_queued_segments_and_late_asr() {
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            invalidate_with_queued_audio(SpeechControl::PushToTalk(true)),
+            invalidate_with_queued_audio(SpeechControl::SetEnabled(false)),
         )
         .await
         .unwrap();
