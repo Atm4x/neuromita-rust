@@ -218,7 +218,7 @@ component TemplateSelector inherits Rectangle {
 export component ApiPresetsWorkspace inherits VerticalLayout {
     in property <bool> connected;
     spacing: 16px; padding: 2px; min-height: 0px; min-width: 0px;
-    SectionHeading { title: I18n.i18n("settings.api.heading", "Подключение к моделям"); description: I18n.i18n("settings.api.subtitle", "Провайдеры, пресеты, ключи и параметры генерации ответов."); glyph: "\u{f1e6}"; }
+
     SettingsLabel { visible: false; height: 0px; text: I18n.i18n("settings.api-preset.key-env", "API ключ (ссылка)"); }
     HorizontalLayout { spacing: 12px; vertical-stretch: 1;
         Rectangle {

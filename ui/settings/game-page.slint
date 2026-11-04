@@ -32,11 +32,7 @@ export component GameSettingsPage inherits SettingsScrollView {
     content := VerticalLayout {
         width: parent.width; padding: 2px; padding-right: 10px;
         spacing: SettingsTheme.section-gap; alignment: start;
-        SettingsSectionHeading {
-            title: I18n.i18n("settings.game.title", "Связь с игрой");
-            description: I18n.i18n("settings.game.subtitle", "Параметры подключения и обмена данными с игрой.");
-            glyph: "\u{f11b}";
-        }
+
         CollapsibleSettingsSection {
             title: I18n.i18n("settings.game.mod", "Настройки мода");
             subtitle: I18n.i18n("settings.game.mod.desc", "Внутриигровые меню мода и обработка запросов из игры.");

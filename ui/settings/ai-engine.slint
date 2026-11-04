@@ -82,11 +82,7 @@ component EngineCardSubtitle inherits SettingsLabel {
 
 export component AiEngineWorkspace inherits VerticalLayout {
     spacing: 12px;
-    SectionHeading {
-        title: I18n.i18n("settings.ai-engine.title", "Управление ИИ-движком");
-        description: I18n.i18n("settings.ai-engine.description", "Аппаратный профиль, модели, режим workers и обслуживание AI-окружений.");
-        glyph: "\u{f2db}";
-    }
+
     SettingsScrollView {
         vertical-stretch: 1;
         content-height: content.preferred-height;

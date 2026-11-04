@@ -54,11 +54,7 @@ export component ModelsSettingsPage inherits SettingsScrollView {
     content := VerticalLayout {
         width: parent.width; padding: 2px; padding-right: 10px;
         spacing: SettingsTheme.section-gap; alignment: start;
-        SettingsSectionHeading {
-            title: I18n.i18n("settings.models.title", "Модели и поведение");
-            description: I18n.i18n("settings.models.subtitle", "Управление логикой ответа, памятью, мышлением и RAG.");
-            glyph: "\u{f544}";
-        }
+
         CollapsibleSettingsSection {
             title: I18n.i18n("settings.models.request", "Поведение запросов");
             subtitle: I18n.i18n("settings.models.request.subtitle", "Поведение запросов и работа инструментов. Параметры генерации настраиваются у API-пресета.");

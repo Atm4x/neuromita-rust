@@ -11,9 +11,13 @@ export component SettingsScrollView inherits Rectangle {
     property <length> thumb-travel: root.height - root.thumb-height;
     clip: true;
     min-height: 0px;
+    min-width: 0px;
+    preferred-width: 0px;
+    horizontal-stretch: 1;
     changed scroll-limit => { root.content-y = clamp(root.content-y, -root.scroll-limit, 0px); }
 
     viewport := Flickable {
+        content-x: 0px;
         width: parent.width - (root.scrollable ? SettingsTheme.scrollbar-width : 0px);
         height: parent.height;
         content-width: self.width;

@@ -18,11 +18,6 @@ export component LanguageSettingsPage inherits SettingsScrollView {
         spacing: SettingsTheme.section-gap;
         alignment: start;
 
-        SettingsSectionHeading {
-            title: I18n.i18n("settings.language.title", "Язык интерфейса");
-            description: I18n.i18n("settings.language.subtitle", "Выбор языка интерфейса и подключение кастомных переводов.");
-            glyph: "\u{f0ac}";
-        }
         CollapsibleSettingsSection {
             title: "Язык / Language";
             subtitle: I18n.i18n("settings.language.select.description", "Выбор языка интерфейса приложения.");

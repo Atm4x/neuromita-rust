@@ -8,6 +8,7 @@ component AsrMiddle inherits VerticalLayout {
     padding: 0px;
     spacing: 0px;
     alignment: center;
+    vertical-stretch: 1;
     @children
 }
 
@@ -135,11 +136,21 @@ component AsrStatus inherits Rectangle {
     height: 38px; min-width: 0px;
     background: SettingsTheme.field; border-width: 1px; border-color: SettingsTheme.border; border-radius: 9px;
     HorizontalLayout { padding-left: 12px; padding-right: 12px; spacing: 8px;
-        AsrMiddle { width: 9px; height: 100%;
+        AsrMiddle { width: 9px;
             Rectangle { width: 9px; height: 9px; border-radius: 5px; background: AsrUi.active && AsrUi.runtime-ready ? SettingsTheme.status-success : SettingsTheme.accent; }
         }
         SettingsText { text: AsrUi.status == "" ? I18n.i18n("asr.status.unavailable", "Распознавание не запущено") : AsrUi.status; color: SettingsTheme.muted; horizontal-stretch: 1; }
     }
+}
+
+component AsrRowCopy inherits VerticalLayout {
+    spacing: 3px;
+    padding: 0px;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    vertical-stretch: 1;
+    alignment: center;
+    @children
 }
 
 component AsrToggleSetting inherits Rectangle {
@@ -152,16 +163,16 @@ component AsrToggleSetting inherits Rectangle {
     border-width: 1px; border-color: SettingsTheme.border;
     background: SettingsTheme.section;
     HorizontalLayout { padding-left: 10px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
-        AsrMiddle { width: 36px; height: 100%;
+        AsrMiddle { width: 36px;
             Rectangle { width: 36px; height: 36px; border-radius: 10px; background: SettingsTheme.heading-icon-background;
                 SettingsGlyph { text: root.glyph; width: 100%; height: 100%; font-size: 17px; color: SettingsTheme.accent; }
             }
         }
-        VerticalLayout { horizontal-stretch: 1; spacing: 3px; alignment: center;
+        AsrRowCopy {
             SettingsText { text: root.title; font-size: 13px; font-weight: 600; wrap: word-wrap; overflow: clip; }
             SettingsText { text: root.hint; color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
         }
-        AsrMiddle { width: 20px; height: 100%;
+        AsrMiddle { width: 20px;
             SettingsCheckbox { checked: root.checked; enabled: AsrUi.draft-enabled; toggled(value) => { root.changed(value); } }
         }
     }
@@ -177,16 +188,16 @@ component AsrParameter inherits Rectangle {
     height: 70px; vertical-stretch: 0; border-radius: 10px; border-width: 1px; border-color: SettingsTheme.border;
     background: SettingsTheme.section;
     HorizontalLayout { padding-left: 10px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; spacing: 10px;
-        AsrMiddle { width: 36px; height: 100%;
+        AsrMiddle { width: 36px;
             Rectangle { width: 36px; height: 36px; border-radius: 10px; background: SettingsTheme.heading-icon-background;
                 SettingsGlyph { text: root.glyph; width: 100%; height: 100%; font-size: 17px; color: SettingsTheme.accent; }
             }
         }
-        VerticalLayout { spacing: 3px; alignment: center; horizontal-stretch: 1;
+        AsrRowCopy {
             SettingsText { text: root.title; font-size: 13px; font-weight: 600; wrap: word-wrap; overflow: clip; }
             SettingsText { text: root.hint; color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
         }
-        AsrMiddle { width: 110px; height: 100%;
+        AsrMiddle { width: 110px;
             SettingsTextField { width: 110px; value <=> root.value; editable: root.active && AsrUi.draft-enabled; accepted(value) => { root.committed(value); } }
         }
     }
@@ -196,7 +207,7 @@ component AsrToolbar inherits AsrCard {
     VerticalLayout { padding: 15px; spacing: 12px;
         if root.width >= 850px: HorizontalLayout { height: 44px; spacing: 15px;
             HorizontalLayout { horizontal-stretch: 1; spacing: 12px;
-                AsrMiddle { width: 42px; height: 100%;
+                AsrMiddle { width: 42px;
                     SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready || AsrUi.active; toggled(v) => { AsrUi.session-toggle(v); } }
                 }
                 VerticalLayout { spacing: 2px; alignment: center;
@@ -212,7 +223,7 @@ component AsrToolbar inherits AsrCard {
         }
         if root.width < 850px: VerticalLayout { spacing: 10px;
             HorizontalLayout { spacing: 12px; height: 36px;
-                AsrMiddle { width: 42px; height: 100%;
+                AsrMiddle { width: 42px;
                     SettingsToggle { checked: AsrUi.active; enabled: AsrUi.runtime-ready || AsrUi.active; toggled(v) => { AsrUi.session-toggle(v); } }
                 }
                 SettingsText { text: I18n.i18n("asr.active", "Микрофон активен"); font-weight: 650; horizontal-stretch: 1; }
@@ -292,7 +303,7 @@ component AsrBehaviorCard inherits AsrCard {
         AsrToggleSetting { title: I18n.i18n("asr.pause-speaking", "Приостанавливать распознавание, пока Мита говорит"); hint: I18n.i18n("asr.pause-speaking.note", "Не распознавать речь во время ответа Миты."); glyph: "\u{f04c}"; checked: AsrUi.pause-while-speaking; changed(v) => { AsrUi.pause-while-speaking = v; AsrUi.persist(); } }
         Rectangle { height: 70px; border-radius: 10px; border-width: 1px; border-color: SettingsTheme.border; background: SettingsTheme.section; vertical-stretch: 0;
             HorizontalLayout { padding-left: 10px; padding-right: 12px; spacing: 10px;
-                AsrMiddle { width: 36px; height: 100%;
+                AsrMiddle { width: 36px;
                     Rectangle { width: 36px; height: 36px; border-radius: 10px; background: SettingsTheme.heading-icon-background;
                         SettingsGlyph { text: "\u{f11c}"; width: 100%; height: 100%; color: SettingsTheme.accent; font-size: 17px; }
                     }
@@ -301,7 +312,7 @@ component AsrBehaviorCard inherits AsrCard {
                     SettingsText { text: I18n.i18n("asr.input-mode", "Режим ввода"); font-size: 13px; font-weight: 600; }
                     SettingsText { text: I18n.i18n("asr.input-mode.note", "Способ активации распознавания речи."); font-size: 11px; color: SettingsTheme.muted; }
                 }
-                AsrMiddle { width: 215px; height: 100%;
+                AsrMiddle { width: 215px;
                     AsrSelect { width: 215px; selected: AsrUi.input-mode; choices: AsrUi.input-modes; placeholder: "—"; chosen(v) => { AsrUi.input-mode = v; AsrUi.persist(); } }
                 }
             }
@@ -343,16 +354,39 @@ component AsrMonitorCard inherits AsrCard {
             }
             AsrButton { title: AsrUi.testing ? I18n.i18n("asr.monitor.stop", "Остановить тест") : I18n.i18n("asr.monitor.start", "Проверить микрофон"); glyph: "\u{f025}"; enabled: false; }
         }
-        Rectangle { height: 30px; background: SettingsTheme.field; border-width: 1px; border-color: SettingsTheme.field-border; border-radius: 8px;
-            Rectangle { x: 4px; y: 4px; height: parent.height - 8px; width: max(0px, (parent.width - 8px) * AsrUi.mic-level / 100); border-radius: 5px; background: SettingsTheme.accent; }
+        meter := Rectangle {
+            height: 30px;
+            min-width: 0px;
+            background: transparent;
+            property <int> segments: min(120, max(12, self.width / 9px));
+            HorizontalLayout {
+                padding-top: 6px;
+                padding-bottom: 6px;
+                padding-left: 1px;
+                padding-right: 1px;
+                spacing: 3px;
+                for segment in meter.segments: Rectangle {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    border-radius: 3px;
+                    background: (segment + 1) * 100 <= AsrUi.mic-level * meter.segments
+                        ? SettingsTheme.accent : SettingsTheme.muted;
+                    opacity: (segment + 1) * 100 <= AsrUi.mic-level * meter.segments ? 1 : 0.16;
+                }
+            }
         }
         SettingsText { text: AsrUi.monitored-device == "" ? I18n.i18n("asr.monitor.no-device", "Устройство для проверки не выбрано") : AsrUi.monitored-device; color: SettingsTheme.muted; font-size: 11px; height: 19px; }
     }
 }
 
 export component AsrSettingsPage inherits VerticalLayout {
-    spacing: 14px; padding-left: 2px; padding-right: 10px; padding-top: 2px; padding-bottom: 2px; alignment: start;
-    SettingsSectionHeading { title: I18n.i18n("asr.title", "Настройки микрофона"); description: I18n.i18n("asr.description", "Устройства ввода, распознавание речи и проверка микрофона."); glyph: "\u{f130}"; }
+    spacing: 14px;
+    padding: 2px;
+    padding-right: 10px;
+    min-width: 0px;
+    horizontal-stretch: 1;
+    alignment: start;
+
     AsrToolbar { vertical-stretch: 0; }
     if root.width >= 880px: HorizontalLayout { spacing: 14px; vertical-stretch: 0;
         AsrBehaviorCard { horizontal-stretch: 1; min-width: 0px; }
