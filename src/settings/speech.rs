@@ -104,6 +104,10 @@ impl Default for AsrPreferences {
 pub struct SpeechSettings {
     pub tts: TtsPreferences,
     pub asr: AsrPreferences,
+    #[serde(default)]
+    pub tts_model_options: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub asr_model_options: BTreeMap<String, serde_json::Value>,
 }
 
 impl SpeechSettings {
@@ -129,6 +133,41 @@ impl SpeechSettings {
                 .any(|(_, value)| value.len() > 512)
         {
             return Err(SettingsError::Validation("invalid TTS preferences".into()));
+        }
+        for models in [&self.tts_model_options, &self.asr_model_options] {
+            if models.len() > 64 {
+                return Err(SettingsError::Validation(
+                    "too many speech model options".into(),
+                ));
+            }
+            for (plugin_id, options) in models {
+                if plugin_id.is_empty()
+                    || plugin_id.len() > 128
+                    || !plugin_id.is_ascii()
+                    || !plugin_id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                    || !options.as_object().is_some_and(|fields| {
+                        fields.len() <= 128
+                            && fields.iter().all(|(key, value)| {
+                                !key.is_empty()
+                                    && key.len() <= 128
+                                    && match value {
+                                        serde_json::Value::String(text) => text.len() <= 4096,
+                                        serde_json::Value::Bool(_)
+                                        | serde_json::Value::Number(_)
+                                        | serde_json::Value::Null => true,
+                                        _ => false,
+                                    }
+                            })
+                    })
+                    || serde_json::to_vec(options).is_ok_and(|bytes| bytes.len() > 32_768)
+                {
+                    return Err(SettingsError::Validation(
+                        "invalid speech model options".into(),
+                    ));
+                }
+            }
         }
         let a = &self.asr;
         if a.recognizer_id.len() > 128
@@ -173,5 +212,32 @@ mod tests {
         let mut json = serde_json::to_value(&settings.speech).unwrap();
         json["tts"].as_object_mut().unwrap().remove("enabled");
         assert!(serde_json::from_value::<SpeechSettings>(json).is_err());
+    }
+}
+
+#[cfg(test)]
+mod model_options_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn legacy_speech_settings_remain_readable_and_new_options_are_bounded() {
+        let mut json = serde_json::to_value(SpeechSettings::default()).unwrap();
+        json.as_object_mut().unwrap().remove("tts_model_options");
+        json.as_object_mut().unwrap().remove("asr_model_options");
+        let decoded: SpeechSettings = serde_json::from_value(json).unwrap();
+        assert!(decoded.tts_model_options.is_empty());
+        assert!(decoded.asr_model_options.is_empty());
+        assert!(decoded.validate().is_ok());
+        let mut invalid = decoded;
+        invalid
+            .asr_model_options
+            .insert("whisper".into(), json!({"nested": {"unsafe": 1}}));
+        assert!(invalid.validate().is_err());
+        invalid
+            .asr_model_options
+            .insert("whisper".into(), json!({"beam_size": 5}));
+        assert!(invalid.validate().is_ok());
     }
 }
