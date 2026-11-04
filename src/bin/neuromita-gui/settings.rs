@@ -148,6 +148,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 ui.set_preset_template_name("".into());
                 ui.set_preset_provider_icon("".into());
                 ui.set_preset_schema_label("".into());
+                ui.set_preset_url_template("".into());
                 ui.set_preset_endpoint("".into());
                 ui.set_preset_model("".into());
                 ui.set_preset_key_env("".into());
@@ -165,9 +166,16 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     ui.set_preset_template_name(template.name);
                     ui.set_preset_provider_icon(template.icon);
                     ui.set_preset_schema_label(template.format);
-                    if ui.get_preset_endpoint().is_empty() {
-                        ui.set_preset_endpoint(template.endpoint);
-                    }
+                    let endpoint = if ui.get_preset_endpoint().is_empty() {
+                        ui.set_preset_endpoint(template.endpoint.clone());
+                        template.endpoint
+                    } else {
+                        ui.get_preset_endpoint()
+                    };
+                    let request_url_template =
+                        PresetsPresenter::request_url_template("gemini", &endpoint)
+                            .unwrap_or_default();
+                    ui.set_preset_url_template(request_url_template.into());
                     if ui.get_preset_temperature().is_empty() {
                         ui.set_preset_temperature("0.7".into());
                     }
@@ -588,6 +596,7 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_template_name("".into());
     ui.set_preset_provider_icon("".into());
     ui.set_preset_schema_label("".into());
+    ui.set_preset_url_template("".into());
     if record.configured {
         if let Some(template) = ui
             .get_preset_templates()
@@ -598,6 +607,11 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
             ui.set_preset_template_name(template.name);
             ui.set_preset_provider_icon(record.provider.clone());
             ui.set_preset_schema_label(template.format);
+            if let Some(request_url_template) =
+                PresetsPresenter::request_url_template("gemini", &record.endpoint)
+            {
+                ui.set_preset_url_template(request_url_template.into());
+            }
         } else {
             ui.set_settings_error("Provider metadata is unavailable for this preset".into());
         }
@@ -619,6 +633,7 @@ pub fn clear_preset(ui: &SettingsUi) {
     ui.set_preset_template_name("".into());
     ui.set_preset_provider_icon("".into());
     ui.set_preset_schema_label("".into());
+    ui.set_preset_url_template("".into());
     ui.set_preset_delete_id("".into());
     mark_preset_baseline(ui);
 }

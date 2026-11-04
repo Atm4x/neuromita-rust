@@ -54,6 +54,9 @@ export global SettingsUi {
     in-out property <string> preset-name;
     in-out property <string> preset-model;
     in-out property <string> preset-endpoint;
+    in-out property <string> preset-url-template;
+    out property <string> preset-request-url: preset-url-template == "" ? preset-endpoint :
+        (preset-model == "" ? "" : preset-url-template.replace-all("{model}", preset-model));
     in-out property <string> preset-key-env;
     in-out property <string> preset-temperature;
     in-out property <string> preset-tokens;

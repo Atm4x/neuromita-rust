@@ -141,6 +141,18 @@ impl PresetsPresenter {
         }
     }
 
+    /// Returns the display-only request URL template for a provider.
+    /// The persisted endpoint remains the transport's base address, never the expanded URL.
+    pub fn request_url_template(provider_id: &str, endpoint: &str) -> Option<String> {
+        if provider_id != "gemini" || endpoint.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}/models/{{model}}:generateContent",
+            endpoint.trim_end_matches('/')
+        ))
+    }
+
     pub fn providers() -> Vec<ProviderOption> {
         const CATALOG: &[(&str, &str, &str, &str, &str, &str, bool)] = &[
             (
@@ -561,6 +573,31 @@ mod tests {
                 .unwrap()
                 .name,
             "Пользовательский API 1"
+        );
+    }
+
+    #[test]
+    fn request_url_template_uses_saved_endpoint_without_embedding_a_key() {
+        let template =
+            PresetsPresenter::request_url_template("gemini", "http://127.0.0.1:12345/v1beta/")
+                .unwrap();
+        assert_eq!(
+            template.replace("{model}", "gemini-2.5-flash"),
+            "http://127.0.0.1:12345/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(
+            PresetsPresenter::request_url_template(
+                "gemini",
+                crate::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT,
+            )
+            .unwrap()
+            .replace("{model}", "gemini-3.6-flash"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        );
+        assert_eq!(PresetsPresenter::request_url_template("gemini", ""), None);
+        assert_eq!(
+            PresetsPresenter::request_url_template("openrouter", "https://openrouter.ai/"),
+            None
         );
     }
 

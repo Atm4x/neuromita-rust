@@ -393,6 +393,20 @@ fn settings_render_and_bindings(window: &AppWindow) {
     );
     settings.invoke_preset_edit("7".into());
     assert_eq!(settings.get_preset_model(), "fixture-model");
+    assert_eq!(
+        settings.get_preset_request_url(),
+        "http://127.0.0.1:12345/v1beta/models/fixture-model:generateContent"
+    );
+    settings.set_preset_model("changed-model".into());
+    assert_eq!(
+        settings.get_preset_request_url(),
+        "http://127.0.0.1:12345/v1beta/models/changed-model:generateContent"
+    );
+    assert_eq!(
+        settings.get_preset_endpoint(),
+        "http://127.0.0.1:12345/v1beta/"
+    );
+    settings.set_preset_model("fixture-model".into());
     settings.invoke_preset_save();
     assert!(matches!(
         commands.borrow().last(),

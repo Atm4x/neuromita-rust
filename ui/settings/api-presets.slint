@@ -214,7 +214,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
     SettingsLabel { visible: false; height: 0px; text: I18n.i18n("settings.api-preset.key-env", "API ключ (переменная окружения)"); }
     HorizontalLayout { spacing: 12px; vertical-stretch: 1;
         Rectangle {
-            width: max(310px, (parent.width - 9px) / 3);
+            horizontal-stretch: 1; min-width: 310px; preferred-width: 0px;
             background: SettingsTheme.panel; border-width: 1px; border-color: SettingsTheme.border; border-radius: 12px;
             VerticalLayout { padding-left: 10px; padding-right: 10px; padding-top: 14px; padding-bottom: 10px; spacing: 10px;
                 HorizontalLayout { spacing: 10px; height: 40px;
@@ -240,13 +240,15 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                 }
             }
         }
-        VerticalLayout { width: max(500px, parent.width - max(310px, (parent.width - 9px) / 3) - 12px); spacing: 14px;
+        VerticalLayout { horizontal-stretch: 2; min-width: 500px; preferred-width: 0px; spacing: 14px;
             if SettingsUi.preset-edit-id == "": Rectangle {
                 horizontal-stretch: 1; vertical-stretch: 1; border-width: 1px; border-radius: 12px; border-color: SettingsTheme.border; background: SettingsTheme.panel;
-                VerticalLayout { alignment: center; spacing: 12px;
-                    Centered { Glyph { text: "\u{f1e6}"; color: SettingsTheme.muted; font-size: 28px; } }
-                    SettingsLabel { text: I18n.i18n("settings.preset.choose", "Выберите пресет слева"); color: SettingsTheme.muted; horizontal-alignment: center; font-size: 14px; }
-                    SettingsLabel { text: I18n.i18n("settings.preset.choose-hint", "Или нажмите «Добавить пресет», чтобы создать новый"); color: SettingsTheme.muted; horizontal-alignment: center; font-size: 12px; }
+                VerticalLayout { width: 100%; height: 100%; alignment: center; spacing: 12px;
+                    HorizontalLayout { width: 100%; height: 34px; alignment: center;
+                        Glyph { text: "\u{f1e6}"; color: SettingsTheme.muted; font-size: 28px; width: 34px; height: 34px; }
+                    }
+                    SettingsLabel { width: 100%; text: I18n.i18n("settings.preset.choose", "Выберите пресет слева"); color: SettingsTheme.muted; horizontal-alignment: center; font-size: 14px; }
+                    SettingsLabel { width: 100%; text: I18n.i18n("settings.preset.choose-hint", "Или нажмите «Добавить пресет», чтобы создать новый"); color: SettingsTheme.muted; horizontal-alignment: center; font-size: 12px; }
                 }
             }
             if SettingsUi.preset-edit-id != "": Rectangle {
@@ -303,7 +305,16 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                                     TemplateSelector { width: 100%; }
                                 }
                             }
-                            ApiFieldRow { title: I18n.i18n("settings.preset.url", "Ссылка API"); placeholder: I18n.i18n("settings.preset.url-placeholder", "Адрес API"); value <=> SettingsUi.preset-endpoint; }
+                            if SettingsUi.preset-template-id == "": ApiFieldRow {
+                                title: I18n.i18n("settings.preset.url", "Ссылка API");
+                                placeholder: I18n.i18n("settings.preset.url-placeholder", "Адрес API");
+                                value <=> SettingsUi.preset-endpoint;
+                            }
+                            if SettingsUi.preset-template-id != "": ApiFieldRow {
+                                title: I18n.i18n("settings.preset.url", "Ссылка API");
+                                placeholder: I18n.i18n("settings.preset.url-model-placeholder", "Укажите модель для формирования URL");
+                                value: SettingsUi.preset-request-url; editable: false;
+                            }
                             HorizontalLayout { spacing: 16px;
                                 ApiFieldRow { title: I18n.i18n("settings.api-preset.model", "Модель"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.models-link", "Список моделей") : ""; link-activated => { SettingsUi.preset-help(1); } placeholder: I18n.i18n("settings.preset.model-placeholder", "Название модели"); value <=> SettingsUi.preset-model; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
                                 ApiFieldRow { title: I18n.i18n("settings.api-preset.key-label", "API ключ"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.key-link", "Получить ключ") : ""; link-activated => { SettingsUi.preset-help(2); } placeholder: I18n.i18n("settings.preset.key-placeholder", "Имя переменной окружения"); value <=> SettingsUi.preset-key-env; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }

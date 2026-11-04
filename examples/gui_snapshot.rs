@@ -184,6 +184,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             "Google AI Studio".into()
         });
+        if !unconfigured {
+            settings.set_preset_url_template(
+                PresetsPresenter::request_url_template(
+                    "gemini",
+                    neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT,
+                )
+                .unwrap()
+                .into(),
+            );
+        }
         let templates = PresetsPresenter::providers()
             .into_iter()
             .map(|provider| view::PresetTemplateItem {
