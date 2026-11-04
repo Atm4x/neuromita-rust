@@ -176,15 +176,6 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                         PresetsPresenter::request_url_template("gemini", &endpoint)
                             .unwrap_or_default();
                     ui.set_preset_url_template(request_url_template.into());
-                    if ui.get_preset_temperature().is_empty() {
-                        ui.set_preset_temperature("0.7".into());
-                    }
-                    if ui.get_preset_tokens().is_empty() {
-                        ui.set_preset_tokens("3000".into());
-                    }
-                    if ui.get_preset_timeout().is_empty() {
-                        ui.set_preset_timeout("60000".into());
-                    }
                 }
             } else {
                 ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());

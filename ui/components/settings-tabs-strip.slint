@@ -51,12 +51,14 @@ export component SettingsTabsStrip inherits Rectangle {
                 padding-right: 10px;
                 spacing: 5px;
 
-                for entry in root.entries: SettingsNavigationTab {
-                    visible: root.visibility[entry.section];
+                for entry in root.entries: HorizontalLayout {
+                    padding: 0px; spacing: 0px; horizontal-stretch: 0;
+                    if root.visibility[entry.section]: SettingsNavigationTab {
                     label: entry.title;
                     glyph: entry.glyph;
                     active: root.active-section == entry.section;
                     activated => { root.selected(entry.section); }
+                    }
                 }
             }
         }
