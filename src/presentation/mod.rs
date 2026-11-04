@@ -5,6 +5,7 @@ mod conversation;
 pub mod hardware;
 mod presets;
 mod releases;
+mod runtime;
 mod settings;
 
 pub use characters::{
@@ -24,6 +25,7 @@ pub use presets::{
 pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };
+pub use runtime::RuntimeStatePresenter;
 pub use settings::{
     AsrSettingsPresenter, BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
     InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
@@ -31,6 +33,7 @@ pub use settings::{
 };
 
 pub struct GuiPresenter {
+    pub ai_runtime: RuntimeStatePresenter,
     pub releases: ReleasesPresenter,
     pub connections: ConnectionsPresenter,
     pub conversation: ConversationPresenter,

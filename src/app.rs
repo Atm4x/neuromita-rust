@@ -519,6 +519,9 @@ impl ApplicationLifecycle {
             games: Arc::clone(&games),
             reminders,
         });
+        let ai_runtime_status = crate::presentation::RuntimeStatePresenter::new(
+            ai_runtime.as_ref().map(|runtime| runtime.observe_status()),
+        );
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),
@@ -552,6 +555,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
                 conversation: ConversationPresenter::new(
