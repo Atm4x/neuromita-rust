@@ -346,6 +346,10 @@ async fn probe<P: VadScoreProvider>(config: &Config, provider: P) -> ProbeResult
     }
     drop(capture);
     report.elapsed_ms = start.elapsed().as_millis();
+    if report.sample_count == 0 && matches!(report.finish, Finish::Duration | Finish::Eof) {
+        report.finish = Finish::CaptureError;
+        report.error = Some("capture produced no complete PCM frames".into());
+    }
     if !matches!(report.finish, Finish::CaptureError | Finish::ProviderError)
         && let Some(segment) = segmenter.flush()
     {

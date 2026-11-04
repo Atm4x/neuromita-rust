@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-04",
+  "platform": "Windows DirectShow USB microphone",
+  "wav_saved": false,
+  "asr_used": false,
+  "note": "Observed before PCM watchdog fix. No speech segments; live speech detection is unverified. First zero-frame success triggered the fix; cause of missing PCM unknown.",
+  "reports": [
+    {
+      "backend": "dshow",
+      "provider": "silero",
+      "mode": "auto",
+      "threshold": 0.5,
+      "sample_rate_hz": 16000,
+      "duration_limit_secs": 15,
+      "elapsed_ms": 15010,
+      "finish": "duration",
+      "error": null,
+      "sample_count": 0,
+      "peak_amplitude": 0,
+      "applied_ptt_events": 0,
+      "segments": []
+    },
+    {
+      "backend": "dshow",
+      "provider": "direct",
+      "mode": "auto",
+      "threshold": 0.5,
+      "sample_rate_hz": 16000,
+      "duration_limit_secs": 6,
+      "elapsed_ms": 6014,
+      "finish": "duration",
+      "error": null,
+      "sample_count": 63744,
+      "peak_amplitude": 685,
+      "applied_ptt_events": 0,
+      "segments": []
+    },
+    {
+      "backend": "dshow",
+      "provider": "silero",
+      "mode": "auto",
+      "threshold": 0.5,
+      "sample_rate_hz": 16000,
+      "duration_limit_secs": 15,
+      "elapsed_ms": 15002,
+      "finish": "duration",
+      "error": null,
+      "sample_count": 207872,
+      "peak_amplitude": 2367,
+      "applied_ptt_events": 0,
+      "segments": []
+    }
+  ]
+}
