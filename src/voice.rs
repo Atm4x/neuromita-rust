@@ -5,9 +5,26 @@ use thiserror::Error;
 use crate::settings::Volume;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoiceBackend {
+    Disabled,
+    Local,
+    FishAudio {
+        provider: String,
+        model: String,
+        speed_percent: u16,
+    },
+    Telegram {
+        bot: String,
+        wait_seconds: u16,
+        interval_seconds: u16,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceOptions {
     pub voice: String,
     pub volume: Volume,
+    pub backend: VoiceBackend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

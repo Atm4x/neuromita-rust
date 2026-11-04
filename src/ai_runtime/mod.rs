@@ -1857,6 +1857,7 @@ class Plugin:
                 VoiceOptions {
                     voice: "crazy".into(),
                     volume: crate::settings::Volume::new(50).unwrap(),
+                    backend: crate::voice::VoiceBackend::Local,
                 },
             )
             .await
@@ -1878,6 +1879,7 @@ class Plugin:
                     VoiceOptions {
                         voice: "crazy".into(),
                         volume: crate::settings::Volume::new(50).unwrap(),
+                        backend: crate::voice::VoiceBackend::Local,
                     }
                 )
                 .await
@@ -2148,6 +2150,7 @@ class Plugin:
                 VoiceOptions {
                     voice: "default".into(),
                     volume: crate::settings::Volume::try_from(100).unwrap(),
+                    backend: crate::voice::VoiceBackend::Local,
                 },
             )
             .await

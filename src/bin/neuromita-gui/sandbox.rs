@@ -197,6 +197,18 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             }
             _ => {}
         },
+        Update::RemoteCredentialPresent(ready) => {
+            window
+                .global::<super::view::VoiceUi>()
+                .set_api_credential_status(
+                    if ready {
+                        "API key configured (enter a new key to replace)"
+                    } else {
+                        "API key not configured"
+                    }
+                    .into(),
+                );
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);

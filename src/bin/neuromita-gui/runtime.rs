@@ -55,6 +55,7 @@ pub enum Command {
     VoiceInGame(bool),
     VoiceName(String),
     SaveTts(TtsPreferences),
+    SaveFishAudioCredential(String),
     SaveCharacterVoice(Option<CharacterId>, String),
     SaveAsr(AsrPreferences, String),
     SelectAsrRecognizer(String),
@@ -82,6 +83,7 @@ pub struct SpeechOptionControl {
 
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
+    RemoteCredentialPresent(bool),
     SpeechModelSchema {
         service: AiService,
         plugin_id: String,
@@ -432,6 +434,10 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(Update::RemoteCredentialPresent(
+        std::env::var_os("NEUROMITA_FISH_AUDIO_API_KEY").is_some()
+            || directory.join("AIData/secrets/fish_audio.key").is_file(),
+    ));
     if let Some(problem) = app.speech_startup_warning() {
         publish(Update::AdminError(format!("Speech runtime: {problem}")));
     }
@@ -617,6 +623,13 @@ async fn observe(
                                 Err(error) => publish(Update::AdminError(error.to_string())),
                             }
                         }
+                    }
+                },
+                Some(Command::SaveFishAudioCredential(key)) => {
+                    let file = directory.join("AIData/secrets/fish_audio.key");
+                    match neuromita::adapters::fish_audio::save_key(&file, &key).await {
+                        Ok(()) => publish(Update::RemoteCredentialPresent(true)),
+                        Err(error) => publish(Update::AdminError(error.to_string())),
                     }
                 },
                 Some(Command::SaveSpeechOption(service, plugin_id, key, value)) => {

@@ -31,6 +31,7 @@ export global VoiceUi {
     in-out property <[string]> api-models;
     in-out property <string> api-model;
     in-out property <string> api-key;
+    in-out property <string> api-credential-status;
     in-out property <int> api-speed: 100;
     in-out property <int> character: 0;
     in-out property <int> avatar-offset: 0;
@@ -45,6 +46,7 @@ export global VoiceUi {
     callback voice-id-changed(int, string);
     callback voice-test(string, int);
     callback telegram-connect();
+    callback api-key-committed(string);
     callback local-initialize();
     callback local-restart();
     callback open-engine-settings();
@@ -130,6 +132,7 @@ component VoiceSelectField inherits HorizontalLayout {
 }
 
 component SecretField inherits HorizontalLayout {
+    callback committed(string);
     in property <string> title;
     in-out property <string> value;
     in property <string> hint;
@@ -138,7 +141,7 @@ component SecretField inherits HorizontalLayout {
     SettingsText { text: root.title; width: 145px; font-size: 12px; }
     Rectangle { horizontal-stretch: 1; height: 38px; border-width: 1px; border-color: SettingsTheme.field-border; border-radius: 10px; background: SettingsTheme.field;
         text-input := TextInput { x: 10px; y: 2px; width: parent.width - 20px; height: parent.height - 4px;
-            text <=> root.value; single-line: true; input-type: root.revealed ? text : password;
+            text <=> root.value; single-line: true; input-type: root.revealed ? text : password; accepted => { root.committed(root.value); }
             color: SettingsTheme.text; font-family: SettingsTheme.font-family; font-size: 12px;
         }
         if root.value == "": SettingsText { x: 10px; y: 2px; width: parent.width - 20px; height: parent.height - 4px;
@@ -293,7 +296,8 @@ export component VoiceSettingsPage inherits VerticalLayout {
                     VoiceButton { text: ""; glyph: "\u{f067}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-add(); } }
                     VoiceButton { text: ""; glyph: "\u{f1f8}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-delete(); } }
                 }
-                SecretField { title: I18n.i18n("voice.api.key", "API ключ"); hint: I18n.i18n("voice.api.key-hint", "Ключ провайдера"); value <=> VoiceUi.api-key; }
+                SecretField { title: I18n.i18n("voice.api.key", "API ключ"); hint: I18n.i18n("voice.api.key-hint", "Ключ провайдера"); value <=> VoiceUi.api-key; committed(value) => { VoiceUi.api-key-committed(value); VoiceUi.api-key = ""; } }
+                SettingsText { text: VoiceUi.api-credential-status; color: SettingsTheme.muted; font-size: 11px; height: 22px; }
                 VoiceSelectField { title: I18n.i18n("voice.api.model", "Модель"); options: VoiceUi.api-models; value: VoiceUi.api-model == "" ? I18n.i18n("voice.api.model-choose", "Выберите модель") : VoiceUi.api-model; chosen(v) => { VoiceUi.api-model = v; VoiceUi.persist(); } }
                 SettingsText { text: I18n.i18n("voice.api.usage", "Бесплатные и платные модели зависят от выбранного провайдера."); color: SettingsTheme.muted; font-size: 11px; height: 23px; }
                 HorizontalLayout { height: 38px; spacing: 10px;

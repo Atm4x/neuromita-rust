@@ -18,7 +18,7 @@ use crate::{
     knowledge::KnowledgeRetrieval,
     settings::SettingsOwner,
     timeline::selection::TimelineSelection,
-    voice::{VoiceError, VoiceOptions, VoiceProvider},
+    voice::{VoiceBackend, VoiceError, VoiceOptions, VoiceProvider},
 };
 
 #[derive(Clone)]
@@ -143,9 +143,49 @@ impl MessageHandler {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
+        let voice_name = if matches!(
+            settings.values.speech.tts.backend,
+            crate::settings::TtsBackend::Api | crate::settings::TtsBackend::Telegram
+        ) && settings.values.speech.tts.enabled
+        {
+            settings
+                .values
+                .speech
+                .tts
+                .character_voice_ids
+                .get(&message.character_id())
+                .filter(|voice| !voice.is_empty())
+                .or_else(|| {
+                    let default = &settings.values.speech.tts.default_voice_id;
+                    (!default.is_empty()).then_some(default)
+                })
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            voice_settings.voice
+        };
+        let tts = &settings.values.speech.tts;
+        let backend = if !tts.enabled {
+            VoiceBackend::Disabled
+        } else {
+            match tts.backend {
+                crate::settings::TtsBackend::Local => VoiceBackend::Local,
+                crate::settings::TtsBackend::Api => VoiceBackend::FishAudio {
+                    provider: tts.api_profile.clone(),
+                    model: tts.api_model.clone(),
+                    speed_percent: tts.api_speed_percent,
+                },
+                crate::settings::TtsBackend::Telegram => VoiceBackend::Telegram {
+                    bot: tts.telegram_service.clone(),
+                    wait_seconds: tts.telegram_wait_seconds,
+                    interval_seconds: tts.telegram_interval_seconds,
+                },
+            }
+        };
         let voice_options = voice_enabled.then_some(VoiceOptions {
-            voice: voice_settings.voice,
+            voice: voice_name,
             volume: voice_settings.volume,
+            backend,
         });
         let acceptance = AcceptanceContext {
             anchor: context.anchor,

@@ -16,6 +16,9 @@ use uuid::Uuid;
 pub use crate::runtime::ApplicationStatus;
 
 use crate::{
+    adapters::{
+        fish_audio::FishAudioVoice, speech_voice::SpeechVoiceRouter, telegram_voice::TelegramVoice,
+    },
     ai_runtime::{
         AiService,
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
@@ -504,9 +507,9 @@ impl ApplicationLifecycle {
         // A stable speech boundary is needed even if no worker was installed at
         // startup. The worker may appear or change after settings are edited.
         let initial_speech = settings_owner.snapshot_all()?.values.speech.clone();
-        let live_speech = live_environment.map(|environment| {
+        let live_speech = live_environment.as_ref().map(|environment| {
             Arc::new(LiveSpeechRuntime::new(
-                environment,
+                environment.clone(),
                 ai_runtime.take(),
                 &initial_speech,
                 speech_startup_warning.as_deref(),
@@ -523,13 +526,28 @@ impl ApplicationLifecycle {
                         Arc::new(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>
                     })
             };
-        let voice: Arc<dyn VoiceProvider> = if let Some(live) = &live_speech {
+        let local_voice: Arc<dyn VoiceProvider> = if let Some(live) = &live_speech {
             Arc::new(LiveSpeechVoice(Arc::clone(live)))
         } else {
             match &ai_runtime {
                 Some(running) if running.has_service(AiService::Tts) => running.voice_provider(),
                 _ => voice,
             }
+        };
+        let voice: Arc<dyn VoiceProvider> = if let Some(environment) = &live_environment {
+            let fish = FishAudioVoice::new(
+                environment
+                    .data_directory
+                    .join("AIData/secrets/fish_audio.key"),
+            )
+            .map_err(|error| AiApplicationError::Invalid(error.to_string()))?;
+            Arc::new(SpeechVoiceRouter::new(
+                local_voice,
+                fish,
+                TelegramVoice::new(environment.data_directory.clone()),
+            ))
+        } else {
+            local_voice
         };
         let registry = Arc::new(RequestRegistry::new_with_diagnostics(
             limits.discovery_buffer.get(),

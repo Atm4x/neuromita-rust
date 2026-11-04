@@ -106,6 +106,12 @@ impl ValidateTtsUi for TtsPreferences {
 }
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
+    let key_send = dispatch.clone();
+    window.global::<VoiceUi>().on_api_key_committed(move |key| {
+        if !key.is_empty() {
+            key_send(Command::SaveFishAudioCredential(key.to_string()));
+        }
+    });
     let ui = window.global::<VoiceUi>();
     let weak = window.as_weak();
     let send = dispatch.clone();
