@@ -1,6 +1,6 @@
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
-export struct PresetItem { id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string }
+export struct PresetItem { id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string, configured: bool }
 export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, pricing: string, badge-kind: string, available: bool }
 export struct PresetParameterItem { id: string, wire-key: string, title: string, title-key: string, description: string, description-key: string, editable: bool, sent: bool }
 export global SettingsUi {
@@ -34,10 +34,29 @@ export global SettingsUi {
     in-out property <int> selected-character;
     in-out property <bool> character-prompt-expanded: true;
     in-out property <string> preset-edit-id;
-    in-out property <string> preset-save-token;
+    in-out property <bool> preset-configured;
+    in-out property <string> preset-pending-id;
+    in-out property <bool> preset-pending-save;
+    in-out property <string> preset-baseline-name;
+    in-out property <string> preset-baseline-model;
+    in-out property <string> preset-baseline-endpoint;
+    in-out property <string> preset-baseline-key-env;
+    in-out property <string> preset-baseline-template;
+    in-out property <string> preset-baseline-temperature;
+    in-out property <string> preset-baseline-tokens;
+    in-out property <string> preset-baseline-timeout;
+    out property <bool> preset-dirty: preset-edit-id != "" && (
+        preset-name != preset-baseline-name || preset-model != preset-baseline-model ||
+        preset-endpoint != preset-baseline-endpoint || preset-key-env != preset-baseline-key-env ||
+        preset-template-id != preset-baseline-template || preset-temperature != preset-baseline-temperature ||
+        preset-tokens != preset-baseline-tokens || preset-timeout != preset-baseline-timeout
+    );
     in-out property <string> preset-name;
     in-out property <string> preset-model;
     in-out property <string> preset-endpoint;
+    in-out property <string> preset-url-template;
+    out property <string> preset-request-url: preset-url-template == "" ? preset-endpoint :
+        (preset-model == "" ? "" : preset-url-template.replace-all("{model}", preset-model));
     in-out property <string> preset-key-env;
     in-out property <string> preset-temperature;
     in-out property <string> preset-tokens;
@@ -46,8 +65,12 @@ export global SettingsUi {
         return query == "" || item.name.to-lowercase().replace-all(query.to-lowercase(), "") != item.name.to-lowercase() || item.model.to-lowercase().replace-all(query.to-lowercase(), "") != item.model.to-lowercase();
     }
     callback preset-new();
+    callback preset-confirm-save();
+    callback preset-confirm-discard();
+    callback preset-confirm-cancel();
     callback preset-template-select(string);
     callback preset-documentation();
+    callback preset-help(int);
     callback preset-save();
     callback preset-edit(string);
     callback preset-delete(string);

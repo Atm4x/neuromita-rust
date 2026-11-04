@@ -552,6 +552,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                ai_engine: crate::presentation::AiEngineSettingsPresenter::new(),
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
                 conversation: ConversationPresenter::new(

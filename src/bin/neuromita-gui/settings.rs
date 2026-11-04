@@ -40,24 +40,16 @@ pub struct AdministrationSnapshot {
     pub presets: PresetsView,
 }
 
-pub fn execute(
-    api: &GuiPresenter,
-    command: Command,
-) -> Result<Option<(PresetId, uuid::Uuid)>, String> {
+pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
     match command {
-        Command::CreatePreset(record, token) => {
-            return api
-                .presets
-                .create(record)
-                .map(|id| Some((id, token)))
-                .map_err(|e| e.to_string());
-        }
         Command::UpdatePreset(id, record) => {
             api.presets.update(id, record).map_err(|e| e.to_string())?
         }
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
         Command::ActivePreset(id) => {
-            api.presets.require(id).map_err(|e| e.to_string())?;
+            api.presets
+                .require_configured(id)
+                .map_err(|e| e.to_string())?;
             api.settings
                 .presets
                 .active
@@ -91,6 +83,50 @@ pub fn execute(
             };
             target.set(selection).map_err(|e| e.to_string())?;
         }
+        Command::SaveTts(mut value) => {
+            value.character_voice_ids = api.settings.tts.preferences.get().character_voice_ids;
+            api.settings
+                .tts
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SaveCharacterVoice(character, voice_id) => {
+            if !(-1..=8).contains(&character) || voice_id.len() > 512 {
+                return Err("Invalid character voice ID".into());
+            }
+            let mut value = api.settings.tts.preferences.get();
+            value
+                .character_voice_ids
+                .insert(character.to_string(), voice_id);
+            api.settings
+                .tts
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SelectAsrRecognizer(model_id) => {
+            let mut value = api.settings.asr.preferences.get();
+            value.recognizer_id = model_id;
+            api.settings
+                .asr
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SaveAsr(mut value, language) => {
+            value.model_languages = api.settings.asr.preferences.get().model_languages;
+            if !value.recognizer_id.is_empty() {
+                value
+                    .model_languages
+                    .insert(value.recognizer_id.clone(), language);
+            }
+            api.settings
+                .asr
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
         Command::VoiceInLauncher(value) => api
             .settings
             .voice
@@ -122,7 +158,7 @@ pub fn execute(
             .map_err(|e| e.to_string())?,
         _ => return Err("Unsupported administration command".into()),
     }
-    Ok(None)
+    Ok(())
 }
 
 fn id(value: &str) -> Result<PresetId, String> {
@@ -135,12 +171,35 @@ fn id(value: &str) -> Result<PresetId, String> {
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let settings = window.global::<SettingsUi>();
     let send = dispatch.clone();
-    settings.on_preset_new(move || send(Command::NewPreset));
+    let weak = window.as_weak();
+    settings.on_preset_new(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<SettingsUi>();
+        if ui.get_preset_dirty() {
+            ui.set_preset_pending_id("__new__".into());
+        } else {
+            send(Command::NewPreset);
+        }
+    });
     let weak = window.as_weak();
     settings.on_preset_template_select(move |id| {
         if let Some(window) = weak.upgrade() {
             let ui = window.global::<SettingsUi>();
-            if ui
+            if id.is_empty() {
+                ui.set_preset_template_id("".into());
+                ui.set_preset_template_name("".into());
+                ui.set_preset_provider_icon("".into());
+                ui.set_preset_schema_label("".into());
+                ui.set_preset_url_template("".into());
+                ui.set_preset_endpoint("".into());
+                ui.set_preset_model("".into());
+                ui.set_preset_key_env("".into());
+                ui.set_preset_temperature("".into());
+                ui.set_preset_tokens("".into());
+                ui.set_preset_timeout("".into());
+            } else if ui
                 .get_preset_templates()
                 .iter()
                 .any(|item| item.id == id && item.available)
@@ -151,6 +210,25 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     ui.set_preset_template_name(template.name);
                     ui.set_preset_provider_icon(template.icon);
                     ui.set_preset_schema_label(template.format);
+                    let endpoint = if ui.get_preset_endpoint().is_empty() {
+                        ui.set_preset_endpoint(template.endpoint.clone());
+                        template.endpoint
+                    } else {
+                        ui.get_preset_endpoint()
+                    };
+                    let request_url_template =
+                        PresetsPresenter::request_url_template("gemini", &endpoint)
+                            .unwrap_or_default();
+                    ui.set_preset_url_template(request_url_template.into());
+                    if ui.get_preset_temperature().is_empty() {
+                        ui.set_preset_temperature("0.7".into());
+                    }
+                    if ui.get_preset_tokens().is_empty() {
+                        ui.set_preset_tokens("3000".into());
+                    }
+                    if ui.get_preset_timeout().is_empty() {
+                        ui.set_preset_timeout("60000".into());
+                    }
                 }
             } else {
                 ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());
@@ -175,6 +253,32 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let weak = window.as_weak();
+    settings.on_preset_help(move |kind| {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<SettingsUi>();
+        let selected = ui.get_preset_template_id();
+        let target = PresetsPresenter::providers()
+            .into_iter()
+            .find(|provider| selected == provider.id && provider.supported)
+            .map(|provider| {
+                if kind == 1 {
+                    provider.models_url
+                } else if kind == 2 {
+                    provider.credentials_url
+                } else {
+                    ""
+                }
+            })
+            .filter(|link| link.starts_with("https://"));
+        if let Some(url) = target
+            && let Err(error) = super::binding::open_external_url(url)
+        {
+            ui.set_settings_error(error.into());
+        }
+    });
+    let weak = window.as_weak();
     let send = dispatch.clone();
     settings.on_preset_save(move || {
         let Some(component) = weak.upgrade() else {
@@ -182,6 +286,18 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         };
         let window = component.global::<SettingsUi>();
         let record = (|| -> Result<PresetRecord, String> {
+            if window.get_preset_edit_id().is_empty() {
+                return Err("Choose a preset before editing".into());
+            }
+            if window.get_preset_name().trim().is_empty() {
+                return Err("Preset name is required".into());
+            }
+            if window.get_preset_template_id().is_empty() {
+                return Ok(PresetRecord {
+                    name: window.get_preset_name().into(),
+                    definition: PresetDefinition::Unconfigured,
+                });
+            }
             if window.get_preset_template_id() != "gemini" {
                 return Err("Unsupported preset provider".into());
             }
@@ -207,11 +323,6 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             })
         })();
         match record {
-            Ok(record) if window.get_preset_edit_id().is_empty() => {
-                let token = uuid::Uuid::new_v4();
-                window.set_preset_save_token(token.to_string().into());
-                send(Command::CreatePreset(record, token))
-            }
             Ok(record) => match id(&window.get_preset_edit_id()) {
                 Ok(id) => send(Command::UpdatePreset(id, record)),
                 Err(error) => window.set_settings_error(error.into()),
@@ -225,7 +336,13 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let window = component.global::<SettingsUi>();
-        window.set_preset_save_token("".into());
+        if selected == window.get_preset_edit_id() {
+            return;
+        }
+        if window.get_preset_dirty() {
+            window.set_preset_pending_id(selected);
+            return;
+        }
         if let Some(record) = window
             .get_settings_presets()
             .iter()
@@ -234,6 +351,41 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             select_preset(&window, &record);
         } else {
             window.set_settings_error("Preset is no longer available".into());
+        }
+    });
+    let weak = window.as_weak();
+    settings.on_preset_confirm_cancel(move || {
+        if let Some(component) = weak.upgrade() {
+            component
+                .global::<SettingsUi>()
+                .set_preset_pending_id("".into());
+        }
+    });
+    let weak = window.as_weak();
+    settings.on_preset_confirm_save(move || {
+        if let Some(component) = weak.upgrade() {
+            let ui = component.global::<SettingsUi>();
+            ui.set_preset_pending_save(true);
+            ui.invoke_preset_save();
+        }
+    });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    settings.on_preset_confirm_discard(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<SettingsUi>();
+        let target = ui.get_preset_pending_id();
+        ui.set_preset_pending_id("".into());
+        if target == "__new__" {
+            send(Command::NewPreset);
+        } else if let Some(record) = ui
+            .get_settings_presets()
+            .iter()
+            .find(|row| row.id == target)
+        {
+            select_preset(&ui, &record);
         }
     });
     let send = dispatch.clone();
@@ -420,9 +572,22 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             provider: record.provider.into(),
             endpoint: record.endpoint.as_str().into(),
             key_env: record.credential_env.as_str().into(),
-            temperature: record.temperature.to_string().into(),
-            tokens: record.max_output_tokens.to_string().into(),
-            timeout: record.timeout_ms.to_string().into(),
+            temperature: if record.configured {
+                record.temperature.to_string().into()
+            } else {
+                "".into()
+            },
+            tokens: if record.configured {
+                record.max_output_tokens.to_string().into()
+            } else {
+                "".into()
+            },
+            timeout: if record.configured {
+                record.timeout_ms.to_string().into()
+            } else {
+                "".into()
+            },
+            configured: record.configured,
         })
         .collect::<Vec<_>>();
     let selected = window.get_preset_edit_id();
@@ -438,11 +603,30 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             select_preset(&window, record);
         }
     }
+    if records.is_empty() {
+        clear_preset(&window);
+    } else if let Some(record) = records.iter().find(|r| r.id == window.get_preset_edit_id()) {
+        if record.configured != window.get_preset_configured() {
+            select_preset(&window, record);
+        }
+    }
     window.set_settings_presets(ModelRc::new(VecModel::from(records)));
+}
+
+fn mark_preset_baseline(ui: &SettingsUi) {
+    ui.set_preset_baseline_name(ui.get_preset_name());
+    ui.set_preset_baseline_model(ui.get_preset_model());
+    ui.set_preset_baseline_endpoint(ui.get_preset_endpoint());
+    ui.set_preset_baseline_key_env(ui.get_preset_key_env());
+    ui.set_preset_baseline_template(ui.get_preset_template_id());
+    ui.set_preset_baseline_temperature(ui.get_preset_temperature());
+    ui.set_preset_baseline_tokens(ui.get_preset_tokens());
+    ui.set_preset_baseline_timeout(ui.get_preset_timeout());
 }
 
 fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_creating(false);
+    ui.set_preset_configured(record.configured);
     ui.set_preset_delete_id("".into());
     ui.set_preset_edit_id(record.id.clone());
     ui.set_preset_name(record.name.clone());
@@ -456,57 +640,83 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_template_name("".into());
     ui.set_preset_provider_icon("".into());
     ui.set_preset_schema_label("".into());
-    if let Some(template) = ui
-        .get_preset_templates()
-        .iter()
-        .find(|item| item.id == "gemini")
-    {
-        ui.set_preset_template_id(template.id);
-        ui.set_preset_template_name(template.name);
-        ui.set_preset_provider_icon(record.provider.clone());
-        ui.set_preset_schema_label(template.format);
-    } else {
-        ui.set_settings_error("Provider metadata is unavailable for this preset".into());
+    ui.set_preset_url_template("".into());
+    if record.configured {
+        if let Some(template) = ui
+            .get_preset_templates()
+            .iter()
+            .find(|item| item.id == "gemini")
+        {
+            ui.set_preset_template_id(template.id);
+            ui.set_preset_template_name(template.name);
+            ui.set_preset_provider_icon(record.provider.clone());
+            ui.set_preset_schema_label(template.format);
+            if let Some(request_url_template) =
+                PresetsPresenter::request_url_template("gemini", &record.endpoint)
+            {
+                ui.set_preset_url_template(request_url_template.into());
+            }
+        } else {
+            ui.set_settings_error("Provider metadata is unavailable for this preset".into());
+        }
     }
+    mark_preset_baseline(ui);
 }
 
-pub fn draft(window: &AppWindow, record: &PresetRecord) {
-    let ui = window.global::<SettingsUi>();
-    let PresetDefinition::Gemini(definition) = &record.definition;
-    ui.set_preset_creating(true);
+pub fn clear_preset(ui: &SettingsUi) {
     ui.set_preset_edit_id("".into());
-    ui.set_preset_save_token("".into());
-    ui.set_preset_template_id("gemini".into());
-    if let Some(template) = ui
-        .get_preset_templates()
-        .iter()
-        .find(|item| item.id == "gemini")
-    {
-        ui.set_preset_template_name(template.name);
-        ui.set_preset_provider_icon(template.icon);
-        ui.set_preset_schema_label(template.format);
-    }
-    ui.set_preset_name(record.name.as_str().into());
-    ui.set_preset_model(definition.model.as_str().into());
-    ui.set_preset_endpoint(definition.endpoint.as_str().into());
-    ui.set_preset_key_env(definition.credential_env.as_str().into());
-    ui.set_preset_temperature(definition.temperature.to_string().into());
-    ui.set_preset_tokens(definition.max_output_tokens.to_string().into());
-    ui.set_preset_timeout(definition.timeout_ms.to_string().into());
+    ui.set_preset_configured(false);
+    ui.set_preset_name("".into());
+    ui.set_preset_model("".into());
+    ui.set_preset_endpoint("".into());
+    ui.set_preset_key_env("".into());
+    ui.set_preset_temperature("".into());
+    ui.set_preset_tokens("".into());
+    ui.set_preset_timeout("".into());
+    ui.set_preset_template_id("".into());
+    ui.set_preset_template_name("".into());
+    ui.set_preset_provider_icon("".into());
+    ui.set_preset_schema_label("".into());
+    ui.set_preset_url_template("".into());
+    ui.set_preset_delete_id("".into());
+    mark_preset_baseline(ui);
+}
+
+pub fn created(window: &AppWindow, id: PresetId, record: &PresetRecord) {
+    let ui = window.global::<SettingsUi>();
+    let item = PresetItem {
+        id: id.0.to_string().into(),
+        name: record.name.as_str().into(),
+        model: "".into(),
+        provider: "".into(),
+        endpoint: "".into(),
+        key_env: "".into(),
+        temperature: "".into(),
+        tokens: "".into(),
+        timeout: "".into(),
+        configured: false,
+    };
+    select_preset(&ui, &item);
+    ui.set_preset_search("".into());
     ui.set_preset_tab(0);
 }
 
-pub fn saved(window: &AppWindow, created: Option<(PresetId, uuid::Uuid)>) {
+pub fn saved(window: &AppWindow, edited: Option<PresetId>) {
     let ui = window.global::<SettingsUi>();
-    if let Some((id, token)) = created {
-        if ui.get_preset_save_token() != token.to_string() {
-            return;
-        }
-        ui.set_preset_edit_id(id.0.to_string().into());
-        ui.set_preset_creating(false);
-        ui.set_preset_save_token("".into());
-    }
     ui.set_settings_error("".into());
+    if edited.is_some_and(|id| ui.get_preset_edit_id() == id.0.to_string()) {
+        mark_preset_baseline(&ui);
+        if ui.get_preset_pending_save() {
+            let target = ui.get_preset_pending_id();
+            ui.set_preset_pending_id("".into());
+            ui.set_preset_pending_save(false);
+            if target == "__new__" {
+                ui.invoke_preset_new();
+            } else if !target.is_empty() {
+                ui.invoke_preset_edit(target);
+            }
+        }
+    }
 }
 
 pub(super) fn provider_templates(

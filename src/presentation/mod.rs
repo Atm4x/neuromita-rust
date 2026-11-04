@@ -1,3 +1,4 @@
+mod ai_engine;
 mod characters;
 mod chat;
 mod connections;
@@ -6,6 +7,9 @@ mod presets;
 mod releases;
 mod settings;
 
+pub use ai_engine::{
+    AiEngineSettingsPresenter, AiEngineSettingsSnapshot, AiHardwareDevice, AiHardwareSnapshot,
+};
 pub use characters::{
     CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
     MemorySummary,
@@ -24,12 +28,13 @@ pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };
 pub use settings::{
-    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
+    AsrSettingsPresenter, BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
     InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
-    SettingsPresenter, VoiceSettingsPresenter,
+    SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
 };
 
 pub struct GuiPresenter {
+    pub ai_engine: AiEngineSettingsPresenter,
     pub releases: ReleasesPresenter,
     pub connections: ConnectionsPresenter,
     pub conversation: ConversationPresenter,

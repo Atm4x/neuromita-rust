@@ -57,6 +57,9 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::voice::bind(window, dispatch.clone());
+    super::asr::bind(window, dispatch.clone());
+    super::ai_engine::bind(window);
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     let send = dispatch.clone();
@@ -147,6 +150,10 @@ pub(super) fn render_catalog(
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
+        Update::SpeechInventory(catalog, devices) => {
+            super::voice::inventory(window, &catalog);
+            super::asr::inventory(window, &catalog, &devices);
+        }
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
@@ -178,14 +185,20 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
         }
-        Update::Administration(snapshot) => super::settings::render(window, &snapshot),
-        Update::PresetDraft(draft) => super::settings::draft(window, &draft),
+        Update::Administration(snapshot) => {
+            super::settings::render(window, &snapshot);
+            super::voice::render(window, &snapshot.settings.values.speech.tts);
+            super::asr::render(window, &snapshot.settings.values.speech.asr);
+        }
+        Update::PresetCreated(id, record) => super::settings::created(window, id, &record),
         Update::AdminError(error) => {
+            window.global::<SettingsUi>().set_preset_pending_save(false);
             window
                 .global::<SettingsUi>()
                 .set_settings_error(error.into());
         }
-        Update::AdminSaved(created) => super::settings::saved(window, created),
+        Update::AdminSaved => super::settings::saved(window, None),
+        Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             window.set_core_connected(false);
             window.set_core_connecting(false);

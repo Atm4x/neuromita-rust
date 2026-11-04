@@ -1794,5 +1794,57 @@
   "asr.description": {
     "source": "Устройства ввода, распознавание речи и проверка микрофона.",
     "translation": "Input devices, speech recognition and microphone testing."
+  },
+  "settings.preset.choose": {
+    "source": "Выберите пресет слева",
+    "translation": "Select a preset on the left"
+  },
+  "settings.preset.choose-hint": {
+    "source": "Или нажмите «Добавить пресет», чтобы создать новый",
+    "translation": "Or click Add preset to create one"
+  },
+  "settings.preset.name-placeholder": {
+    "source": "Название пресета",
+    "translation": "Preset name"
+  },
+  "settings.preset.url-placeholder": {
+    "source": "Адрес API",
+    "translation": "API address"
+  },
+  "settings.api-preset.key-label": {
+    "source": "API ключ",
+    "translation": "API key"
+  },
+  "settings.preset.model-placeholder": {
+    "source": "Название модели",
+    "translation": "Model name"
+  },
+  "settings.preset.key-placeholder": {
+    "source": "Имя переменной окружения",
+    "translation": "Environment variable name"
+  },
+  "settings.preset.models-link": {
+    "source": "Список моделей",
+    "translation": "Model list"
+  },
+  "settings.preset.key-link": {
+    "source": "Получить ключ",
+    "translation": "Get API key"
+  },
+  "settings.preset.not-configured": {
+    "source": "Не настроен",
+    "translation": "Not configured"
+  },
+  "settings.preset.unsaved": {
+    "source": "Есть несохранённые изменения. Сохранить перед переходом?",
+    "translation": "You have unsaved changes. Save before switching?"
+  },
+  "settings.preset.save-and-switch": {
+    "source": "Сохранить и перейти",
+    "translation": "Save and switch"
+  },
+  "settings.preset.discard-and-switch": {
+    "source": "Не сохранять",
+    "translation": "Discard changes"
   }
 }

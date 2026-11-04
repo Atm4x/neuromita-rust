@@ -5,9 +5,9 @@ use tokio::sync::watch;
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, CharactersSettings, InterfaceSettings, OperationPresets, PresetId,
-        PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
-        SettingsSnapshot, SettingsTransfer, VoiceSettings, Volume,
+        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
+        PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
+        SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences, VoiceSettings, Volume,
     },
 };
 
@@ -93,6 +93,14 @@ pub struct VoiceSettingsPresenter {
     pub in_launcher: BoundProperty<bool>,
     pub in_game: BoundProperty<bool>,
     pub voice: BoundProperty<String>,
+}
+
+pub struct TtsSettingsPresenter {
+    pub preferences: BoundProperty<TtsPreferences>,
+}
+
+pub struct AsrSettingsPresenter {
+    pub preferences: BoundProperty<AsrPreferences>,
 }
 
 pub struct PresetsSettingsPresenter {
@@ -205,6 +213,8 @@ pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
     pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
+    pub tts: TtsSettingsPresenter,
+    pub asr: AsrSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
 }
@@ -236,6 +246,28 @@ impl SettingsPresenter {
                 ),
             },
             characters: CharactersSettingsPresenter::new(Arc::clone(&owner)),
+            tts: TtsSettingsPresenter {
+                preferences: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.tts.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.tts = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            asr: AsrSettingsPresenter {
+                preferences: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.asr.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.asr = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
             voice: VoiceSettingsPresenter {
                 volume: BoundProperty::new(
                     Arc::clone(&owner),
@@ -300,6 +332,40 @@ mod tests {
     use crate::settings::{
         MemorySettingsRepository, SettingsConfig, SettingsLifecycle, SettingsSource,
     };
+
+    #[tokio::test]
+    async fn tts_asr_preferences_round_trip_through_settings_owner() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut tts_updates = presenter.tts.preferences.observe();
+        let mut asr_updates = presenter.asr.preferences.observe();
+        assert_eq!(tts_updates.next().await.unwrap(), TtsPreferences::default());
+        assert_eq!(asr_updates.next().await.unwrap(), AsrPreferences::default());
+
+        let mut tts = presenter.tts.preferences.get();
+        tts.backend = crate::settings::TtsBackend::Local;
+        tts.local_model_id = "f5_tts_ru".into();
+        tts.character_voice_ids.insert("3".into(), "voice3".into());
+        presenter.tts.preferences.set(tts.clone()).unwrap();
+        assert_eq!(tts_updates.next().await.unwrap(), tts);
+
+        let mut asr = presenter.asr.preferences.get();
+        asr.recognizer_id = "whisper".into();
+        asr.model_languages.insert("whisper".into(), "en".into());
+        asr.model_languages.insert("gigaam".into(), "ru".into());
+        presenter.asr.preferences.set(asr.clone()).unwrap();
+        assert_eq!(asr_updates.next().await.unwrap(), asr);
+        assert_eq!(presenter.tts.preferences.get(), tts);
+        assert_eq!(presenter.asr.preferences.get(), asr);
+        assert_eq!(owner.snapshot_all().unwrap().values.speech.tts, tts);
+        assert_eq!(owner.snapshot_all().unwrap().values.speech.asr, asr);
+    }
 
     #[tokio::test]
     async fn character_preset_bindings_are_independent_and_observable() {

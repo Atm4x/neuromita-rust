@@ -17,6 +17,7 @@ pub mod overlay;
 pub mod production;
 pub mod resolver;
 pub mod speech;
+pub mod speech_catalog;
 pub mod uv;
 pub mod voice_profile;
 

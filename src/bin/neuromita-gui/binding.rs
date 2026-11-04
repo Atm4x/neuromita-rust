@@ -32,8 +32,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         options.data_directory.clone(),
         options.model.clone(),
     )?;
-    super::voice::bind(&window);
-    super::asr::bind(&window);
     let catalog = Rc::new(RefCell::new(catalog));
     window
         .global::<I18n>()
