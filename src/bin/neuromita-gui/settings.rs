@@ -83,6 +83,55 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             };
             target.set(selection).map_err(|e| e.to_string())?;
         }
+        Command::SaveTts(mut value) => {
+            let current = api.settings.tts.preferences.get();
+            value.character_voice_ids = current.character_voice_ids;
+            value.default_voice_id = current.default_voice_id;
+            api.settings
+                .tts
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SaveCharacterVoice(character, voice_id) => {
+            if !(-1..=8).contains(&character) || voice_id.len() > 512 {
+                return Err("Invalid character voice ID".into());
+            }
+            let mut value = api.settings.tts.preferences.get();
+            if character == -1 {
+                value.default_voice_id = voice_id;
+            } else {
+                let id = neuromita::character::CharacterId::ALL[character as usize];
+                value.character_voice_ids.insert(id, voice_id);
+            }
+            api.settings
+                .tts
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SelectAsrRecognizer(model_id) => {
+            let mut value = api.settings.asr.preferences.get();
+            value.recognizer_id = model_id;
+            api.settings
+                .asr
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
+        Command::SaveAsr(mut value, language) => {
+            value.model_languages = api.settings.asr.preferences.get().model_languages;
+            if !value.recognizer_id.is_empty() {
+                value
+                    .model_languages
+                    .insert(value.recognizer_id.clone(), language);
+            }
+            api.settings
+                .asr
+                .preferences
+                .set(value)
+                .map_err(|e| e.to_string())?;
+        }
         Command::VoiceInLauncher(value) => api
             .settings
             .voice

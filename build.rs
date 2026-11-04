@@ -42,6 +42,25 @@ fn main() {
         bundled.push_str("];\n");
     }
     std::fs::write(output.join("localization-bundled.rs"), bundled).unwrap();
+    let mut speech_manifests = String::from("const BUNDLED_SPEECH_MANIFESTS: &[&str] = &[\n");
+    let builtin_plugins = root.join("python/plugins/builtin");
+    if let Ok(entries) = std::fs::read_dir(&builtin_plugins) {
+        let mut manifests = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("plugin.json"))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        manifests.sort();
+        for path in manifests {
+            println!("cargo:rerun-if-changed={}", path.display());
+            speech_manifests.push_str(&format!(
+                "    include_str!({:?}),\n",
+                path.to_str().unwrap()
+            ));
+        }
+    }
+    speech_manifests.push_str("];\n");
+    std::fs::write(output.join("speech-plugin-manifests.rs"), speech_manifests).unwrap();
     #[cfg(feature = "gui")]
     slint_build::compile_with_config(
         "ui/app.slint",

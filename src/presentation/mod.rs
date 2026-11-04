@@ -24,9 +24,9 @@ pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };
 pub use settings::{
-    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
+    AsrSettingsPresenter, BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
     InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
-    SettingsPresenter, VoiceSettingsPresenter,
+    SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
 };
 
 pub struct GuiPresenter {

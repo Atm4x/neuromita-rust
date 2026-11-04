@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::SettingsError;
+use super::{SettingsError, SpeechSettings};
 use crate::generation::PresetId;
 use crate::reminders::{LocalTimePolicy, TimeZoneId};
 
@@ -257,6 +257,7 @@ pub struct AppSettings {
     pub capture: CaptureSettings,
     pub interface: InterfaceSettings,
     pub reminders: RemindersSettings,
+    pub speech: SpeechSettings,
 }
 
 impl AppSettings {
@@ -282,6 +283,7 @@ impl AppSettings {
                 hide_private: true,
             },
             reminders: RemindersSettings::initial_profile(),
+            speech: SpeechSettings::default(),
         }
     }
     pub fn selected_preset(
@@ -302,6 +304,7 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
+        self.speech.validate()?;
         if self.voice.voice.trim().is_empty() {
             return Err(SettingsError::Validation(
                 "voice identifier must not be empty".into(),
@@ -345,6 +348,7 @@ macro_rules! section {
 section!(PresetSettings, presets);
 section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
+section!(SpeechSettings, speech);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);

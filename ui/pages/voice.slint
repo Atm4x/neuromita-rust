@@ -33,9 +33,12 @@ export global VoiceUi {
     in-out property <int> character: 0;
     in-out property <int> avatar-offset: 0;
     in-out property <string> voice-id;
+    in-out property <[string]> character-voice-ids;
     in-out property <string> sample-text;
     in-out property <bool> preview-available: false;
     callback toggle-enabled(bool);
+    callback persist();
+    callback refresh-models();
     callback select-character(int);
     callback voice-id-changed(int, string);
     callback voice-test(string, int);
@@ -89,9 +92,10 @@ component VoiceFieldRow inherits HorizontalLayout {
     in-out property <string> value;
     in property <string> hint;
     in property <bool> editable: true;
+    callback committed(string);
     height: 42px; spacing: 8px; vertical-stretch: 0;
     SettingsText { text: root.title; width: 145px; font-size: 12px; wrap: word-wrap; overflow: clip; }
-    SettingsTextField { value <=> root.value; editable: root.editable; placeholder: root.hint; horizontal-stretch: 1; }
+    SettingsTextField { value <=> root.value; editable: root.editable; placeholder: root.hint; horizontal-stretch: 1; accepted(value) => { root.committed(value); } }
 }
 
 component VoiceSelectField inherits HorizontalLayout {
@@ -233,7 +237,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
                         text: mode; glyph: index == 0 ? "\u{f1d8}" : index == 1 ? "\u{f108}" : "\u{f0c2}";
                         accent: VoiceUi.backend == index;
                         horizontal-stretch: 1;
-                        activated => { VoiceUi.backend = index; }
+                        activated => { VoiceUi.backend = index; VoiceUi.persist(); }
                     }
                 }
             }
@@ -245,11 +249,11 @@ export component VoiceSettingsPage inherits VerticalLayout {
         if VoiceUi.backend == 0: VoiceCard { horizontal-stretch: 3; min-width: 0px;
             VerticalLayout { padding: 17px; spacing: 11px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.telegram.title", "Подключение Telegram"); description: I18n.i18n("voice.telegram.description", "Синтез через выбранного Telegram-бота."); glyph: "\u{f1d8}"; }
-                SettingsToggleRow { title: I18n.i18n("voice.telegram.auto", "Автоподключение Telegram"); checked: VoiceUi.telegram-auto-connect; changed(v) => { VoiceUi.telegram-auto-connect = v; } }
+                SettingsToggleRow { title: I18n.i18n("voice.telegram.auto", "Автоподключение Telegram"); checked: VoiceUi.telegram-auto-connect; changed(v) => { VoiceUi.telegram-auto-connect = v; VoiceUi.persist(); } }
                 VoiceButton { text: I18n.i18n("voice.telegram.connect", "Подключиться к Telegram"); glyph: "\u{f1d8}"; horizontal-stretch: 1; enabled: VoiceUi.preview-available; activated => { VoiceUi.telegram-connect(); } }
-                VoiceFieldRow { title: I18n.i18n("voice.telegram.service", "Канал/Сервис"); hint: "@..."; value <=> VoiceUi.telegram-service; }
-                VoiceFieldRow { title: I18n.i18n("voice.telegram.wait", "Макс. ожидание (сек)"); value <=> VoiceUi.telegram-wait; }
-                VoiceFieldRow { title: I18n.i18n("voice.telegram.interval", "Мин. интервал запросов (сек)"); value <=> VoiceUi.telegram-interval; }
+                VoiceFieldRow { title: I18n.i18n("voice.telegram.service", "Канал/Сервис"); hint: "@..."; value <=> VoiceUi.telegram-service; committed(v) => { VoiceUi.persist(); } }
+                VoiceFieldRow { title: I18n.i18n("voice.telegram.wait", "Макс. ожидание (сек)"); value <=> VoiceUi.telegram-wait; committed(v) => { VoiceUi.persist(); } }
+                VoiceFieldRow { title: I18n.i18n("voice.telegram.interval", "Мин. интервал запросов (сек)"); value <=> VoiceUi.telegram-interval; committed(v) => { VoiceUi.persist(); } }
                 SettingsText { text: I18n.i18n("voice.telegram.api", "Настройки Telegram API"); font-weight: 700; height: 32px; }
                 SecretField { title: "API ID"; hint: I18n.i18n("voice.telegram.api-id", "api_id из my.telegram.org"); value <=> VoiceUi.telegram-api-id; }
                 SecretField { title: "API Hash"; hint: I18n.i18n("voice.telegram.hash", "api_hash из my.telegram.org"); value <=> VoiceUi.telegram-api-hash; }
@@ -259,10 +263,10 @@ export component VoiceSettingsPage inherits VerticalLayout {
         if VoiceUi.backend == 1: VoiceCard { horizontal-stretch: 3; min-width: 0px;
             VerticalLayout { padding: 17px; spacing: 12px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.local.title", "Локальный движок озвучки"); description: I18n.i18n("voice.local.description", "Выберите установленную модель и способ её загрузки."); glyph: "\u{f2db}"; }
-                VoiceSelectField { title: I18n.i18n("voice.local.model", "Локальная модель"); options: VoiceUi.local-models; value: VoiceUi.local-model == "" ? I18n.i18n("voice.local.choose", "Выберите модель") : VoiceUi.local-model; chosen(v) => { VoiceUi.local-model = v; } }
-                VoiceSelectField { title: I18n.i18n("voice.local.language", "Язык локальной озвучки"); options: VoiceUi.local-languages; value: VoiceUi.local-language; chosen(v) => { VoiceUi.local-language = v; } }
-                SettingsToggleRow { title: I18n.i18n("voice.local.auto", "Автозагрузка модели"); checked: VoiceUi.local-auto-load; changed(v) => { VoiceUi.local-auto-load = v; } }
-                SettingsToggleRow { title: I18n.i18n("voice.local.lazy", "Инициализировать модель при запросе"); checked: VoiceUi.local-lazy-init; changed(v) => { VoiceUi.local-lazy-init = v; } }
+                VoiceSelectField { title: I18n.i18n("voice.local.model", "Локальная модель"); options: VoiceUi.local-models; value: VoiceUi.local-model == "" ? I18n.i18n("voice.local.choose", "Выберите модель") : VoiceUi.local-model; chosen(v) => { VoiceUi.local-model = v; VoiceUi.persist(); } }
+                VoiceSelectField { title: I18n.i18n("voice.local.language", "Язык локальной озвучки"); options: VoiceUi.local-languages; value: VoiceUi.local-language; chosen(v) => { VoiceUi.local-language = v; VoiceUi.persist(); } }
+                SettingsToggleRow { title: I18n.i18n("voice.local.auto", "Автозагрузка модели"); checked: VoiceUi.local-auto-load; changed(v) => { VoiceUi.local-auto-load = v; VoiceUi.persist(); } }
+                SettingsToggleRow { title: I18n.i18n("voice.local.lazy", "Инициализировать модель при запросе"); checked: VoiceUi.local-lazy-init; changed(v) => { VoiceUi.local-lazy-init = v; VoiceUi.persist(); } }
                 VoiceButton { text: I18n.i18n("voice.local.restart", "Перезапустить озвучку"); glyph: "\u{f021}"; horizontal-stretch: 1; enabled: VoiceUi.preview-available; activated => { VoiceUi.local-restart(); } }
                 VoiceButton { text: I18n.i18n("voice.local.engine", "Настройки ИИ-движка"); glyph: "\u{f2db}"; horizontal-stretch: 1; activated => { VoiceUi.open-engine-settings(); } }
             }
@@ -271,18 +275,18 @@ export component VoiceSettingsPage inherits VerticalLayout {
             VerticalLayout { padding: 17px; spacing: 11px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.api.title", "Профиль API озвучки"); description: I18n.i18n("voice.api.description", "Подключение к провайдеру и голоса персонажей."); glyph: "\u{f0c2}"; }
                 HorizontalLayout { height: 40px; spacing: 8px;
-                    VoiceSelectField { title: I18n.i18n("voice.api.profile", "Профиль"); options: VoiceUi.api-profiles; value: VoiceUi.api-profile == "" ? I18n.i18n("voice.api.choose", "Выберите профиль") : VoiceUi.api-profile; chosen(v) => { VoiceUi.api-profile = v; } horizontal-stretch: 1; }
+                    VoiceSelectField { title: I18n.i18n("voice.api.profile", "Профиль"); options: VoiceUi.api-profiles; value: VoiceUi.api-profile == "" ? I18n.i18n("voice.api.choose", "Выберите профиль") : VoiceUi.api-profile; chosen(v) => { VoiceUi.api-profile = v; VoiceUi.persist(); } horizontal-stretch: 1; }
                     VoiceButton { text: ""; glyph: "\u{f067}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-add(); } }
                     VoiceButton { text: ""; glyph: "\u{f1f8}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-delete(); } }
                 }
                 SecretField { title: I18n.i18n("voice.api.key", "API ключ"); hint: I18n.i18n("voice.api.key-hint", "Ключ провайдера"); value <=> VoiceUi.api-key; }
-                VoiceSelectField { title: I18n.i18n("voice.api.model", "Модель"); options: VoiceUi.api-models; value: VoiceUi.api-model == "" ? I18n.i18n("voice.api.model-choose", "Выберите модель") : VoiceUi.api-model; chosen(v) => { VoiceUi.api-model = v; } }
+                VoiceSelectField { title: I18n.i18n("voice.api.model", "Модель"); options: VoiceUi.api-models; value: VoiceUi.api-model == "" ? I18n.i18n("voice.api.model-choose", "Выберите модель") : VoiceUi.api-model; chosen(v) => { VoiceUi.api-model = v; VoiceUi.persist(); } }
                 SettingsText { text: I18n.i18n("voice.api.usage", "Бесплатные и платные модели зависят от выбранного провайдера."); color: SettingsTheme.muted; font-size: 11px; height: 23px; }
                 HorizontalLayout { height: 38px; spacing: 10px;
                     SettingsText { text: I18n.i18n("voice.api.speed", "Скорость"); width: 145px; }
                     SettingsTextField { value: (VoiceUi.api-speed / 100) + "," + (Math.mod(VoiceUi.api-speed, 100) < 10 ? "0" : "") + Math.mod(VoiceUi.api-speed, 100) + " ×"; editable: false; horizontal-stretch: 1; }
-                    VoiceButton { width: 35px; text: "−"; activated => { VoiceUi.api-speed = max(50, VoiceUi.api-speed - 5); } }
-                    VoiceButton { width: 35px; text: "+"; activated => { VoiceUi.api-speed = min(200, VoiceUi.api-speed + 5); } }
+                    VoiceButton { width: 35px; text: "−"; activated => { VoiceUi.api-speed = max(50, VoiceUi.api-speed - 5); VoiceUi.persist(); } }
+                    VoiceButton { width: 35px; text: "+"; activated => { VoiceUi.api-speed = min(200, VoiceUi.api-speed + 5); VoiceUi.persist(); } }
                 }
                 VoiceAvatarSelector { selected <=> VoiceUi.character; offset <=> VoiceUi.avatar-offset; id-value <=> VoiceUi.voice-id; changed-id(character, value) => { VoiceUi.voice-id-changed(character, value); } changed-selection(character) => { VoiceUi.select-character(character); } }
             }

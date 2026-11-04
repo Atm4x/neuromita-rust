@@ -64,6 +64,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         0
     } else if mode.starts_with("api") {
         1
+    } else if mode == "ai-engine" {
+        6
     } else {
         2
     });
@@ -232,9 +234,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
     }
     window.show()?;
-    window
-        .window()
-        .set_size(slint::PhysicalSize::new(1560, 918));
+    window.window().set_size(slint::PhysicalSize::new(
+        1560,
+        if mode == "ai-engine" { 958 } else { 918 },
+    ));
     if mode == "api-dropdown" {
         let weak = window.as_weak();
         slint::Timer::single_shot(Duration::from_millis(250), move || {
@@ -258,6 +261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         });
     }
+
     let result = Rc::new(RefCell::new(None));
     let completed = result.clone();
     let weak = window.as_weak();

@@ -1,7 +1,9 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
+    ai_runtime::speech_catalog::{SpeechInventory, SpeechModelCatalog},
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
+    audio::input_catalog::{AudioInputCatalog, AudioInputDevice},
     character::CharacterId,
     generation::PresetRecord,
     generation::{
@@ -13,7 +15,7 @@ use neuromita::{
         PresetSlot,
     },
     request::{CancelResult, RequestId},
-    settings::{PresetId, PresetSelection, Volume},
+    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -39,6 +41,11 @@ pub enum Command {
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
+    SaveTts(TtsPreferences),
+    SaveCharacterVoice(i32, String),
+    SaveAsr(AsrPreferences, String),
+    SelectAsrRecognizer(String),
+    RefreshSpeechInventory,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     Select(CharacterId),
@@ -50,6 +57,7 @@ pub enum Command {
 
 pub enum Update {
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
+    SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
     ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
@@ -117,6 +125,20 @@ impl Drop for DesktopRuntime {
     }
 }
 
+async fn discover_input_devices(directory: &std::path::Path) -> Vec<AudioInputDevice> {
+    let configured = std::env::var_os("NEUROMITA_FFMPEG").map(PathBuf::from);
+    let candidates = [
+        configured,
+        Some(directory.join("AIData/bin/ffmpeg.exe")),
+        Some(directory.join("AIData/bin/ffmpeg")),
+    ];
+    let executable = candidates
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_absolute() && path.is_file());
+    AudioInputCatalog::discover(executable.as_deref()).await
+}
+
 async fn start(
     directory: &std::path::Path,
     model: Option<&str>,
@@ -165,6 +187,11 @@ async fn run(
     publish: impl Fn(Update) + Send + Sync,
 ) {
     publish(Update::Connecting);
+    let catalog = SpeechModelCatalog::for_desktop(directory.clone());
+    publish(Update::SpeechInventory(
+        Box::new(catalog.snapshot().await),
+        discover_input_devices(&directory).await,
+    ));
     let app = match start(&directory, initial_model.as_deref()).await {
         Ok(app) => app,
         Err(error) => {
@@ -177,7 +204,7 @@ async fn run(
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(app.presenter(), &mut receive, &stop, &publish).await {
+    if let Err(error) = observe(app.presenter(), &catalog, &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -188,6 +215,7 @@ async fn run(
 
 async fn observe(
     administration: &GuiPresenter,
+    catalog: &SpeechModelCatalog,
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
@@ -232,7 +260,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
@@ -241,6 +269,9 @@ async fn observe(
                 Some(Command::NewPreset) => match administration.presets.create_unconfigured() {
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),
                     Err(error) => publish(Update::AdminError(error.to_string())),
+                },
+                Some(Command::RefreshSpeechInventory) => {
+                    publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
