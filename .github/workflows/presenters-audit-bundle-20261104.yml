@@ -1,0 +1,35 @@
+name: Presenters Audit Git Bundle
+on:
+  push:
+    branches: [bridge/presenters-audit-bundle-20261104]
+  workflow_dispatch:
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch voice ASR AI and main branches
+        shell: bash
+        run: |
+          mkdir -p /tmp/presenter-export
+          git fetch --no-tags origin '+refs/heads/main:refs/heads/export/main'
+          git fetch --no-tags origin '+refs/heads/codex/voice-main-integrated-20261104:refs/heads/export/voice-main-integrated-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/voice-settings-pyqt-slint-parity-20261104:refs/heads/export/voice-settings-pyqt-slint-parity-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/asr-pyqt-slint-parity-20261104:refs/heads/export/asr-pyqt-slint-parity-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/ai-engine-slint-pyqt-20261104:refs/heads/export/ai-engine-slint-pyqt-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/character-gui-integration-20261104:refs/heads/export/character-gui-integration-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/api-presets-layout-endpoint-parity-20261104:refs/heads/export/api-presets-layout-endpoint-parity-20261104'
+          git fetch --no-tags origin '+refs/heads/codex/ai-engine-install-voice-20261103:refs/heads/export/ai-engine-install-voice-20261103'
+          git bundle create /tmp/presenter-export/presenters-branches.bundle $(git for-each-ref --format='%(refname)' refs/heads/export/)
+          git bundle verify /tmp/presenter-export/presenters-branches.bundle
+          git bundle list-heads /tmp/presenter-export/presenters-branches.bundle > /tmp/presenter-export/refs.txt
+          sha256sum /tmp/presenter-export/presenters-branches.bundle > /tmp/presenter-export/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: presenters-audit-branches-20261104
+          path: /tmp/presenter-export/
+          retention-days: 3
