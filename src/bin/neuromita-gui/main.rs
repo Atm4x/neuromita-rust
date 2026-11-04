@@ -2,6 +2,7 @@
 
 mod asr;
 mod binding;
+mod launcher_ui;
 mod memory;
 mod presenter;
 mod releases;

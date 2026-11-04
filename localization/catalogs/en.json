@@ -23,6 +23,30 @@
     "source": "Проверить файлы Unity",
     "translation": "Verify Unity files"
   },
+  "launcher.actions.stop": {
+    "source": "Остановить",
+    "translation": "Stop"
+  },
+  "launcher.game.started": {
+    "source": "Игра запущена (PID {pid}).",
+    "translation": "Game started (PID {pid})."
+  },
+  "launcher.game.stopped": {
+    "source": "Игра остановлена.",
+    "translation": "Game stopped."
+  },
+  "launcher.game.operation-error": {
+    "source": "Не удалось запустить или остановить игру: {error}",
+    "translation": "Failed to start or stop the game: {error}"
+  },
+  "launcher.game.location-opened": {
+    "source": "Каталог Unity открыт.",
+    "translation": "Unity directory opened."
+  },
+  "launcher.game.location-error": {
+    "source": "Не удалось открыть каталог Unity: {error}",
+    "translation": "Failed to open the Unity directory: {error}"
+  },
   "launcher.releases.title": {
     "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
     "translation": "LATEST RELEASES"
@@ -34,10 +58,6 @@
   "page.sandbox.title": {
     "source": "Песочница / Sandbox",
     "translation": "Sandbox"
-  },
-  "preview.play.unavailable": {
-    "source": "Макет интерфейса: запуск игры пока не подключён.",
-    "translation": "UI preview: game launch is not connected yet."
   },
   "preview.action.unavailable": {
     "source": "Макет интерфейса: «{action}» пока не подключено.",

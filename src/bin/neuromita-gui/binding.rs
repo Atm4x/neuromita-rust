@@ -6,6 +6,7 @@ use neuromita::localization::{
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
+    launcher_ui::{LauncherUi, load_config},
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
@@ -36,6 +37,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     window
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog.clone()));
+    let launcher = Rc::new(RefCell::new(LauncherUi::new(
+        load_config(
+            options.unity_directory.as_deref(),
+            options.launcher_config.as_deref(),
+        )?,
+        window.as_weak(),
+    )?));
     let presenter = Rc::new(RefCell::new(ShellPresenter::new(
         HomePreview::python_reference(),
         options.locale,
@@ -138,10 +146,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_toggle_client(move || handler(ShellCommand::ToggleClient));
     let handler = dispatch.clone();
-    window.on_play(move || handler(ShellCommand::Play));
+    let launcher_for_play = launcher.clone();
+    window.on_play(move || {
+        let notice = launcher_for_play.borrow_mut().toggle_play();
+        handler(ShellCommand::LauncherFeedback(notice));
+    });
     let handler = dispatch.clone();
-    window
-        .on_launcher_action(move |action| handler(ShellCommand::Launcher(launcher_action(action))));
+    let launcher_for_action = launcher.clone();
+    window.on_launcher_action(move |action| {
+        let action = launcher_action(action);
+        match action {
+            LauncherAction::OpenUnityFolder => {
+                let notice = launcher_for_action.borrow().open_location();
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            action => handler(ShellCommand::Launcher(action)),
+        }
+    });
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
@@ -154,6 +175,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
     });
     window.run()?;
+    launcher
+        .borrow_mut()
+        .shutdown()
+        .map_err(std::io::Error::other)?;
     Ok(())
 }
 
@@ -223,6 +248,8 @@ struct Options {
     sandbox: bool,
     voice_preview: Option<VoicePreviewMode>,
     asr_preview: bool,
+    unity_directory: Option<PathBuf>,
+    launcher_config: Option<PathBuf>,
 }
 
 impl Options {
@@ -235,6 +262,8 @@ impl Options {
             sandbox: false,
             voice_preview: None,
             asr_preview: false,
+            unity_directory: None,
+            launcher_config: None,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
@@ -246,6 +275,22 @@ impl Options {
                     options.voice_preview = Some(VoicePreviewMode::parse(
                         mode.to_str().ok_or("voice preview mode must be UTF-8")?,
                     )?);
+                }
+                Some("--unity-dir") => {
+                    options.unity_directory = Some(
+                        arguments
+                            .next()
+                            .ok_or("--unity-dir requires a path")?
+                            .into(),
+                    );
+                }
+                Some("--launcher-config") => {
+                    options.launcher_config = Some(
+                        arguments
+                            .next()
+                            .ok_or("--launcher-config requires a path")?
+                            .into(),
+                    );
                 }
                 Some("--model") => {
                     options.model = Some(
