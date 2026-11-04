@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::generation::{
-    GeminiPresetDefinition, PresetCatalog, PresetCatalogError, PresetCatalogSnapshot,
-    PresetDefinition, PresetId, PresetRecord, gemini::GeminiTemplate,
+    PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetDefinition, PresetId,
+    PresetRecord,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,8 @@ pub struct ProviderOption {
     pub icon: &'static str,
     pub schema_label: &'static str,
     pub documentation: &'static str,
+    pub models_url: &'static str,
+    pub credentials_url: &'static str,
     pub pricing: &'static str,
     pub badge_kind: &'static str,
     pub supported: bool,
@@ -33,6 +35,7 @@ pub struct PresetParameterOption {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresetView {
     pub id: PresetId,
+    pub configured: bool,
     pub name: String,
     pub model: String,
     pub provider: &'static str,
@@ -55,6 +58,7 @@ pub trait PresetsApi: Send + Sync {
     fn observe(&self) -> watch::Receiver<Arc<PresetCatalogSnapshot>>;
     fn snapshot(&self) -> PresetsView;
     fn create(&self, record: PresetRecord) -> Result<PresetId, PresetCatalogError>;
+    fn create_unconfigured(&self) -> Result<(PresetId, PresetRecord), PresetCatalogError>;
     fn update(&self, id: PresetId, record: PresetRecord) -> Result<(), PresetCatalogError>;
     fn delete(&self, id: PresetId) -> Result<(), PresetCatalogError>;
     fn require(&self, id: PresetId) -> Result<(), PresetCatalogError>;
@@ -84,17 +88,48 @@ impl PresetsPresenter {
             .entries
             .iter()
             .map(|(&id, record)| {
-                let PresetDefinition::Gemini(definition) = &record.definition;
+                let (
+                    configured,
+                    provider,
+                    model,
+                    endpoint,
+                    credential_env,
+                    temperature,
+                    max_output_tokens,
+                    timeout_ms,
+                ) = match &record.definition {
+                    PresetDefinition::Unconfigured => (
+                        false,
+                        "",
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        0.0,
+                        0,
+                        0,
+                    ),
+                    PresetDefinition::Gemini(definition) => (
+                        true,
+                        "google",
+                        definition.model.clone(),
+                        definition.endpoint.clone(),
+                        definition.credential_env.clone(),
+                        definition.temperature,
+                        definition.max_output_tokens,
+                        definition.timeout_ms,
+                    ),
+                };
                 PresetView {
                     id,
+                    configured,
                     name: record.name.clone(),
-                    model: definition.model.clone(),
-                    provider: "google",
-                    endpoint: definition.endpoint.clone(),
-                    credential_env: definition.credential_env.clone(),
-                    temperature: definition.temperature,
-                    max_output_tokens: definition.max_output_tokens,
-                    timeout_ms: definition.timeout_ms,
+                    model,
+                    provider,
+                    endpoint,
+                    credential_env,
+                    temperature,
+                    max_output_tokens,
+                    timeout_ms,
                 }
             })
             .collect();
@@ -104,6 +139,18 @@ impl PresetsPresenter {
             providers: Self::providers(),
             parameters: Self::parameters(),
         }
+    }
+
+    /// Returns the display-only request URL template for a provider.
+    /// The persisted endpoint remains the transport's base address, never the expanded URL.
+    pub fn request_url_template(provider_id: &str, endpoint: &str) -> Option<String> {
+        if provider_id != "gemini" || endpoint.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}/models/{{model}}:generateContent",
+            endpoint.trim_end_matches('/')
+        ))
     }
 
     pub fn providers() -> Vec<ProviderOption> {
@@ -215,6 +262,16 @@ impl PresetsPresenter {
                         ""
                     },
                     documentation,
+                    models_url: if id == "gemini" {
+                        "https://ai.google.dev/gemini-api/docs/models"
+                    } else {
+                        ""
+                    },
+                    credentials_url: if id == "gemini" {
+                        "https://aistudio.google.com/app/apikey"
+                    } else {
+                        ""
+                    },
                     pricing,
                     badge_kind,
                     supported,
@@ -353,17 +410,32 @@ impl PresetsPresenter {
         ]
     }
 
-    pub fn new_draft(&self) -> PresetRecord {
-        PresetRecord {
-            name: String::new(),
-            definition: PresetDefinition::Gemini(GeminiPresetDefinition {
-                endpoint: GeminiTemplate::GOOGLE_ENDPOINT.into(),
-                model: String::new(),
-                credential_env: "GEMINI_API_KEY".into(),
-                temperature: 0.7,
-                max_output_tokens: 3000,
-                timeout_ms: 60_000,
-            }),
+    pub fn create_unconfigured(&self) -> Result<(PresetId, PresetRecord), PresetCatalogError> {
+        let names: std::collections::HashSet<String> = self
+            .catalog
+            .list()
+            .into_iter()
+            .map(|(_, record)| record.name)
+            .collect();
+        let name = (1..)
+            .map(|number| format!("Пользовательский API {number}"))
+            .find(|name| !names.contains(name))
+            .ok_or(PresetCatalogError::IdExhausted)?;
+        let record = PresetRecord {
+            name,
+            definition: PresetDefinition::Unconfigured,
+        };
+        let id = self.catalog.create(record.clone())?;
+        Ok((id, record))
+    }
+
+    pub fn require_configured(&self, id: PresetId) -> Result<(), PresetCatalogError> {
+        if self.catalog.configured(id)? {
+            Ok(())
+        } else {
+            Err(PresetCatalogError::Invalid(
+                "preset is not configured".into(),
+            ))
         }
     }
 
@@ -398,6 +470,9 @@ impl PresetsApi for PresetsPresenter {
     fn create(&self, record: PresetRecord) -> Result<PresetId, PresetCatalogError> {
         self.create(record)
     }
+    fn create_unconfigured(&self) -> Result<(PresetId, PresetRecord), PresetCatalogError> {
+        self.create_unconfigured()
+    }
     fn update(&self, id: PresetId, record: PresetRecord) -> Result<(), PresetCatalogError> {
         self.update(id, record)
     }
@@ -416,9 +491,20 @@ mod tests {
     #[test]
     fn presenter_snapshot_preserves_catalog_values() {
         let presenter = PresetsPresenter::new(Arc::new(PresetCatalog::new(Default::default())));
-        let mut draft = presenter.new_draft();
-        draft.name = "test-preset".into();
-        let PresetDefinition::Gemini(definition) = &mut draft.definition;
+        let mut draft = PresetRecord {
+            name: "test-preset".into(),
+            definition: PresetDefinition::Gemini(crate::generation::GeminiPresetDefinition {
+                endpoint: crate::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into(),
+                model: "test-model".into(),
+                credential_env: "TEST_KEY_ENV".into(),
+                temperature: 0.7,
+                max_output_tokens: 3000,
+                timeout_ms: 60000,
+            }),
+        };
+        let PresetDefinition::Gemini(definition) = &mut draft.definition else {
+            unreachable!()
+        };
         definition.model = "test-model".into();
         definition.credential_env = "TEST_KEY_ENV".into();
         definition.temperature = 1.3;
@@ -454,6 +540,64 @@ mod tests {
                 .snapshot()
                 .records
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn new_preset_is_immediately_persisted_and_unconfigured() {
+        let catalog = Arc::new(PresetCatalog::new(Default::default()));
+        let presenter = PresetsPresenter::new(Arc::clone(&catalog));
+        let (first, record) = presenter.create_unconfigured().unwrap();
+        assert_eq!(record.name, "Пользовательский API 1");
+        assert!(matches!(record.definition, PresetDefinition::Unconfigured));
+        assert!(catalog.contains(first));
+        assert!(presenter.require_configured(first).is_err());
+        assert!(
+            presenter
+                .snapshot()
+                .records
+                .iter()
+                .any(|row| row.id == first && !row.configured)
+        );
+        let (second, _) = presenter.create_unconfigured().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(presenter.snapshot().records.len(), 2);
+        presenter.delete(first).unwrap();
+        let (third, _) = presenter.create_unconfigured().unwrap();
+        assert_eq!(
+            presenter
+                .snapshot()
+                .records
+                .iter()
+                .find(|row| row.id == third)
+                .unwrap()
+                .name,
+            "Пользовательский API 1"
+        );
+    }
+
+    #[test]
+    fn request_url_template_uses_saved_endpoint_without_embedding_a_key() {
+        let template =
+            PresetsPresenter::request_url_template("gemini", "http://127.0.0.1:12345/v1beta/")
+                .unwrap();
+        assert_eq!(
+            template.replace("{model}", "gemini-2.5-flash"),
+            "http://127.0.0.1:12345/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(
+            PresetsPresenter::request_url_template(
+                "gemini",
+                crate::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT,
+            )
+            .unwrap()
+            .replace("{model}", "gemini-3.6-flash"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        );
+        assert_eq!(PresetsPresenter::request_url_template("gemini", ""), None);
+        assert_eq!(
+            PresetsPresenter::request_url_template("openrouter", "https://openrouter.ai/"),
+            None
         );
     }
 
@@ -499,10 +643,10 @@ mod tests {
                 .count()
                 == 1
         );
-        let draft = presenter.new_draft();
-        assert!(draft.name.is_empty());
-        let PresetDefinition::Gemini(config) = draft.definition;
-        assert!(config.model.is_empty());
-        assert_eq!(config.endpoint, GeminiTemplate::GOOGLE_ENDPOINT);
+        let (id, record) = presenter.create_unconfigured().unwrap();
+        assert_eq!(record.name, "Пользовательский API 1");
+        assert!(matches!(record.definition, PresetDefinition::Unconfigured));
+        assert!(!presenter.catalog.configured(id).unwrap());
+        assert_eq!(presenter.snapshot().records.len(), 1);
     }
 }

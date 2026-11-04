@@ -10,6 +10,7 @@ use super::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
     view::{AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem},
+    voice::VoicePreviewMode,
 };
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -39,7 +40,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         HomePreview::python_reference(),
         options.locale,
     )));
-    if options.sandbox {
+    if options.voice_preview.is_some() || options.asr_preview {
+        presenter
+            .borrow_mut()
+            .dispatch(ShellCommand::Navigate(Page::Settings));
+    } else if options.sandbox {
         presenter
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
@@ -57,6 +62,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     window.set_releases(ModelRc::new(VecModel::from(releases)));
     render(&window, &presenter.borrow(), &catalog.borrow());
+    if let Some(mode) = options.voice_preview {
+        super::voice::preview(&window, mode);
+    }
+    if options.asr_preview {
+        super::asr::preview(&window);
+    }
 
     let weak = window.as_weak();
     let dispatch = Rc::new(move |command| {
@@ -210,6 +221,8 @@ struct Options {
     data_directory: PathBuf,
     model: Option<String>,
     sandbox: bool,
+    voice_preview: Option<VoicePreviewMode>,
+    asr_preview: bool,
 }
 
 impl Options {
@@ -220,11 +233,20 @@ impl Options {
             data_directory: super::runtime::data_directory()?,
             model: None,
             sandbox: false,
+            voice_preview: None,
+            asr_preview: false,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
                 Some("--sandbox") => options.sandbox = true,
+                Some("--asr-preview") => options.asr_preview = true,
+                Some("--voice-preview") => {
+                    let mode = arguments.next().ok_or("--voice-preview requires a mode")?;
+                    options.voice_preview = Some(VoicePreviewMode::parse(
+                        mode.to_str().ok_or("voice preview mode must be UTF-8")?,
+                    )?);
+                }
                 Some("--model") => {
                     options.model = Some(
                         arguments

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod asr;
 mod binding;
 mod memory;
 mod presenter;
@@ -7,6 +8,7 @@ mod releases;
 mod runtime;
 mod sandbox;
 mod settings;
+mod voice;
 
 mod view {
     slint::include_modules!();

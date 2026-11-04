@@ -32,7 +32,9 @@ export component SettingsSectionHeading inherits HorizontalLayout {
         width: 48px; height: 48px; border-radius: 12px;
         background: SettingsTheme.heading-icon-background;
         clip: true;
-        SettingsGlyph { x: 8px; y: 8px; text: root.glyph; width: parent.width - 16px; height: parent.height - 16px; font-size: 27px; color: SettingsTheme.accent; }
+        HorizontalLayout { padding: 8px; alignment: center;
+            SettingsGlyph { text: root.glyph; width: 32px; height: 32px; font-size: 27px; color: SettingsTheme.accent; }
+        }
     }
     VerticalLayout {
         padding: 0px; spacing: 2px; alignment: center;
@@ -113,17 +115,18 @@ export component SettingsTextField inherits Rectangle {
     background: SettingsTheme.field; border-width: 1px;
     border-color: input.has-focus ? SettingsTheme.field-focus-border : SettingsTheme.field-border;
     border-radius: 10px;
-    input := TextInput {
-        x: 10px; y: 3px; width: parent.width - 20px; height: parent.height - 6px;
-        text <=> root.value; color: SettingsTheme.text;
-        font-family: SettingsTheme.font-family; font-size: 12px;
-        enabled: root.editable; single-line: true;
-        accepted => { root.accepted(root.value); }
+    HorizontalLayout { padding-left: 10px; padding-right: 10px; padding-top: 3px; padding-bottom: 3px;
+        input := TextInput {
+            text <=> root.value; color: SettingsTheme.text;
+            font-family: SettingsTheme.font-family; font-size: 12px;
+            enabled: root.editable; single-line: true;
+            accepted => { root.accepted(root.value); }
+        }
     }
-    if root.value == "": SettingsText {
-        x: 10px; y: 3px; width: parent.width - 20px; height: parent.height - 6px;
-        text: root.placeholder; color: SettingsTheme.muted;
-        touch-area := TouchArea { clicked => { input.focus(); } }
+    if root.value == "": HorizontalLayout { padding-left: 10px; padding-right: 10px; padding-top: 3px; padding-bottom: 3px;
+        SettingsText { text: root.placeholder; color: SettingsTheme.muted; horizontal-stretch: 1;
+            touch-area := TouchArea { clicked => { input.focus(); } }
+        }
     }
 }
 
@@ -210,12 +213,13 @@ export component SettingsTextArea inherits Rectangle {
     callback committed(string);
     height: 100px; background: SettingsTheme.field;
     border-width: 1px; border-color: SettingsTheme.field-border; border-radius: 10px;
-    TextInput {
-        single-line: false; wrap: word-wrap;
-        x: 10px; y: 8px; width: parent.width - 20px; height: parent.height - 16px;
-        text <=> root.value; color: SettingsTheme.text;
-        font-family: SettingsTheme.font-family; font-size: 12px;
-        edited => { root.committed(root.value); }
+    HorizontalLayout { padding-left: 10px; padding-right: 10px; padding-top: 8px; padding-bottom: 8px;
+        TextInput {
+            single-line: false; wrap: word-wrap;
+            text <=> root.value; color: SettingsTheme.text;
+            font-family: SettingsTheme.font-family; font-size: 12px;
+            edited => { root.committed(root.value); }
+        }
     }
 }
 
