@@ -428,7 +428,9 @@ impl SpeechInputHandler {
                     match frame {
                         Ok(Some(frame)) => {
                             if playing.load(Ordering::Acquire) {
-                                segmenter.suppress_playback_echo();
+                                if let Err(error) = segmenter.discard_playback_frame() {
+                                    break Err(error.into());
+                                }
                                 continue;
                             }
                             match segmenter.process(frame) {
@@ -563,7 +565,7 @@ mod tests {
         };
         let session = SpeechInputHandler::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Presenter,
             },
             Arc::new(Asr),
@@ -595,7 +597,7 @@ mod tests {
     async fn provider_failure_ends_the_session_through_the_normal_shutdown_path() {
         let session = SpeechInputHandler::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Presenter,
             },
             Arc::new(Asr),
@@ -632,7 +634,7 @@ mod tests {
     async fn stalled_asr_cannot_hold_shutdown_open() {
         let session = SpeechInputHandler::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Presenter,
             },
             Arc::new(HangingTranscriber),
@@ -666,7 +668,7 @@ mod tests {
     async fn stop_after_eof_cancels_drain_without_waiting_for_deadline() {
         let session = SpeechInputHandler::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Presenter,
             },
             Arc::new(HangingTranscriber),
@@ -758,7 +760,7 @@ mod tests {
         });
         let session = SpeechInputHandler::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Client(Uuid::new_v4()),
             },
             Arc::clone(&asr) as Arc<dyn SpeechTranscriber>,
@@ -843,7 +845,7 @@ mod tests {
     #[test]
     fn ticket_admission_is_once_only_and_retains_client_route() {
         let route = SpeechRoute {
-            character: CharacterId::Mita,
+            character: CharacterId::Crazy,
             source: RequestSource::Client(Uuid::new_v4()),
         };
         let stream = SpeechStream::new(route, CancellationToken::new());
@@ -867,7 +869,7 @@ mod tests {
     fn stream_drop_cancels_tickets_after_admission_panics_without_double_panic() {
         let stream = SpeechStream::new(
             SpeechRoute {
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 source: RequestSource::Presenter,
             },
             CancellationToken::new(),

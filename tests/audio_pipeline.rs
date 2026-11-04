@@ -141,7 +141,7 @@ async fn fixture_audio_pipeline_and_old_target_cannot_publish_into_restarted_cor
         .unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let route = SpeechRoute {
-        character: CharacterId::Mita,
+        character: CharacterId::Crazy,
         source: RequestSource::Presenter,
     };
     let old_target = Arc::new(ChatReplyTarget::capture(route).unwrap());
@@ -205,7 +205,7 @@ async fn fixture_audio_pipeline_and_old_target_cannot_publish_into_restarted_cor
     let before = next
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     let handler = SpeechInputHandler::new(
@@ -232,7 +232,7 @@ async fn fixture_audio_pipeline_and_old_target_cannot_publish_into_restarted_cor
     let after = next
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     assert_eq!(

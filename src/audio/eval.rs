@@ -325,11 +325,8 @@ where
         if let Some(config) = config {
             let gate = ScoreGate::new(new_provider()?, voice)?;
             let mut segmenter = SpeechSegmenter::new(gate, config)?;
-            for frame in samples.chunks_exact(FRAME_SAMPLES) {
-                let frame = frame
-                    .try_into()
-                    .map_err(|_| EvalError::Wav("invalid capture frame"))?;
-                if let Some(segment) = segmenter.process(frame)? {
+            for frame in samples.as_chunks::<FRAME_SAMPLES>().0 {
+                if let Some(segment) = segmenter.process(*frame)? {
                     emitted_segments.push(segment.into());
                 }
             }
@@ -395,11 +392,10 @@ fn boundary_error(runs: &[(u64, u64)], speech: &[Annotation]) -> BoundaryError {
             .iter()
             .enumerate()
             .find(|(_, run)| overlaps(**run, interval))
+            && predictions[j] == 1
         {
-            if predictions[j] == 1 {
-                start_errors.push(delta_ms(run.0, interval.start_sample));
-                end_errors.push(delta_ms(run.1, interval.end_sample));
-            }
+            start_errors.push(delta_ms(run.0, interval.start_sample));
+            end_errors.push(delta_ms(run.1, interval.end_sample));
         }
     }
     BoundaryError {

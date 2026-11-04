@@ -326,6 +326,15 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         self.gate.reset();
     }
 
+    pub fn discard_playback_frame(&mut self) -> Result<(), SegmentError> {
+        self.consumed_samples = self
+            .consumed_samples
+            .checked_add(FRAME_SAMPLES as u64)
+            .ok_or(SegmentError::TooLong)?;
+        self.suppress_playback_echo();
+        Ok(())
+    }
+
     fn finish(&mut self, end_reason: SegmentEndReason) -> Option<SpeechSegment> {
         let enough = self.active.len() >= self.config.min_segment_samples;
         let samples = std::mem::take(&mut self.active);
@@ -560,6 +569,33 @@ mod tests {
         let tail = segmenter.flush().unwrap();
         assert_eq!(tail.start_sample, 0);
         assert_eq!(tail.end_reason, SegmentEndReason::Eof);
+    }
+
+    #[test]
+    fn discarded_playback_frames_preserve_the_capture_clock() {
+        let mut segmenter = SpeechSegmenter::new(
+            DeterministicGate,
+            SegmentConfig {
+                pre_roll_samples: 0,
+                start_voice_samples: 256,
+                end_silence_samples: 256,
+                min_segment_samples: 256,
+                ..SegmentConfig::default()
+            },
+        )
+        .unwrap();
+        segmenter.process([1; FRAME_SAMPLES]).unwrap();
+        let first = segmenter.process([0; FRAME_SAMPLES]).unwrap().unwrap();
+        assert_eq!(first.end_sample, 512);
+        for _ in 0..10 {
+            segmenter.discard_playback_frame().unwrap();
+        }
+        segmenter.process([1; FRAME_SAMPLES]).unwrap();
+        let second = segmenter.process([0; FRAME_SAMPLES]).unwrap().unwrap();
+        assert_eq!(second.start_sample, 3072);
+        assert_eq!(second.onset_decided_at_sample, Some(3328));
+        assert_eq!(second.end_sample, 3584);
+        assert_eq!(second.emitted_at_sample, 3584);
     }
 
     #[test]

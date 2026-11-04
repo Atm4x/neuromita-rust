@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src blob:; connect-src 'none'">
+<title>Ручная разметка VAD</title>
+<style>
+body{font:16px system-ui;margin:24px auto;padding:0 18px;max-width:1050px;background:#111827;color:#e5e7eb}
+h1{font-size:26px}label{display:inline-block;margin:8px 16px 8px 0}button,input,select{font:inherit;padding:7px;border-radius:5px}
+button{cursor:pointer;margin:4px}button:disabled{cursor:default;opacity:.5}input[type=number]{width:155px}
+canvas{width:100%;height:190px;background:#030712;border:1px solid #64748b;cursor:crosshair}audio{width:100%;margin:12px 0}
+.warn{color:#fcd34d}.ok{color:#86efac}#error{color:#fca5a5;white-space:pre-wrap}#transcript{white-space:pre-wrap}
+table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:7px;border-bottom:1px solid #374151}small{color:#cbd5e1}
+</style>
+<h1>Ручная разметка VAD</h1>
+<p>Всё работает локально. Прослушайте клип и задайте интервалы вручную. Загрузка и редактирование не подтверждают проверку.</p>
+<label>Manifest JSON <input id="manifestFile" type="file" accept=".json,application/json"></label>
+<label>WAV-файлы <input id="wavFiles" type="file" accept=".wav,audio/wav" multiple></label>
+<label>sources.json (необязательно) <input id="sourcesFile" type="file" accept=".json,application/json"></label>
+<p id="error" role="alert"></p>
+<label>Клип <select id="fixture"></select></label>
+<button id="export" disabled>Экспортировать полный manifest</button>
+<p id="status" class="warn">Выберите manifest и WAV-файлы.</p>
+<p id="info"></p><p id="transcript"></p>
+<audio id="audio" controls preload="metadata"></audio>
+<canvas id="wave" width="1000" height="190" aria-label="Волна: щёлкните для перехода по времени"></canvas>
+<p id="position">Время: 0 мс · Сэмпл: 0</p>
+<fieldset id="editor" disabled>
+<legend>Интервалы [начало, конец), сэмплы исходного WAV 16 кГц</legend>
+<label>Начало <input id="start" type="number" min="0" step="1" value="0"></label>
+<button id="setStart">Текущее → начало</button>
+<label>Конец <input id="end" type="number" min="1" step="1" value="256"></label>
+<button id="setEnd">Текущее → конец</button>
+<button id="add">Добавить интервал</button><button id="sort">Сортировать интервалы</button>
+<table><thead><tr><th>Начало</th><th>Конец</th><th>Время, мс</th><th></th></tr></thead><tbody id="intervals"></tbody></table>
+<p class="warn">После любого изменения интервалов статус сбрасывается в unknown. Подтверждайте только после прослушивания.</p>
+<button id="manual">Подтвердить ручную разметку</button>
+<button id="noise">Подтвердить отсутствие речи</button>
+</fieldset>
+<p><small>unknown/heuristic — непроверенные метки. verified_noise разрешён только с пустым speech.
+Экспорт создаёт новый файл; исходные файлы на диске не изменяются.</small></p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), RATE=16000, MAX_WAV=960000+65536, MAX_JSON=1048576;
+const statuses=new Set(['unknown','heuristic','manual','verified_noise']);
+let manifest=null,sources=null,files=new Map(),lengths=new Map(),decoded=null,current=null,context=null,url=null,epoch=0,manifestEpoch=0,sourcesEpoch=0;
+const fail=message=>{throw new Error(message)};
+const message=error=>{$('error').textContent=error.message||String(error)};
+const guard=fn=>async()=>{try{$('error').textContent='';await fn()}catch(error){message(error)}};
+function localName(value){
+  if(typeof value!=='string'||!value||value.length>240||/[\\/:\x00-\x1f]/.test(value)||value==='.'||value==='..')
+    fail('Ожидается локальное имя файла без каталогов, URL и переходов .. (до 240 символов).');
+  return value;
+}
+function intervals(f){return f.speech??[]}
+function validate(f,n){
+  if(!statuses.has(f.annotation_status))fail('Неизвестный статус: '+f.id);
+  if(f.speech!=null&&!Array.isArray(f.speech))fail('speech должен быть массивом: '+f.id);
+  if(f.annotation_status!=='unknown'&&!Array.isArray(f.speech))fail('Для статуса нужны явные speech-метки: '+f.id);
+  let last=0;
+  for(const a of intervals(f)){
+    if(!a||!Number.isSafeInteger(a.start_sample)||!Number.isSafeInteger(a.end_sample)||a.start_sample<last||
+       a.start_sample<0||a.end_sample<=a.start_sample||a.end_sample>n)
+      fail('Интервалы должны быть целыми, упорядоченными, без пересечений и внутри WAV: '+f.id);
+    last=a.end_sample;
+  }
+  if(f.annotation_status==='verified_noise'&&intervals(f).length)fail('verified_noise требует пустой speech: '+f.id);
+}
+async function jsonFile(file){
+  if(!file||file.size>MAX_JSON)fail('JSON не выбран или превышает 1 MiB.');
+  return JSON.parse(await file.text());
+}
+function pcmLength(buffer){
+  const v=new DataView(buffer),tag=p=>String.fromCharCode(...new Uint8Array(buffer,p,4));
+  if(v.byteLength<44||tag(0)!=='RIFF'||tag(8)!=='WAVE')fail('Нужен RIFF/WAVE PCM16 mono 16 кГц.');
+  let fmt=false,n=null;
+  for(let p=12;p+8<=v.byteLength;){
+    const size=v.getUint32(p+4,true),b=p+8,e=b+size;
+    if(e>v.byteLength)fail('Обрезанный WAV chunk.');
+    if(tag(p)==='fmt '){
+      if(size<16||v.getUint16(b,true)!==1||v.getUint16(b+2,true)!==1||
+         v.getUint32(b+4,true)!==RATE||v.getUint16(b+14,true)!==16||
+         v.getUint16(b+12,true)!==2)fail('WAV должен быть PCM16 mono с исходной частотой ровно 16000 Гц.');
+      fmt=true;
+    }
+    if(tag(p)==='data'){
+      if(n!==null||size%2)fail('Некорректный или повторный WAV data chunk.');
+      n=size/2;
+    }
+    p=e+(size%2);
+  }
+  if(!fmt||n===null||n===0||n>30*RATE)fail('WAV должен содержать от 1 сэмпла до 30 секунд PCM.');
+  return n;
+}
+async function readWav(file){
+  if(!file||file.size>MAX_WAV)fail('Выберите соответствующий WAV размером до '+MAX_WAV+' байт.');
+  const bytes=await file.arrayBuffer();return {bytes,n:pcmLength(bytes)};
+}
+function render(){
+  if(!current)return;
+  const status=current.annotation_status;
+  $('status').className=['manual','verified_noise'].includes(status)?'ok':'warn';
+  $('status').textContent='Статус: '+status+(['unknown','heuristic'].includes(status)?' — ручная проверка не подтверждена.':' — подтверждение сохранено в manifest.');
+  const source=Array.isArray(sources?.fixtures)?sources.fixtures.find(f=>f.id===current.id):null;
+  $('transcript').textContent=source?.transcription?'Транскрипция (подсказка, не разметка): '+source.transcription:'';
+  $('intervals').replaceChildren();
+  intervals(current).forEach((a,i)=>{
+    const row=document.createElement('tr');
+    for(const value of [a.start_sample,a.end_sample,(a.start_sample/16).toFixed(2)+'–'+(a.end_sample/16).toFixed(2)]){
+      const cell=document.createElement('td');cell.textContent=value;row.append(cell);
+    }
+    const cell=document.createElement('td'),button=document.createElement('button');button.textContent='Удалить';
+    button.onclick=()=>{current.speech.splice(i,1);changed()};cell.append(button);row.append(cell);$('intervals').append(row);
+  });
+  draw();
+}
+function changed(){current.annotation_status='unknown';render()}
+function sample(){return Math.min(lengths.get(current?.wav)||0,Math.max(0,Math.round($('audio').currentTime*RATE)))}
+function draw(){
+  const canvas=$('wave'),ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height;
+  ctx.clearRect(0,0,w,h);if(!decoded||!current)return;
+  const n=lengths.get(current.wav),data=decoded.getChannelData(0),duration=n/RATE;
+  for(const a of intervals(current)){
+    ctx.fillStyle='#1e3a5f';ctx.fillRect(a.start_sample/n*w,0,(a.end_sample-a.start_sample)/n*w,h);
+  }
+  ctx.strokeStyle='#67e8f9';ctx.beginPath();
+  for(let x=0;x<w;x++){
+    const begin=Math.floor(x/w*duration*decoded.sampleRate),end=Math.min(data.length,Math.ceil((x+1)/w*duration*decoded.sampleRate));
+    let low=0,high=0;for(let i=begin;i<end;i++){low=Math.min(low,data[i]);high=Math.max(high,data[i])}
+    ctx.moveTo(x,h/2-low*h*.47);ctx.lineTo(x,h/2-high*h*.47);
+  }
+  ctx.stroke();ctx.strokeStyle='#fb7185';ctx.beginPath();const x=sample()/n*w;ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();
+}
+function invalidateView(){
+  ++epoch;$('audio').pause();$('audio').removeAttribute('src');$('audio').load();
+  if(url){URL.revokeObjectURL(url);url=null}
+  decoded=null;$('editor').disabled=true;$('info').textContent='';draw();
+}
+async function selectFixture(){
+  invalidateView();const ticket=epoch;
+  current=manifest?.fixtures[Number($('fixture').value)]||null;render();if(!current)return;
+  const selected=current;
+  try{
+    const file=files.get(localName(selected.wav)),{bytes,n}=await readWav(file);
+    if(ticket!==epoch)return;
+    validate(selected,n);
+    context??=new (window.AudioContext||window.webkitAudioContext)();
+    const buffer=await context.decodeAudioData(bytes.slice(0));if(ticket!==epoch)return;
+    lengths.set(selected.wav,n);decoded=buffer;url=URL.createObjectURL(file);$('audio').src=url;
+    $('editor').disabled=false;$('start').max=n;$('end').max=n;
+    $('info').textContent=`${selected.id} · ${selected.wav} · ${(n/16).toFixed(2)} мс · ${n} сэмплов · исходная частота 16000 Гц`;
+    $('position').textContent='Время: 0 мс · Сэмпл: 0';render();
+  }catch(error){if(ticket===epoch)message(error)}
+}
+$('manifestFile').onchange=async()=>{
+  const ticket=++manifestEpoch;invalidateView();$('export').disabled=true;$('error').textContent='';
+  try{
+    const candidate=await jsonFile($('manifestFile').files[0]);if(ticket!==manifestEpoch)return;
+    if(!Array.isArray(candidate.fixtures)||!candidate.fixtures.length)fail('В manifest отсутствует fixtures.');
+    const ids=new Set();for(const f of candidate.fixtures){
+      if(typeof f.id!=='string'||!f.id||ids.has(f.id))fail('Нужны уникальные непустые id.');ids.add(f.id);localName(f.wav);
+      f.annotation_status??='unknown';validate(f,Number.MAX_SAFE_INTEGER);
+    }
+    manifest=candidate;$('fixture').replaceChildren();manifest.fixtures.forEach((f,i)=>{
+      const option=document.createElement('option');option.value=i;option.textContent=f.id+' · '+f.wav;$('fixture').append(option);
+    });$('export').disabled=false;await selectFixture();
+  }catch(error){if(ticket===manifestEpoch)message(error)}
+};
+$('wavFiles').onchange=guard(async()=>{
+  const next=new Map();for(const file of $('wavFiles').files){localName(file.name);if(next.has(file.name))fail('Повторное имя WAV: '+file.name);next.set(file.name,file)}
+  files=next;lengths.clear();await selectFixture();
+});
+$('sourcesFile').onchange=async()=>{
+  const ticket=++sourcesEpoch;$('error').textContent='';
+  try{
+    const candidate=$('sourcesFile').files.length?await jsonFile($('sourcesFile').files[0]):null;
+    if(ticket!==sourcesEpoch)return;
+    if(candidate&&!Array.isArray(candidate.fixtures))fail('sources.json должен содержать массив fixtures.');
+    sources=candidate;render();
+  }catch(error){if(ticket===sourcesEpoch)message(error)}
+};
+$('fixture').onchange=guard(selectFixture);
+$('audio').ontimeupdate=()=>{$('position').textContent=`Время: ${(sample()/16).toFixed(2)} мс · Сэмпл: ${sample()}`;draw()};
+$('wave').onclick=event=>{
+  if(!decoded)return;const rect=$('wave').getBoundingClientRect();
+  $('audio').currentTime=Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width))*lengths.get(current.wav)/RATE;
+  $('audio').ontimeupdate();
+};
+$('setStart').onclick=()=>{$('start').value=sample()};$('setEnd').onclick=()=>{$('end').value=sample()};
+$('add').onclick=guard(()=>{
+  const a={start_sample:$('start').valueAsNumber,end_sample:$('end').valueAsNumber};
+  const speech=[...intervals(current),a].sort((a,b)=>a.start_sample-b.start_sample);
+  validate({...current,annotation_status:'unknown',speech},lengths.get(current.wav));current.speech=speech;changed();
+});
+$('sort').onclick=guard(()=>{
+  const speech=[...intervals(current)].sort((a,b)=>a.start_sample-b.start_sample);
+  validate({...current,annotation_status:'unknown',speech},lengths.get(current.wav));current.speech=speech;changed();
+});
+function confirmStatus(status){
+  const speech=[...intervals(current)];
+  if(status==='verified_noise'&&speech.length)fail('Сначала удалите все интервалы речи.');
+  validate({...current,annotation_status:status,speech},lengths.get(current.wav));
+  current.speech=speech;current.annotation_status=status;render();
+}
+$('manual').onclick=guard(()=>confirmStatus('manual'));
+$('noise').onclick=guard(()=>confirmStatus('verified_noise'));
+$('export').onclick=guard(async()=>{
+  const snapshot=JSON.parse(JSON.stringify(manifest)),selectedFiles=new Map(files);
+  for(const f of snapshot.fixtures){
+    const {n}=await readWav(selectedFiles.get(localName(f.wav)));validate(f,n);
+  }
+  const blob=new Blob([JSON.stringify(snapshot,null,2)+'\n'],{type:'application/json'}),href=URL.createObjectURL(blob);
+  const link=document.createElement('a');link.href=href;link.download='manifest-manual.json';link.click();setTimeout(()=>URL.revokeObjectURL(href),1000);
+});
+</script>
+</html>
