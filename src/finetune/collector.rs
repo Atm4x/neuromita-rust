@@ -214,16 +214,16 @@ fn build_sample(
     );
     sample.id = SampleId::for_request(scope.request_id);
     sample.character_name = scope.character_id.clone();
-    let (provider_name, protocol_id, dialect_id) = match request.provider {
-        ProviderKind::Gemini => (
-            Some("gemini".into()),
-            Some("google_gemini_default".into()),
-            Some("generate_content".into()),
-        ),
-    };
-    sample.provider_name = provider_name;
-    sample.protocol_id = protocol_id;
-    sample.dialect_id = dialect_id;
+    sample.provider_name = Some(
+        match request.provider {
+            ProviderKind::Gemini => "gemini",
+            ProviderKind::OpenAi => "openai",
+        }
+        .into(),
+    );
+    sample.protocol_id = Some(request.protocol.to_string());
+    sample.dialect_id = Some(request.dialect.to_string());
+
     sample.temperature = request.temperature.map(f64::from);
     sample.max_tokens = request.max_output_tokens.map(u64::from);
     sample.request_payload = Some(request.payload_json.to_string());
@@ -269,6 +269,8 @@ mod tests {
             source: RequestSource::Presenter,
         };
         let request = PreparedRequest {
+            protocol: "google_gemini_default".into(),
+            dialect: "gemini_generate_content".into(),
             provider: ProviderKind::Gemini,
             model: "fixture".into(),
             endpoint: "https://example.test".into(),

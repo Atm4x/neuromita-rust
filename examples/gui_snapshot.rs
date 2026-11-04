@@ -97,6 +97,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let id = catalog.create(record)?;
         let row = view::PresetItem {
+            output_token_wire_key: "maxOutputTokens".into(),
+            template_id: "gemini".into(),
             temperature_enabled: true,
             tokens_enabled: true,
             id: id.0.to_string().into(),

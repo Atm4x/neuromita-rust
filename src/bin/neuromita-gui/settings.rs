@@ -7,7 +7,7 @@ use super::{
 };
 use neuromita::{
     character::CharacterId,
-    generation::{GeminiConnectionEdit, PresetConnectionEdit, PresetId, PresetRecord},
+    generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
     settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
@@ -221,14 +221,19 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     } else {
                         ui.get_preset_endpoint()
                     };
-                    let request_url_template =
-                        PresetsPresenter::request_url_template("gemini", &endpoint)
-                            .unwrap_or_default();
+                    let request_url_template = PresetsPresenter::request_url_template(
+                        ui.get_preset_template_id().as_str(),
+                        &endpoint,
+                    )
+                    .unwrap_or_default();
                     ui.set_preset_url_template(request_url_template.into());
                     match PresetsPresenter::template(ui.get_preset_template_id().as_str()) {
                         Ok(template) => {
-                            ui.set_preset_temperature_enabled(template.options.send_temperature);
-                            ui.set_preset_tokens_enabled(template.options.send_max_output_tokens);
+                            ui.set_preset_output_token_wire_key(
+                                template.output_token_wire_key().into(),
+                            );
+                            ui.set_preset_temperature_enabled(template.send_temperature);
+                            ui.set_preset_tokens_enabled(template.send_max_output_tokens);
                             if ui.get_preset_temperature().is_empty() {
                                 ui.set_preset_temperature(template.temperature.to_string().into());
                             }
@@ -313,20 +318,26 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     connection: None,
                 });
             }
-            if window.get_preset_template_id() != "gemini" {
-                return Err("Unsupported preset provider".into());
-            }
+            let template = PresetsPresenter::template(window.get_preset_template_id().as_str())
+                .map_err(|e| e.to_string())?;
             Ok(PresetConnectionEdit {
                 name: window.get_preset_name().into(),
-                connection: Some(GeminiConnectionEdit {
+                connection: Some(PresetGenerationEdit {
+                    protocol: template.protocol,
                     send_temperature: window.get_preset_temperature_enabled(),
                     send_max_output_tokens: window.get_preset_tokens_enabled(),
                     endpoint: window.get_preset_endpoint().into(),
                     model: window.get_preset_model().into(),
-                    credential: neuromita::generation::CredentialReference::parse(
-                        window.get_preset_key_env().as_str(),
-                    )
-                    .map_err(|error| error.to_string())?,
+                    credential: if window.get_preset_key_env() == "none" {
+                        None
+                    } else {
+                        Some(
+                            neuromita::generation::CredentialReference::parse(
+                                window.get_preset_key_env().as_str(),
+                            )
+                            .map_err(|error| error.to_string())?,
+                        )
+                    },
                     temperature: window
                         .get_preset_temperature()
                         .parse()
@@ -586,6 +597,8 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         .records
         .iter()
         .map(|record| PresetItem {
+            output_token_wire_key: record.output_token_wire_key.into(),
+            template_id: record.template_id.into(),
             temperature_enabled: record.send_temperature,
             tokens_enabled: record.send_max_output_tokens,
             id: record.id.0.to_string().into(),
@@ -659,6 +672,7 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_key_env(record.key_env.clone());
     ui.set_preset_temperature_enabled(record.temperature_enabled);
     ui.set_preset_tokens_enabled(record.tokens_enabled);
+    ui.set_preset_output_token_wire_key(record.output_token_wire_key.clone());
     ui.set_preset_temperature(record.temperature.clone());
     ui.set_preset_tokens(record.tokens.clone());
     ui.set_preset_timeout(record.timeout.clone());
@@ -671,15 +685,16 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
         if let Some(template) = ui
             .get_preset_templates()
             .iter()
-            .find(|item| item.id == "gemini")
+            .find(|item| item.id == record.template_id)
         {
             ui.set_preset_template_id(template.id);
             ui.set_preset_template_name(template.name);
             ui.set_preset_provider_icon(record.provider.clone());
             ui.set_preset_schema_label(template.format);
-            if let Some(request_url_template) =
-                PresetsPresenter::request_url_template("gemini", &record.endpoint)
-            {
+            if let Some(request_url_template) = PresetsPresenter::request_url_template(
+                record.template_id.as_str(),
+                &record.endpoint,
+            ) {
                 ui.set_preset_url_template(request_url_template.into());
             }
         } else {
@@ -711,6 +726,8 @@ pub fn clear_preset(ui: &SettingsUi) {
 pub fn created(window: &AppWindow, id: PresetId, record: &PresetRecord) {
     let ui = window.global::<SettingsUi>();
     let item = PresetItem {
+        output_token_wire_key: "".into(),
+        template_id: "".into(),
         temperature_enabled: false,
         tokens_enabled: false,
         id: id.0.to_string().into(),

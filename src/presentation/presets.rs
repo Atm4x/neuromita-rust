@@ -34,6 +34,8 @@ pub struct PresetParameterOption {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresetView {
+    pub output_token_wire_key: &'static str,
+    pub template_id: &'static str,
     pub send_temperature: bool,
     pub send_max_output_tokens: bool,
     pub id: PresetId,
@@ -72,15 +74,9 @@ pub struct PresetsPresenter {
 
 impl PresetsPresenter {
     pub fn template(id: &str) -> Result<crate::generation::PresetTemplate, PresetCatalogError> {
-        match id {
-            "gemini" => Ok(crate::generation::PresetTemplate::for_provider(
-                crate::generation::ProviderKind::Gemini,
-            )),
-            _ => Err(PresetCatalogError::Invalid(format!(
-                "unsupported provider template: {id}"
-            ))),
-        }
+        crate::generation::PresetTemplate::named(id)
     }
+
     pub(crate) fn new(catalog: Arc<PresetCatalog>) -> Self {
         Self { catalog }
     }
@@ -120,6 +116,26 @@ impl PresetsPresenter {
                         0,
                         0,
                     ),
+                    PresetDefinition::OpenAi(definition) => (
+                        true,
+                        if definition.protocol
+                            == crate::generation::openai::OpenAiProtocol::OpenRouter
+                        {
+                            "openrouter"
+                        } else {
+                            "openai"
+                        },
+                        definition.model.clone(),
+                        definition.endpoint.clone(),
+                        definition
+                            .credential
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "none".into()),
+                        definition.temperature,
+                        definition.max_output_tokens,
+                        definition.timeout_ms,
+                    ),
                     PresetDefinition::Gemini(definition) => (
                         true,
                         "google",
@@ -132,8 +148,32 @@ impl PresetsPresenter {
                     ),
                 };
                 PresetView {
-                    send_temperature: matches!(&record.definition, PresetDefinition::Gemini(config) if config.options.send_temperature),
-                    send_max_output_tokens: matches!(&record.definition, PresetDefinition::Gemini(config) if config.options.send_max_output_tokens),
+                    output_token_wire_key: match &record.definition {
+                        PresetDefinition::Gemini(_) => "maxOutputTokens",
+                        PresetDefinition::OpenAi(config)
+                            if config.protocol
+                                == crate::generation::openai::OpenAiProtocol::Responses =>
+                        {
+                            "max_output_tokens"
+                        }
+                        PresetDefinition::OpenAi(_) => "max_tokens",
+                        PresetDefinition::Unconfigured => "",
+                    },
+                    template_id: match &record.definition {
+                        PresetDefinition::Gemini(_) => "gemini",
+                        PresetDefinition::OpenAi(config) => config.protocol.template_id(),
+                        PresetDefinition::Unconfigured => "",
+                    },
+                    send_temperature: match &record.definition {
+                        PresetDefinition::Gemini(config) => config.options.send_temperature,
+                        PresetDefinition::OpenAi(config) => config.options.send_temperature,
+                        PresetDefinition::Unconfigured => false,
+                    },
+                    send_max_output_tokens: match &record.definition {
+                        PresetDefinition::Gemini(config) => config.options.send_max_output_tokens,
+                        PresetDefinition::OpenAi(config) => config.options.send_max_output_tokens,
+                        PresetDefinition::Unconfigured => false,
+                    },
                     id,
                     configured,
                     name: record.name.clone(),
@@ -158,8 +198,11 @@ impl PresetsPresenter {
     /// Returns the display-only request URL template for a provider.
     /// The persisted endpoint remains the transport's base address, never the expanded URL.
     pub fn request_url_template(provider_id: &str, endpoint: &str) -> Option<String> {
-        if provider_id != "gemini" || endpoint.is_empty() {
+        if endpoint.is_empty() || Self::template(provider_id).is_err() {
             return None;
+        }
+        if provider_id != "gemini" {
+            return Some(endpoint.into());
         }
         Some(format!(
             "{}/models/{{model}}:generateContent",
@@ -169,6 +212,7 @@ impl PresetsPresenter {
 
     pub fn providers() -> Vec<ProviderOption> {
         const CATALOG: &[(&str, &str, &str, &str, &str, &str)] = &[
+            ("compatible", "OpenAI-compatible", "openai", "", "mixed", ""),
             (
                 "gemini",
                 "Google AI Studio",
@@ -262,8 +306,12 @@ impl PresetsPresenter {
                     icon,
                     schema_label: if id == "gemini" {
                         "Google Gemini API"
+                    } else if id == "openai" {
+                        "OpenAI Responses"
+                    } else if id == "codex" {
+                        "ChatGPT OAuth"
                     } else {
-                        ""
+                        "Chat Completions"
                     },
                     documentation,
                     models_url: if id == "gemini" {
@@ -611,7 +659,7 @@ mod tests {
         assert_eq!(PresetsPresenter::request_url_template("gemini", ""), None);
         assert_eq!(
             PresetsPresenter::request_url_template("openrouter", "https://openrouter.ai/"),
-            None
+            Some("https://openrouter.ai/".into())
         );
     }
 
@@ -653,9 +701,13 @@ mod tests {
             snapshot
                 .providers
                 .iter()
-                .filter(|item| item.supported)
-                .count()
-                == 1
+                .any(|item| item.id == "compatible" && item.supported)
+        );
+        assert!(
+            snapshot
+                .providers
+                .iter()
+                .any(|item| item.id == "codex" && !item.supported)
         );
         let (id, record) = presenter.create_unconfigured().unwrap();
         assert_eq!(record.name, "Пользовательский API 1");

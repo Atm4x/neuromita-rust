@@ -552,6 +552,8 @@ pub struct ContextSummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderRequestTrace {
     pub provider: String,
+    pub protocol: String,
+    pub dialect: String,
     pub model: BoundedText,
     pub endpoint: BoundedText,
     pub temperature: Option<f32>,
@@ -773,6 +775,8 @@ impl RequestTrace {
         self.prompt = Some(prompt);
         self.provider_request = Some(ProviderRequestTrace {
             provider: provider_name(request.provider),
+            protocol: request.protocol.to_string(),
+            dialect: request.dialect.to_string(),
             model: BoundedText::capture(&mut self.redactor, &request.model, limit),
             endpoint: BoundedText::capture(&mut self.redactor, &request.endpoint, limit),
             temperature: request.temperature,
@@ -1096,6 +1100,7 @@ pub struct DiagnosticView {
 fn provider_name(kind: ProviderKind) -> String {
     match kind {
         ProviderKind::Gemini => "gemini".into(),
+        ProviderKind::OpenAi => "openai".into(),
     }
 }
 

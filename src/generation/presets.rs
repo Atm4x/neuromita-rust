@@ -54,9 +54,16 @@ pub struct GeminiPresetDefinition {
     pub timeout_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresetProtocol {
+    Gemini,
+    OpenAi(super::openai::OpenAiProtocol),
+}
+
 pub struct PresetTemplate {
-    pub options: super::gemini::GeminiRequestOptions,
+    pub protocol: PresetProtocol,
+    pub send_temperature: bool,
+    pub send_max_output_tokens: bool,
     pub endpoint: String,
     pub credential: super::CredentialReference,
     pub temperature: f32,
@@ -65,10 +72,106 @@ pub struct PresetTemplate {
 }
 
 impl PresetTemplate {
+    pub fn output_token_wire_key(&self) -> &'static str {
+        match self.protocol {
+            PresetProtocol::Gemini => "maxOutputTokens",
+            PresetProtocol::OpenAi(super::openai::OpenAiProtocol::Responses) => "max_output_tokens",
+            PresetProtocol::OpenAi(_) => "max_tokens",
+        }
+    }
+    pub fn named(id: &str) -> Result<Self, PresetCatalogError> {
+        use super::openai::OpenAiProtocol::*;
+        if id == "gemini" {
+            return Ok(Self::for_provider(super::ProviderKind::Gemini));
+        }
+        let (protocol, endpoint, credential) = match id {
+            "compatible" => (
+                Compatible,
+                "https://api.openai.com/v1/chat/completions",
+                "OPENAI_API_KEY",
+            ),
+            "mistral" => (
+                Mistral,
+                "https://api.mistral.ai/v1/chat/completions",
+                "MISTRAL_API_KEY",
+            ),
+            "openrouter" => (
+                OpenRouter,
+                "https://openrouter.ai/api/v1/chat/completions",
+                "OPENROUTER_API_KEY",
+            ),
+            "aiio" => (
+                Aiio,
+                "https://api.intelligence.io.solutions/api/v1/chat/completions",
+                "AIIO_API_KEY",
+            ),
+            "proxyapi" => (
+                Compatible,
+                "https://openai.api.proxyapi.ru/v1/chat/completions",
+                "PROXYAPI_KEY",
+            ),
+            "groq" => (
+                Compatible,
+                "https://api.groq.com/openai/v1/chat/completions",
+                "GROQ_API_KEY",
+            ),
+            "together" => (
+                Compatible,
+                "https://api.together.ai/v1/chat/completions",
+                "TOGETHER_API_KEY",
+            ),
+            "chutes" => (
+                Compatible,
+                "https://llm.chutes.ai/v1/chat/completions",
+                "CHUTES_API_KEY",
+            ),
+            "kodikrouter" => (
+                Compatible,
+                "https://api.kodikrouter.ru/v1/chat/completions",
+                "KODIKROUTER_API_KEY",
+            ),
+            "lmstudio" => (
+                LmStudio,
+                "http://127.0.0.1:1234/v1/chat/completions",
+                "LMSTUDIO_API_KEY",
+            ),
+            "ollama" => (
+                Compatible,
+                "http://127.0.0.1:11434/v1/chat/completions",
+                "OLLAMA_API_KEY",
+            ),
+            "openai" => (
+                Responses,
+                "https://api.openai.com/v1/responses",
+                "OPENAI_API_KEY",
+            ),
+            _ => {
+                return Err(PresetCatalogError::Invalid(format!(
+                    "unsupported provider template: {id}"
+                )));
+            }
+        };
+        Ok(Self {
+            protocol: PresetProtocol::OpenAi(protocol),
+            endpoint: endpoint.into(),
+            credential: credential.into(),
+            temperature: 0.7,
+            max_output_tokens: 3000,
+            timeout_ms: 60_000,
+            send_temperature: true,
+            send_max_output_tokens: true,
+        })
+    }
+
     pub fn for_provider(provider: super::ProviderKind) -> Self {
         match provider {
+            super::ProviderKind::OpenAi => {
+                Self::named("compatible").expect("built-in compatible template")
+            }
             super::ProviderKind::Gemini => Self {
-                options: Default::default(),
+                protocol: PresetProtocol::Gemini,
+                send_temperature: true,
+                send_max_output_tokens: true,
                 endpoint: GeminiTemplate::GOOGLE_ENDPOINT.into(),
                 credential: "GEMINI_API_KEY".into(),
                 temperature: 0.7,
@@ -84,10 +187,37 @@ impl PresetTemplate {
         model: String,
         credential: super::CredentialReference,
     ) -> Result<PresetRecord, PresetCatalogError> {
+        if let PresetProtocol::OpenAi(protocol) = self.protocol {
+            let record = PresetRecord {
+                name,
+                definition: PresetDefinition::OpenAi(super::openai::OpenAiPresetDefinition {
+                    protocol,
+                    endpoint: self.endpoint.clone(),
+                    model,
+                    credential: Some(credential),
+                    temperature: self.temperature,
+                    max_output_tokens: self.max_output_tokens,
+                    timeout_ms: self.timeout_ms,
+                    options: {
+                        let mut options = protocol.options();
+                        options.send_temperature = self.send_temperature;
+                        options.send_max_output_tokens = self.send_max_output_tokens;
+                        options
+                    },
+                    transforms: protocol.transforms(),
+                }),
+            };
+            record.validate()?;
+            return Ok(record);
+        }
         let record = PresetRecord {
             name,
             definition: PresetDefinition::Gemini(GeminiPresetDefinition {
-                options: self.options.clone(),
+                options: super::gemini::GeminiRequestOptions {
+                    send_temperature: self.send_temperature,
+                    send_max_output_tokens: self.send_max_output_tokens,
+                    ..Default::default()
+                },
                 transforms: Vec::new(),
                 endpoint: self.endpoint.clone(),
                 model,
@@ -130,6 +260,7 @@ impl GeminiPresetDefinition {
 pub enum PresetDefinition {
     Unconfigured,
     Gemini(GeminiPresetDefinition),
+    OpenAi(super::openai::OpenAiPresetDefinition),
 }
 
 impl PresetDefinition {
@@ -137,6 +268,11 @@ impl PresetDefinition {
         match self {
             Self::Unconfigured => Ok(()),
             Self::Gemini(config) => config.validate(),
+            Self::OpenAi(config) => super::openai::OpenAiTemplate::new(
+                config.clone(),
+                config.credential.as_ref().map(|_| "validation-key"),
+            )
+            .map(|_| ()),
         }
     }
 
@@ -149,6 +285,17 @@ impl PresetDefinition {
                 return Err(PresetCatalogError::Invalid(
                     "preset is not configured".into(),
                 ));
+            }
+            Self::OpenAi(config) => {
+                let credential = config
+                    .credential
+                    .as_ref()
+                    .map(|reference| credentials.resolve(reference))
+                    .transpose()?;
+                ProviderTemplate::OpenAi(super::openai::OpenAiTemplate::new(
+                    config.clone(),
+                    credential.as_deref(),
+                )?)
             }
             Self::Gemini(config) => {
                 let credential = credentials.resolve(&config.credential)?;
@@ -167,12 +314,13 @@ pub struct PresetRecord {
 }
 
 /// Connection/settings fields editable independently of the provider pipeline.
-pub struct GeminiConnectionEdit {
+pub struct PresetGenerationEdit {
+    pub protocol: PresetProtocol,
     pub send_temperature: bool,
     pub send_max_output_tokens: bool,
     pub endpoint: String,
     pub model: String,
-    pub credential: super::CredentialReference,
+    pub credential: Option<super::CredentialReference>,
     pub temperature: f32,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
@@ -180,7 +328,7 @@ pub struct GeminiConnectionEdit {
 
 pub struct PresetConnectionEdit {
     pub name: String,
-    pub connection: Option<GeminiConnectionEdit>,
+    pub connection: Option<PresetGenerationEdit>,
 }
 
 impl PresetRecord {
@@ -446,7 +594,7 @@ impl PresetCatalog {
             return Ok(true);
         }
         match state.stored.entries.get(&id) {
-            Some(record) => Ok(matches!(record.definition, PresetDefinition::Gemini(_))),
+            Some(record) => Ok(!matches!(record.definition, PresetDefinition::Unconfigured)),
             None => Err(PresetCatalogError::NotFound(id)),
         }
     }
@@ -513,14 +661,48 @@ impl PresetCatalog {
             .entries
             .get(&id)
             .ok_or(PresetCatalogError::NotFound(id))?;
+        let edit_name = edit.name;
         let definition = match edit.connection {
             None => PresetDefinition::Unconfigured,
             Some(edit) => {
+                if let PresetProtocol::OpenAi(protocol) = edit.protocol {
+                    let (transforms, mut options) = match &current.definition {
+                        PresetDefinition::OpenAi(config) if config.protocol == protocol => {
+                            (config.transforms.clone(), config.options.clone())
+                        }
+                        _ => (protocol.transforms(), protocol.options()),
+                    };
+                    options.send_temperature = edit.send_temperature;
+                    options.send_max_output_tokens = edit.send_max_output_tokens;
+                    let definition =
+                        PresetDefinition::OpenAi(super::openai::OpenAiPresetDefinition {
+                            protocol,
+                            endpoint: edit.endpoint,
+                            model: edit.model,
+                            credential: edit.credential,
+                            temperature: edit.temperature,
+                            max_output_tokens: edit.max_output_tokens,
+                            timeout_ms: edit.timeout_ms,
+                            options,
+                            transforms,
+                        });
+                    let record = PresetRecord {
+                        name: edit_name,
+                        definition,
+                    };
+                    record.validate()?;
+                    let mut next = state.stored.clone();
+                    next.entries.insert(id, record);
+                    self.persist(&next)?;
+                    self.publish(&mut state, next);
+                    return Ok(());
+                }
+
                 let (transforms, mut options) = match &current.definition {
                     PresetDefinition::Gemini(config) => {
                         (config.transforms.clone(), config.options.clone())
                     }
-                    PresetDefinition::Unconfigured => {
+                    PresetDefinition::OpenAi(_) | PresetDefinition::Unconfigured => {
                         (Vec::new(), super::gemini::GeminiRequestOptions::default())
                     }
                 };
@@ -529,7 +711,9 @@ impl PresetCatalog {
                 PresetDefinition::Gemini(GeminiPresetDefinition {
                     endpoint: edit.endpoint,
                     model: edit.model,
-                    credential: edit.credential,
+                    credential: edit.credential.ok_or_else(|| {
+                        PresetCatalogError::Invalid("Gemini requires a credential reference".into())
+                    })?,
                     temperature: edit.temperature,
                     max_output_tokens: edit.max_output_tokens,
                     timeout_ms: edit.timeout_ms,
@@ -539,7 +723,7 @@ impl PresetCatalog {
             }
         };
         let record = PresetRecord {
-            name: edit.name,
+            name: edit_name,
             definition,
         };
         record.validate()?;
@@ -615,12 +799,13 @@ mod tests {
                 id,
                 PresetConnectionEdit {
                     name: "renamed".into(),
-                    connection: Some(GeminiConnectionEdit {
+                    connection: Some(PresetGenerationEdit {
+                        protocol: PresetProtocol::Gemini,
                         send_temperature: false,
                         send_max_output_tokens: true,
                         endpoint: "http://127.0.0.1:9999/v1beta/".into(),
                         model: "after".into(),
-                        credential: "OTHER_KEY".into(),
+                        credential: Some("OTHER_KEY".into()),
                         temperature: 1.0,
                         max_output_tokens: 3000,
                         timeout_ms: 1000,

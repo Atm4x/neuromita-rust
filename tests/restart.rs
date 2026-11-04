@@ -104,7 +104,9 @@ impl GenerationProvider for ControlledProvider {
         template: ProviderTemplate,
     ) -> ProviderFuture<'_> {
         Box::pin(async move {
-            let ProviderTemplate::Gemini(template) = template;
+            let ProviderTemplate::Gemini(template) = template else {
+                panic!("fixture requires Gemini")
+            };
             let (reply, receive) = oneshot::channel();
             self.0
                 .send(Call {

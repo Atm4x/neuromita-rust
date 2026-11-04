@@ -5,12 +5,12 @@ mod wire;
 
 pub use template::{GeminiTemplate, GenerationSettings, PresetError};
 
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use super::provider::GenerationInput;
 use super::{
     GenerationError, GenerationObserver, GenerationProvider, PreparedRequest, ProviderFuture,
-    ProviderKind, ProviderReply, ProviderTemplate,
+    ProviderKind, ProviderTemplate,
 };
 
 pub struct GeminiProvider {
@@ -41,6 +41,8 @@ impl GeminiProvider {
         endpoint.set_query(None);
         endpoint.set_fragment(None);
         observer.request_prepared(PreparedRequest {
+            protocol: "google_gemini_default".into(),
+            dialect: "gemini_generate_content".into(),
             provider: ProviderKind::Gemini,
             model: template.model().into(),
             endpoint: endpoint.as_str().into(),
@@ -56,80 +58,16 @@ impl GeminiProvider {
             payload_json: payload_json.as_str().into(),
             captured_at: SystemTime::now(),
         });
-        let started = Instant::now();
-        let mut response = match self
-            .client
-            .post(template.request_url())
-            .timeout(template.settings().timeout())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(payload_json)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let error = GenerationError::Transport(error.without_url().to_string());
-                observer.failed(&error);
-                return Err(error);
-            }
-        };
-        let status = response.status();
-        let mut bytes = Vec::new();
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    let error = GenerationError::Transport(error.without_url().to_string());
-                    observer.response_received(ProviderReply {
-                        status: Some(status.as_u16()),
-                        raw_body: String::from_utf8_lossy(&bytes).into_owned().as_str().into(),
-                        answer_text: None,
-                        complete: false,
-                        finish_reason: None,
-                        usage: None,
-                        elapsed: started.elapsed(),
-                    });
-                    observer.failed(&error);
-                    return Err(error);
-                }
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if bytes.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
-                let remaining = (8usize * 1024 * 1024).saturating_sub(bytes.len());
-                bytes.extend_from_slice(&chunk[..remaining.min(chunk.len())]);
-                observer.response_received(ProviderReply {
-                    status: Some(status.as_u16()),
-                    raw_body: String::from_utf8_lossy(&bytes).into_owned().as_str().into(),
-                    answer_text: None,
-                    complete: false,
-                    finish_reason: None,
-                    usage: None,
-                    elapsed: started.elapsed(),
-                });
-                let error = GenerationError::Response("response exceeds 8 MiB".into());
-                observer.failed(&error);
-                return Err(error);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let raw_body = String::from_utf8_lossy(&bytes).into_owned();
-        let observation = wire::observation_metadata(&bytes);
-        observer.response_received(ProviderReply {
-            status: Some(status.as_u16()),
-            raw_body: raw_body.as_str().into(),
-            answer_text: observation.answer_text,
-            complete: true,
-            finish_reason: observation.finish_reason,
-            usage: observation.usage,
-            elapsed: started.elapsed(),
-        });
-        if !status.is_success() {
-            let error = GenerationError::Http(status.as_u16());
-            observer.failed(&error);
-            return Err(error);
-        }
+        let bytes = super::http::send_json(
+            self.client
+                .post(template.request_url())
+                .timeout(template.settings().timeout())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload_json),
+            observer,
+            wire::observation_metadata,
+        )
+        .await?;
         match wire::decode(&bytes) {
             Ok(response) => Ok(response),
             Err(error) => {
@@ -151,6 +89,7 @@ impl GenerationProvider for GeminiProvider {
                 ProviderTemplate::Gemini(template) => {
                     self.execute(context, template, &mut NoopObserver).await
                 }
+                other => Err(GenerationError::Unavailable(other.kind())),
             }
         })
     }
@@ -166,6 +105,7 @@ impl GenerationProvider for GeminiProvider {
                 ProviderTemplate::Gemini(template) => {
                     self.execute(context, template, observer).await
                 }
+                other => Err(GenerationError::Unavailable(other.kind())),
             }
         })
     }
