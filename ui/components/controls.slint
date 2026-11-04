@@ -58,5 +58,9 @@ export component IconButton inherits ActionSurface {
     background: root.hovered ? #b74b7d24 : #ffffff09;
     border-width: 1px;
     border-color: #ffffff06;
-    Icon { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; source: root.icon; width: 14px; height: 14px; }
+    HorizontalLayout { padding: 0px; alignment: center;
+        VerticalLayout { padding: 0px; alignment: center; width: 14px;
+            Icon { source: root.icon; width: 14px; height: 14px; }
+        }
+    }
 }

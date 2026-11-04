@@ -132,7 +132,9 @@ VerticalLayout {
                             SettingsField {
                                 placeholder: I18n.i18n("settings.characters.prompt-unavailable", "Каталог наборов промптов не подключён");
                                 enabled: false; height: 38px;
-                                Glyph { x: parent.width - 28px; width: 18px; height: parent.height; text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
+                                HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: end;
+                                    Glyph { width: 18px; text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
+                                }
                             }
                             VerticalLayout {
                                 padding: 0px; spacing: 4px;
@@ -272,12 +274,18 @@ export component SettingsPage inherits Rectangle {
                             Glyph { text: item.icon; color: SettingsUi.section == item.section ? white : SettingsTheme.muted; }
                             SettingsLabel { text: item.name; font-family: SandboxTheme.font-family; font-weight: SettingsUi.section == item.section ? 700 : 600; }
                         }
-                        Rectangle { y: parent.height - 2px; width: 100%; height: 2px; background: SettingsUi.section == item.section ? SettingsTheme.accent-alt : transparent; }
+                        VerticalLayout { padding: 0px; spacing: 0px;
+                            Rectangle { vertical-stretch: 1; }
+                            Rectangle { height: 2px; background: SettingsUi.section == item.section ? SettingsTheme.accent-alt : transparent; }
+                        }
                         activated => { SettingsUi.section = item.section; if (item.section == 2 && root.connected) { MemoryUi.select(SettingsUi.selected-character); } }
                     }
                     }
                 }
-                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: SettingsTheme.divider; }
+                VerticalLayout { padding: 0px; spacing: 0px;
+                    Rectangle { vertical-stretch: 1; }
+                    Rectangle { height: 1px; background: SettingsTheme.divider; }
+                }
                 }
                 if SettingsUi.settings-error != "": Card {
                     background: SettingsTheme.error-background;

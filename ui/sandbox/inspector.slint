@@ -274,13 +274,18 @@ component DebugTab inherits ScrollView {
             title: I18n.i18n("sandbox.debug.params", "Параметры отладки"); glyph: Fa.bug;
             Caption { text: I18n.i18n("sandbox.debug.structured", "Structured output (дебаг)"); font-size: 12px; font-weight: 700; }
             Rectangle { height: 29px; width: 120px; background: SandboxTheme.input; border-width: 1px; border-color: SandboxTheme.border; border-radius: 8px;
-                Caption { text: I18n.i18n("sandbox.debug.off", "Выкл"); x: 10px; width: parent.width - 20px; height: parent.height; }
+                HorizontalLayout { padding-left: 10px; padding-right: 10px;
+                    Caption { text: I18n.i18n("sandbox.debug.off", "Выкл"); }
+                }
             }
             CheckRow { title: I18n.i18n("sandbox.debug.expanded", "Развёрнуто по умолчанию"); }
             CheckRow { title: I18n.i18n("sandbox.debug.limits", "Ограничивать structured output в sandbox"); }
             Caption { text: I18n.i18n("sandbox.debug.insert", "Вставить system-сообщение в историю"); font-size: 12px; font-weight: 700; }
             Rectangle { height: 70px; background: SandboxTheme.input; border-width: 1px; border-color: SandboxTheme.border; border-radius: 9px;
-                Caption { text: I18n.i18n("sandbox.debug.insert-placeholder", "Текст system-сообщения…"); x: 10px; y: 10px; width: parent.width - 20px; color: SandboxTheme.muted; }
+                VerticalLayout { padding: 10px; spacing: 0px; alignment: start;
+                    Caption { text: I18n.i18n("sandbox.debug.insert-placeholder", "Текст system-сообщения…"); color: SandboxTheme.muted; }
+                    Rectangle { vertical-stretch: 1; }
+                }
             }
             CheckRow { title: I18n.i18n("sandbox.debug.as-user", "Как пользователь [Системное]: (видно Gemini)"); }
             QuickAction { text: I18n.i18n("sandbox.debug.submit-system", "Отправить системное"); enabled: false; }
@@ -305,7 +310,10 @@ component TabButton inherits ActionSurface {
         padding-left: 16px; padding-right: 16px; spacing: 0px;
         Caption { text: root.title; color: root.active ? SandboxTheme.text : SandboxTheme.muted; font-size: 12.6667px; font-weight: 700; horizontal-alignment: center; }
     }
-    if root.active: Rectangle { x: 0px; y: parent.height - 2px; height: 2px; width: parent.width; background: SandboxTheme.accent-alt; }
+    if root.active: VerticalLayout { padding: 0px; spacing: 0px;
+        Rectangle { vertical-stretch: 1; }
+        Rectangle { height: 2px; background: SandboxTheme.accent-alt; }
+    }
 }
 
 export component SandboxInspector inherits Rectangle {

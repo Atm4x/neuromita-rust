@@ -59,17 +59,18 @@ component ReleaseCard inherits Rectangle {
             Flickable {
                 width: parent.width; height: parent.height;
                 content-width: self.width;
-                Text {
-                    width: parent.width - 24px;
-                    x: 12px; y: 10px;
-                    text: root.release.details;
-                    color: Theme.muted; font-size: 13px; wrap: word-wrap;
+                VerticalLayout { width: parent.width; padding-left: 12px; padding-right: 12px; padding-top: 10px; padding-bottom: 10px;
+                    Text { text: root.release.details; color: Theme.muted; font-size: 13px; wrap: word-wrap; }
                 }
             }
-            ActionSurface {
-                x: parent.width - 36px; y: 6px; width: 28px; height: 28px; label: I18n.i18n("releases.collapse", "Свернуть");
-                Label { text: "×"; font-size: 20px; horizontal-alignment: center; }
-                activated => { root.expanded = false; }
+            VerticalLayout { padding-top: 6px; padding-right: 8px; padding-left: 8px; padding-bottom: 0px; alignment: start;
+                HorizontalLayout { alignment: end; padding: 0px;
+                    ActionSurface {
+                        width: 28px; height: 28px; label: I18n.i18n("releases.collapse", "Свернуть");
+                        Label { text: "×"; font-size: 20px; horizontal-alignment: center; }
+                        activated => { root.expanded = false; }
+                    }
+                }
             }
         }
         HorizontalLayout {
@@ -111,7 +112,9 @@ export component ReleasesPage inherits Rectangle {
                 height: 185px;
                 border-radius: 22px; border-width: 1px; border-color: Theme.border;
                 background: @linear-gradient(135deg, #171928f5, #0e101ff5);
-                Rectangle { x: 0px; width: 3px; height: parent.height; border-radius: 2px; background: Theme.accent; }
+                HorizontalLayout { padding: 0px; alignment: start;
+                    Rectangle { width: 3px; border-radius: 2px; background: Theme.accent; }
+                }
                 VerticalLayout {
                     padding: 20px; spacing: 12px;
                     Label { height: 13px; text: "NEWS"; color: Theme.accent-hover; font-size: 10px; font-weight: 700; }
@@ -149,15 +152,21 @@ export component ReleasesPage inherits Rectangle {
             }
             if root.loading: Rectangle {
                 height: 80px; background: Theme.panel; border-radius: 20px; border-width: 1px; border-color: Theme.border;
-                Label { x: 20px; text: I18n.i18n("releases.loading", "Загрузка релизов…"); color: Theme.muted; }
+                HorizontalLayout { padding-left: 20px; padding-right: 20px;
+                    Label { text: I18n.i18n("releases.loading", "Загрузка релизов…"); color: Theme.muted; }
+                }
             }
             if root.error != "": Rectangle {
                 height: 76px; background: Theme.panel; border-radius: 18px; border-width: 1px; border-color: Theme.border;
-                Label { x: 18px; width: parent.width - 36px; text: root.error; color: Theme.warning; wrap: word-wrap; overflow: clip; }
+                HorizontalLayout { padding-left: 18px; padding-right: 18px;
+                    Label { text: root.error; color: Theme.warning; wrap: word-wrap; overflow: clip; }
+                }
             }
             if !root.loading && root.error == "" && root.prereleases.length == 0 && root.releases.length == 0: Rectangle {
                 height: 76px; background: Theme.panel; border-radius: 18px; border-width: 1px; border-color: Theme.border;
-                Label { x: 18px; text: I18n.i18n("releases.empty", "Релизы пока не найдены."); color: Theme.muted; }
+                HorizontalLayout { padding-left: 18px; padding-right: 18px;
+                    Label { text: I18n.i18n("releases.empty", "Релизы пока не найдены."); color: Theme.muted; }
+                }
             }
             if root.filter != 1 && root.prereleases.length > 0: VerticalLayout {
                 padding: 0px; spacing: 12px;

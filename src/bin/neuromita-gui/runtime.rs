@@ -31,7 +31,6 @@ pub enum Command {
     Abort,
     Diagnostics,
     NewPreset,
-    CreatePreset(PresetRecord, uuid::Uuid),
     UpdatePreset(PresetId, PresetRecord),
     DeletePreset(PresetId),
     ActivePreset(PresetId),
@@ -61,8 +60,9 @@ pub enum Update {
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
-    PresetDraft(PresetRecord),
-    AdminSaved(Option<(PresetId, uuid::Uuid)>),
+    PresetCreated(PresetId, PresetRecord),
+    AdminSaved,
+    PresetSaved(PresetId),
     AdminError(String),
     Stopped,
     Connecting,
@@ -226,13 +226,22 @@ async fn observe(
             biased;
             _ = stop.cancelled() => return Ok(()),
             command = receive.recv() => match command {
-                Some(command @ (Command::CreatePreset(..) | Command::UpdatePreset(..) | Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_))) => {
+                Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
-                        Ok(id) => publish(Update::AdminSaved(id)),
+                        Ok(()) => publish(Update::PresetSaved(id)),
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(Command::NewPreset) => publish(Update::PresetDraft(administration.presets.new_draft())),
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_))) => {
+                    match super::settings::execute(administration, command) {
+                        Ok(()) => publish(Update::AdminSaved),
+                        Err(error) => publish(Update::AdminError(error)),
+                    }
+                },
+                Some(Command::NewPreset) => match administration.presets.create_unconfigured() {
+                    Ok((id, record)) => publish(Update::PresetCreated(id, record)),
+                    Err(error) => publish(Update::AdminError(error.to_string())),
+                },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
                 Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
