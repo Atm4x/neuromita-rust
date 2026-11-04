@@ -23,6 +23,7 @@ pub mod runtime_status;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
+pub mod speech_languages;
 pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;

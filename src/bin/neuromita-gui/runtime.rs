@@ -3,12 +3,14 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 use neuromita::{
     ai_runtime::{
         runtime_status::{RuntimePhase, RuntimeSnapshot},
+        speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
         controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
         input_catalog::{AudioInputCatalog, AudioInputDevice},
+        session::{SpeechConversation, SpeechFuture, SpeechSessionError},
     },
     character::CharacterId,
     generation::PresetRecord,
@@ -67,6 +69,11 @@ pub enum Command {
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
     SpeechSessionStatus(SpeechSessionSnapshot),
+    RecognizedText {
+        text: String,
+        auto_send_after: Option<Duration>,
+        merge_with_draft: bool,
+    },
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
@@ -161,10 +168,36 @@ fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> O
     .find(|path| path.is_absolute() && path.is_file())
 }
 
+struct DesktopTranscriptSink(mpsc::UnboundedSender<Transcript>);
+
+impl SpeechConversation for DesktopTranscriptSink {
+    fn reply<'a>(
+        &'a self,
+        transcript: &'a Transcript,
+    ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
+        Box::pin(async move {
+            self.0
+                .send(transcript.clone())
+                .map_err(|_| SpeechSessionError::DispatchClosed)?;
+            Ok(None)
+        })
+    }
+}
+
+fn dispatch_policy(preferences: &AsrPreferences) -> Option<Duration> {
+    preferences.instant_send.then(|| {
+        if preferences.delayed_send {
+            Duration::from_millis(u64::from(preferences.send_delay_ms))
+        } else {
+            Duration::ZERO
+        }
+    })
+}
+
 async fn enable_speech_session(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
-    character: CharacterId,
+    conversation: Arc<dyn SpeechConversation>,
 ) -> Result<(), String> {
     let administration = app.presenter();
     let runtime = administration.ai_runtime.refresh_status().await;
@@ -204,7 +237,7 @@ async fn enable_speech_session(
     .ok_or("FFplay не найден; укажите абсолютный путь к исполняемому файлу")?;
     let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
         .map_err(|e| e.to_string())?;
-    app.start_speech_capture(config, character)
+    app.start_speech_capture_routed(config, conversation)
         .await
         .map_err(|e| e.to_string())
 }
@@ -313,6 +346,8 @@ async fn observe(
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
+    let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
+    let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -361,7 +396,7 @@ async fn observe(
                 },
                 Some(Command::SpeechSessionEnabled(enabled)) => {
                     let result = if enabled {
-                        enable_speech_session(app, directory, character).await
+                        enable_speech_session(app, directory, Arc::clone(&transcript_sink)).await
                     } else {
                         app.stop_speech_capture().await;
                         Ok(())
@@ -423,6 +458,19 @@ async fn observe(
                     Ok(()) => {},
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+            },
+            transcript = transcript_updates.recv() => {
+                if let Some(transcript) = transcript {
+                    let text = transcript.text.trim();
+                    if !text.is_empty() {
+                        let preferences = administration.settings.asr.preferences.get();
+                        publish(Update::RecognizedText {
+                            text: text.to_owned(),
+                            auto_send_after: dispatch_policy(&preferences),
+                            merge_with_draft: preferences.merge_chat,
+                        });
+                    }
+                }
             },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
             result = speech_status.changed() => {
@@ -520,4 +568,37 @@ async fn hardware_snapshot() -> Update {
                 },
             );
     Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
+}
+
+#[cfg(test)]
+mod speech_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn manual_speech_does_not_trigger_reply() {
+        let mut settings = AsrPreferences::default();
+        assert_eq!(dispatch_policy(&settings), None);
+        settings.instant_send = true;
+        settings.delayed_send = false;
+        assert_eq!(dispatch_policy(&settings), Some(Duration::ZERO));
+        settings.delayed_send = true;
+        settings.send_delay_ms = 2400;
+        assert_eq!(
+            dispatch_policy(&settings),
+            Some(Duration::from_millis(2400))
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_sink_only_delivers_transcripts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = DesktopTranscriptSink(tx);
+        sink.reply(&Transcript {
+            text: "spoken words".into(),
+            language: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap().text, "spoken words");
+    }
 }

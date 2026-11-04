@@ -149,6 +149,39 @@ pub(super) fn render_catalog(
 
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::RecognizedText {
+            text,
+            auto_send_after,
+            merge_with_draft,
+        } => {
+            let previous = window.get_chat_draft();
+            let combined = if previous.trim().is_empty() {
+                text
+            } else {
+                format!(
+                    "{}{}{}",
+                    previous,
+                    if merge_with_draft { " " } else { "\n" },
+                    text
+                )
+            };
+            window.set_chat_draft(combined.clone().into());
+            if let Some(delay) = auto_send_after {
+                if delay.is_zero() {
+                    window.invoke_chat_send(combined.into());
+                } else {
+                    let weak = window.as_weak();
+                    slint::Timer::single_shot(delay, move || {
+                        if let Some(window) = weak.upgrade()
+                            && window.get_chat_draft() == combined
+                            && !window.get_chat_sending()
+                        {
+                            window.invoke_chat_send(combined.into());
+                        }
+                    });
+                }
+            }
+        }
         Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);

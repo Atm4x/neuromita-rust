@@ -5,6 +5,7 @@ use neuromita::{
         AiService,
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech_catalog::SpeechInventory,
+        speech_languages::asr_language_capability,
     },
     audio::{
         controller::{SpeechSessionPhase, SpeechSessionSnapshot},
@@ -36,51 +37,21 @@ fn millis(value: &str, field: &str) -> Result<u32, String> {
 }
 
 fn language_id(name: &str) -> String {
-    match name {
-        "Русский" => "ru",
-        "English" => "en",
-        "Автоматически" => "auto",
-        other => other,
-    }
-    .into()
+    name.rsplit_once(" (")
+        .and_then(|(_, suffix)| suffix.strip_suffix(')'))
+        .unwrap_or(name)
+        .to_owned()
 }
-fn language_name(id: &str) -> String {
-    match id {
-        "ru" => "Русский",
-        "en" => "English",
-        "auto" => "Автоматически",
-        other => other,
-    }
-    .into()
-}
-fn language_capability(id: &str) -> (&'static [&'static str], &'static str, &'static str) {
-    match id {
-        "gigaam" | "gigaam_onnx" => (
-            &["Русский"],
-            "ru",
-            "Для GigaAM доступен только русский язык",
-        ),
-        "mock_asr" => (
-            &["Русский", "English"],
-            "ru",
-            "Языки определены схемой mock ASR",
-        ),
-        "google" => (
-            &[],
-            "ru-RU",
-            "Выбор языка недоступен: схема Google ASR не содержит вариантов",
-        ),
-        "whisper" | "whisper_onnx" => (
-            &[],
-            "ru",
-            "Варианты языка этой модели настраиваются в AI Engine",
-        ),
-        _ => (
-            &[],
-            "",
-            "У выбранной модели нет объявленных вариантов языка",
-        ),
-    }
+
+fn language_label(plugin_id: &str, language: &str) -> String {
+    asr_language_capability(plugin_id)
+        .and_then(|capability| {
+            capability
+                .choices
+                .iter()
+                .find(|choice| choice.id == language)
+        })
+        .map_or_else(|| language.to_owned(), |choice| choice.label.clone())
 }
 
 fn mode_id(name: &str) -> String {
@@ -138,11 +109,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     ui.set_runtime_ready(false);
     ui.set_active(false);
     ui.set_status("Настройки доступны; микрофон не запущен".into());
-    ui.set_languages(ModelRc::new(VecModel::from(vec![
-        "Русский".into(),
-        "English".into(),
-        "Автоматически".into(),
-    ])));
+    ui.set_languages(ModelRc::new(VecModel::from(
+        Vec::<slint::SharedString>::new(),
+    )));
     ui.set_input_modes(ModelRc::new(VecModel::from(vec![
         "Рация — включать кнопкой".into(),
         "Слушать постоянно".into(),
@@ -186,24 +155,33 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
     ui.set_pause_while_speaking(settings.pause_while_speaking);
     ui.set_send_delay(format!("{:.2}", settings.send_delay_ms as f64 / 1000.0).into());
     ui.set_input_mode(mode_name(&settings.input_mode).into());
-    let (languages, default_language, hint) = language_capability(&settings.recognizer_id);
+    let capability = asr_language_capability(&settings.recognizer_id);
     ui.set_languages(ModelRc::new(VecModel::from(
-        languages
-            .iter()
-            .map(|value| (*value).into())
-            .collect::<Vec<_>>(),
+        capability
+            .map(|capability| {
+                capability
+                    .choices
+                    .iter()
+                    .map(|choice| slint::SharedString::from(choice.label.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     )));
-    ui.set_language(
-        language_name(
-            settings
-                .model_languages
-                .get(&settings.recognizer_id)
-                .map(String::as_str)
-                .unwrap_or(default_language),
-        )
-        .into(),
+    let default_language = capability.map_or("", |capability| capability.default.as_str());
+    let language = settings
+        .model_languages
+        .get(&settings.recognizer_id)
+        .map(String::as_str)
+        .unwrap_or(default_language);
+    ui.set_language(language_label(&settings.recognizer_id, language).into());
+    ui.set_language_hint(
+        capability
+            .map_or(
+                "Выбранный плагин не объявил список языков",
+                |capability| capability.hint.as_str(),
+            )
+            .into(),
     );
-    ui.set_language_hint(hint.into());
     ui.set_sample_rate("16000".into());
     ui.set_chunk_size(settings.chunk_size.to_string().into());
     ui.set_vad_threshold(format!("{:.2}", f64::from(settings.vad_threshold_milli) / 1000.0).into());
@@ -273,10 +251,16 @@ mod tests {
     use super::*;
     #[test]
     fn asr_languages_follow_original_model_schemas() {
-        assert_eq!(language_capability("gigaam").0, &["Русский"]);
-        assert_eq!(language_capability("google").0, &[] as &[&str]);
-        assert_eq!(language_capability("google").1, "ru-RU");
-        assert_eq!(language_capability("mock_asr").0, &["Русский", "English"]);
+        assert_eq!(
+            asr_language_capability("google").unwrap().choices.len(),
+            102
+        );
+        assert_eq!(
+            asr_language_capability("whisper").unwrap().choices.len(),
+            101
+        );
+        assert_eq!(language_id(&language_label("google", "en-US")), "en-US");
+        assert_eq!(language_id(&language_label("whisper", "auto")), "auto");
     }
 
     #[test]

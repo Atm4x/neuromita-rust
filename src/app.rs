@@ -749,6 +749,37 @@ impl ApplicationLifecycle {
         Some((handler, self.stop.child_token()))
     }
 
+    /// Starts a microphone session with a caller-owned transcript destination.
+    /// Desktop routing uses this rather than implicitly submitting every transcript.
+    pub async fn start_speech_capture_routed(
+        &self,
+        config: crate::audio::controller::SpeechCaptureConfig,
+        conversation: Arc<dyn crate::audio::session::SpeechConversation>,
+    ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
+        let mut controller = self.speech_controller.lock().await;
+        let runtime = self.presenter.ai_runtime.refresh_status().await;
+        if runtime.service(crate::ai_runtime::AiService::Asr).phase
+            != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
+        {
+            return Err(crate::audio::controller::SpeechCaptureError::Invalid(
+                "ASR model must be initialized before capturing audio".into(),
+            ));
+        }
+        let recognizer = self.speech.as_ref().ok_or_else(|| {
+            crate::audio::controller::SpeechCaptureError::Invalid(
+                "ASR worker has not been activated".into(),
+            )
+        })?;
+        let handler = crate::audio::session::SpeechInputHandler::new(
+            Arc::clone(recognizer),
+            conversation,
+            crate::audio::controller::playback(&config),
+        );
+        controller
+            .start(handler, self.stop.child_token(), config)
+            .await
+    }
+
     /// Starts capture only if an ASR worker was explicitly provided to this application.
     pub async fn start_speech_capture(
         &self,
