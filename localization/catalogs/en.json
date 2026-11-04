@@ -1332,8 +1332,8 @@
     "translation": "Model name"
   },
   "settings.preset.key-placeholder": {
-    "source": "env:ИМЯ или local:ИМЯ",
-    "translation": "env:NAME or local:NAME"
+    "source": "Введите API ключ",
+    "translation": "Enter API key"
   },
   "settings.preset.models-link": {
     "source": "Список моделей",

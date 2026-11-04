@@ -138,6 +138,7 @@ export component StatusRow inherits HorizontalLayout {
 }
 
 export component Field inherits Rectangle {
+    in property <bool> masked: false;
     in-out property <string> text;
     in property <string> placeholder;
     in property <bool> enabled: true;
@@ -149,7 +150,7 @@ export component Field inherits Rectangle {
     HorizontalLayout { padding-left: root.leading-glyph == "" ? 10px : 8px; padding-right: 10px; spacing: 14px;
         if root.leading-glyph != "": Glyph { width: 16px; text: root.leading-glyph; color: SandboxTheme.muted; }
         Rectangle { horizontal-stretch: 1; min-width: 0px;
-            editor := TextInput { text <=> root.text; enabled: root.enabled;
+            editor := TextInput { text <=> root.text; enabled: root.enabled; input-type: root.masked ? InputType.password : InputType.text;
                 font-family: root.font-family; font-size: 12px; color: SandboxTheme.text;
                 single-line: true; vertical-alignment: center; selection-background-color: SandboxTheme.accent; selection-foreground-color: white;
             }
