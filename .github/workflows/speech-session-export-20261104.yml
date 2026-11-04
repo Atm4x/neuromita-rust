@@ -1,0 +1,28 @@
+name: Speech Session Source Bundle
+on:
+  push:
+    branches: [bridge/speech-session-source-export-20261104]
+  workflow_dispatch:
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Bundle main and speech runtime
+        run: |
+          mkdir -p /tmp/bridge
+          git fetch --no-tags origin '+refs/heads/main:refs/heads/export-main'
+          git fetch --no-tags origin '+refs/heads/codex/speech-runtime-desktop-20261104:refs/heads/export-speech-runtime'
+          git bundle create /tmp/bridge/speech-session-source.bundle refs/heads/export-main refs/heads/export-speech-runtime
+          git bundle verify /tmp/bridge/speech-session-source.bundle
+          git bundle list-heads /tmp/bridge/speech-session-source.bundle > /tmp/bridge/refs.txt
+          sha256sum /tmp/bridge/speech-session-source.bundle > /tmp/bridge/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speech-session-source
+          path: /tmp/bridge/
+          retention-days: 3
