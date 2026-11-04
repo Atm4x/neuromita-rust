@@ -1,0 +1,32 @@
+name: Speech Contracts Latest Bundle
+on:
+  push:
+    branches: [bridge/speech-contracts-latest-export-20261104]
+  workflow_dispatch:
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Make verified bundle
+        shell: bash
+        run: |
+          git fetch --no-tags origin '+refs/heads/main:refs/heads/audit-0'
+          git fetch --no-tags origin '+refs/heads/codex/slint-layout-only-parity-20261104:refs/heads/audit-1'
+          git fetch --no-tags origin '+refs/heads/codex/tts-asr-presenters-connected-20261104:refs/heads/audit-2'
+          git fetch --no-tags origin '+refs/heads/codex/ai-engine-slint-pyqt-20261104:refs/heads/audit-3'
+          git fetch --no-tags origin '+refs/heads/codex/asr-pyqt-slint-parity-20261104:refs/heads/audit-4'
+          mkdir -p /tmp/speech-export
+          git bundle create /tmp/speech-export/latest-speech.bundle $(git for-each-ref --format='%(refname)' refs/heads/audit-)
+          git bundle verify /tmp/speech-export/latest-speech.bundle
+          git bundle list-heads /tmp/speech-export/latest-speech.bundle > /tmp/speech-export/refs.txt
+          sha256sum /tmp/speech-export/latest-speech.bundle > /tmp/speech-export/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speech-contracts-latest-branches
+          path: /tmp/speech-export
+          retention-days: 3
