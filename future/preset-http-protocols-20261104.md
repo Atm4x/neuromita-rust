@@ -14,7 +14,7 @@ Branch: `codex/preset-http-protocols-20261104`.
 - [x] Reject truncated/refused replies and unsupported native tool outputs.
 - [x] Final default/GUI tests, both Clippy configurations, formatting and GUI build.
 - [x] Stage and install newly supported Python presets without overwriting existing edits.
-- [ ] Publish through PR to main.
+- [x] Published through [PR #86](https://github.com/Atm4x/neuromita-rust/pull/86), merge `206eee8a`.
 
 ## Boundaries
 
@@ -54,3 +54,19 @@ Import produced six presets with one explicit ChatGPT Plan blocker. Presets 19
 and 20 were added to the local application catalog and credential store with
 backups; existing presets and active selection were preserved. These local data
 files and secrets are excluded from commits.
+
+## Next checkpoint
+
+- [ ] ChatGPT Plan/OAuth/account handling and forced streaming; preset 16 stays blocked.
+- [ ] Decide the editable template-catalog contract before consuming arbitrary imported descriptors.
+- [ ] Advanced per-profile parameter/transform editor and reserve routing, if needed beyond this slice.
+- [ ] Review and repair the later speech chain before merging it.
+
+The final fetch also found `codex/tts-asr-schema-forms-20261104` (`2d780ebe`),
+which adds dynamic Python-schema forms over `9573deb2`. An ancestry/targeted check
+confirms that its chain still contains `InstalledSpeechEnvironment::for_desktop`
+falling back to the source SDK/plugin tree and the hidden ten-second capture
+clamp (`.min(MAX_SPEECH_FRAMES)`). It was fetched but is not claimed fully reviewed
+or merged. Keep its useful forms/language/runtime work together with explicit
+installed-path handling and coherent settings/IPC/audio duration bounds, rather
+than taking the chain wholesale with those unresolved contracts.
