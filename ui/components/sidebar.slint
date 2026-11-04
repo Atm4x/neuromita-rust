@@ -95,5 +95,7 @@ export component Sidebar inherits Rectangle {
             Label { text: root.version; color: Theme.muted; horizontal-alignment: right; font-size: 10px; min-width: 0px; }
         }
     }
-    Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: #ffffff0f; }
+    HorizontalLayout { padding: 0px; alignment: end;
+        Rectangle { width: 1px; background: #ffffff0f; }
+    }
 }

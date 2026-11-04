@@ -105,14 +105,15 @@ export component MemoryPanel inherits Rectangle {
                     background: SandboxTheme.input; border-radius: 8px;
                     border-width: 1px; border-color: SandboxTheme.border;
                     min-height: 112px; vertical-stretch: 1;
-                    ScrollView {
-                        x: 10px; y: 10px; width: parent.width - 20px; height: parent.height - 20px;
-                        content-width: self.visible-width;
-                        TextInput {
-                            enabled: MemoryUi.editing;
-                            text <=> MemoryUi.content;
-                            color: SandboxTheme.text; font-family: SandboxTheme.font-family;
-                            font-size: 12px; wrap: word-wrap; single-line: false;
+                    HorizontalLayout { padding: 10px;
+                        ScrollView {
+                            content-width: self.visible-width;
+                            TextInput {
+                                enabled: MemoryUi.editing;
+                                text <=> MemoryUi.content;
+                                color: SandboxTheme.text; font-family: SandboxTheme.font-family;
+                                font-size: 12px; wrap: word-wrap; single-line: false;
+                            }
                         }
                     }
                 }
