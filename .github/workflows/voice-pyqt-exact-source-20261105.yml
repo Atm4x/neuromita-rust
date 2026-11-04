@@ -1,0 +1,36 @@
+name: Export pinned voice PyQt parity source
+on:
+  push:
+    branches:
+      - bridge/voice-pyqt-exact-source-20261105
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create verified pinned git bundle
+        shell: bash
+        env:
+          BASE_SHA: 51d87276e5441ac7ed220c3999e352790a5e8f92
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git update-ref refs/heads/voice-pinned "${BASE_SHA}"
+          git bundle create voice-pinned.bundle refs/heads/voice-pinned
+          git bundle verify voice-pinned.bundle
+          sha256sum voice-pinned.bundle > voice-pinned.bundle.sha256
+          printf '%s\n' "${BASE_SHA}" > voice-pinned.commit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voice-pyqt-exact-source
+          path: |
+            voice-pinned.bundle
+            voice-pinned.bundle.sha256
+            voice-pinned.commit
+          retention-days: 3
+          if-no-files-found: error
