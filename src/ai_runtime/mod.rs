@@ -1051,19 +1051,19 @@ pub async fn fetch_speech_plugin_inspection(
             ));
         }
         let mut selected = settings_overrides.as_object().cloned().unwrap_or_default();
-        if fields.contains_key("language") {
-            if let Some(language) = language_hint {
-                let language = Value::String(language.into());
-                if selected
-                    .get("language")
-                    .is_some_and(|value| value != &language)
-                {
-                    return Err(AiRuntimeError::Protocol(
-                        "conflicting language selection and model override".into(),
-                    ));
-                }
-                selected.insert("language".into(), language);
+        if fields.contains_key("language")
+            && let Some(language) = language_hint
+        {
+            let language = Value::String(language.into());
+            if selected
+                .get("language")
+                .is_some_and(|value| value != &language)
+            {
+                return Err(AiRuntimeError::Protocol(
+                    "conflicting language selection and model override".into(),
+                ));
             }
+            selected.insert("language".into(), language);
         }
         let requested = Value::Object(selected);
         let effective = worker
