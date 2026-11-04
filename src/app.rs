@@ -94,6 +94,8 @@ pub struct ApplicationConfig {
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
     pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
+    pub ai_installed_speech:
+        Option<crate::ai_runtime::installed_speech::InstalledSpeechEnvironment>,
     pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
@@ -133,6 +135,7 @@ impl ApplicationConfig {
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
             ai_speech_inventory: None,
+            ai_installed_speech: None,
             ai_hardware: None,
             ai_knowledge: None,
             settings: SettingsConfig {
@@ -155,6 +158,16 @@ impl ApplicationConfig {
     ) -> Self {
         self.ai_runtime = Some(plan);
         self.ai_speech_inventory = Some(inventory);
+        self
+    }
+
+    /// Resolve already installed speech workers after settings migration.
+    /// Missing dependencies never cause installs, downloads or backend substitution.
+    pub fn with_installed_speech_runtime(
+        mut self,
+        environment: crate::ai_runtime::installed_speech::InstalledSpeechEnvironment,
+    ) -> Self {
+        self.ai_installed_speech = Some(environment);
         self
     }
 
@@ -265,6 +278,7 @@ pub struct ApplicationLifecycle {
     finetune: Option<FineTuneCollector>,
     speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
     speech_controller: tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
+    speech_startup_warning: Option<String>,
     id: Uuid,
     stop: CancellationToken,
     completion: Option<oneshot::Receiver<Result<(), ApplicationError>>>,
@@ -367,6 +381,7 @@ impl ApplicationLifecycle {
             voice,
             ai_runtime,
             ai_speech_inventory,
+            ai_installed_speech,
             ai_hardware,
             ai_knowledge,
             settings,
@@ -393,29 +408,60 @@ impl ApplicationLifecycle {
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let settings_owner = settings.owner();
-        let ai_runtime = match (ai_runtime, ai_speech_inventory) {
-            (Some(plan), Some(inventory)) => {
+        let mut speech_startup_warning = None;
+        let auto_speech = ai_installed_speech.is_some();
+        let ai_runtime = match (ai_runtime, ai_speech_inventory, ai_installed_speech) {
+            (Some(plan), Some(inventory), None) => {
                 let saved = settings_owner.snapshot_all()?.values.speech.clone();
                 Some(plan.with_speech_settings(&saved, &inventory).await?)
             }
-            (Some(plan), None) => Some(plan),
-            (None, Some(_)) => {
-                return Err(AiApplicationError::Invalid(
-                    "speech inventory requires a prepared AI application plan".into(),
-                )
-                .into());
+            (Some(plan), None, None) => Some(plan),
+            (None, None, Some(environment)) => {
+                let mut saved = settings_owner.snapshot_all()?.values.speech.clone();
+                if !saved.tts.local_auto_load {
+                    saved.tts.enabled = false;
+                }
+                match environment.prepare_from_saved(&saved).await {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        speech_startup_warning = Some(error.to_string());
+                        None
+                    }
+                }
             }
-            (None, None) => None,
+            (None, None, None) => None,
+            _ => return Err(AiApplicationError::Invalid(
+                "speech runtime must use either an explicit prepared plan or installed discovery"
+                    .into(),
+            )
+            .into()),
         };
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let ai_runtime = match (ai_runtime, ai_hardware) {
+            (Some(configuration), Some(path)) if auto_speech => {
+                speech_startup_warning = Some(format!(
+                    "automatic speech activation cannot combine with hardware selection at {}",
+                    path.display()
+                ));
+                let _ = configuration;
+                None
+            }
             (Some(configuration), Some(path)) => {
                 let store = crate::ai_runtime::hardware::HardwareConfigStore::new(path);
                 let selected = store.load().map_err(|error| {
                     crate::ai_runtime::application::AiApplicationError::Invalid(error.to_string())
                 })?;
                 Some(Box::pin(configuration.activate_with_hardware(&selected, &store)).await?)
+            }
+            (Some(configuration), None) if auto_speech => {
+                match Box::pin(configuration.activate()).await {
+                    Ok(running) => Some(running),
+                    Err(error) => {
+                        speech_startup_warning = Some(error.to_string());
+                        None
+                    }
+                }
             }
             (Some(configuration), None) => Some(Box::pin(configuration.activate()).await?),
             (None, Some(_)) => {
@@ -557,6 +603,19 @@ impl ApplicationLifecycle {
         );
         if let Some(runtime) = &ai_runtime {
             ai_runtime_status = ai_runtime_status.with_supervisor(runtime.supervisor_weak());
+        } else if let Some(reason) = &speech_startup_warning {
+            let speech = bindings.settings.snapshot_all()?.values.speech.clone();
+            let mut services = Vec::new();
+            if speech.tts.enabled
+                && speech.tts.local_auto_load
+                && speech.tts.backend == crate::settings::TtsBackend::Local
+            {
+                services.push(crate::ai_runtime::AiService::Tts);
+            }
+            if !speech.asr.recognizer_id.is_empty() {
+                services.push(crate::ai_runtime::AiService::Asr);
+            }
+            ai_runtime_status = ai_runtime_status.with_startup_failure(&services, reason);
         }
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
@@ -616,6 +675,7 @@ impl ApplicationLifecycle {
             finetune,
             speech,
             speech_controller: tokio::sync::Mutex::new(speech_controller),
+            speech_startup_warning,
             id,
             stop,
             completion: Some(completion),
@@ -681,6 +741,10 @@ impl ApplicationLifecycle {
         pressed: bool,
     ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
         self.speech_controller.lock().await.press(pressed).await
+    }
+
+    pub fn speech_startup_warning(&self) -> Option<&str> {
+        self.speech_startup_warning.as_deref()
     }
 
     pub fn presenter(&self) -> &GuiPresenter {

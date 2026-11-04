@@ -243,7 +243,12 @@ async fn start(
         }
         None => ApplicationConfig::persistent_unconfigured(generator, limits, bind, directory),
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .with_installed_speech_runtime(
+        neuromita::ai_runtime::installed_speech::InstalledSpeechEnvironment::for_desktop(
+            directory.to_path_buf(),
+        ),
+    );
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
@@ -271,6 +276,9 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    if let Some(problem) = app.speech_startup_warning() {
+        publish(Update::AdminError(format!("Speech runtime: {problem}")));
+    }
     publish(hardware_snapshot().await);
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),

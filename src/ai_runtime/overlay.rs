@@ -91,6 +91,42 @@ impl LockedOverlay {
     }
 }
 
+/// Read the pinned overlay receipt without installing or rewriting the layer.
+pub fn load_installed_overlay(
+    overlays_directory: &std::path::Path,
+    plugin_id: &str,
+    revision: &str,
+) -> Result<(LockedOverlay, PathBuf), OverlayError> {
+    if !overlays_directory.is_absolute() || !valid_segment(plugin_id) || !valid_segment(revision) {
+        return Err(LayerError::Invalid(
+            "invalid installed overlay location".into(),
+        ));
+    }
+    let path = overlays_directory.join(plugin_id).join(revision);
+    let marker = path.join(".neuromita-overlay.json");
+    if path.is_symlink() || marker.is_symlink() {
+        return Err(LayerError::Conflict);
+    }
+    if let Ok(stat) = std::fs::metadata(&marker) {
+        if !stat.is_file() || stat.len() > 131_072 {
+            return Err(LayerError::Conflict);
+        }
+    }
+    let bytes = std::fs::read(&marker).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            LayerError::NotInstalled(path.display().to_string())
+        } else {
+            LayerError::Io(error)
+        }
+    })?;
+    let locked: LockedOverlay = serde_json::from_slice(&bytes).map_err(|_| LayerError::Conflict)?;
+    locked.validate()?;
+    if locked.plugin_id != plugin_id || locked.revision != revision {
+        return Err(LayerError::Conflict);
+    }
+    Ok((locked, path))
+}
+
 impl OverlayInstaller {
     fn layer(&self) -> LayerInstaller<'_> {
         LayerInstaller {
