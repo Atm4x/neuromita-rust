@@ -133,6 +133,10 @@ impl InstalledSpeechEnvironment {
         let mut selected = Vec::new();
         for service in [AiService::Tts, AiService::Asr] {
             if let Some(selection) = select_speech_model(speech, inventory, service)? {
+                let overlay_directory = self.ai_data().join("overlays").join(&selection.plugin_id);
+                if entries(&overlay_directory)?.is_empty() {
+                    continue;
+                }
                 selected.push(selection);
             }
         }
@@ -462,6 +466,33 @@ mod tests {
         std::fs::create_dir_all(root.join("overlays/mock_asr/rev2")).unwrap();
         assert!(installed_overlay(&root, "mock_asr").is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn selected_but_uninstalled_asr_remains_inactive_without_failing_startup() {
+        let data = std::env::temp_dir().join(format!("speech-missing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let cfg = InstalledSpeechEnvironment {
+            data_directory: data.clone(),
+            sdk_root: PathBuf::from("/nonexistent"),
+            plugins_directory: PathBuf::from("/nonexistent"),
+            timeout: Duration::from_secs(5),
+        };
+        let mut settings = SpeechSettings::default();
+        settings.asr.recognizer_id = "gigaam".into();
+        let inventory = SpeechInventory {
+            asr: vec![super::super::speech_catalog::SpeechModelOption {
+                id: "gigaam".into(),
+                name: "GigaAM".into(),
+                package_detected: false,
+                verified_assets: false,
+                installed_revisions: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(cfg.prepare(&settings, &inventory).await.unwrap().is_none());
+        assert_eq!(settings.asr.recognizer_id, "gigaam");
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[tokio::test]
