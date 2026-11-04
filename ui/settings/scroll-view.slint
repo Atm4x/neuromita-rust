@@ -2,6 +2,7 @@ import { SettingsTheme } from "theme.slint";
 
 export component SettingsScrollView inherits Rectangle {
     in property <length> content-height;
+    in property <length> viewport-width: root.width - (root.scrollable ? SettingsTheme.scrollbar-width : 0px);
     in-out property <length> content-y <=> viewport.content-y;
     out property <length> visible-width: viewport.width;
     out property <length> visible-height: root.height;
@@ -18,7 +19,7 @@ export component SettingsScrollView inherits Rectangle {
 
     viewport := Flickable {
         content-x: 0px;
-        width: parent.width - (root.scrollable ? SettingsTheme.scrollbar-width : 0px);
+        width: root.viewport-width;
         height: parent.height;
         content-width: self.width;
         content-height: root.content-height;

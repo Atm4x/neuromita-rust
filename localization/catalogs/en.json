@@ -1584,8 +1584,8 @@
     "translation": "The test sends text to the provider. Paid models consume API balance."
   },
   "asr.status.unavailable": {
-    "source": "Распознавание не запущено",
-    "translation": "Recognition is stopped"
+    "source": "—",
+    "translation": "—"
   },
   "asr.active": {
     "source": "Микрофон активен",

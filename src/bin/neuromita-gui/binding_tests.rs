@@ -519,6 +519,22 @@ fn memory_render_and_contract(window: &AppWindow) {
         ))
         .await
         .unwrap();
+        super::super::settings::execute(
+            app.presenter(),
+            super::super::runtime::Command::SelectAsrRecognizer("whisper".into()),
+        )
+        .unwrap();
+        let mut absent_dropdown = app.presenter().settings.asr.preferences.get();
+        absent_dropdown.recognizer_id.clear();
+        super::super::settings::execute(
+            app.presenter(),
+            super::super::runtime::Command::SaveAsr(absent_dropdown, None),
+        )
+        .unwrap();
+        assert_eq!(
+            app.presenter().settings.asr.preferences.get().recognizer_id,
+            "whisper"
+        );
         let initial_revision = app.presenter().settings.snapshot().unwrap().revision;
         super::super::settings::execute(
             app.presenter(),

@@ -401,9 +401,10 @@ export component SettingsPage inherits Rectangle {
                     }
                 }
                 if SettingsUi.section == 6: AiEngineWorkspace {}
-                if SettingsUi.section == 5: SettingsScrollView {
+                if SettingsUi.section == 5: asr-scroll := SettingsScrollView {
+                    viewport-width: self.width - SettingsTheme.scrollbar-width;
                     content-height: asr-page.preferred-height;
-                    asr-page := AsrSettingsPage { width: parent.width; }
+                    asr-page := AsrSettingsPage { width: asr-scroll.visible-width; }
                 }
                 if SettingsUi.section == 4: LanguageSettingsPage {
                     language-selected(code) => { root.language-selected(code); }

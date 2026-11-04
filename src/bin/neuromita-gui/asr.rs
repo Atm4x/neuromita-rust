@@ -73,7 +73,7 @@ fn mode_name(id: &str) -> String {
     .into()
 }
 
-fn read(window: &AppWindow) -> Result<(AsrPreferences, String), String> {
+fn read(window: &AppWindow) -> Result<(AsrPreferences, Option<String>), String> {
     let ui = window.global::<AsrUi>();
     let model = model_id(&ui.get_recognizer());
     let options = AsrPreferences {
@@ -100,15 +100,43 @@ fn read(window: &AppWindow) -> Result<(AsrPreferences, String), String> {
         max_speech_ms: millis(&ui.get_max_speech(), "Максимальная речь")?,
         min_speech_ms: millis(&ui.get_min_speech(), "Минимальная речь")?,
     };
-    Ok((options, language_id(&ui.get_language())))
+    Ok((
+        options,
+        (ui.get_recognition_available() && !ui.get_language().is_empty())
+            .then(|| language_id(&ui.get_language())),
+    ))
 }
 
 pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let ui = window.global::<AsrUi>();
+    let weak_numbers = window.as_weak();
+    ui.on_step_number(move |value, minimum, maximum, step, decimals, up| {
+        let parsed = value
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite());
+        if let Some(number) = parsed {
+            let adjusted = (number
+                + if up {
+                    f64::from(step)
+                } else {
+                    -f64::from(step)
+                })
+            .clamp(f64::from(minimum), f64::from(maximum));
+            format!("{:.*}", decimals.clamp(0, 6) as usize, adjusted).into()
+        } else {
+            if let Some(window) = weak_numbers.upgrade() {
+                window
+                    .global::<super::view::SettingsUi>()
+                    .set_settings_error("Invalid numeric value".into());
+            }
+            value
+        }
+    });
     ui.set_draft_enabled(true);
     ui.set_runtime_ready(false);
     ui.set_active(false);
-    ui.set_status("Настройки доступны; микрофон не запущен".into());
+    ui.set_status("—".into());
     ui.set_languages(ModelRc::new(VecModel::from(
         Vec::<slint::SharedString>::new(),
     )));
@@ -130,7 +158,15 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
-    ui.on_recognizer_changed(move |value| send(Command::SelectAsrRecognizer(model_id(&value))));
+    let selection_window = window.as_weak();
+    ui.on_recognizer_changed(move |value| {
+        if let Some(window) = selection_window.upgrade() {
+            let ui = window.global::<AsrUi>();
+            ui.set_recognition_available(false);
+            ui.set_language("".into());
+        }
+        send(Command::SelectAsrRecognizer(model_id(&value)));
+    });
     let send = dispatch.clone();
     ui.on_refresh_models(move || send(Command::RefreshSpeechInventory));
     let refresh = dispatch.clone();
@@ -146,6 +182,8 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
         .get_recognizers()
         .iter()
         .find(|entry| model_id(entry) == settings.recognizer_id);
+    let available = chosen.is_some();
+    ui.set_recognition_available(available);
     ui.set_recognizer(chosen.unwrap_or_else(|| "".into()));
     ui.set_device(settings.device_id.clone().into());
     ui.set_audio_backend(settings.audio_backend.clone().into());
@@ -155,7 +193,11 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
     ui.set_pause_while_speaking(settings.pause_while_speaking);
     ui.set_send_delay(format!("{:.2}", settings.send_delay_ms as f64 / 1000.0).into());
     ui.set_input_mode(mode_name(&settings.input_mode).into());
-    let capability = asr_language_capability(&settings.recognizer_id);
+    let capability = if available {
+        asr_language_capability(&settings.recognizer_id)
+    } else {
+        None
+    };
     ui.set_languages(ModelRc::new(VecModel::from(
         capability
             .map(|capability| {
@@ -173,13 +215,14 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
         .get(&settings.recognizer_id)
         .map(String::as_str)
         .unwrap_or(default_language);
-    ui.set_language(language_label(&settings.recognizer_id, language).into());
+    ui.set_language(if available {
+        language_label(&settings.recognizer_id, language).into()
+    } else {
+        "".into()
+    });
     ui.set_language_hint(
         capability
-            .map_or(
-                "Выбранный плагин не объявил список языков",
-                |capability| capability.hint.as_str(),
-            )
+            .map_or("", |capability| capability.hint.as_str())
             .into(),
     );
     ui.set_sample_rate("16000".into());
@@ -254,6 +297,48 @@ pub fn preview(window: &AppWindow) {
     ui.set_runtime_ready(false);
 }
 
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let service = snapshot.service(AiService::Asr);
+    let ui = window.global::<AsrUi>();
+    ui.set_worker_failed(service.phase == RuntimePhase::Failed);
+    ui.set_worker_idle(service.phase == RuntimePhase::Stopped);
+    ui.set_runtime_ready(service.phase == RuntimePhase::ModelReady);
+    ui.set_worker_status(super::speech_status::describe(&service).into());
+    display_status(&ui);
+}
+
+pub fn session_status(window: &AppWindow, snapshot: &SpeechSessionSnapshot) {
+    let ui = window.global::<AsrUi>();
+    ui.set_session_failed(snapshot.phase == SpeechSessionPhase::Failed);
+    ui.set_session_idle(snapshot.phase == SpeechSessionPhase::Stopped);
+    ui.set_active(snapshot.phase == SpeechSessionPhase::Listening);
+    let message = match snapshot.phase {
+        SpeechSessionPhase::Stopped => "Микрофон остановлен".to_owned(),
+        SpeechSessionPhase::Starting => "Запуск микрофона".to_owned(),
+        SpeechSessionPhase::Listening => {
+            "Микрофон слушает (максимум 10 секунд на фразу)".to_owned()
+        }
+        SpeechSessionPhase::Stopping => "Остановка микрофона".to_owned(),
+        SpeechSessionPhase::Failed => format!(
+            "Ошибка микрофона: {}",
+            snapshot
+                .last_error
+                .as_deref()
+                .unwrap_or("неизвестная ошибка")
+        ),
+    };
+    ui.set_session_status(message.into());
+    display_status(&ui);
+}
+
+fn display_status(ui: &AsrUi) {
+    ui.set_status(if ui.get_worker_idle() && ui.get_session_idle() {
+        "—".into()
+    } else {
+        format!("{} · {}", ui.get_session_status(), ui.get_worker_status()).into()
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,38 +362,4 @@ mod tests {
         assert!(millis("NaN", "VAD").is_err());
         assert!(millis("-1", "VAD").is_err());
     }
-}
-
-pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
-    let service = snapshot.service(AiService::Asr);
-    let ui = window.global::<AsrUi>();
-    ui.set_runtime_ready(service.phase == RuntimePhase::ModelReady);
-    ui.set_worker_status(super::speech_status::describe(&service).into());
-    display_status(&ui);
-}
-
-pub fn session_status(window: &AppWindow, snapshot: &SpeechSessionSnapshot) {
-    let ui = window.global::<AsrUi>();
-    ui.set_active(snapshot.phase == SpeechSessionPhase::Listening);
-    let message = match snapshot.phase {
-        SpeechSessionPhase::Stopped => "Микрофон остановлен".to_owned(),
-        SpeechSessionPhase::Starting => "Запуск микрофона".to_owned(),
-        SpeechSessionPhase::Listening => {
-            "Микрофон слушает (максимум 10 секунд на фразу)".to_owned()
-        }
-        SpeechSessionPhase::Stopping => "Остановка микрофона".to_owned(),
-        SpeechSessionPhase::Failed => format!(
-            "Ошибка микрофона: {}",
-            snapshot
-                .last_error
-                .as_deref()
-                .unwrap_or("неизвестная ошибка")
-        ),
-    };
-    ui.set_session_status(message.into());
-    display_status(&ui);
-}
-
-fn display_status(ui: &AsrUi) {
-    ui.set_status(format!("{} · {}", ui.get_session_status(), ui.get_worker_status()).into());
 }

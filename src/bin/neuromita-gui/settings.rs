@@ -120,8 +120,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveAsr(mut value, language) => {
-            value.model_languages = api.settings.asr.preferences.get().model_languages;
-            if !value.recognizer_id.is_empty() {
+            let current = api.settings.asr.preferences.get();
+            value.recognizer_id = current.recognizer_id;
+            value.model_languages = current.model_languages;
+            if let Some(language) = language
+                && !value.recognizer_id.is_empty()
+            {
                 value
                     .model_languages
                     .insert(value.recognizer_id.clone(), language);

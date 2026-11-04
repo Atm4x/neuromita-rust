@@ -51,7 +51,7 @@ pub enum Command {
     VoiceName(String),
     SaveTts(TtsPreferences),
     SaveCharacterVoice(Option<CharacterId>, String),
-    SaveAsr(AsrPreferences, String),
+    SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
     RefreshHardware,

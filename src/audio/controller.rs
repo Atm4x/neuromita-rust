@@ -339,8 +339,10 @@ mod tests {
     }
     #[test]
     fn device_identity_is_not_guessed() {
-        let mut settings = AsrPreferences::default();
-        settings.device_id = "".into();
+        let settings = AsrPreferences {
+            device_id: String::new(),
+            ..Default::default()
+        };
         let result =
             SpeechCaptureConfig::from_preferences(&settings, PathBuf::new(), PathBuf::new());
         assert!(matches!(result, Err(SpeechCaptureError::Invalid(_))));
