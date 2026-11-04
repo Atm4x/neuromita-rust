@@ -21,7 +21,8 @@ use crate::{
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GenerateContent {
-    system_instruction: Content,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<Content>,
     contents: Vec<Content>,
     generation_config: Config,
 }
@@ -44,11 +45,21 @@ struct Part {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Config {
-    temperature: f32,
-    max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<Value>,
     candidate_count: u32,
-    response_mime_type: String,
-    response_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_schema: Option<Value>,
 }
 
 fn content(role: Option<&str>, text: &str) -> Content {
@@ -116,25 +127,89 @@ pub(super) fn encode_observed(
         },
         text: Arc::from(message.text.as_str()),
     }));
+    encode_prompt(prompt, template)
+}
+
+fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> EncodedRequest {
+    if !template.options().structured_output {
+        prompt[0].text = format!(
+            "{}\nReturn only JSON conforming to this response schema:\n{}",
+            prompt[0].text,
+            gemini_message_schema()
+        )
+        .into();
+    }
+    let prompt = crate::generation::apply_message_transforms(prompt, template.transforms());
+    let mut prompt = crate::generation::apply_message_transforms(
+        prompt,
+        &[crate::generation::MessageTransform::SystemMessagesToUser {
+            tag: "[SYSTEM INFO]".into(),
+        }],
+    );
+    if let super::SystemInstructionMode::UserPrefix { tag } = &template.options().system_instruction
+    {
+        let instructions = prompt
+            .iter()
+            .filter(|m| m.role == PromptRole::System)
+            .map(|m| m.text.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        prompt.retain(|m| m.role != PromptRole::System);
+        if !instructions.trim().is_empty() {
+            let prefix = format!("{tag}\n{}\n\n", instructions.trim());
+            if let Some(message) = prompt.iter_mut().find(|m| m.role == PromptRole::User) {
+                message.text = format!("{prefix}{}", message.text).into();
+            } else {
+                prompt.insert(
+                    0,
+                    PromptMessage {
+                        role: PromptRole::User,
+                        text: prefix.into(),
+                    },
+                );
+            }
+        }
+    }
+    let instructions = prompt
+        .iter()
+        .filter(|m| m.role == PromptRole::System)
+        .map(|m| m.text.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let body = GenerateContent {
-        system_instruction: content(None, &conversation.system_instruction),
-        contents: conversation
-            .messages
-            .into_iter()
+        system_instruction: (!instructions.is_empty()).then(|| content(None, &instructions)),
+        contents: prompt
+            .iter()
+            .filter(|m| m.role != PromptRole::System)
             .map(|message| {
                 let role = match message.role {
-                    LlmRole::User => "user",
-                    LlmRole::Assistant => "model",
+                    PromptRole::Assistant => "model",
+                    _ => "user",
                 };
                 content(Some(role), &message.text)
             })
             .collect(),
         generation_config: Config {
-            temperature: template.settings().temperature(),
-            max_output_tokens: template.settings().max_output_tokens(),
+            temperature: template
+                .options()
+                .send_temperature
+                .then(|| template.settings().temperature()),
+            max_output_tokens: template
+                .options()
+                .send_max_output_tokens
+                .then(|| template.settings().max_output_tokens()),
+            top_p: template.options().top_p,
+            top_k: template.options().top_k,
+            thinking_config: template.options().thinking_json(),
             candidate_count: 1,
-            response_mime_type: "application/json".into(),
-            response_schema: gemini_message_schema(),
+            response_mime_type: template
+                .options()
+                .structured_output
+                .then(|| "application/json".into()),
+            response_schema: template
+                .options()
+                .structured_output
+                .then(gemini_message_schema),
         },
     };
     EncodedRequest { body, prompt }
@@ -671,5 +746,71 @@ mod tests {
             assert!(decode(&serde_json::to_vec(&body).unwrap()).is_err());
         }
         assert!(decode(b"not json").is_err());
+    }
+
+    #[test]
+    fn wire_and_diagnostic_prompt_use_the_same_transformed_messages_and_enabled_options() {
+        use crate::generation::{
+            MessageTransform,
+            gemini::{GeminiRequestOptions, GeminiThinking, ThinkingLevel},
+        };
+        let settings =
+            super::super::GenerationSettings::new(1.0, 3000, std::time::Duration::from_secs(2))
+                .unwrap();
+        let template = GeminiTemplate::google("fixture-model", "fixture-key", settings)
+            .unwrap()
+            .with_transforms(vec![
+                MessageTransform::SystemToUserPrefix {
+                    tag: "[SYSTEM CONTEXT]".into(),
+                },
+                MessageTransform::EnsureAlternatingRoles,
+            ])
+            .with_options(GeminiRequestOptions {
+                system_instruction: super::super::SystemInstructionMode::Native,
+                send_temperature: false,
+                send_max_output_tokens: true,
+                top_p: None,
+                top_k: None,
+                thinking: Some(GeminiThinking::Level {
+                    level: ThinkingLevel::Minimal,
+                    include_thoughts: None,
+                }),
+                structured_output: true,
+            })
+            .unwrap();
+        let encoded = encode_prompt(
+            vec![
+                PromptMessage {
+                    role: PromptRole::System,
+                    text: "instructions".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::User,
+                    text: "hello".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::User,
+                    text: "world".into(),
+                },
+            ],
+            &template,
+        );
+        let body = serde_json::to_value(encoded.body).unwrap();
+        assert!(body.get("systemInstruction").is_none());
+        assert!(body["generationConfig"].get("temperature").is_none());
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 3000);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel":"minimal"})
+        );
+        assert_eq!(body["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["contents"][0]["parts"][0]["text"],
+            encoded.prompt[0].text.as_ref()
+        );
+        assert_eq!(
+            encoded.prompt[0].text.as_ref(),
+            "[SYSTEM CONTEXT] instructions\n\nhello\n\nworld"
+        );
     }
 }

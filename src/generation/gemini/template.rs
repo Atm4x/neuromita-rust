@@ -5,6 +5,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PresetError {
+    #[error("invalid provider request options")]
+    Options,
     #[error("model must be a nonempty Gemini model identifier")]
     Model,
     #[error("API key must be nonempty without whitespace or control characters")]
@@ -60,6 +62,8 @@ pub struct GeminiTemplate {
     model: Arc<str>,
     api_key: Arc<str>,
     settings: GenerationSettings,
+    transforms: Vec<crate::generation::MessageTransform>,
+    options: super::GeminiRequestOptions,
 }
 
 impl fmt::Debug for GeminiTemplate {
@@ -125,7 +129,30 @@ impl GeminiTemplate {
             model: Arc::from(model),
             api_key: Arc::from(api_key),
             settings,
+            transforms: Vec::new(),
+            options: super::GeminiRequestOptions::default(),
         })
+    }
+
+    pub fn with_transforms(mut self, transforms: Vec<crate::generation::MessageTransform>) -> Self {
+        self.transforms = transforms;
+        self
+    }
+
+    pub fn transforms(&self) -> &[crate::generation::MessageTransform] {
+        &self.transforms
+    }
+
+    pub fn with_options(
+        mut self,
+        options: super::GeminiRequestOptions,
+    ) -> Result<Self, PresetError> {
+        options.validate()?;
+        self.options = options;
+        Ok(self)
+    }
+    pub fn options(&self) -> &super::GeminiRequestOptions {
+        &self.options
     }
 
     pub fn model(&self) -> &str {

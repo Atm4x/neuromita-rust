@@ -85,8 +85,8 @@ impl GenerationProvider for ScriptedProvider {
                 provider: ProviderKind::Gemini,
                 model: "fixture-model".into(),
                 endpoint: "https://example.test/v1beta".into(),
-                temperature: 0.7,
-                max_output_tokens: 128,
+                temperature: Some(0.7),
+                max_output_tokens: Some(128),
                 prompt,
                 payload_json: "{\"systemInstruction\":\"fixture system prompt\",\"url\":\"https://user:pass@example.test/v1?key=encoded-url-key\"}".into(),
                 captured_at: SystemTime::now(),
@@ -188,7 +188,7 @@ async fn success_captures_exact_artifacts_usage_and_redacted_exports() {
         .unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.request.model.as_ref(), "fixture-model");
-    assert_eq!(call.request.temperature, 0.7);
+    assert_eq!(call.request.temperature, Some(0.7));
     call.reply
         .send(Scripted::Success {
             raw: json!({"segments":[{"text":"answer"}]}).to_string(),

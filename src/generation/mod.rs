@@ -1,20 +1,26 @@
 mod conversation;
 pub(crate) use conversation::LlmConversation;
+mod credentials;
 mod effects;
 pub mod gemini;
 mod presets;
+pub use credentials::{ApplicationPresetCredentials, CredentialReference};
 mod provider;
+pub mod python_import;
 mod structured;
+mod transforms;
 pub use effects::ResponseEffect;
 pub use presets::{
-    EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
-    PresetCatalogError, PresetCatalogSnapshot, PresetCredentials, PresetDefinition, PresetId,
-    PresetRecord, PresetRepository,
+    EnvironmentPresetCredentials, GeminiConnectionEdit, GeminiPresetDefinition,
+    JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetCatalogSnapshot,
+    PresetConnectionEdit, PresetCredentials, PresetDefinition, PresetId, PresetRecord,
+    PresetRepository, PresetTemplate,
 };
 pub use structured::{
     RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
     WorkingState,
 };
+pub use transforms::{MessageTransform, apply_message_transforms};
 
 pub use provider::{
     GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,

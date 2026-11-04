@@ -1048,8 +1048,8 @@
     "translation": "Model"
   },
   "settings.api-preset.key-env": {
-    "source": "API ключ (переменная окружения)",
-    "translation": "API key (environment variable)"
+    "source": "API ключ (ссылка)",
+    "translation": "API key (reference)"
   },
   "settings.preset.reserve-keys": {
     "source": "Резервные ключи",
@@ -1332,8 +1332,8 @@
     "translation": "Model name"
   },
   "settings.preset.key-placeholder": {
-    "source": "Имя переменной окружения",
-    "translation": "Environment variable name"
+    "source": "env:ИМЯ или local:ИМЯ",
+    "translation": "env:NAME or local:NAME"
   },
   "settings.preset.models-link": {
     "source": "Список моделей",

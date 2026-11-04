@@ -34,13 +34,15 @@ pub struct PresetParameterOption {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresetView {
+    pub send_temperature: bool,
+    pub send_max_output_tokens: bool,
     pub id: PresetId,
     pub configured: bool,
     pub name: String,
     pub model: String,
     pub provider: &'static str,
     pub endpoint: String,
-    pub credential_env: String,
+    pub credential: String,
     pub temperature: f32,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
@@ -69,6 +71,16 @@ pub struct PresetsPresenter {
 }
 
 impl PresetsPresenter {
+    pub fn template(id: &str) -> Result<crate::generation::PresetTemplate, PresetCatalogError> {
+        match id {
+            "gemini" => Ok(crate::generation::PresetTemplate::for_provider(
+                crate::generation::ProviderKind::Gemini,
+            )),
+            _ => Err(PresetCatalogError::Invalid(format!(
+                "unsupported provider template: {id}"
+            ))),
+        }
+    }
     pub(crate) fn new(catalog: Arc<PresetCatalog>) -> Self {
         Self { catalog }
     }
@@ -93,7 +105,7 @@ impl PresetsPresenter {
                     provider,
                     model,
                     endpoint,
-                    credential_env,
+                    credential,
                     temperature,
                     max_output_tokens,
                     timeout_ms,
@@ -113,20 +125,22 @@ impl PresetsPresenter {
                         "google",
                         definition.model.clone(),
                         definition.endpoint.clone(),
-                        definition.credential_env.clone(),
+                        definition.credential.to_string(),
                         definition.temperature,
                         definition.max_output_tokens,
                         definition.timeout_ms,
                     ),
                 };
                 PresetView {
+                    send_temperature: matches!(&record.definition, PresetDefinition::Gemini(config) if config.options.send_temperature),
+                    send_max_output_tokens: matches!(&record.definition, PresetDefinition::Gemini(config) if config.options.send_max_output_tokens),
                     id,
                     configured,
                     name: record.name.clone(),
                     model,
                     provider,
                     endpoint,
-                    credential_env,
+                    credential,
                     temperature,
                     max_output_tokens,
                     timeout_ms,
@@ -154,7 +168,7 @@ impl PresetsPresenter {
     }
 
     pub fn providers() -> Vec<ProviderOption> {
-        const CATALOG: &[(&str, &str, &str, &str, &str, &str, bool)] = &[
+        const CATALOG: &[(&str, &str, &str, &str, &str, &str)] = &[
             (
                 "gemini",
                 "Google AI Studio",
@@ -162,7 +176,6 @@ impl PresetsPresenter {
                 "https://ai.google.dev/gemini-api/docs",
                 "mixed",
                 "",
-                true,
             ),
             (
                 "openrouter",
@@ -171,7 +184,6 @@ impl PresetsPresenter {
                 "https://openrouter.ai/docs/quickstart",
                 "mixed",
                 "",
-                false,
             ),
             (
                 "mistral",
@@ -180,10 +192,9 @@ impl PresetsPresenter {
                 "https://docs.mistral.ai/",
                 "mixed",
                 "",
-                false,
             ),
-            ("aiio", "Ai.iO", "aiio", "", "paid", "", false),
-            ("proxyapi", "ProxyAPI", "proxyapi", "", "paid", "ru", false),
+            ("aiio", "Ai.iO", "aiio", "", "paid", ""),
+            ("proxyapi", "ProxyAPI", "proxyapi", "", "paid", "ru"),
             (
                 "groq",
                 "Groq",
@@ -191,7 +202,6 @@ impl PresetsPresenter {
                 "https://console.groq.com/docs/overview",
                 "mixed",
                 "",
-                false,
             ),
             (
                 "together",
@@ -200,9 +210,8 @@ impl PresetsPresenter {
                 "https://docs.together.ai/",
                 "mixed",
                 "",
-                false,
             ),
-            ("chutes", "Chutes", "chutes", "", "paid", "", false),
+            ("chutes", "Chutes", "chutes", "", "paid", ""),
             (
                 "lmstudio",
                 "LM Studio",
@@ -210,7 +219,6 @@ impl PresetsPresenter {
                 "https://lmstudio.ai/docs",
                 "free",
                 "local",
-                false,
             ),
             (
                 "ollama",
@@ -219,7 +227,6 @@ impl PresetsPresenter {
                 "https://docs.ollama.com/",
                 "free",
                 "local",
-                false,
             ),
             (
                 "kodikrouter",
@@ -228,7 +235,6 @@ impl PresetsPresenter {
                 "",
                 "paid",
                 "ru",
-                false,
             ),
             (
                 "openai",
@@ -237,7 +243,6 @@ impl PresetsPresenter {
                 "https://platform.openai.com/docs/api-reference/responses",
                 "paid",
                 "",
-                false,
             ),
             (
                 "codex",
@@ -246,13 +251,12 @@ impl PresetsPresenter {
                 "",
                 "paid",
                 "subscription",
-                false,
             ),
         ];
         CATALOG
             .iter()
             .map(
-                |&(id, name, icon, documentation, pricing, badge_kind, supported)| ProviderOption {
+                |&(id, name, icon, documentation, pricing, badge_kind)| ProviderOption {
                     id,
                     name,
                     icon,
@@ -274,7 +278,7 @@ impl PresetsPresenter {
                     },
                     pricing,
                     badge_kind,
-                    supported,
+                    supported: Self::template(id).is_ok(),
                 },
             )
             .collect()
@@ -443,6 +447,14 @@ impl PresetsPresenter {
         self.catalog.create(record)
     }
 
+    pub fn update_connection(
+        &self,
+        id: PresetId,
+        edit: crate::generation::PresetConnectionEdit,
+    ) -> Result<(), PresetCatalogError> {
+        self.catalog.update_connection(id, edit)
+    }
+
     pub fn update(&self, id: PresetId, record: PresetRecord) -> Result<(), PresetCatalogError> {
         self.catalog.update(id, record)
     }
@@ -494,9 +506,11 @@ mod tests {
         let mut draft = PresetRecord {
             name: "test-preset".into(),
             definition: PresetDefinition::Gemini(crate::generation::GeminiPresetDefinition {
+                options: Default::default(),
+                transforms: Vec::new(),
                 endpoint: crate::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into(),
                 model: "test-model".into(),
-                credential_env: "TEST_KEY_ENV".into(),
+                credential: "TEST_KEY_ENV".into(),
                 temperature: 0.7,
                 max_output_tokens: 3000,
                 timeout_ms: 60000,
@@ -506,7 +520,7 @@ mod tests {
             unreachable!()
         };
         definition.model = "test-model".into();
-        definition.credential_env = "TEST_KEY_ENV".into();
+        definition.credential = "TEST_KEY_ENV".into();
         definition.temperature = 1.3;
         definition.max_output_tokens = 2500;
         let created = (&presenter as &dyn PresetsApi).create(draft).unwrap();
@@ -518,7 +532,7 @@ mod tests {
             .unwrap();
         assert_eq!(record.name, "test-preset");
         assert_eq!(record.model, "test-model");
-        assert_eq!(record.credential_env, "TEST_KEY_ENV");
+        assert_eq!(record.credential, "env:TEST_KEY_ENV");
         assert_eq!(record.temperature, 1.3);
         assert_eq!(record.max_output_tokens, 2500);
         assert!(

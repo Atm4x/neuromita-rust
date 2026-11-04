@@ -554,8 +554,8 @@ pub struct ProviderRequestTrace {
     pub provider: String,
     pub model: BoundedText,
     pub endpoint: BoundedText,
-    pub temperature: f32,
-    pub max_output_tokens: u32,
+    pub temperature: Option<f32>,
+    pub max_output_tokens: Option<u32>,
     pub body: BoundedText,
 }
 

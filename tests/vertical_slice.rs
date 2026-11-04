@@ -29,6 +29,97 @@ use uuid::Uuid;
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn factory_preset_is_saved_selected_generated_and_reloaded_through_presenters() {
+    use neuromita::generation::{
+        JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetCredentials,
+    };
+    use neuromita::presentation::PresetsPresenter;
+    struct Credentials;
+    impl PresetCredentials for Credentials {
+        fn get(&self, key: &str) -> Result<String, PresetCatalogError> {
+            if key == "FIXTURE_GEMINI_KEY" {
+                Ok("test-key".into())
+            } else {
+                Err(PresetCatalogError::MissingCredential(key.into()))
+            }
+        }
+    }
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let directory = std::env::temp_dir().join(format!("factory-sandbox-{}", Uuid::new_v4()));
+    let setup = || {
+        let mut config = ApplicationConfig::persistent_unconfigured(
+            ResponseGenerator::new([
+                Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+            ])
+            .unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &directory,
+        )
+        .unwrap();
+        config.presets = PresetCatalog::open(
+            Default::default(),
+            Arc::new(JsonPresetRepository::new(directory.join("presets.json"))),
+            Arc::new(Credentials),
+        )
+        .unwrap();
+        config
+    };
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    let (id, _) = app.presenter().presets.create_unconfigured().unwrap();
+    assert!(app.presenter().presets.require_configured(id).is_err());
+    let mut template = PresetsPresenter::template("gemini").unwrap();
+    template.endpoint = server.endpoint.clone();
+    assert!(
+        template
+            .configure("fixture".into(), "".into(), "FIXTURE_GEMINI_KEY".into())
+            .is_err()
+    );
+    assert!(PresetsPresenter::template("unknown").is_err());
+    let record = template
+        .configure(
+            "factory fixture".into(),
+            "test-model".into(),
+            "FIXTURE_GEMINI_KEY".into(),
+        )
+        .unwrap();
+    app.presenter().presets.update(id, record).unwrap();
+    app.presenter().settings.presets.active.set(id).unwrap();
+    let request = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "factory path".into())
+        .unwrap();
+    let call = server.next().await;
+    assert_eq!(call.body["generationConfig"]["maxOutputTokens"], 3000);
+    call.respond.send(Reply::Text("factory response")).unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    let stored = std::fs::read_to_string(directory.join("presets.json")).unwrap();
+    assert!(stored.contains("FIXTURE_GEMINI_KEY"));
+    assert!(!stored.contains("test-key"));
+    let reopened = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert_eq!(reopened.presenter().settings.presets.active.get(), id);
+    assert!(
+        reopened
+            .presenter()
+            .conversation
+            .snapshot(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .model
+            .is_ok()
+    );
+    reopened.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
 async fn every_builtin_character_has_an_owner_and_independent_context() {
     let _serial = CORE_TEST_MUTEX.lock().await;
     let server = GeminiServer::start().await;
@@ -2532,9 +2623,11 @@ async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
     let make = |model: &str| PresetRecord {
         name: model.into(),
         definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            options: Default::default(),
+            transforms: Vec::new(),
             endpoint: "http://127.0.0.1:8800/v1beta/".into(),
             model: model.into(),
-            credential_env: "EXAMPLE_GEMINI_KEY".into(),
+            credential: "EXAMPLE_GEMINI_KEY".into(),
             temperature: 0.7,
             max_output_tokens: 128,
             timeout_ms: 2000,
@@ -2571,9 +2664,11 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     let record = |model: &str| PresetRecord {
         name: model.to_owned(),
         definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            options: Default::default(),
+            transforms: Vec::new(),
             endpoint: "http://127.0.0.1:8100/v1beta/".to_owned(),
             model: model.to_owned(),
-            credential_env: "EXAMPLE_GEMINI_KEY".to_owned(),
+            credential: "EXAMPLE_GEMINI_KEY".into(),
             temperature: 0.7,
             max_output_tokens: 256,
             timeout_ms: 5000,
@@ -2713,9 +2808,11 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
         .create(PresetRecord {
             name: "Explicit".into(),
             definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                options: Default::default(),
+                transforms: Vec::new(),
                 endpoint: "http://127.0.0.1:1/v1beta/".into(),
                 model: "explicit-model".into(),
-                credential_env: "NEUROMITA_MISSING_FIXTURE_CREDENTIAL_42".into(),
+                credential: "NEUROMITA_MISSING_FIXTURE_CREDENTIAL_42".into(),
                 temperature: 0.7,
                 max_output_tokens: 100,
                 timeout_ms: 1000,

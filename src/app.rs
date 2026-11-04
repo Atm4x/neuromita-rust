@@ -24,8 +24,8 @@ use crate::{
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
     games::GamePolicy,
     generation::{
-        EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
-        PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
+        GenerationPreset, JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetId,
+        PresetRepository, ResponseGenerator,
     },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
@@ -194,8 +194,13 @@ impl ApplicationConfig {
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
-        config.presets =
-            PresetCatalog::open(runtime, repository, Arc::new(EnvironmentPresetCredentials))?;
+        config.presets = PresetCatalog::open(
+            runtime,
+            repository,
+            Arc::new(crate::generation::ApplicationPresetCredentials::new(
+                data_directory.join("preset-credentials.json"),
+            )),
+        )?;
         config.settings = SettingsConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
@@ -519,6 +524,9 @@ impl ApplicationLifecycle {
             games: Arc::clone(&games),
             reminders,
         });
+        let ai_runtime_status = crate::presentation::RuntimeStatePresenter::new(
+            ai_runtime.as_ref().map(|runtime| runtime.observe_status()),
+        );
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),
@@ -552,6 +560,7 @@ impl ApplicationLifecycle {
         });
         Ok(Self {
             presenter: GuiPresenter {
+                ai_runtime: ai_runtime_status,
                 releases,
                 connections: ConnectionsPresenter::new(server.clone()),
                 conversation: ConversationPresenter::new(
