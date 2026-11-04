@@ -97,10 +97,12 @@ pub struct VoiceSettingsPresenter {
 
 pub struct TtsSettingsPresenter {
     pub preferences: BoundProperty<TtsPreferences>,
+    pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
 }
 
 pub struct AsrSettingsPresenter {
     pub preferences: BoundProperty<AsrPreferences>,
+    pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
 }
 
 pub struct PresetsSettingsPresenter {
@@ -256,6 +258,15 @@ impl SettingsPresenter {
                             .map(|_| ())
                     },
                 ),
+                model_options: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.tts_model_options.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.tts_model_options = value)
+                            .map(|_| ())
+                    },
+                ),
             },
             asr: AsrSettingsPresenter {
                 preferences: BoundProperty::new(
@@ -264,6 +275,15 @@ impl SettingsPresenter {
                     |owner, value| {
                         owner
                             .edit::<SpeechSettings>(|settings| settings.asr = value)
+                            .map(|_| ())
+                    },
+                ),
+                model_options: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.asr_model_options.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.asr_model_options = value)
                             .map(|_| ())
                     },
                 ),

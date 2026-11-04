@@ -19,6 +19,8 @@ pub mod production;
 pub mod resolver;
 pub mod speech;
 pub mod speech_catalog;
+pub mod speech_inspection;
+pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;
 pub mod voice_profile;
@@ -992,6 +994,133 @@ pub async fn fetch_install_plan_for(
     let value = result?;
     serde_json::from_value(value)
         .map_err(|error| AiRuntimeError::Protocol(format!("invalid install plan: {error}")))
+}
+
+/// Query SDK metadata and readiness without initializing a model or changing a running worker.
+/// Dependency layers must belong to the selected plugin's installed environment.
+pub async fn fetch_speech_plugin_inspection(
+    config: &PythonHostConfig,
+    service: AiService,
+    plugin_id: &str,
+    settings_overrides: Value,
+    language_hint: Option<&str>,
+    asset_revision: Option<&str>,
+    dependency_layers: &[PathBuf],
+) -> Result<speech_inspection::SpeechPluginInspection, AiRuntimeError> {
+    if !matches!(service, AiService::Tts | AiService::Asr)
+        || !layer::valid_segment(plugin_id)
+        || asset_revision.is_some_and(|revision| !layer::valid_segment(revision))
+        || language_hint.is_some_and(|language| language.len() > 64 || language.contains('\0'))
+        || !settings_overrides.is_object()
+        || serde_json::to_vec(&settings_overrides).is_ok_and(|bytes| bytes.len() > 32_768)
+    {
+        return Err(AiRuntimeError::Protocol(
+            "invalid speech plugin selection".into(),
+        ));
+    }
+    let model = ModelActivation {
+        service,
+        plugin_id: plugin_id.into(),
+        settings: json!({}),
+        asset_revision: asset_revision.map(str::to_owned),
+    };
+    let mut worker = WorkerProcess::launch(config, dependency_layers, &[model]).await?;
+    let result = async {
+        let discovered = worker.request("discover", &json!({})).await?;
+        let recognized = discovered.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("id").and_then(Value::as_str) == Some(plugin_id)
+                    && item.get("kind").and_then(Value::as_str) == Some(service.kind())
+                    && item.get("discovery_status").and_then(Value::as_str) == Some("available")
+            })
+        });
+        if !recognized {
+            return Err(AiRuntimeError::Protocol(
+                "selected plugin not discovered with the requested speech service".into(),
+            ));
+        }
+        let args = json!({ "plugin_id": plugin_id });
+        let schema = worker.request("settings_schema", &args).await?;
+        let fields = schema.as_object().ok_or_else(|| {
+            AiRuntimeError::Protocol("plugin settings schema is not an object".into())
+        })?;
+        if fields.len() > 128 || serde_json::to_vec(&schema).is_ok_and(|json| json.len() > 131_072)
+        {
+            return Err(AiRuntimeError::Protocol(
+                "plugin settings schema exceeds bounds".into(),
+            ));
+        }
+        let mut selected = settings_overrides.as_object().cloned().unwrap_or_default();
+        if fields.contains_key("language") {
+            if let Some(language) = language_hint {
+                let language = Value::String(language.into());
+                if selected
+                    .get("language")
+                    .is_some_and(|value| value != &language)
+                {
+                    return Err(AiRuntimeError::Protocol(
+                        "conflicting language selection and model override".into(),
+                    ));
+                }
+                selected.insert("language".into(), language);
+            }
+        }
+        let requested = Value::Object(selected);
+        let effective = worker
+            .request(
+                "validate_config",
+                &json!({"plugin_id": plugin_id, "settings": requested}),
+            )
+            .await?;
+        if !effective.is_object()
+            || serde_json::to_vec(&effective).is_ok_and(|json| json.len() > 65_536)
+        {
+            return Err(AiRuntimeError::Protocol(
+                "plugin validated settings are invalid or exceed bounds".into(),
+            ));
+        }
+        let dynamic = if requested
+            .as_object()
+            .is_some_and(|values| values.is_empty())
+        {
+            json!({})
+        } else {
+            effective.clone()
+        };
+        let install_plan = worker
+            .request(
+                "install_plan",
+                &json!({"plugin_id": plugin_id, "settings": dynamic}),
+            )
+            .await?;
+        let plan: install::PluginInstallPlan =
+            serde_json::from_value(install_plan).map_err(|error| {
+                AiRuntimeError::Protocol(format!("invalid plugin installation plan: {error}"))
+            })?;
+        let result = worker
+            .request(
+                "probe_install",
+                &json!({"plugin_id": plugin_id, "settings": dynamic}),
+            )
+            .await?;
+        let probe: speech_inspection::InstallProbe =
+            serde_json::from_value(result).map_err(|error| {
+                AiRuntimeError::Protocol(format!("invalid plugin installation probe: {error}"))
+            })?;
+        probe.validate()?;
+        Ok(speech_inspection::SpeechPluginInspection {
+            service,
+            plugin_id: plugin_id.into(),
+            settings_schema: schema,
+            effective_settings: effective,
+            install_plan: plan,
+            install_probe: probe,
+        })
+    }
+    .await;
+    let _ = worker.child.start_kill();
+    let _ = worker.child.wait().await;
+    result
 }
 
 pub struct PythonVoiceProvider {
