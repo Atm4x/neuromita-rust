@@ -247,9 +247,6 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                             if ui.get_preset_timeout().is_empty() {
                                 ui.set_preset_timeout(template.timeout_ms.to_string().into());
                             }
-                            if ui.get_preset_key_env().is_empty() {
-                                ui.set_preset_key_env(template.credential.to_string().into());
-                            }
                         }
                         Err(error) => ui.set_settings_error(error.to_string().into()),
                     }
@@ -318,6 +315,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             }
             if window.get_preset_template_id().is_empty() {
                 return Ok(PresetConnectionEdit {
+                    key: None,
                     name: window.get_preset_name().into(),
                     connection: None,
                 });
@@ -325,6 +323,9 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             let template = PresetsPresenter::template(window.get_preset_template_id().as_str())
                 .map_err(|e| e.to_string())?;
             Ok(PresetConnectionEdit {
+                key: Some(neuromita::generation::SecretKey::new(
+                    window.get_preset_key_env().to_string(),
+                )),
                 name: window.get_preset_name().into(),
                 connection: Some(PresetGenerationEdit {
                     protocol: template.protocol,
@@ -332,16 +333,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     send_max_output_tokens: window.get_preset_tokens_enabled(),
                     endpoint: window.get_preset_endpoint().into(),
                     model: window.get_preset_model().into(),
-                    credential: if window.get_preset_key_env() == "none" {
-                        None
-                    } else {
-                        Some(
-                            neuromita::generation::CredentialReference::parse(
-                                window.get_preset_key_env().as_str(),
-                            )
-                            .map_err(|error| error.to_string())?,
-                        )
-                    },
+                    credential: None,
                     temperature: window
                         .get_preset_temperature()
                         .parse()
@@ -610,7 +602,17 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             model: record.model.as_str().into(),
             provider: record.provider.into(),
             endpoint: record.endpoint.as_str().into(),
-            key_env: record.credential.as_str().into(),
+            key_env: record
+                .api_key
+                .as_ref()
+                .map(|key| key.expose())
+                .unwrap_or_default()
+                .into(),
+            key_error: record
+                .credential_error
+                .as_deref()
+                .unwrap_or_default()
+                .into(),
             temperature: if record.configured {
                 record.temperature.to_string().into()
             } else {
@@ -673,7 +675,11 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_name(record.name.clone());
     ui.set_preset_model(record.model.clone());
     ui.set_preset_endpoint(record.endpoint.clone());
+    ui.set_preset_key_revealed(false);
     ui.set_preset_key_env(record.key_env.clone());
+    if !record.key_error.is_empty() {
+        ui.set_settings_error(record.key_error.clone());
+    }
     ui.set_preset_temperature_enabled(record.temperature_enabled);
     ui.set_preset_tokens_enabled(record.tokens_enabled);
     ui.set_preset_output_token_wire_key(record.output_token_wire_key.clone());
@@ -730,6 +736,7 @@ pub fn clear_preset(ui: &SettingsUi) {
 pub fn created(window: &AppWindow, id: PresetId, record: &PresetRecord) {
     let ui = window.global::<SettingsUi>();
     let item = PresetItem {
+        key_error: "".into(),
         output_token_wire_key: "".into(),
         template_id: "".into(),
         temperature_enabled: false,

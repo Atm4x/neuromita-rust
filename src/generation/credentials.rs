@@ -2,6 +2,22 @@ use super::{PresetCatalogError, PresetCredentials};
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretKey(std::sync::Arc<str>);
+impl SecretKey {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into().into())
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+impl fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretKey([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", content = "name", rename_all = "snake_case")]
 pub enum CredentialReference {
@@ -60,13 +76,72 @@ impl fmt::Display for CredentialReference {
 
 pub struct ApplicationPresetCredentials {
     path: PathBuf,
+    writes: std::sync::Mutex<()>,
 }
 impl ApplicationPresetCredentials {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            writes: std::sync::Mutex::new(()),
+        }
     }
 }
 impl PresetCredentials for ApplicationPresetCredentials {
+    fn store(&self, key: &SecretKey) -> Result<CredentialReference, PresetCatalogError> {
+        use std::io::Write;
+        let value = key.expose();
+        if value.is_empty()
+            || value.len() > 16_384
+            || value.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(PresetCatalogError::Invalid(
+                "API key must be nonempty without whitespace".into(),
+            ));
+        }
+        let _guard = self.writes.lock().expect("credential store poisoned");
+        let mut values: std::collections::BTreeMap<String, String> = match std::fs::read(&self.path)
+        {
+            Ok(bytes) if bytes.len() <= 1_048_576 => {
+                serde_json::from_slice(&bytes).map_err(|_| {
+                    PresetCatalogError::Storage("invalid local credential store".into())
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            _ => {
+                return Err(PresetCatalogError::Storage(
+                    "cannot read local credential store".into(),
+                ));
+            }
+        };
+        let name = format!("preset_{}", uuid::Uuid::new_v4().simple());
+        values.insert(name.clone(), value.into());
+        let bytes = serde_json::to_vec_pretty(&values)
+            .map_err(|_| PresetCatalogError::Storage("cannot encode credential store".into()))?;
+        if bytes.len() > 1_048_576 {
+            return Err(PresetCatalogError::Storage(
+                "credential store exceeds bounds".into(),
+            ));
+        }
+        let temporary = self
+            .path
+            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        result.map_err(|_| {
+            PresetCatalogError::Storage("cannot save local credential store".into())
+        })?;
+        Ok(CredentialReference::Local(name))
+    }
     fn get(&self, name: &str) -> Result<String, PresetCatalogError> {
         super::EnvironmentPresetCredentials.get(name)
     }

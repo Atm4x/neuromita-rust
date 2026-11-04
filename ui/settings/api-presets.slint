@@ -34,6 +34,8 @@ component ApiFieldRow inherits VerticalLayout {
     in property <string> link-label;
     callback link-activated();
     in-out property <string> value;
+    in property <bool> secret: false;
+    in-out property <bool> revealed;
     in property <bool> editable: true;
     spacing: 6px; vertical-stretch: 0;
     HorizontalLayout { height: 16px; spacing: 8px;
@@ -44,7 +46,15 @@ component ApiFieldRow inherits VerticalLayout {
             activated => { root.link-activated(); }
         }
     }
-    SettingsField { text <=> root.value; placeholder: root.placeholder; enabled: root.editable; height: 40px; }
+    HorizontalLayout { spacing: 6px; height: 40px;
+        SettingsField { text <=> root.value; placeholder: root.placeholder; masked: root.secret && !root.revealed; enabled: root.editable; height: 40px; horizontal-stretch: 1; min-width: 0px; }
+        if root.secret: ActionSurface {
+            width: 30px; height: 40px; border-width: 0px; background: transparent;
+            enabled: root.editable; label: I18n.i18n("settings.preset.toggle-key", "Показать/скрыть ключ");
+            Glyph { width: 100%; height: 100%; font-size: 16px; color: SettingsTheme.muted; text: root.revealed ? "\u{f070}" : "\u{f06e}"; }
+            activated => { root.revealed = !root.revealed; }
+        }
+    }
 }
 
 component ApiParameterRow inherits HorizontalLayout {
@@ -325,7 +335,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                             }
                             HorizontalLayout { spacing: 16px;
                                 ApiFieldRow { title: I18n.i18n("settings.api-preset.model", "Модель"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.models-link", "Список моделей") : ""; link-activated => { SettingsUi.preset-help(1); } placeholder: I18n.i18n("settings.preset.model-placeholder", "Название модели"); value <=> SettingsUi.preset-model; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
-                                ApiFieldRow { title: I18n.i18n("settings.api-preset.key-label", "API ключ"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.key-link", "Получить ключ") : ""; link-activated => { SettingsUi.preset-help(2); } placeholder: I18n.i18n("settings.preset.key-placeholder", "env:ИМЯ или local:ИМЯ"); value <=> SettingsUi.preset-key-env; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
+                                ApiFieldRow { title: I18n.i18n("settings.api-preset.key-label", "API ключ"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.key-link", "Получить ключ") : ""; link-activated => { SettingsUi.preset-help(2); } secret: true; revealed <=> SettingsUi.preset-key-revealed; placeholder: I18n.i18n("settings.preset.key-placeholder", "Введите API ключ"); value <=> SettingsUi.preset-key-env; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
                             }
                             CollapsibleSettingsSection { title: I18n.i18n("settings.preset.reserve-keys", "Резервные ключи"); glyph: "\u{f084}"; expanded <=> SettingsUi.preset-reserve-keys-open;
                                 SettingsLabel { text: I18n.i18n("settings.preset.reserve-keys-disabled", "Резервные ключи пока не поддерживаются текущим API-ядром."); color: SettingsTheme.muted; wrap: word-wrap; }

@@ -42,6 +42,13 @@ ASR view → desktop command adapter → AudioInputPresenter → AudioInputOwner
 
 ## Verification
 
+Follow-up: the Language page also sizes its content against visible-width with
+the same 2 px outer padding as General. Its locale popup has a bounded, clipped
+background and a SettingsScrollView; all locale rows remain inside the popup.
+Disabled SettingsField uses the darker input surface, muted text and normal
+panel border, following the API editor QSS disabled state. Home's Rust icon uses
+the user-selected Rust color `#d34516` and 34×34 size from `home_page.py`.
+
 Native read-only inventory on this machine returned USB Audio, VB-Audio Virtual Cable, FIFINE K670 and Realtek inputs with distinct WASAPI endpoint IDs. `cargo run --locked --offline --example audio_devices` performs inventory only; explicit `--capture <backend> <stable-device-id>` performs a three-second capture check without saving audio.
 
 The explicit FIFINE K670 capture check received 186 PCM16 frames in three seconds, with nonzero signal (peak 3708). Audio was not saved. Auditory loopback quality and production-model recognition were not evaluated by this capture check. Native Linux CPAL builds require the platform ALSA development library; vendoring Rust crates does not bundle operating-system audio libraries.

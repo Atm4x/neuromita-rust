@@ -10,6 +10,7 @@ component StatusCard inherits Rectangle {
     in property <ComponentCard> model;
     in property <image> icon;
     in property <color> icon-color;
+    in property <length> icon-size: 28px;
     in property <bool> checked;
     callback toggled();
     min-width: 0px; preferred-width: 0px; horizontal-stretch: 1;
@@ -17,8 +18,8 @@ component StatusCard inherits Rectangle {
     HorizontalLayout {
         padding: 16px; padding-left: 20px; spacing: 14px;
         VerticalLayout {
-            width: 28px; padding: 0px; alignment: center;
-            Icon { width: 28px; height: 28px; source: root.icon; colorize: root.icon-color; }
+            width: root.icon-size; padding: 0px; alignment: center;
+            Icon { width: root.icon-size; height: root.icon-size; source: root.icon; colorize: root.icon-color; }
         }
         VerticalLayout {
             padding: 0px; spacing: 2px; alignment: center; min-width: 0px;
@@ -160,7 +161,7 @@ export component HomePage inherits Rectangle {
             Rectangle { vertical-stretch: 1; }
             HorizontalLayout {
                 height: 80px; spacing: 12px; padding: 0px;
-                StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.text; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
+                StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.rust; icon-size: 34px; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
             PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }

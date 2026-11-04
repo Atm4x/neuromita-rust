@@ -1,4 +1,8 @@
 {
+  "settings.preset.toggle-key": {
+    "source": "Показать/скрыть ключ",
+    "translation": "Show/hide key"
+  },
   "asr.device.choose": {
     "source": "Выберите устройство ввода",
     "translation": "Select an input device"
@@ -1344,8 +1348,8 @@
     "translation": "Model name"
   },
   "settings.preset.key-placeholder": {
-    "source": "env:ИМЯ или local:ИМЯ",
-    "translation": "env:NAME or local:NAME"
+    "source": "Введите API ключ",
+    "translation": "Enter API key"
   },
   "settings.preset.models-link": {
     "source": "Список моделей",
