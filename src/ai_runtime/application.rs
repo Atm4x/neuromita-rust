@@ -328,6 +328,9 @@ impl RunningAiApplication {
     pub(crate) fn supervisor(&self) -> &AiSupervisor {
         &self.supervisor
     }
+    pub(crate) fn supervisor_weak(&self) -> std::sync::Weak<AiSupervisor> {
+        Arc::downgrade(&self.supervisor)
+    }
     pub fn has_service(&self, service: AiService) -> bool {
         self.selected.contains(&service)
     }

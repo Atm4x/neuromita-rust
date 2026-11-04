@@ -173,6 +173,19 @@ impl SpeechSettings {
                 }
             }
         }
+        for (plugin, language) in &self.asr.model_languages {
+            if let Some(capability) =
+                crate::ai_runtime::speech_languages::asr_language_capability(plugin)
+                && !capability
+                    .choices
+                    .iter()
+                    .any(|choice| choice.id == *language)
+            {
+                return Err(SettingsError::Validation(format!(
+                    "unsupported ASR language {language} for {plugin}"
+                )));
+            }
+        }
         let a = &self.asr;
         if a.recognizer_id.len() > 128
             || a.device_id.len() > 512
@@ -203,6 +216,30 @@ impl SpeechSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_asr_languages_are_checked_before_persistence() {
+        let mut speech = SpeechSettings::default();
+        speech
+            .asr
+            .model_languages
+            .insert("google".into(), "en-US".into());
+        assert!(speech.validate().is_ok());
+        speech
+            .asr
+            .model_languages
+            .insert("google".into(), "en".into());
+        assert!(speech.validate().is_err());
+        speech
+            .asr
+            .model_languages
+            .insert("google".into(), "ru-RU".into());
+        speech
+            .asr
+            .model_languages
+            .insert("whisper".into(), "auto".into());
+        assert!(speech.validate().is_ok());
+    }
+
     #[test]
     fn strict_settings_reject_missing_fields_and_index_keys() {
         let settings = crate::settings::AppSettings::initial_profile();
