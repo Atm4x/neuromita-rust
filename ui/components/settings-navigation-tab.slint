@@ -6,10 +6,10 @@ export component SettingsNavigationTab inherits ActionSurface {
     in property <string> glyph;
     in property <bool> active;
     property <length> content-width: tab-caption.preferred-width + 42px;
-    width: max(54px, root.content-width);
+    min-width: max(54px, root.content-width);
     preferred-width: max(54px, root.content-width);
     height: 42px;
-    horizontal-stretch: 0;
+    horizontal-stretch: 1;
     vertical-stretch: 0;
     border-width: 0px;
     border-radius: 0px;

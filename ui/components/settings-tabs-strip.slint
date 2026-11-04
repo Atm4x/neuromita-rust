@@ -40,25 +40,24 @@ export component SettingsTabsStrip inherits Rectangle {
         viewport := Flickable {
             width: parent.width;
             height: 42px;
-            content-width: max(self.width, items.preferred-width);
+            content-width: items.width;
             content-height: self.height;
             mouse-drag-pan-enabled: false;
 
             items := HorizontalLayout {
-                width: self.preferred-width;
+                width: max(viewport.width, self.preferred-width);
                 height: 42px;
-                padding-left: 18px;
+                padding-left: 10px;
                 padding-right: 10px;
-                spacing: 5px;
+                spacing: 3px;
 
-                for entry in root.entries: HorizontalLayout {
-                    padding: 0px; spacing: 0px; horizontal-stretch: 0;
-                    if root.visibility[entry.section]: SettingsNavigationTab {
+                for entry in root.entries: SettingsNavigationTab {
+                    visible: root.visibility[entry.section];
                     label: entry.title;
                     glyph: entry.glyph;
                     active: root.active-section == entry.section;
+                    horizontal-stretch: 1;
                     activated => { root.selected(entry.section); }
-                    }
                 }
             }
         }

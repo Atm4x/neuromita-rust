@@ -222,7 +222,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
     in property <bool> in-chat;
     callback change-volume(int);
     callback change-chat(bool);
-    spacing: 14px; padding: 2px; alignment: start;
+    spacing: 14px; padding-left: 2px; padding-right: 10px; alignment: start;
     SettingsSectionHeading { title: I18n.i18n("voice.title", "Настройки озвучки"); description: I18n.i18n("voice.subtitle", "Голоса персонажей, подключение и воспроизведение."); glyph: "\u{f028}"; }
     VoiceCard { height: 70px; vertical-stretch: 0;
         HorizontalLayout { padding: 14px; spacing: 12px;
