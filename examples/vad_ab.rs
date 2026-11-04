@@ -1,40 +1,49 @@
 //! Offline A/B on the recorded corpus.
 //!
 //! Usage:
-//!   cargo run --example vad_ab -- <manifest.json> <direct|wavekat|silero> <threshold>
+//!   cargo run --example vad_ab -- <manifest.json> <direct|wavekat|silero> <threshold> [--validated-only]
 //!
 //! `silero` requires --features vad-silero plus NEUROMITA_SILERO_MODEL and
 //! NEUROMITA_ORT_DLL; `wavekat` requires --features vad-wavekat.
 
 use std::{env, error::Error, path::Path};
 
-use neuromita::audio::eval::evaluate_endpoint;
+use neuromita::audio::eval::evaluate_endpoint_with_policy;
 use neuromita::audio::score::DirectEarshotScores;
 use neuromita::audio::segment::SegmentConfig;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let validated_only = args.last().is_some_and(|arg| arg == "--validated-only");
+    if validated_only {
+        args.pop();
+    }
     let [manifest, provider, threshold] = args.as_slice() else {
-        return Err("usage: vad_ab <manifest.json> <direct|wavekat|silero> <threshold>".into());
+        return Err(
+            "usage: vad_ab <manifest.json> <direct|wavekat|silero> <threshold> [--validated-only]"
+                .into(),
+        );
     };
     let threshold: f32 = threshold.parse()?;
     let manifest = Path::new(manifest);
 
     let report = match provider.as_str() {
-        "direct" => evaluate_endpoint(
+        "direct" => evaluate_endpoint_with_policy(
             manifest,
-            DirectEarshotScores::default,
+            || Ok(DirectEarshotScores::default()),
             threshold,
             SegmentConfig::default(),
+            validated_only,
         )?,
         "wavekat" => {
             #[cfg(feature = "vad-wavekat")]
             {
-                evaluate_endpoint(
+                evaluate_endpoint_with_policy(
                     manifest,
-                    neuromita::audio::score::WavekatEarshotScores::new,
+                    || Ok(neuromita::audio::score::WavekatEarshotScores::new()),
                     threshold,
                     SegmentConfig::default(),
+                    validated_only,
                 )?
             }
             #[cfg(not(feature = "vad-wavekat"))]
@@ -53,11 +62,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let library = env::var("NEUROMITA_ORT_DLL")?;
                 init_onnx_runtime(Path::new(&library))?;
                 let asset = VerifiedSileroAsset::open(Path::new(&model))?;
-                evaluate_endpoint(
+                evaluate_endpoint_with_policy(
                     manifest,
-                    || SileroScores::from_verified(&asset).expect("verified model"),
+                    || SileroScores::from_verified(&asset),
                     threshold,
                     SegmentConfig::default(),
+                    validated_only,
                 )?
             }
             #[cfg(not(feature = "vad-silero"))]

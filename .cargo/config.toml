@@ -6,3 +6,7 @@ directory = "vendor"
 
 [build]
 incremental = false
+
+[env]
+# The dependency's build script otherwise downloads a model, even with --offline.
+SILERO_MODEL_PATH = { value = "assets/vad/explicit-local-model-required.onnx", relative = true, force = false }

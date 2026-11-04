@@ -7,6 +7,25 @@ use thiserror::Error;
 
 use super::vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ};
 
+#[cfg(feature = "vad-silero")]
+use std::{path::PathBuf, sync::Mutex};
+
+#[cfg(feature = "vad-silero")]
+enum RuntimeState {
+    Uninitialized,
+    Ready(PathBuf),
+    Failed,
+}
+
+#[cfg(feature = "vad-silero")]
+static ONNX_RUNTIME: Mutex<RuntimeState> = Mutex::new(RuntimeState::Uninitialized);
+
+// Official Microsoft ONNX Runtime 1.24.2, Windows x64 CPU release.
+#[cfg(feature = "vad-silero")]
+const ORT_RUNTIME_BYTES: u64 = 14_148_680;
+#[cfg(feature = "vad-silero")]
+const ORT_RUNTIME_SHA256: &str = "114947d633e6844ce3c4b51ef6678f776628571d08a5763859c61642c8dcca9c";
+
 pub const SILERO_MODEL_BYTES: usize = 2_327_524;
 pub const SILERO_MODEL_SHA256: &str =
     "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
@@ -25,6 +44,12 @@ pub enum ScoreError {
     AssetPath,
     #[error("local Silero asset does not match the pinned size/SHA-256")]
     AssetMismatch,
+    #[error("ONNX Runtime must be explicitly initialized before creating Silero")]
+    RuntimeUninitialized,
+    #[error("ONNX Runtime is already bound to a different library or initialization failed")]
+    RuntimeConflict,
+    #[error("ONNX Runtime library does not match the pinned Windows x64 CPU release")]
+    RuntimeMismatch,
     #[error("cannot read local VAD asset: {0}")]
     AssetIo(#[from] std::io::Error),
 }
@@ -156,10 +181,32 @@ pub fn init_onnx_runtime(path: &Path) -> Result<(), ScoreError> {
             path.display()
         )));
     }
-    ort::init_from(path)
+    let path = path.canonicalize()?;
+    let mut state = ONNX_RUNTIME
+        .lock()
+        .map_err(|_| ScoreError::RuntimeConflict)?;
+    match &*state {
+        RuntimeState::Ready(loaded) if loaded == &path => return Ok(()),
+        RuntimeState::Ready(_) | RuntimeState::Failed => return Err(ScoreError::RuntimeConflict),
+        RuntimeState::Uninitialized => {}
+    }
+    let mut bytes = Vec::new();
+    File::open(&path)?
+        .take(ORT_RUNTIME_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != ORT_RUNTIME_BYTES || sha256(&bytes) != ORT_RUNTIME_SHA256 {
+        return Err(ScoreError::RuntimeMismatch);
+    }
+    *state = RuntimeState::Failed;
+    let committed = ort::init_from(&path)
         .map_err(|error| ScoreError::Provider(error.to_string()))?
         .with_name("neuromita")
+        .with_telemetry(false)
         .commit();
+    if !committed {
+        return Err(ScoreError::RuntimeConflict);
+    }
+    *state = RuntimeState::Ready(path);
     Ok(())
 }
 
@@ -216,6 +263,14 @@ pub struct SileroScores(wavekat_vad::backends::silero::SileroVad);
 impl SileroScores {
     /// Build a detector from model bytes that passed size and SHA-256 checks.
     pub fn from_verified(asset: &VerifiedSileroAsset) -> Result<Self, ScoreError> {
+        let runtime = ONNX_RUNTIME
+            .lock()
+            .map_err(|_| ScoreError::RuntimeConflict)?;
+        match &*runtime {
+            RuntimeState::Ready(_) => {}
+            RuntimeState::Uninitialized => return Err(ScoreError::RuntimeUninitialized),
+            RuntimeState::Failed => return Err(ScoreError::RuntimeConflict),
+        }
         wavekat_vad::backends::silero::SileroVad::from_memory(asset.bytes(), SAMPLE_RATE_HZ)
             .map(Self)
             .map_err(|error| ScoreError::Provider(error.to_string()))
@@ -473,6 +528,21 @@ mod tests {
             init_onnx_runtime(Path::new("C:/definitely/missing/onnxruntime.dll")),
             Err(ScoreError::Provider(_))
         ));
+        let wrong = std::env::temp_dir().join(format!("vad-not-a-dll-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&wrong, b"not an ONNX Runtime binary").unwrap();
+        let result = init_onnx_runtime(&wrong);
+        std::fs::remove_file(wrong).unwrap();
+        assert!(matches!(result, Err(ScoreError::RuntimeMismatch)));
+    }
+
+    #[cfg(feature = "vad-silero")]
+    #[test]
+    fn silero_constructor_requires_our_runtime_initialization() {
+        let asset = VerifiedSileroAsset(Arc::from([]));
+        assert!(matches!(
+            SileroScores::from_verified(&asset),
+            Err(ScoreError::RuntimeUninitialized)
+        ));
     }
 
     /// Live check with the pinned model and an explicit ONNX Runtime library.
@@ -486,6 +556,11 @@ mod tests {
         let model = std::env::var("NEUROMITA_SILERO_MODEL").expect("model path");
         let library = std::env::var("NEUROMITA_ORT_DLL").expect("onnxruntime library path");
         init_onnx_runtime(Path::new(&library)).unwrap();
+        init_onnx_runtime(Path::new(&library)).unwrap();
+        assert!(matches!(
+            init_onnx_runtime(Path::new(&model)),
+            Err(ScoreError::RuntimeConflict)
+        ));
         let asset = VerifiedSileroAsset::open(Path::new(&model)).unwrap();
         let mut frames = ScoreFrames::new(SileroScores::from_verified(&asset).unwrap()).unwrap();
 
@@ -503,5 +578,13 @@ mod tests {
         let voiced_max = voiced.iter().map(|s| s.probability).fold(0.0, f32::max);
         assert!(quiet_max < 0.2, "silence scored {quiet_max}");
         assert!(voiced_max > quiet_max, "tone did not outscore silence");
+        frames.reset();
+        let reset_quiet = frames.push(&silence).unwrap();
+        let reset_voiced = frames.push(&tone).unwrap();
+        assert_eq!(
+            quiet, reset_quiet,
+            "reset must clear recurrent state, context and offsets"
+        );
+        assert_eq!(voiced, reset_voiced);
     }
 }

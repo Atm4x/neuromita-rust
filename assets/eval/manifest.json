@@ -10,7 +10,8 @@
           "start_sample": 29760,
           "end_sample": 96480
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-ru-1615",
@@ -26,7 +27,8 @@
           "start_sample": 50880,
           "end_sample": 97440
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-ru-1587",
@@ -38,7 +40,8 @@
           "start_sample": 12000,
           "end_sample": 70560
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-ru-1651",
@@ -54,7 +57,8 @@
           "start_sample": 91680,
           "end_sample": 119040
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-ru-1560",
@@ -74,7 +78,8 @@
           "start_sample": 84000,
           "end_sample": 90240
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-ru-1534",
@@ -94,7 +99,8 @@
           "start_sample": 86400,
           "end_sample": 121440
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1548",
@@ -110,7 +116,8 @@
           "start_sample": 68640,
           "end_sample": 86880
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1510",
@@ -122,7 +129,8 @@
           "start_sample": 12960,
           "end_sample": 117120
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1578",
@@ -138,7 +146,8 @@
           "start_sample": 49440,
           "end_sample": 57600
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1652",
@@ -150,7 +159,8 @@
           "start_sample": 12000,
           "end_sample": 57120
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1531",
@@ -162,7 +172,8 @@
           "start_sample": 1440,
           "end_sample": 64320
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "fleurs-en-1528",
@@ -182,49 +193,56 @@
           "start_sample": 104640,
           "end_sample": 107520
         }
-      ]
+      ],
+      "annotation_status": "heuristic"
     },
     {
       "id": "esc10-dog",
       "category": "noise",
       "wav": "noise-01-dog.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     },
     {
       "id": "esc10-crackling_fire",
       "category": "noise",
       "wav": "noise-02-crackling_fire.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     },
     {
       "id": "esc10-rain",
       "category": "noise",
       "wav": "noise-03-rain.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     },
     {
       "id": "esc10-clock_tick",
       "category": "noise",
       "wav": "noise-04-clock_tick.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     },
     {
       "id": "esc10-rooster",
       "category": "noise",
       "wav": "noise-05-rooster.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     },
     {
       "id": "esc10-sea_waves",
       "category": "noise",
       "wav": "noise-06-sea_waves.wav",
       "role": "heldout",
-      "speech": []
+      "speech": [],
+      "annotation_status": "unknown"
     }
   ]
 }

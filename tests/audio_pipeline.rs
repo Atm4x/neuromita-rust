@@ -51,11 +51,9 @@ impl VoiceProvider for Voice {
             Ok(AudioArtifact {
                 format: AudioFormat::Wave,
                 bytes: Arc::from(
-                    SpeechSegment {
-                        samples: vec![500; 256],
-                    }
-                    .as_wav()
-                    .unwrap(),
+                    SpeechSegment::from_samples(vec![500; 256])
+                        .as_wav()
+                        .unwrap(),
                 ),
             })
         })

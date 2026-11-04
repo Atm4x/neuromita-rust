@@ -1,10 +1,8 @@
-//! Offline A/B harness for VAD providers.
-//!
-//! Fixtures are explicit local files described by a manifest. Metrics are computed
-//! per fixture; nothing here tunes thresholds or downloads anything.
+//! Offline VAD evaluation. Annotation provenance and decision times are explicit.
 
 use std::{
-    fs,
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -12,13 +10,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    score::{ScoreError, ScoreFrames, VadScoreProvider},
-    segment::{ScoreGate, SegmentConfig, SegmentError, SpeechSegmenter},
+    score::{ScoreError, ScoreFrames, ScoredFrame, VadScoreProvider},
+    segment::{
+        ScoreGate, SegmentConfig, SegmentEndReason, SegmentError, SpeechMode, SpeechSegment,
+        SpeechSegmenter,
+    },
     vad::{FRAME_SAMPLES, SAMPLE_RATE_HZ, VoiceThreshold},
 };
 
-/// Longest accepted fixture: thirty seconds at 16 kHz.
 pub const MAX_FIXTURE_SAMPLES: usize = 30 * SAMPLE_RATE_HZ as usize;
+const MAX_WAV_BYTES: usize = MAX_FIXTURE_SAMPLES * 2 + 64 * 1024;
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -41,7 +43,23 @@ pub enum FixtureRole {
     Heldout,
 }
 
-/// Speech interval in integer sample offsets. A transcript is not an annotation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationStatus {
+    #[default]
+    Unknown,
+    Heuristic,
+    Manual,
+    VerifiedNoise,
+}
+
+impl AnnotationStatus {
+    pub fn is_validated(self) -> bool {
+        matches!(self, Self::Manual | Self::VerifiedNoise)
+    }
+}
+
+/// Half-open absolute sample interval; a transcript alone is not an annotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Annotation {
     pub start_sample: u64,
@@ -55,7 +73,8 @@ pub struct Fixture {
     pub wav: String,
     pub role: FixtureRole,
     #[serde(default)]
-    pub speech: Vec<Annotation>,
+    pub annotation_status: AnnotationStatus,
+    pub speech: Option<Vec<Annotation>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -65,9 +84,9 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn load(path: &Path) -> Result<Self, EvalError> {
-        let raw = fs::read_to_string(path)?;
+        let raw = read_bounded(path, MAX_MANIFEST_BYTES)?;
         let manifest: Self =
-            serde_json::from_str(&raw).map_err(|error| EvalError::Manifest(error.to_string()))?;
+            serde_json::from_slice(&raw).map_err(|error| EvalError::Manifest(error.to_string()))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -87,8 +106,21 @@ impl Manifest {
                     fixture.id
                 )));
             }
+            if fixture.annotation_status != AnnotationStatus::Unknown && fixture.speech.is_none() {
+                return Err(EvalError::Manifest(format!(
+                    "fixture {} lacks explicit speech labels",
+                    fixture.id
+                )));
+            }
+            let speech = fixture.speech.as_deref().unwrap_or_default();
+            if fixture.annotation_status == AnnotationStatus::VerifiedNoise && !speech.is_empty() {
+                return Err(EvalError::Manifest(format!(
+                    "fixture {} marks speech as verified noise",
+                    fixture.id
+                )));
+            }
             let mut previous = 0;
-            for interval in &fixture.speech {
+            for interval in speech {
                 if interval.start_sample >= interval.end_sample || interval.start_sample < previous
                 {
                     return Err(EvalError::Manifest(format!(
@@ -103,40 +135,66 @@ impl Manifest {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Counts are sample durations, so 256- and 512-sample providers use the same units.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FrameMetrics {
-    pub frames: u64,
-    pub true_positive: u64,
-    pub false_positive: u64,
-    pub false_negative: u64,
+    pub scored_samples: u64,
+    pub true_positive_samples: u64,
+    pub false_positive_samples: u64,
+    pub false_negative_samples: u64,
     pub precision: f32,
     pub recall: f32,
     pub f1: f32,
     pub false_positive_seconds: f32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Coverage is distinct from one-to-one matches. Errors use only one-to-one pairs.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct BoundaryError {
-    pub matched: u64,
-    pub missed: u64,
-    pub onset_ms: f32,
-    pub end_ms: f32,
-}
-
-/// What the player would actually get: segments produced by `ScoreGate` and
-/// `SpeechSegmenter` with the configured silence policy.
-#[derive(Debug, Clone, Serialize)]
-pub struct EndpointMetrics {
     pub annotated: u64,
     pub detected: u64,
+    pub covered: u64,
     pub matched: u64,
     pub missed: u64,
     pub spurious: u64,
-    pub onset_ms: Option<f32>,
-    pub end_ms: Option<f32>,
+    /// Number of predictions overlapping multiple annotations.
+    pub merged: u64,
+    /// Number of annotations overlapping multiple predictions.
+    pub split: u64,
+    pub audio_start_error_ms: Option<f32>,
+    pub audio_end_error_ms: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EmittedSegment {
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub onset_decided_at_sample: Option<u64>,
+    pub emitted_at_sample: u64,
+    pub end_reason: SegmentEndReason,
+}
+
+impl From<SpeechSegment> for EmittedSegment {
+    fn from(segment: SpeechSegment) -> Self {
+        Self {
+            start_sample: segment.start_sample,
+            end_sample: segment.end_sample,
+            onset_decided_at_sample: segment.onset_decided_at_sample,
+            emitted_at_sample: segment.emitted_at_sample,
+            end_reason: segment.end_reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointMetrics {
+    pub boundary: BoundaryError,
+    pub onset_decision_delay_ms: Option<f32>,
+    /// Emission delay only for natural (Silence) endpoints, never forced cuts.
+    pub silence_emission_delay_ms: Option<f32>,
+    pub eof_censored_ends: u64,
+    pub eof_censored_audio_end_error_ms: Option<f32>,
     pub spurious_seconds: f32,
-    /// Up to the first sixteen produced segments, in milliseconds.
-    pub detected_segments: Vec<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,21 +202,24 @@ pub struct FixtureReport {
     pub id: String,
     pub category: String,
     pub role: FixtureRole,
-    pub metrics: FrameMetrics,
+    pub annotation_status: AnnotationStatus,
+    pub audio_samples: u64,
+    pub scored_samples: u64,
+    pub unscored_tail_samples: u64,
+    pub endpoint_unprocessed_tail_samples: Option<u64>,
+    pub metrics: Option<FrameMetrics>,
     pub boundary: Option<BoundaryError>,
     pub endpoint: Option<EndpointMetrics>,
+    pub emitted_segments: Vec<EmittedSegment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub threshold: f32,
+    pub validated_only: bool,
     pub fixtures: Vec<FixtureReport>,
 }
 
-/// Score every fixture with a fresh provider and report frame metrics.
-///
-/// The threshold is supplied by the caller and never adjusted here; run held-out
-/// fixtures only after the value is frozen.
 pub fn evaluate<P, F>(
     manifest_path: &Path,
     new_provider: F,
@@ -166,36 +227,11 @@ pub fn evaluate<P, F>(
 ) -> Result<Report, EvalError>
 where
     P: VadScoreProvider,
-    F: Fn() -> P,
+    F: Fn() -> Result<P, ScoreError>,
 {
-    if !(0.0..=1.0).contains(&threshold) {
-        return Err(EvalError::Manifest("threshold must be in 0..=1".into()));
-    }
-    let manifest = Manifest::load(manifest_path)?;
-    let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut fixtures = Vec::with_capacity(manifest.fixtures.len());
-    for fixture in &manifest.fixtures {
-        let samples = read_pcm16_mono_wav(&base.join(&fixture.wav))?;
-        let scores = score_fixture(&samples, new_provider())?;
-        let metrics = frame_metrics(&scores, &fixture.speech, threshold);
-        let boundary = boundary_error(&scores, &fixture.speech, threshold);
-        fixtures.push(FixtureReport {
-            id: fixture.id.clone(),
-            category: fixture.category.clone(),
-            role: fixture.role,
-            metrics,
-            boundary,
-            endpoint: None,
-        });
-    }
-    Ok(Report {
-        threshold,
-        fixtures,
-    })
+    evaluate_inner(manifest_path, new_provider, threshold, None, false)
 }
 
-/// Frame metrics plus real endpoint behaviour: segments produced by
-/// `ScoreGate` and `SpeechSegmenter` with the given silence policy.
 pub fn evaluate_endpoint<P, F>(
     manifest_path: &Path,
     new_provider: F,
@@ -204,198 +240,288 @@ pub fn evaluate_endpoint<P, F>(
 ) -> Result<Report, EvalError>
 where
     P: VadScoreProvider,
-    F: Fn() -> P,
+    F: Fn() -> Result<P, ScoreError>,
 {
-    let mut report = evaluate(manifest_path, &new_provider, threshold)?;
-    let manifest = Manifest::load(manifest_path)?;
-    let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let voice = VoiceThreshold::new(threshold)
-        .map_err(|_| EvalError::Manifest("threshold must be in 0..=1".into()))?;
-    for (fixture, entry) in manifest.fixtures.iter().zip(report.fixtures.iter_mut()) {
-        let samples = read_pcm16_mono_wav(&base.join(&fixture.wav))?;
-        let gate = ScoreGate::new(new_provider(), voice)?;
-        let mut segmenter = SpeechSegmenter::new(gate, config)?;
-        let mut segments = Vec::new();
-        let mut consumed = 0u64;
-        for frame in samples.chunks(FRAME_SAMPLES) {
-            if frame.len() < FRAME_SAMPLES {
-                break;
-            }
-            consumed += FRAME_SAMPLES as u64;
-            let frame: [i16; FRAME_SAMPLES] = frame.try_into().expect("frame size");
-            if let Some(segment) = segmenter.process(frame)? {
-                let end = consumed;
-                let start = end.saturating_sub(segment.samples.len() as u64);
-                segments.push((start, end));
-            }
-        }
-        if let Some(segment) = segmenter.flush() {
-            let end = consumed;
-            let start = end.saturating_sub(segment.samples.len() as u64);
-            segments.push((start, end));
-        }
-        entry.endpoint = Some(endpoint_metrics(&segments, &fixture.speech));
-    }
-    Ok(report)
+    evaluate_endpoint_with_policy(manifest_path, new_provider, threshold, config, false)
 }
 
-fn endpoint_metrics(segments: &[(u64, u64)], speech: &[Annotation]) -> EndpointMetrics {
-    let sample_ms = 1000.0 / SAMPLE_RATE_HZ as f32;
-    let mut matched = 0u64;
-    let mut missed = 0u64;
-    let mut onset = Vec::new();
-    let mut end = Vec::new();
-    for interval in speech {
-        let overlapping: Vec<&(u64, u64)> = segments
-            .iter()
-            .filter(|(start, stop)| *start < interval.end_sample && *stop > interval.start_sample)
-            .collect();
-        if overlapping.is_empty() {
-            missed += 1;
-            continue;
-        }
-        matched += 1;
-        let start = overlapping.iter().map(|(s, _)| *s).min().unwrap();
-        let stop = overlapping.iter().map(|(_, e)| *e).max().unwrap();
-        // Latency the listener sees: how late speech is reported, never negative
-        // when a merged segment already covers the interval.
-        onset.push((start as f32 - interval.start_sample as f32).max(0.0) * sample_ms);
-        end.push((stop as f32 - interval.end_sample as f32).max(0.0) * sample_ms);
+/// Strict mode rejects the entire manifest before constructing providers if any
+/// fixture lacks manual speech labels or explicitly verified noise labels.
+pub fn evaluate_endpoint_with_policy<P, F>(
+    manifest_path: &Path,
+    new_provider: F,
+    threshold: f32,
+    config: SegmentConfig,
+    validated_only: bool,
+) -> Result<Report, EvalError>
+where
+    P: VadScoreProvider,
+    F: Fn() -> Result<P, ScoreError>,
+{
+    evaluate_inner(
+        manifest_path,
+        new_provider,
+        threshold,
+        Some(config),
+        validated_only,
+    )
+}
+
+fn evaluate_inner<P, F>(
+    manifest_path: &Path,
+    new_provider: F,
+    threshold: f32,
+    config: Option<SegmentConfig>,
+    validated_only: bool,
+) -> Result<Report, EvalError>
+where
+    P: VadScoreProvider,
+    F: Fn() -> Result<P, ScoreError>,
+{
+    let voice = VoiceThreshold::new(threshold)
+        .map_err(|_| EvalError::Manifest("threshold must be in 0..=1".into()))?;
+    if config.is_some_and(|config| config.mode == SpeechMode::PushToTalk) {
+        return Err(EvalError::Manifest(
+            "endpoint evaluation requires automatic mode; no PTT button events are supplied".into(),
+        ));
     }
-    let spurious: Vec<&(u64, u64)> = segments
+    let manifest = Manifest::load(manifest_path)?;
+    if validated_only {
+        let invalid: Vec<_> = manifest
+            .fixtures
+            .iter()
+            .filter(|fixture| !fixture.annotation_status.is_validated())
+            .map(|fixture| fixture.id.as_str())
+            .collect();
+        if !invalid.is_empty() {
+            return Err(EvalError::Manifest(format!(
+                "validated-only rejects: {}",
+                invalid.join(", ")
+            )));
+        }
+    }
+    let base = fixture_root(manifest_path);
+    let mut fixtures = Vec::with_capacity(manifest.fixtures.len());
+    for fixture in manifest.fixtures {
+        let samples = read_pcm16_mono_wav(&base.join(&fixture.wav))?;
+        let speech = fixture.speech.as_deref().unwrap_or_default();
+        if speech
+            .iter()
+            .any(|interval| interval.end_sample > samples.len() as u64)
+        {
+            return Err(EvalError::Manifest(format!(
+                "fixture {} interval exceeds audio length {}",
+                fixture.id,
+                samples.len()
+            )));
+        }
+        let scores = score_fixture(&samples, new_provider()?)?;
+        let scored_samples = scores.last().map_or(0, |score| score.end_sample);
+        let labeled = fixture.annotation_status != AnnotationStatus::Unknown;
+        let runs = predicted_runs(&scores, threshold);
+        let metrics = labeled.then(|| frame_metrics(&scores, speech, threshold));
+        let boundary = labeled.then(|| boundary_error(&runs, speech));
+        let mut emitted_segments = Vec::new();
+        if let Some(config) = config {
+            let gate = ScoreGate::new(new_provider()?, voice)?;
+            let mut segmenter = SpeechSegmenter::new(gate, config)?;
+            for frame in samples.chunks_exact(FRAME_SAMPLES) {
+                let frame = frame
+                    .try_into()
+                    .map_err(|_| EvalError::Wav("invalid capture frame"))?;
+                if let Some(segment) = segmenter.process(frame)? {
+                    emitted_segments.push(segment.into());
+                }
+            }
+            if let Some(segment) = segmenter.flush() {
+                emitted_segments.push(segment.into());
+            }
+        }
+        let endpoint =
+            (labeled && config.is_some()).then(|| endpoint_metrics(&emitted_segments, speech));
+        fixtures.push(FixtureReport {
+            id: fixture.id,
+            category: fixture.category,
+            role: fixture.role,
+            annotation_status: fixture.annotation_status,
+            audio_samples: samples.len() as u64,
+            scored_samples,
+            unscored_tail_samples: samples.len() as u64 - scored_samples,
+            endpoint_unprocessed_tail_samples: config
+                .map(|_| (samples.len() % FRAME_SAMPLES) as u64),
+            metrics,
+            boundary,
+            endpoint,
+            emitted_segments,
+        });
+    }
+    Ok(Report {
+        threshold,
+        validated_only,
+        fixtures,
+    })
+}
+
+fn overlaps(run: (u64, u64), interval: &Annotation) -> bool {
+    run.0 < interval.end_sample && run.1 > interval.start_sample
+}
+
+fn degrees(runs: &[(u64, u64)], speech: &[Annotation]) -> (Vec<usize>, Vec<usize>) {
+    let annotations = speech
         .iter()
-        .filter(|(start, stop)| {
-            !speech
+        .map(|interval| runs.iter().filter(|run| overlaps(**run, interval)).count())
+        .collect();
+    let predictions = runs
+        .iter()
+        .map(|run| {
+            speech
                 .iter()
-                .any(|interval| *start < interval.end_sample && *stop > interval.start_sample)
+                .filter(|interval| overlaps(*run, interval))
+                .count()
         })
         .collect();
-    EndpointMetrics {
+    (annotations, predictions)
+}
+
+fn boundary_error(runs: &[(u64, u64)], speech: &[Annotation]) -> BoundaryError {
+    let (annotations, predictions) = degrees(runs, speech);
+    let mut start_errors = Vec::new();
+    let mut end_errors = Vec::new();
+    for (i, interval) in speech.iter().enumerate() {
+        if annotations[i] != 1 {
+            continue;
+        }
+        if let Some((j, run)) = runs
+            .iter()
+            .enumerate()
+            .find(|(_, run)| overlaps(**run, interval))
+        {
+            if predictions[j] == 1 {
+                start_errors.push(delta_ms(run.0, interval.start_sample));
+                end_errors.push(delta_ms(run.1, interval.end_sample));
+            }
+        }
+    }
+    BoundaryError {
         annotated: speech.len() as u64,
-        detected: segments.len() as u64,
-        matched,
-        missed,
-        spurious: spurious.len() as u64,
-        onset_ms: mean(&onset),
-        end_ms: mean(&end),
-        spurious_seconds: spurious
+        detected: runs.len() as u64,
+        covered: annotations.iter().filter(|&&n| n > 0).count() as u64,
+        matched: start_errors.len() as u64,
+        missed: annotations.iter().filter(|&&n| n == 0).count() as u64,
+        spurious: predictions.iter().filter(|&&n| n == 0).count() as u64,
+        merged: predictions.iter().filter(|&&n| n > 1).count() as u64,
+        split: annotations.iter().filter(|&&n| n > 1).count() as u64,
+        audio_start_error_ms: mean(&start_errors),
+        audio_end_error_ms: mean(&end_errors),
+    }
+}
+
+fn endpoint_metrics(segments: &[EmittedSegment], speech: &[Annotation]) -> EndpointMetrics {
+    let runs: Vec<_> = segments
+        .iter()
+        .map(|s| (s.start_sample, s.end_sample))
+        .collect();
+    let mut boundary = boundary_error(&runs, speech);
+    let (annotations, predictions) = degrees(&runs, speech);
+    let mut onset = Vec::new();
+    let mut emission = Vec::new();
+    let mut ends = Vec::new();
+    let mut censored_ends = Vec::new();
+    for (i, interval) in speech.iter().enumerate() {
+        if annotations[i] != 1 {
+            continue;
+        }
+        if let Some((j, segment)) = segments
             .iter()
-            .map(|(start, stop)| (stop - start) as f32 / SAMPLE_RATE_HZ as f32)
+            .enumerate()
+            .find(|(_, s)| overlaps((s.start_sample, s.end_sample), interval))
+        {
+            if predictions[j] != 1 {
+                continue;
+            }
+            if let Some(decided) = segment.onset_decided_at_sample {
+                onset.push(delta_ms(decided, interval.start_sample));
+            }
+            let error = delta_ms(segment.end_sample, interval.end_sample);
+            if segment.end_reason == SegmentEndReason::Eof {
+                censored_ends.push(error);
+            } else {
+                ends.push(error);
+            }
+            if segment.end_reason == SegmentEndReason::Silence {
+                emission.push(delta_ms(segment.emitted_at_sample, interval.end_sample));
+            }
+        }
+    }
+    boundary.audio_end_error_ms = mean(&ends);
+    EndpointMetrics {
+        boundary,
+        onset_decision_delay_ms: mean(&onset),
+        silence_emission_delay_ms: mean(&emission),
+        eof_censored_ends: segments
+            .iter()
+            .filter(|s| s.end_reason == SegmentEndReason::Eof)
+            .count() as u64,
+        eof_censored_audio_end_error_ms: mean(&censored_ends),
+        spurious_seconds: segments
+            .iter()
+            .zip(predictions)
+            .filter(|(_, n)| *n == 0)
+            .map(|(s, _)| (s.end_sample - s.start_sample) as f32 / SAMPLE_RATE_HZ as f32)
             .sum(),
-        detected_segments: segments
-            .iter()
-            .take(16)
-            .map(|(start, stop)| {
-                (
-                    (start * 1000 / SAMPLE_RATE_HZ as u64) as u32,
-                    (stop * 1000 / SAMPLE_RATE_HZ as u64) as u32,
-                )
-            })
-            .collect(),
     }
 }
 
 fn score_fixture<P: VadScoreProvider>(
     samples: &[i16],
     provider: P,
-) -> Result<Vec<super::score::ScoredFrame>, EvalError> {
-    let frame = provider.frame_samples();
+) -> Result<Vec<ScoredFrame>, EvalError> {
     let mut framing = ScoreFrames::new(provider)?;
     let mut scores = Vec::new();
-    for chunk in samples.chunks(frame) {
-        if chunk.len() < frame {
-            break;
-        }
+    for chunk in samples.chunks(FRAME_SAMPLES) {
         scores.extend(framing.push(chunk)?);
     }
     Ok(scores)
 }
 
-fn frame_metrics(
-    scores: &[super::score::ScoredFrame],
-    speech: &[Annotation],
-    threshold: f32,
-) -> FrameMetrics {
-    let mut metrics = FrameMetrics {
-        frames: scores.len() as u64,
-        true_positive: 0,
-        false_positive: 0,
-        false_negative: 0,
-        precision: 0.0,
-        recall: 0.0,
-        f1: 0.0,
-        false_positive_seconds: 0.0,
-    };
+fn frame_metrics(scores: &[ScoredFrame], speech: &[Annotation], threshold: f32) -> FrameMetrics {
+    let mut metrics = FrameMetrics::default();
     for score in scores {
-        let midpoint = (score.start_sample + score.end_sample) / 2;
-        let expected = speech
+        let duration = score.end_sample - score.start_sample;
+        let expected: u64 = speech
             .iter()
-            .any(|interval| (interval.start_sample..interval.end_sample).contains(&midpoint));
-        let predicted = score.probability > threshold;
-        match (expected, predicted) {
-            (true, true) => metrics.true_positive += 1,
-            (false, true) => {
-                metrics.false_positive += 1;
-                metrics.false_positive_seconds +=
-                    (score.end_sample - score.start_sample) as f32 / SAMPLE_RATE_HZ as f32;
-            }
-            (true, false) => metrics.false_negative += 1,
-            (false, false) => {}
+            .map(|interval| {
+                score
+                    .end_sample
+                    .min(interval.end_sample)
+                    .saturating_sub(score.start_sample.max(interval.start_sample))
+            })
+            .sum();
+        metrics.scored_samples += duration;
+        if score.probability > threshold {
+            metrics.true_positive_samples += expected;
+            metrics.false_positive_samples += duration - expected;
+        } else {
+            metrics.false_negative_samples += expected;
         }
     }
-    let predicted_positive = metrics.true_positive + metrics.false_positive;
-    let actual_positive = metrics.true_positive + metrics.false_negative;
-    if predicted_positive > 0 {
-        metrics.precision = metrics.true_positive as f32 / predicted_positive as f32;
+    let predicted = metrics.true_positive_samples + metrics.false_positive_samples;
+    let actual = metrics.true_positive_samples + metrics.false_negative_samples;
+    if predicted > 0 {
+        metrics.precision = metrics.true_positive_samples as f32 / predicted as f32;
     }
-    if actual_positive > 0 {
-        metrics.recall = metrics.true_positive as f32 / actual_positive as f32;
+    if actual > 0 {
+        metrics.recall = metrics.true_positive_samples as f32 / actual as f32;
     }
     if metrics.precision + metrics.recall > 0.0 {
         metrics.f1 =
             2.0 * metrics.precision * metrics.recall / (metrics.precision + metrics.recall);
     }
+    metrics.false_positive_seconds = metrics.false_positive_samples as f32 / SAMPLE_RATE_HZ as f32;
     metrics
 }
 
-fn boundary_error(
-    scores: &[super::score::ScoredFrame],
-    speech: &[Annotation],
-    threshold: f32,
-) -> Option<BoundaryError> {
-    if speech.is_empty() {
-        return None;
-    }
-    let sample_ms = 1000.0 / SAMPLE_RATE_HZ as f32;
-    let runs = predicted_runs(scores, threshold);
-    let mut matched = 0u64;
-    let mut missed = 0u64;
-    let mut onset = Vec::new();
-    let mut end = Vec::new();
-    for interval in speech {
-        let overlapping: Vec<&(u64, u64)> = runs
-            .iter()
-            .filter(|(start, stop)| *start < interval.end_sample && *stop > interval.start_sample)
-            .collect();
-        if overlapping.is_empty() {
-            missed += 1;
-            continue;
-        }
-        matched += 1;
-        let start = overlapping.iter().map(|(s, _)| *s).min().unwrap();
-        let stop = overlapping.iter().map(|(_, e)| *e).max().unwrap();
-        onset.push((start as f32 - interval.start_sample as f32).max(0.0) * sample_ms);
-        end.push((stop as f32 - interval.end_sample as f32).max(0.0) * sample_ms);
-    }
-    Some(BoundaryError {
-        matched,
-        missed,
-        onset_ms: mean(&onset).unwrap_or(0.0),
-        end_ms: mean(&end).unwrap_or(0.0),
-    })
-}
-
-fn predicted_runs(scores: &[super::score::ScoredFrame], threshold: f32) -> Vec<(u64, u64)> {
+fn predicted_runs(scores: &[ScoredFrame], threshold: f32) -> Vec<(u64, u64)> {
     let mut runs: Vec<(u64, u64)> = Vec::new();
     for score in scores {
         if score.probability <= threshold {
@@ -409,16 +535,37 @@ fn predicted_runs(scores: &[super::score::ScoredFrame], threshold: f32) -> Vec<(
     runs
 }
 
+fn delta_ms(actual: u64, expected: u64) -> f32 {
+    ((actual as f64 - expected as f64) * 1000.0 / SAMPLE_RATE_HZ as f64) as f32
+}
+
 fn mean(values: &[f32]) -> Option<f32> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.iter().sum::<f32>() / values.len() as f32)
+    (!values.is_empty()).then(|| values.iter().sum::<f32>() / values.len() as f32)
+}
+
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, EvalError> {
+    let file = File::open(path)?;
+    if file.metadata()?.len() > limit as u64 {
+        return Err(EvalError::Manifest(format!(
+            "{} exceeds {} byte read limit",
+            path.display(),
+            limit
+        )));
     }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(EvalError::Manifest(format!(
+            "{} exceeds {} byte read limit",
+            path.display(),
+            limit
+        )));
+    }
+    Ok(bytes)
 }
 
 fn read_pcm16_mono_wav(path: &Path) -> Result<Vec<i16>, EvalError> {
-    let bytes = fs::read(path)?;
+    let bytes = read_bounded(path, MAX_WAV_BYTES)?;
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(EvalError::Wav("not a RIFF/WAVE file"));
     }
@@ -460,6 +607,9 @@ fn read_pcm16_mono_wav(path: &Path) -> Result<Vec<i16>, EvalError> {
     if data.len() % 2 != 0 {
         return Err(EvalError::Wav("odd PCM data length"));
     }
+    if data.len() / 2 > MAX_FIXTURE_SAMPLES {
+        return Err(EvalError::Wav("fixture exceeds thirty seconds"));
+    }
     let (pairs, _) = data.as_chunks::<2>();
     let samples: Vec<i16> = pairs.iter().map(|pair| i16::from_le_bytes(*pair)).collect();
     if samples.len() > MAX_FIXTURE_SAMPLES {
@@ -479,210 +629,389 @@ pub fn fixture_root(manifest_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::vad::FRAME_SAMPLES;
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    struct FixtureFiles(PathBuf);
+
+    impl FixtureFiles {
+        fn new(samples: Vec<i16>, labels: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "neuromita-eval-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join("clip.wav"),
+                SpeechSegment::from_samples(samples).as_wav().unwrap(),
+            )
+            .unwrap();
+            fs::write(root.join("manifest.json"), format!(
+                r#"{{"fixtures":[{{"id":"clip","category":"test","wav":"clip.wav","role":"heldout"{labels}}}]}}"#
+            )).unwrap();
+            Self(root)
+        }
+
+        fn manifest(&self) -> PathBuf {
+            self.0.join("manifest.json")
+        }
+    }
+
+    impl Drop for FixtureFiles {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     struct MarkerScores {
-        marker: i16,
-        always: bool,
+        frame: usize,
     }
 
     impl VadScoreProvider for MarkerScores {
         fn frame_samples(&self) -> usize {
-            FRAME_SAMPLES
+            self.frame
         }
-
         fn score(&mut self, frame: &[i16]) -> Result<f32, ScoreError> {
-            Ok(if self.always || frame.contains(&self.marker) {
-                1.0
-            } else {
-                0.0
-            })
+            Ok(if frame.contains(&7) { 1.0 } else { 0.0 })
         }
-
         fn reset(&mut self) {}
     }
 
-    fn wav(samples: &[i16], channels: u16, rate: u32) -> Vec<u8> {
-        let data: Vec<u8> = samples
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect();
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&channels.to_le_bytes());
-        bytes.extend_from_slice(&rate.to_le_bytes());
-        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&data);
-        bytes
+    fn provider() -> Result<MarkerScores, ScoreError> {
+        Ok(MarkerScores { frame: 256 })
     }
-
-    fn fixture_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("neuromita-eval-{name}-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write_clip(samples: &[i16]) -> (PathBuf, PathBuf) {
-        let dir = fixture_dir("clip");
-        let wav_path = dir.join("clip.wav");
-        fs::write(&wav_path, wav(samples, 1, SAMPLE_RATE_HZ)).unwrap();
-        let manifest = dir.join("manifest.json");
-        fs::write(
-            &manifest,
-            r#"{"fixtures":[{"id":"clip","category":"ru","wav":"clip.wav","role":"heldout",
-                "speech":[{"start_sample":1024,"end_sample":2048}]}]}"#,
-        )
-        .unwrap();
-        (manifest, wav_path)
-    }
-
-    #[test]
-    fn manifest_rejects_duplicate_ids_and_unordered_intervals() {
-        let duplicate: Manifest = serde_json::from_str(
-            r#"{"fixtures":[
-                {"id":"a","category":"ru","wav":"a.wav","role":"heldout","speech":[]},
-                {"id":"a","category":"en","wav":"b.wav","role":"heldout","speech":[]}]}"#,
-        )
-        .unwrap();
-        assert!(duplicate.validate().is_err());
-
-        let unordered: Manifest = serde_json::from_str(
-            r#"{"fixtures":[{"id":"a","category":"ru","wav":"a.wav","role":"heldout",
-                "speech":[{"start_sample":500,"end_sample":300}]}]}"#,
-        )
-        .unwrap();
-        assert!(unordered.validate().is_err());
-    }
-
-    #[test]
-    fn wav_parser_rejects_stereo_and_short_files() {
-        let dir = fixture_dir("wav");
-        let stereo = dir.join("stereo.wav");
-        fs::write(&stereo, wav(&[0; 64], 2, SAMPLE_RATE_HZ)).unwrap();
-        assert!(matches!(
-            read_pcm16_mono_wav(&stereo),
-            Err(EvalError::Wav(_))
-        ));
-
-        let broken = dir.join("broken.wav");
-        fs::write(&broken, b"RIFF").unwrap();
-        assert!(matches!(
-            read_pcm16_mono_wav(&broken),
-            Err(EvalError::Wav(_))
-        ));
-    }
-
-    #[test]
-    fn perfect_provider_reaches_f1_one_and_silent_provider_misses_everything() {
-        let mut samples = vec![0i16; FRAME_SAMPLES * 4];
-        samples.extend([7i16; FRAME_SAMPLES * 4]);
-        samples.extend(vec![0i16; FRAME_SAMPLES * 4]);
-        let (manifest, _) = write_clip(&samples);
-
-        let report = evaluate(
-            &manifest,
-            || MarkerScores {
-                marker: 7,
-                always: false,
-            },
-            0.5,
-        )
-        .unwrap();
-        let metrics = &report.fixtures[0].metrics;
-        assert_eq!(metrics.true_positive, 4);
-        assert_eq!(metrics.false_positive, 0);
-        assert_eq!(metrics.false_negative, 0);
-        assert!((metrics.f1 - 1.0).abs() < 1e-6);
-        let boundary = report.fixtures[0].boundary.as_ref().unwrap();
-        assert_eq!(boundary.matched, 1);
-        assert_eq!(boundary.missed, 0);
-        assert_eq!(boundary.onset_ms, 0.0);
-        assert_eq!(boundary.end_ms, 0.0);
-
-        let report = evaluate(
-            &manifest,
-            || MarkerScores {
-                marker: 7,
-                always: false,
-            },
-            0.5,
-        );
-        let missed = evaluate(
-            &manifest,
-            || MarkerScores {
-                marker: 99,
-                always: false,
-            },
-            0.5,
-        )
-        .unwrap();
-        assert!(report.is_ok());
-        assert_eq!(missed.fixtures[0].metrics.false_negative, 4);
-        assert_eq!(missed.fixtures[0].metrics.recall, 0.0);
-        let boundary = missed.fixtures[0].boundary.as_ref().unwrap();
-        assert_eq!(boundary.matched, 0);
-        assert_eq!(boundary.missed, 1);
-    }
-
-    #[test]
-    fn missed_utterance_is_reported_separately_from_matched_one() {
-        let mut samples = vec![0i16; FRAME_SAMPLES * 10];
-        for frame in [1usize, 2] {
-            samples[frame * FRAME_SAMPLES..(frame + 1) * FRAME_SAMPLES].fill(9);
+    fn annotation(start_sample: u64, end_sample: u64) -> Annotation {
+        Annotation {
+            start_sample,
+            end_sample,
         }
-        let dir = fixture_dir("missed");
-        fs::write(dir.join("clip.wav"), wav(&samples, 1, SAMPLE_RATE_HZ)).unwrap();
-        let manifest = dir.join("manifest.json");
-        fs::write(
-            &manifest,
-            r#"{"fixtures":[{"id":"clip","category":"ru","wav":"clip.wav","role":"heldout",
-                "speech":[{"start_sample":256,"end_sample":768},
-                          {"start_sample":1536,"end_sample":2048}]}]}"#,
+    }
+    fn emitted(
+        start: u64,
+        end: u64,
+        onset: Option<u64>,
+        at: u64,
+        reason: SegmentEndReason,
+    ) -> EmittedSegment {
+        EmittedSegment {
+            start_sample: start,
+            end_sample: end,
+            onset_decided_at_sample: onset,
+            emitted_at_sample: at,
+            end_reason: reason,
+        }
+    }
+
+    #[test]
+    fn missing_status_or_labels_never_proves_silence() {
+        for labels in [
+            "",
+            r#", "speech":[]"#,
+            r#", "annotation_status":"unknown", "speech":[{"start_sample":0,"end_sample":256}]"#,
+        ] {
+            let files = FixtureFiles::new(vec![7; 512], labels);
+            let report =
+                evaluate_endpoint(&files.manifest(), provider, 0.5, SegmentConfig::default())
+                    .unwrap();
+            let fixture = &report.fixtures[0];
+            assert_eq!(fixture.annotation_status, AnnotationStatus::Unknown);
+            assert!(fixture.metrics.is_none());
+            assert!(fixture.boundary.is_none());
+            assert!(fixture.endpoint.is_none());
+            assert_eq!(fixture.scored_samples, 512);
+        }
+        let files = FixtureFiles::new(vec![0; 512], r#", "annotation_status":"manual""#);
+        assert!(Manifest::load(&files.manifest()).is_err());
+    }
+
+    #[test]
+    fn strict_policy_rejects_heuristic_and_unknown_before_provider_creation() {
+        for status in ["heuristic", "unknown"] {
+            let files = FixtureFiles::new(
+                vec![0; 512],
+                &format!(r#", "annotation_status":"{status}", "speech":[]"#),
+            );
+            let result = evaluate_endpoint_with_policy::<MarkerScores, _>(
+                &files.manifest(),
+                || panic!("must reject first"),
+                0.5,
+                SegmentConfig::default(),
+                true,
+            );
+            assert!(matches!(result, Err(EvalError::Manifest(_))));
+        }
+        for status in ["manual", "verified_noise"] {
+            let files = FixtureFiles::new(
+                vec![0; 512],
+                &format!(r#", "annotation_status":"{status}", "speech":[]"#),
+            );
+            let report = evaluate_endpoint_with_policy(
+                &files.manifest(),
+                provider,
+                0.5,
+                SegmentConfig::default(),
+                true,
+            )
+            .unwrap();
+            assert!(report.fixtures[0].metrics.is_some());
+            assert!(report.validated_only);
+        }
+    }
+
+    #[test]
+    fn labels_must_fit_audio_even_when_unknown() {
+        for status in ["manual", "unknown"] {
+            let files = FixtureFiles::new(
+                vec![0; 512],
+                &format!(
+                    r#", "annotation_status":"{status}", "speech":[{{"start_sample":256,"end_sample":513}}]"#
+                ),
+            );
+            assert!(matches!(
+                evaluate(&files.manifest(), provider, 0.5),
+                Err(EvalError::Manifest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_annotations_and_duplicate_ids_are_rejected() {
+        for speech in [
+            r#"[{"start_sample":500,"end_sample":300}]"#,
+            r#"[{"start_sample":0,"end_sample":300},{"start_sample":256,"end_sample":512}]"#,
+        ] {
+            let files = FixtureFiles::new(
+                vec![0; 512],
+                &format!(r#", "annotation_status":"manual", "speech":{speech}"#),
+            );
+            assert!(Manifest::load(&files.manifest()).is_err());
+        }
+        let files = FixtureFiles::new(
+            vec![0; 512],
+            r#", "annotation_status":"verified_noise", "speech":[{"start_sample":0,"end_sample":256}]"#,
+        );
+        assert!(Manifest::load(&files.manifest()).is_err());
+        let mut manifest: Manifest = serde_json::from_str(
+            r#"{"fixtures":[{"id":"a","category":"test","wav":"a.wav","role":"heldout"}]}"#,
         )
         .unwrap();
+        manifest.fixtures.push(manifest.fixtures[0].clone());
+        assert!(manifest.validate().is_err());
+    }
 
-        let report = evaluate(
-            &manifest,
-            || MarkerScores {
-                marker: 9,
-                always: false,
+    #[test]
+    fn merge_and_split_are_coverage_not_correct_utterance_matches() {
+        let merged = boundary_error(&[(0, 1024)], &[annotation(100, 400), annotation(600, 900)]);
+        assert_eq!(
+            (merged.covered, merged.matched, merged.merged, merged.missed),
+            (2, 0, 1, 0)
+        );
+        assert!(merged.audio_start_error_ms.is_none());
+        let split = boundary_error(&[(100, 300), (400, 700)], &[annotation(100, 700)]);
+        assert_eq!((split.covered, split.matched, split.split), (1, 0, 1));
+        assert!(split.audio_end_error_ms.is_none());
+        let missed = boundary_error(&[], &[annotation(100, 700)]);
+        assert_eq!(missed.missed, 1);
+        assert!(missed.audio_start_error_ms.is_none());
+        assert!(missed.audio_end_error_ms.is_none());
+    }
+
+    #[test]
+    fn signed_audio_errors_are_separate_from_actual_decision_times() {
+        let segments = [emitted(0, 768, Some(512), 1024, SegmentEndReason::Silence)];
+        let metrics = endpoint_metrics(&segments, &[annotation(256, 800)]);
+        assert_eq!(metrics.boundary.audio_start_error_ms, Some(-16.0));
+        assert_eq!(metrics.boundary.audio_end_error_ms, Some(-2.0));
+        assert_eq!(metrics.onset_decision_delay_ms, Some(16.0));
+        assert_eq!(metrics.silence_emission_delay_ms, Some(14.0));
+    }
+
+    #[test]
+    fn eof_is_censored_and_forced_cuts_are_not_silence_endpoints() {
+        for reason in [
+            SegmentEndReason::Eof,
+            SegmentEndReason::Maximum,
+            SegmentEndReason::Release,
+        ] {
+            let metrics =
+                endpoint_metrics(&[emitted(0, 512, None, 512, reason)], &[annotation(0, 600)]);
+            assert!(metrics.onset_decision_delay_ms.is_none());
+            assert!(metrics.silence_emission_delay_ms.is_none());
+            if reason == SegmentEndReason::Eof {
+                assert_eq!(metrics.eof_censored_ends, 1);
+                assert!(metrics.boundary.audio_end_error_ms.is_none());
+                assert_eq!(metrics.eof_censored_audio_end_error_ms, Some(-5.5));
+            } else {
+                assert_eq!(metrics.eof_censored_ends, 0);
+                assert_eq!(metrics.boundary.audio_end_error_ms, Some(-5.5));
+            }
+        }
+    }
+
+    #[test]
+    fn sample_weighting_agrees_across_provider_windows_and_preserves_partial_overlap() {
+        let speech = [annotation(128, 384)];
+        let wide = [ScoredFrame {
+            start_sample: 0,
+            end_sample: 512,
+            probability: 1.0,
+        }];
+        let narrow = [
+            ScoredFrame {
+                start_sample: 0,
+                end_sample: 256,
+                probability: 1.0,
             },
+            ScoredFrame {
+                start_sample: 256,
+                end_sample: 512,
+                probability: 1.0,
+            },
+        ];
+        let a = frame_metrics(&wide, &speech, 0.5);
+        let b = frame_metrics(&narrow, &speech, 0.5);
+        assert_eq!(a.true_positive_samples, 256);
+        assert_eq!(a.false_positive_samples, 256);
+        assert_eq!(a.f1, b.f1);
+        assert_eq!(a.false_positive_samples, b.false_positive_samples);
+        assert_eq!(a.true_positive_samples, b.true_positive_samples);
+    }
+
+    #[test]
+    fn incomplete_provider_and_capture_tails_are_explicit() {
+        let files = FixtureFiles::new(
+            vec![7; 800],
+            r#", "annotation_status":"manual", "speech":[{"start_sample":0,"end_sample":800}]"#,
+        );
+        let report = evaluate_endpoint(
+            &files.manifest(),
+            || Ok(MarkerScores { frame: 512 }),
             0.5,
+            SegmentConfig::default(),
         )
         .unwrap();
-        let boundary = report.fixtures[0].boundary.as_ref().unwrap();
-        assert_eq!(boundary.matched, 1);
-        assert_eq!(boundary.missed, 1);
-        assert_eq!(boundary.onset_ms, 0.0);
+        let fixture = &report.fixtures[0];
+        assert_eq!(fixture.scored_samples, 512);
+        assert_eq!(fixture.unscored_tail_samples, 288);
+        assert_eq!(fixture.endpoint_unprocessed_tail_samples, Some(32));
+        assert_eq!(fixture.metrics.as_ref().unwrap().true_positive_samples, 512);
+        assert_eq!(fixture.metrics.as_ref().unwrap().false_negative_samples, 0);
+    }
 
-        let endpoint = evaluate_endpoint(
-            &manifest,
-            || MarkerScores {
-                marker: 9,
-                always: false,
-            },
+    #[test]
+    fn endpoint_report_consumes_segmenter_metadata_with_preroll_and_eof() {
+        let mut samples = vec![0; 512];
+        samples.extend(vec![7; 1024]);
+        let files = FixtureFiles::new(
+            samples,
+            r#", "annotation_status":"manual", "speech":[{"start_sample":512,"end_sample":1536}]"#,
+        );
+        let config = SegmentConfig {
+            pre_roll_samples: 768,
+            start_voice_samples: 512,
+            min_segment_samples: 256,
+            end_silence_samples: 256,
+            ..SegmentConfig::default()
+        };
+        let report = evaluate_endpoint(&files.manifest(), provider, 0.5, config).unwrap();
+        let fixture = &report.fixtures[0];
+        assert_eq!(fixture.emitted_segments.len(), 1);
+        let segment = &fixture.emitted_segments[0];
+        assert!(segment.start_sample < 512);
+        assert_eq!(segment.onset_decided_at_sample, Some(1024));
+        assert_eq!(segment.emitted_at_sample, 1536);
+        assert_eq!(segment.end_reason, SegmentEndReason::Eof);
+        assert_eq!(
+            fixture.endpoint.as_ref().unwrap().onset_decision_delay_ms,
+            Some(32.0)
+        );
+        assert!(
+            fixture
+                .endpoint
+                .as_ref()
+                .unwrap()
+                .boundary
+                .audio_end_error_ms
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_fixtures_retain_emitted_segments() {
+        let files = FixtureFiles::new(vec![7; 2048], "");
+        let report = evaluate_endpoint(
+            &files.manifest(),
+            provider,
             0.5,
             SegmentConfig {
-                min_segment_samples: FRAME_SAMPLES,
-                start_voice_samples: FRAME_SAMPLES,
-                end_silence_samples: FRAME_SAMPLES,
-                pre_roll_samples: 0,
+                min_segment_samples: 256,
                 ..SegmentConfig::default()
             },
         )
         .unwrap();
-        let metrics = endpoint.fixtures[0].endpoint.as_ref().unwrap();
-        assert_eq!(metrics.annotated, 2);
-        assert_eq!(metrics.missed, 1);
-        assert!(metrics.detected >= 1);
+        let fixture = &report.fixtures[0];
+        assert!(fixture.metrics.is_none());
+        assert!(fixture.endpoint.is_none());
+        assert_eq!(fixture.emitted_segments.len(), 1);
+        assert_eq!(fixture.emitted_segments[0].end_sample, 2048);
+        assert_eq!(
+            fixture.emitted_segments[0].end_reason,
+            SegmentEndReason::Eof
+        );
+    }
+
+    #[test]
+    fn endpoint_rejects_ptt_without_button_events() {
+        let config = SegmentConfig {
+            mode: SpeechMode::PushToTalk,
+            ..SegmentConfig::default()
+        };
+        let result = evaluate_endpoint::<MarkerScores, _>(
+            Path::new("unused-manifest.json"),
+            || panic!("must reject PTT first"),
+            0.5,
+            config,
+        );
+        assert!(matches!(result, Err(EvalError::Manifest(_))));
+    }
+
+    #[test]
+    fn provider_factory_errors_are_returned() {
+        let files = FixtureFiles::new(vec![0; 512], "");
+        let result = evaluate::<MarkerScores, _>(
+            &files.manifest(),
+            || Err(ScoreError::Provider("construction failed".into())),
+            0.5,
+        );
+        assert!(matches!(
+            result,
+            Err(EvalError::Score(ScoreError::Provider(_)))
+        ));
+    }
+
+    #[test]
+    fn wav_parser_rejects_invalid_format_truncation_and_oversize_before_reading() {
+        let files = FixtureFiles::new(vec![0; 512], "");
+        let path = files.0.join("clip.wav");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(read_pcm16_mono_wav(&path), Err(EvalError::Wav(_))));
+        fs::write(&path, b"RIFF").unwrap();
+        assert!(matches!(read_pcm16_mono_wav(&path), Err(EvalError::Wav(_))));
+        File::create(&path)
+            .unwrap()
+            .set_len(MAX_WAV_BYTES as u64 + 1)
+            .unwrap();
+        assert!(read_pcm16_mono_wav(&path).is_err());
+        File::create(files.manifest())
+            .unwrap()
+            .set_len(MAX_MANIFEST_BYTES as u64 + 1)
+            .unwrap();
+        assert!(Manifest::load(&files.manifest()).is_err());
     }
 }

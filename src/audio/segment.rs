@@ -87,7 +87,6 @@ impl VoiceGate for EarshotVad {
 pub struct ScoreGate<P: VadScoreProvider> {
     frames: ScoreFrames<P>,
     threshold: VoiceThreshold,
-    unscored: Vec<i16>,
     latest: VoiceDecision,
 }
 
@@ -96,7 +95,6 @@ impl<P: VadScoreProvider> ScoreGate<P> {
         Ok(Self {
             frames: ScoreFrames::new(provider)?,
             threshold,
-            unscored: Vec::with_capacity(512),
             latest: VoiceDecision {
                 probability: 0.0,
                 speech: false,
@@ -107,15 +105,7 @@ impl<P: VadScoreProvider> ScoreGate<P> {
 
 impl<P: VadScoreProvider + Send> VoiceGate for ScoreGate<P> {
     fn inspect(&mut self, frame: &MonoPcm16Frame) -> Result<VoiceDecision, ScoreError> {
-        self.unscored.extend_from_slice(frame);
-        let pending = std::mem::take(&mut self.unscored);
-        let scores = match self.frames.push(&pending) {
-            Ok(scores) => scores,
-            Err(error) => {
-                self.unscored = pending;
-                return Err(error);
-            }
-        };
+        let scores = self.frames.push(frame)?;
         if let Some(score) = scores.last() {
             self.latest = VoiceDecision {
                 probability: score.probability,
@@ -134,7 +124,6 @@ impl<P: VadScoreProvider + Send> VoiceGate for ScoreGate<P> {
 
     fn reset(&mut self) {
         self.frames.reset();
-        self.unscored.clear();
         self.latest = VoiceDecision {
             probability: 0.0,
             speech: false,
@@ -145,9 +134,35 @@ impl<P: VadScoreProvider + Send> VoiceGate for ScoreGate<P> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechSegment {
     pub samples: Vec<i16>,
+    pub start_sample: u64,
+    pub end_sample: u64,
+    pub onset_decided_at_sample: Option<u64>,
+    pub emitted_at_sample: u64,
+    pub end_reason: SegmentEndReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentEndReason {
+    Silence,
+    Maximum,
+    Release,
+    Eof,
 }
 
 impl SpeechSegment {
+    pub fn from_samples(samples: Vec<i16>) -> Self {
+        let end_sample = samples.len() as u64;
+        Self {
+            samples,
+            start_sample: 0,
+            end_sample,
+            onset_decided_at_sample: None,
+            emitted_at_sample: end_sample,
+            end_reason: SegmentEndReason::Eof,
+        }
+    }
+
     pub fn as_wav(&self) -> Result<Vec<u8>, SegmentError> {
         let byte_len = self
             .samples
@@ -185,6 +200,8 @@ pub struct SpeechSegmenter<G: VoiceGate> {
     voice_run: usize,
     silence_run: usize,
     pressed: bool,
+    consumed_samples: u64,
+    onset_decided_at_sample: Option<u64>,
 }
 
 impl<G: VoiceGate> SpeechSegmenter<G> {
@@ -196,6 +213,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
             || config.min_segment_samples == 0
             || config.max_segment_samples < config.min_segment_samples
             || config.max_segment_samples > MAX_SEGMENT_SAMPLES
+            || !config.max_segment_samples.is_multiple_of(FRAME_SAMPLES)
         {
             return Err(SegmentError::InvalidConfiguration);
         }
@@ -203,7 +221,9 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
             .pre_roll_samples
             .max(config.start_voice_samples)
             .div_ceil(FRAME_SAMPLES)
-            .saturating_add(gate.decision_lag_frames());
+            .checked_add(gate.decision_lag_frames())
+            .filter(|frames| *frames <= config.max_segment_samples / FRAME_SAMPLES)
+            .ok_or(SegmentError::InvalidConfiguration)?;
         Ok(Self {
             gate,
             config,
@@ -213,6 +233,8 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
             voice_run: 0,
             silence_run: 0,
             pressed: false,
+            consumed_samples: 0,
+            onset_decided_at_sample: None,
         })
     }
 
@@ -220,6 +242,10 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         &mut self,
         frame: MonoPcm16Frame,
     ) -> Result<Option<SpeechSegment>, SegmentError> {
+        self.consumed_samples = self
+            .consumed_samples
+            .checked_add(FRAME_SAMPLES as u64)
+            .ok_or(SegmentError::TooLong)?;
         match self.config.mode {
             SpeechMode::PushToTalk => {
                 if !self.pressed {
@@ -244,6 +270,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
                     if self.voice_run < self.config.start_voice_samples {
                         return Ok(None);
                     }
+                    self.onset_decided_at_sample = Some(self.consumed_samples);
                     for buffered in self.pre_roll.drain(..) {
                         self.active.extend_from_slice(&buffered);
                     }
@@ -259,13 +286,13 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
                         self.silence_run + FRAME_SAMPLES
                     };
                     if self.silence_run >= self.config.end_silence_samples {
-                        return Ok(self.finish());
+                        return Ok(self.finish(SegmentEndReason::Silence));
                     }
                 }
             }
         }
         if self.active.len() >= self.config.max_segment_samples {
-            return Ok(self.finish());
+            return Ok(self.finish(SegmentEndReason::Maximum));
         }
         Ok(None)
     }
@@ -276,7 +303,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         }
         self.pressed = pressed;
         if !pressed {
-            self.finish()
+            self.finish(SegmentEndReason::Release)
         } else {
             self.reset_audio();
             None
@@ -284,13 +311,14 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
     }
 
     pub fn flush(&mut self) -> Option<SpeechSegment> {
-        self.finish()
+        self.finish(SegmentEndReason::Eof)
     }
 
     pub fn reset(&mut self) {
         self.reset_audio();
         self.pressed = false;
         self.gate.reset();
+        self.consumed_samples = 0;
     }
 
     pub fn suppress_playback_echo(&mut self) {
@@ -298,13 +326,21 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         self.gate.reset();
     }
 
-    fn finish(&mut self) -> Option<SpeechSegment> {
+    fn finish(&mut self, end_reason: SegmentEndReason) -> Option<SpeechSegment> {
         let enough = self.active.len() >= self.config.min_segment_samples;
         let samples = std::mem::take(&mut self.active);
         self.pre_roll.clear();
         self.voice_run = 0;
         self.silence_run = 0;
-        enough.then_some(SpeechSegment { samples })
+        let onset_decided_at_sample = self.onset_decided_at_sample.take();
+        enough.then_some(SpeechSegment {
+            start_sample: self.consumed_samples.saturating_sub(samples.len() as u64),
+            end_sample: self.consumed_samples,
+            emitted_at_sample: self.consumed_samples,
+            onset_decided_at_sample,
+            end_reason,
+            samples,
+        })
     }
 
     fn reset_audio(&mut self) {
@@ -312,6 +348,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
         self.pre_roll.clear();
         self.voice_run = 0;
         self.silence_run = 0;
+        self.onset_decided_at_sample = None;
     }
 }
 
@@ -449,6 +486,80 @@ mod tests {
             min_segment_samples: 2 * FRAME_SAMPLES,
             max_segment_samples: 30 * FRAME_SAMPLES,
         }
+    }
+
+    #[test]
+    fn maximum_must_fit_capture_grid_and_delayed_onset() {
+        assert!(
+            SpeechSegmenter::new(
+                DeterministicGate,
+                SegmentConfig {
+                    mode: SpeechMode::PushToTalk,
+                    pre_roll_samples: 0,
+                    start_voice_samples: 256,
+                    end_silence_samples: 256,
+                    min_segment_samples: 256,
+                    max_segment_samples: 257,
+                }
+            )
+            .is_err()
+        );
+        let gate = ScoreGate::new(
+            WideProvider {
+                window: 512,
+                marker: 1,
+            },
+            VoiceThreshold::new(0.5).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            SpeechSegmenter::new(
+                gate,
+                SegmentConfig {
+                    pre_roll_samples: 0,
+                    start_voice_samples: 512,
+                    min_segment_samples: 256,
+                    max_segment_samples: 512,
+                    ..SegmentConfig::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn timestamps_distinguish_preserved_pcm_from_onset_decision() {
+        let mut segmenter = SpeechSegmenter::new(
+            DeterministicGate,
+            SegmentConfig {
+                pre_roll_samples: 3 * FRAME_SAMPLES,
+                start_voice_samples: 2 * FRAME_SAMPLES,
+                end_silence_samples: FRAME_SAMPLES,
+                min_segment_samples: FRAME_SAMPLES,
+                ..SegmentConfig::default()
+            },
+        )
+        .unwrap();
+        for marker in [0, 0, 1, 1] {
+            assert!(
+                segmenter
+                    .process([marker; FRAME_SAMPLES])
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let segment = segmenter.process([0; FRAME_SAMPLES]).unwrap().unwrap();
+        assert_eq!(segment.start_sample, 256);
+        assert_eq!(segment.end_sample, 1280);
+        assert_eq!(segment.onset_decided_at_sample, Some(1024));
+        assert_eq!(segment.emitted_at_sample, 1280);
+        assert_eq!(segment.end_reason, SegmentEndReason::Silence);
+        segmenter.reset();
+        segmenter.process([1; FRAME_SAMPLES]).unwrap();
+        segmenter.process([1; FRAME_SAMPLES]).unwrap();
+        let tail = segmenter.flush().unwrap();
+        assert_eq!(tail.start_sample, 0);
+        assert_eq!(tail.end_reason, SegmentEndReason::Eof);
     }
 
     #[test]

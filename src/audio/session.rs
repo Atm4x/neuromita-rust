@@ -459,11 +459,16 @@ impl SpeechInputHandler {
         let drained = match worker_finished {
             Some(result) => result,
             None => {
-                let abort = worker.abort_handle();
                 tokio::select! {
-                    result = worker => result,
+                    biased;
+                    _ = stop.cancelled() => {
+                        worker.abort();
+                        worker.await
+                    }
+                    result = &mut worker => result,
                     _ = tokio::time::sleep(DRAIN_TIMEOUT) => {
-                        abort.abort();
+                        worker.abort();
+                        let _ = worker.await;
                         return Err(SpeechSessionError::Task(
                             "speech dispatch did not finish before the drain deadline".into(),
                         ));
@@ -654,6 +659,45 @@ mod tests {
         assert!(
             matches!(result, Err(SpeechSessionError::Task(message)) if message.contains("drain deadline")),
             "stalled dispatch must hit the drain deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_after_eof_cancels_drain_without_waiting_for_deadline() {
+        let session = SpeechInputHandler::new(
+            SpeechRoute {
+                character: CharacterId::Mita,
+                source: RequestSource::Presenter,
+            },
+            Arc::new(HangingTranscriber),
+            Arc::new(Chat(Arc::new(Mutex::new(Vec::new())))),
+            Arc::new(SilentPlayback),
+        );
+        let segmenter = SpeechSegmenter::new(
+            Gate,
+            SegmentConfig {
+                min_segment_samples: FRAME_SAMPLES,
+                start_voice_samples: FRAME_SAMPLES,
+                ..SegmentConfig::default()
+            },
+        )
+        .unwrap();
+        let (_send, controls) = mpsc::channel(2);
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(session.run(
+            Capture(vec![[1; FRAME_SAMPLES]]),
+            segmenter,
+            controls,
+            stop.clone(),
+        ));
+        tokio::task::yield_now().await;
+        stop.cancel();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_ok()
         );
     }
 
