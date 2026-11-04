@@ -1,0 +1,36 @@
+name: Publish verified Slint layout parity commit
+on:
+  push:
+    branches:
+      - bridge/slint-layout-publish-20261104
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify Git Bridge bundle and publish target
+        shell: bash
+        env:
+          BASE_SHA: 46e70ec25be3bc18bf15c945ba2d844330e65ca4
+          TARGET_SHA: 5a157ced7ea8f6a15dda5e93134423d180f114c1
+          TARGET_REF: refs/heads/codex/slint-layout-only-parity-20261104
+        run: |
+          set -euo pipefail
+          base64 -d bridge/slint-layout-20261104.bundle.b64 > slint-layout.bundle
+          printf '%s  %s\n' '587782505f4399caf9d54b9fe0e56d3ffc697f0700b1820f6139e3d6650b4b03' slint-layout.bundle | sha256sum -c -
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git bundle verify slint-layout.bundle
+          git fetch slint-layout.bundle "${TARGET_REF}:refs/heads/layout-verified"
+          test "$(git rev-parse refs/heads/layout-verified)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${BASE_SHA}" refs/heads/layout-verified
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Target moved: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/layout-verified:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${TARGET_SHA}"
