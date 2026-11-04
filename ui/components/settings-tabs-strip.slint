@@ -64,17 +64,24 @@ export component SettingsTabsStrip inherits Rectangle {
         }
     }
 
-    if root.scroll-x < -1px: Rectangle {
-        width: 28px;
+    HorizontalLayout {
+        width: parent.width;
         height: 42px;
-        background: @linear-gradient(90deg, #0e101ffa, #0e101f00);
-    }
-
-    if root.scroll-x > -root.scroll-limit + 1px && root.scroll-limit > 0px: Rectangle {
-        x: parent.width - self.width;
-        width: 28px;
-        height: 42px;
-        background: @linear-gradient(90deg, #0e101f00, #0e101ffa);
+        padding: 0px;
+        spacing: 0px;
+        Rectangle {
+            width: 28px;
+            horizontal-stretch: 0;
+            opacity: root.scroll-x < -1px ? 1 : 0;
+            background: @linear-gradient(90deg, #0e101ffa, #0e101f00);
+        }
+        Rectangle { horizontal-stretch: 1; background: transparent; }
+        Rectangle {
+            width: 28px;
+            horizontal-stretch: 0;
+            opacity: root.scroll-x > -root.scroll-limit + 1px && root.scroll-limit > 0px ? 1 : 0;
+            background: @linear-gradient(90deg, #0e101f00, #0e101ffa);
+        }
     }
 
     Rectangle {

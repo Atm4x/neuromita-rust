@@ -20,6 +20,8 @@ Settings pages do not install or start TTS/ASR workers. `SettingsPresenter.tts` 
 
 The pages expose backend/model selection, Telegram wait and polling intervals, local TTS lazy/auto-load flags, API voice profile/model/speed and per-character voice IDs, ASR device/backend/input/send behavior, per-model language preference, PCM chunk size and VAD/segmentation timing. Settings are atomic and backwards-compatible with existing persisted `AppSettings` missing `speech`.
 
+Integration correction: the current strict format requires the complete speech section and all its fields. No deserialization defaults or historical compatibility are retained. Per-character voice IDs use `BTreeMap<CharacterId, String>`; the shared voice has a separate `default_voice_id`. UI indices are translated at the adapter boundary and never stored as identities. This supersedes the earlier backward-compatibility statement above.
+
 Initialization/inference still belongs to the AI Runtime, not presenters. ASR plugin-specific initialization schema fields beyond language (e.g. Whisper model revision, beam size, compute type, GigaAM model variant/device) are not yet exposed by the desktop Presenter: the plugin SDK provides `settings_schema` and `probe_install`, but the desktop runtime currently does not own a live schema/probe IPC worker. These should eventually be surfaced via a read-only worker inspection operation, rather than copying plugin schemas into Rust. Similarly, audio monitoring / capture, TTS playback tests, remote voice preview, Telegram connection and secure secret storage are not claimed to work. Controls for live actions remain disabled. The UI's save operations only write nonsecret preferences.
 
 ## Verification

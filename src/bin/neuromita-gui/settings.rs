@@ -94,15 +94,14 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         Command::SaveCharacterVoice(character, voice_id) => {
-            if !(-1..=8).contains(&character) || voice_id.len() > 512 {
-                return Err("Invalid character voice ID".into());
+            if voice_id.len() > 512 {
+                return Err("Invalid voice ID".into());
             }
             let mut value = api.settings.tts.preferences.get();
-            if character == -1 {
-                value.default_voice_id = voice_id;
-            } else {
-                let id = neuromita::character::CharacterId::ALL[character as usize];
+            if let Some(id) = character {
                 value.character_voice_ids.insert(id, voice_id);
+            } else {
+                value.default_voice_id = voice_id;
             }
             api.settings
                 .tts
@@ -601,10 +600,10 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     }
     if records.is_empty() {
         clear_preset(&window);
-    } else if let Some(record) = records.iter().find(|r| r.id == window.get_preset_edit_id()) {
-        if record.configured != window.get_preset_configured() {
-            select_preset(&window, record);
-        }
+    } else if let Some(record) = records.iter().find(|r| r.id == window.get_preset_edit_id())
+        && record.configured != window.get_preset_configured()
+    {
+        select_preset(&window, record);
     }
     window.set_settings_presets(ModelRc::new(VecModel::from(records)));
 }

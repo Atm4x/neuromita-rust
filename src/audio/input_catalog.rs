@@ -22,8 +22,8 @@ impl AudioInputCatalog {
             }
         }
         #[cfg(target_os = "windows")]
-        if let Some(exe) = ffmpeg.filter(|path| path.is_absolute() && path.is_file()) {
-            if let Some(output) = Self::run(
+        if let Some(exe) = ffmpeg.filter(|path| path.is_absolute() && path.is_file())
+            && let Some(output) = Self::run(
                 exe.to_string_lossy().as_ref(),
                 &[
                     "-hide_banner",
@@ -36,9 +36,8 @@ impl AudioInputCatalog {
                 ],
             )
             .await
-            {
-                return parse_dshow_devices(&output);
-            }
+        {
+            return parse_dshow_devices(&output);
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let _ = ffmpeg;

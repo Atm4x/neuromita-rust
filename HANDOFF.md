@@ -26,6 +26,17 @@ Sandbox import update, 2026-11-03: the user's `neuromita-sandbox-slint-port-2026
 
 Integration update, 2026-11-03: PR #63 merged all origin development heads into main at `6c7e88ca`. Read [integration notes](future/integration-20261103.md). That prior main revision passed 323 GUI / 322 default / 266 no-default Rust tests (2 ignored each), 10 Python tests, Clippy/fmt and offline GUI build. Those totals do not validate the current Sandbox WIP. No permanent GitHub Actions CI is configured. Earlier "NOT implemented" and "separate branch" statements below describe historical checkpoints. Real model parity and live embedding benchmarks remain unverified.
 
+# Current integration: UI and speech settings, 2026-11-04
+
+Read [latest integration decisions](future/latest-branches-integration-20261104.md),
+which supersede the earlier separate-branch statements for Voice/ASR, API workflow,
+Slint layouts and settings tabs. Speech presenters are included with strict required
+fields, CharacterId-keyed voice assignments and a separate shared voice. Fade overlays
+use layout-aligned edges. The independent AI hardware presenter and synchronous Home
+launcher remain excluded. Live speech control remains unfinished; preferences and
+inventory are distinct from inference/capture/playback. See the integration report for
+validation. No historical dev settings fallback was added.
+
 # Handoff: Rust core contracts
 
 GUI/localization update, 2026-11-03: the separate `neuromita-gui` preview now implements the Slint shell/Home with placeholder pages, typed launcher popup actions, and Winit/FemtoVG. It does not start Core/LLM/TTS/server. Read [future/gui.md](future/gui.md) and [future/localization.md](future/localization.md). Common `src/localization/` supplies `i18n(id, source)` descriptors, JSON catalogs, explicit fallback, named/nested arguments, validated external overlays and atomic reload. Slint locale/revision bindings update existing controls immediately; a headless Slint test verifies language switches and catalog revision on one component. Python JSON originals are in `localization/python/`; contextual additions are in `localization/catalogs/`. `neuromita-i18n template` exports declarations; `check [directory]` validates catalogs. Language persistence is not connected to core settings yet. Final GUI-enabled suite: 243 passed, 2 ignored; Clippy default/GUI and fmt pass. Offline debug GUI is built. No live provider calls were made.

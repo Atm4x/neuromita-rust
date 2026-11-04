@@ -42,7 +42,7 @@ pub enum Command {
     VoiceInGame(bool),
     VoiceName(String),
     SaveTts(TtsPreferences),
-    SaveCharacterVoice(i32, String),
+    SaveCharacterVoice(Option<CharacterId>, String),
     SaveAsr(AsrPreferences, String),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,

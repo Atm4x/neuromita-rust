@@ -122,7 +122,8 @@ impl SpeechSettings {
             .iter()
             .any(|value| value.len() > 128)
             || !matches!(t.local_language.as_str(), "ru" | "en" | "auto" | "")
-            || t.character_voice_ids.len() > 64
+            || t.default_voice_id.len() > 512
+            || t.character_voice_ids.len() > crate::character::CharacterId::ALL.len()
             || t.character_voice_ids
                 .iter()
                 .any(|(_, value)| value.len() > 512)

@@ -122,8 +122,24 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    let voice_window = window.as_weak();
     ui.on_voice_id_changed(move |character, value| {
-        send(Command::SaveCharacterVoice(character, value.into()));
+        let id = if character == -1 {
+            Some(None)
+        } else {
+            usize::try_from(character)
+                .ok()
+                .and_then(|index| neuromita::character::CharacterId::ALL.get(index))
+                .copied()
+                .map(Some)
+        };
+        if let Some(id) = id {
+            send(Command::SaveCharacterVoice(id, value.into()));
+        } else if let Some(window) = voice_window.upgrade() {
+            window
+                .global::<SettingsUi>()
+                .set_settings_error("Invalid character selection".into());
+        }
     });
     let weak = window.as_weak();
     ui.on_select_character(move |character| {
@@ -203,7 +219,7 @@ pub fn render(window: &AppWindow, settings: &TtsPreferences) {
     )));
     ui.set_api_model(settings.api_model.clone().into());
     ui.set_api_speed(i32::from(settings.api_speed_percent));
-    let ids = (-1..=8)
+    let ids = (-1..neuromita::character::CharacterId::ALL.len() as i32)
         .map(|id| {
             if id == -1 {
                 settings.default_voice_id.clone()

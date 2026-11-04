@@ -99,6 +99,7 @@ fn export_is_a_complete_canonical_envelope() {
             "interface",
             "presets",
             "reminders",
+            "speech",
             "voice"
         ]
     );
