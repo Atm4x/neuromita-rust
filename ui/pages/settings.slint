@@ -1,4 +1,6 @@
 import { SettingsSectionHeading, SettingsToggleRow, SettingsRow, SettingsText, SettingsEntryRow, SettingsChoiceRow, SettingsNumberRow, SettingsButtonRow } from "../components/settings-kit.slint";
+import { VoiceSettingsPage } from "voice.slint";
+import { AsrSettingsPage } from "asr.slint";
 import { CharacterCatalog } from "../characters/catalog.slint";
 import { CharacterPortrait } from "../characters/portrait.slint";
 import { SettingsTheme } from "../settings/theme.slint";
@@ -378,18 +380,20 @@ export component SettingsPage inherits Rectangle {
                     }
                     CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
                 }
-                if SettingsUi.section == 3: ScrollView { content-width: self.visible-width;
-                    VerticalLayout { padding: 2px; padding-right: 10px; spacing: 16px; alignment: start;
-                        SectionHeading { title: I18n.i18n("settings.voice", "Озвучка"); description: I18n.i18n("settings.voice.description", "Параметры голоса и места озвучивания."); glyph: "\u{f028}"; }
-                        Card { VerticalLayout { padding: 18px; spacing: 18px;
-                            SettingsToggleRow { title: I18n.i18n("settings.voice.launcher", "Озвучивать в лаунчере"); checked: SettingsUi.settings-voice-launcher; active: root.connected; changed(v) => { SettingsUi.voice-launcher(v); } }
-                            SettingsToggleRow { title: I18n.i18n("settings.voice.game", "Озвучивать в игре"); checked: SettingsUi.settings-voice-game; active: root.connected; changed(v) => { SettingsUi.voice-game(v); } }
-                            SettingsLabel { text: I18n.i18n("settings.voice.volume", "Громкость") + " · " + SettingsUi.settings-volume + "%"; }
-                            VolumeSlider { value: SettingsUi.settings-volume; enabled: root.connected; changed(value) => { SettingsUi.volume(round(value)); } }
-                            EditorField { title: I18n.i18n("settings.voice.id", "Идентификатор голоса"); text <=> root.voice-draft; }
-                            SettingsButton { text: I18n.i18n("settings.save", "Сохранить"); enabled: root.connected; activated => { SettingsUi.voice-name(root.voice-draft); } }
-                        } }
+                if SettingsUi.section == 3: ScrollView {
+                    content-width: self.visible-width;
+                    VoiceSettingsPage {
+                        width: parent.width - 10px;
+                        connected: root.connected;
+                        volume: SettingsUi.settings-volume;
+                        in-chat: SettingsUi.settings-voice-launcher;
+                        change-volume(value) => { SettingsUi.volume(value); }
+                        change-chat(value) => { SettingsUi.voice-launcher(value); }
                     }
+                }
+                if SettingsUi.section == 5: ScrollView {
+                    content-width: self.visible-width;
+                    AsrSettingsPage { width: parent.width - 10px; }
                 }
                 if SettingsUi.section == 4: LanguageSettingsPage {
                     language-selected(code) => { root.language-selected(code); }
@@ -397,7 +401,7 @@ export component SettingsPage inherits Rectangle {
                 if SettingsUi.section == 7: GameSettingsPage {}
                 if SettingsUi.section == 8: ModelsSettingsPage {}
                 if SettingsUi.section == 9: ImagesSettingsPage {}
-                if SettingsUi.section > 4 && SettingsUi.section != 7 && SettingsUi.section != 8 && SettingsUi.section != 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
+                if SettingsUi.section > 4 && SettingsUi.section != 5 && SettingsUi.section != 7 && SettingsUi.section != 8 && SettingsUi.section != 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }
                 }
             }
