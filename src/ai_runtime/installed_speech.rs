@@ -115,6 +115,48 @@ impl InstalledSpeechEnvironment {
         }
     }
 
+    /// Open an already installed interpreter for read-only schema inspection.
+    /// An explicitly configured metadata interpreter may be used before installing a model.
+    pub async fn metadata_host(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PythonHostConfig, InstalledSpeechError> {
+        self.validate()?;
+        if !super::layer::valid_segment(plugin_id)
+            || !self
+                .plugins_directory
+                .join(plugin_id)
+                .join("plugin.json")
+                .is_file()
+        {
+            return Err(InstalledSpeechError::Environment(
+                "unknown speech plugin".into(),
+            ));
+        }
+        let python = match std::env::var_os("NEUROMITA_AI_METADATA_PYTHON") {
+            Some(executable) => {
+                let executable = PathBuf::from(executable);
+                if !executable.is_absolute() || !executable.is_file() || executable.is_symlink() {
+                    return Err(InstalledSpeechError::Environment(
+                        "metadata Python must be an absolute existing regular file".into(),
+                    ));
+                }
+                executable
+            }
+            None => {
+                let overlay = installed_overlay(&self.ai_data(), plugin_id)?;
+                self.managed_python(&overlay.python_version).await?
+            }
+        };
+        Ok(PythonHostConfig {
+            python_executable: python,
+            sdk_root: self.sdk_root.clone(),
+            plugins_directory: self.plugins_directory.clone(),
+            models_directory: Some(self.ai_data().join("models")),
+            request_timeout: self.timeout,
+        })
+    }
+
     pub async fn prepare_from_saved(
         &self,
         speech: &SpeechSettings,

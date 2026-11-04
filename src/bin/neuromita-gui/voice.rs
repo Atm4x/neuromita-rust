@@ -3,7 +3,7 @@ use std::rc::Rc;
 use super::runtime::Command;
 use super::{
     sandbox,
-    view::{AppWindow, SettingsUi, VoiceUi},
+    view::{AppWindow, SettingsUi, SpeechParameterItem, VoiceUi},
 };
 use neuromita::{
     ai_runtime::{
@@ -165,6 +165,32 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let weak = window.as_weak();
+    let send_option = dispatch.clone();
+    let model_window = window.as_weak();
+    let reset_window = window.as_weak();
+    let reset_send = dispatch.clone();
+    ui.on_model_options_reset(move || {
+        if let Some(window) = reset_window.upgrade() {
+            let plugin_id = model_id(&window.global::<VoiceUi>().get_local_model());
+            if !plugin_id.is_empty() {
+                reset_send(Command::ResetSpeechOptions(AiService::Tts, plugin_id));
+            }
+        }
+    });
+    ui.on_model_option_changed(move |key, value| {
+        if let Some(window) = model_window.upgrade() {
+            let ui = window.global::<VoiceUi>();
+            let plugin_id = model_id(&ui.get_local_model());
+            if !plugin_id.is_empty() && ui.get_model_options_plugin() == plugin_id {
+                send_option(Command::SaveSpeechOption(
+                    AiService::Tts,
+                    plugin_id,
+                    key.into(),
+                    value.into(),
+                ));
+            }
+        }
+    });
     ui.on_open_engine_settings(move || {
         if let Some(window) = weak.upgrade() {
             window.global::<SettingsUi>().set_section(6);
@@ -198,6 +224,12 @@ pub fn render(window: &AppWindow, settings: &TtsPreferences) {
         ui.set_local_status("Модель не выбрана".into());
     }
     ui.set_local_model(local.unwrap_or_else(|| settings.local_model_id.clone().into()));
+    if ui.get_model_options_plugin() != settings.local_model_id {
+        ui.set_model_options_plugin("".into());
+        ui.set_model_options_fields(ModelRc::new(VecModel::<SpeechParameterItem>::default()));
+        ui.set_model_options_status("Загрузка параметров модели".into());
+    }
+
     ui.set_local_language(settings.local_language.clone().into());
     ui.set_local_auto_load(settings.local_auto_load);
     ui.set_local_lazy_init(settings.local_lazy_init);
@@ -364,4 +396,32 @@ mod tests {
 pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
     let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
     window.global::<VoiceUi>().set_runtime_status(text.into());
+}
+
+pub fn schema(
+    window: &AppWindow,
+    plugin_id: &str,
+    status: &str,
+    fields: &[super::runtime::SpeechOptionControl],
+) {
+    let ui = window.global::<VoiceUi>();
+    ui.set_model_options_plugin(plugin_id.into());
+    ui.set_model_options_status(status.into());
+    ui.set_model_options_fields(ModelRc::new(VecModel::from(
+        fields
+            .iter()
+            .map(|item| SpeechParameterItem {
+                key: item.key.clone().into(),
+                kind: item.kind.clone().into(),
+                value: item.value.clone().into(),
+                choices: ModelRc::new(VecModel::from(
+                    item.choices
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect::<Vec<_>>(),
+    )));
 }

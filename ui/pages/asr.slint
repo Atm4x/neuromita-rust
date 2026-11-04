@@ -1,3 +1,4 @@
+import { SpeechModelSettings, SpeechParameterItem } from "../components/speech-model-settings.slint";
 import { SettingsTheme } from "../settings/theme.slint";
 import { SettingsText, SettingsGlyph, SettingsSectionHeading, SettingsTextField, SettingsToggle, SettingsCheckbox } from "../components/settings-kit.slint";
 import { ActionSurface } from "../components/controls.slint";
@@ -42,6 +43,11 @@ export global AsrUi {
     callback push-to-talk(bool);
     in-out property <string> worker-status;
     in-out property <string> session-status;
+    in-out property <string> model-options-plugin;
+    in-out property <string> model-options-status;
+    in-out property <[SpeechParameterItem]> model-options-fields;
+    callback model-option-changed(string, string);
+    callback model-options-reset();
 }
 
 component AsrCard inherits Rectangle {
@@ -333,6 +339,17 @@ export component AsrSettingsPage inherits VerticalLayout {
     if root.width < 880px: VerticalLayout { spacing: 14px; vertical-stretch: 0;
         AsrBehaviorCard {}
         AsrRecognitionCard {}
+    }
+    AsrCard { vertical-stretch: 0;
+        VerticalLayout { padding: 15px; spacing: 9px; alignment: start;
+            SpeechModelSettings {
+                plugin: AsrUi.model-options-plugin;
+                state: AsrUi.model-options-status;
+                fields: AsrUi.model-options-fields;
+                changed(key, value) => { AsrUi.model-option-changed(key, value); }
+                reset => { AsrUi.model-options-reset(); }
+            }
+        }
     }
     AsrMonitorCard { vertical-stretch: 0; }
 }

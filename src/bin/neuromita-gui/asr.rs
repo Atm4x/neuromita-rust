@@ -17,7 +17,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
     runtime::Command,
-    view::{AppWindow, AsrUi, SettingsUi},
+    view::{AppWindow, AsrUi, SettingsUi, SpeechParameterItem},
 };
 
 fn model_id(label: &str) -> String {
@@ -137,6 +137,32 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     ui.on_refresh_devices(move || refresh(Command::RefreshSpeechInventory));
     let send = dispatch.clone();
     ui.on_session_toggle(move |enabled| send(Command::SpeechSessionEnabled(enabled)));
+    let model_dispatch = dispatch.clone();
+    let model_window = window.as_weak();
+    let reset_window = window.as_weak();
+    let reset_send = dispatch.clone();
+    ui.on_model_options_reset(move || {
+        if let Some(window) = reset_window.upgrade() {
+            let plugin_id = model_id(&window.global::<AsrUi>().get_recognizer());
+            if !plugin_id.is_empty() {
+                reset_send(Command::ResetSpeechOptions(AiService::Asr, plugin_id));
+            }
+        }
+    });
+    ui.on_model_option_changed(move |key, value| {
+        if let Some(window) = model_window.upgrade() {
+            let ui = window.global::<AsrUi>();
+            let plugin_id = model_id(&ui.get_recognizer());
+            if !plugin_id.is_empty() && ui.get_model_options_plugin() == plugin_id {
+                model_dispatch(Command::SaveSpeechOption(
+                    AiService::Asr,
+                    plugin_id,
+                    key.into(),
+                    value.into(),
+                ));
+            }
+        }
+    });
     ui.on_push_to_talk(move |pressed| dispatch(Command::SpeechPushToTalk(pressed)));
 }
 
@@ -147,6 +173,12 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
         .iter()
         .find(|entry| model_id(entry) == settings.recognizer_id);
     ui.set_recognizer(chosen.unwrap_or_else(|| settings.recognizer_id.clone().into()));
+    if ui.get_model_options_plugin() != settings.recognizer_id {
+        ui.set_model_options_plugin("".into());
+        ui.set_model_options_fields(ModelRc::new(VecModel::<SpeechParameterItem>::default()));
+        ui.set_model_options_status("Загрузка параметров модели".into());
+    }
+
     ui.set_device(settings.device_id.clone().into());
     ui.set_audio_backend(settings.audio_backend.clone().into());
     ui.set_instant_send(settings.instant_send);
@@ -303,4 +335,32 @@ pub fn session_status(window: &AppWindow, snapshot: &SpeechSessionSnapshot) {
 
 fn display_status(ui: &AsrUi) {
     ui.set_status(format!("{} · {}", ui.get_session_status(), ui.get_worker_status()).into());
+}
+
+pub fn schema(
+    window: &AppWindow,
+    plugin_id: &str,
+    status: &str,
+    fields: &[super::runtime::SpeechOptionControl],
+) {
+    let ui = window.global::<AsrUi>();
+    ui.set_model_options_plugin(plugin_id.into());
+    ui.set_model_options_status(status.into());
+    ui.set_model_options_fields(ModelRc::new(VecModel::from(
+        fields
+            .iter()
+            .map(|item| SpeechParameterItem {
+                key: item.key.clone().into(),
+                kind: item.kind.clone().into(),
+                value: item.value.clone().into(),
+                choices: ModelRc::new(VecModel::from(
+                    item.choices
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect::<Vec<_>>(),
+    )));
 }

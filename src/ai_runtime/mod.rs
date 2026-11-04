@@ -24,6 +24,7 @@ pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
 pub mod speech_languages;
+pub mod speech_schema;
 pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;
@@ -1203,6 +1204,42 @@ pub async fn fetch_install_plan_for(
 
 /// Query SDK metadata and readiness without initializing a model or changing a running worker.
 /// Dependency layers must belong to the selected plugin's installed environment.
+/// Fetch only the Python plugin settings contract. This never probes packages or initializes a model.
+pub async fn fetch_speech_settings_schema(
+    host: &PythonHostConfig,
+    service: AiService,
+    plugin_id: &str,
+) -> Result<speech_schema::SpeechSettingsSchema, AiRuntimeError> {
+    if !matches!(service, AiService::Tts | AiService::Asr) || !layer::valid_segment(plugin_id) {
+        return Err(AiRuntimeError::Protocol(
+            "invalid speech plugin metadata request".into(),
+        ));
+    }
+    let mut worker = WorkerProcess::launch(host, &[], &[]).await?;
+    let result = async {
+        let available = worker.request("discover", &json!({})).await?;
+        if !available.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("id").and_then(Value::as_str) == Some(plugin_id)
+                    && item.get("kind").and_then(Value::as_str) == Some(service.kind())
+                    && item.get("discovery_status").and_then(Value::as_str) == Some("available")
+            })
+        }) {
+            return Err(AiRuntimeError::Protocol(
+                "speech plugin not found for selected service".into(),
+            ));
+        }
+        let raw = worker
+            .request("settings_schema", &json!({"plugin_id": plugin_id}))
+            .await?;
+        speech_schema::SpeechSettingsSchema::parse(&raw)
+    }
+    .await;
+    let _ = worker.child.start_kill();
+    let _ = worker.child.wait().await;
+    result
+}
+
 pub async fn fetch_speech_plugin_inspection(
     config: &PythonHostConfig,
     service: AiService,

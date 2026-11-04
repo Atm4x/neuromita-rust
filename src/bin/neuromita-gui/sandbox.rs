@@ -183,6 +183,20 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             }
         }
         Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
+        Update::SpeechModelSchema {
+            service,
+            plugin_id,
+            status,
+            fields,
+        } => match service {
+            neuromita::ai_runtime::AiService::Tts => {
+                super::voice::schema(window, &plugin_id, &status, &fields)
+            }
+            neuromita::ai_runtime::AiService::Asr => {
+                super::asr::schema(window, &plugin_id, &status, &fields)
+            }
+            _ => {}
+        },
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);

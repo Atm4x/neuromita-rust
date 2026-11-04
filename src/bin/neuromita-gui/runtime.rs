@@ -1,10 +1,15 @@
-use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    collections::HashMap, num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration,
+};
 
 use neuromita::{
     ai_runtime::{
+        AiService, fetch_speech_settings_schema,
+        installed_speech::InstalledSpeechEnvironment,
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
+        speech_schema::{SpeechSettingsSchema, scalar_text},
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
@@ -54,6 +59,8 @@ pub enum Command {
     SaveAsr(AsrPreferences, String),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    SaveSpeechOption(AiService, String, String, String),
+    ResetSpeechOptions(AiService, String),
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
@@ -66,8 +73,21 @@ pub enum Command {
     SpeechPushToTalk(bool),
 }
 
+pub struct SpeechOptionControl {
+    pub key: String,
+    pub kind: String,
+    pub value: String,
+    pub choices: Vec<String>,
+}
+
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
+    SpeechModelSchema {
+        service: AiService,
+        plugin_id: String,
+        status: String,
+        fields: Vec<SpeechOptionControl>,
+    },
     SpeechSessionStatus(SpeechSessionSnapshot),
     RecognizedText {
         text: String,
@@ -142,6 +162,109 @@ impl Drop for DesktopRuntime {
             let _ = thread.join();
         }
     }
+}
+
+fn schema_fields(
+    schema: &SpeechSettingsSchema,
+    options: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Vec<SpeechOptionControl> {
+    let empty = serde_json::Map::new();
+    let options = options.unwrap_or(&empty);
+    schema
+        .fields
+        .iter()
+        .filter(|field| field.key != "language")
+        .map(|field| SpeechOptionControl {
+            key: field.key.clone(),
+            kind: field.kind.name().into(),
+            value: field.display_value(options),
+            choices: field.choices.iter().map(scalar_text).collect(),
+        })
+        .collect()
+}
+
+fn selected_model_for_schema(
+    service: AiService,
+    settings: &neuromita::settings::SpeechSettings,
+) -> String {
+    match service {
+        AiService::Tts => settings.tts.local_model_id.clone(),
+        AiService::Asr => settings.asr.recognizer_id.clone(),
+        _ => String::new(),
+    }
+}
+
+fn current_schema_values<'a>(
+    service: AiService,
+    speech: &'a neuromita::settings::SpeechSettings,
+    plugin_id: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let values = match service {
+        AiService::Tts => &speech.tts_model_options,
+        AiService::Asr => &speech.asr_model_options,
+        _ => return None,
+    };
+    values.get(plugin_id).and_then(serde_json::Value::as_object)
+}
+
+fn publish_speech_schema(
+    service: AiService,
+    plugin_id: String,
+    schema: &SpeechSettingsSchema,
+    speech: &neuromita::settings::SpeechSettings,
+    publish: &impl Fn(Update),
+) {
+    let fields = schema_fields(schema, current_schema_values(service, speech, &plugin_id));
+    publish(Update::SpeechModelSchema {
+        service,
+        plugin_id,
+        fields,
+        status: "Параметры из Python settings_schema; изменения сохраняются автоматически".into(),
+    });
+}
+
+fn save_speech_option(
+    api: &GuiPresenter,
+    cache: &HashMap<AiService, (String, SpeechSettingsSchema)>,
+    service: AiService,
+    plugin_id: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let current = api.settings.snapshot().map_err(|error| error.to_string())?;
+    if selected_model_for_schema(service, &current.values.speech) != plugin_id {
+        return Err("Выбор модели изменился; настройка не применена".into());
+    }
+    let (_, schema) = cache
+        .get(&service)
+        .filter(|(id, _)| id == plugin_id)
+        .ok_or("Схема выбранной модели ещё не загружена")?;
+    if key == "language" {
+        return Err("Язык задаётся отдельным параметром модели".into());
+    }
+    let field = schema
+        .field(key)
+        .ok_or("Неизвестный параметр выбранного плагина")?;
+    let converted = field
+        .parse_input(value)
+        .map_err(|error| error.to_string())?;
+    let model_options = match service {
+        AiService::Tts => &api.settings.tts.model_options,
+        AiService::Asr => &api.settings.asr.model_options,
+        _ => return Err("Неподдерживаемый сервис".into()),
+    };
+    let mut values = model_options.get();
+    let options = values
+        .entry(plugin_id.to_owned())
+        .or_insert_with(|| serde_json::json!({}));
+    let map = options
+        .as_object_mut()
+        .ok_or("Некорректные сохранённые параметры модели")?;
+    map.insert(key.to_owned(), converted);
+    schema
+        .validate_overrides(map)
+        .map_err(|error| error.to_string())?;
+    model_options.set(values).map_err(|error| error.to_string())
 }
 
 async fn discover_input_devices(directory: &std::path::Path) -> Vec<AudioInputDevice> {
@@ -346,6 +469,12 @@ async fn observe(
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
+    let (schema_tx, mut schema_rx) =
+        mpsc::unbounded_channel::<(AiService, String, u64, Result<SpeechSettingsSchema, String>)>();
+    let mut schema_requested = HashMap::<AiService, (String, u64)>::new();
+    let mut next_schema_request = 0u64;
+    let mut schema_cache = HashMap::<AiService, (String, SpeechSettingsSchema)>::new();
+    let metadata = InstalledSpeechEnvironment::for_desktop(directory.to_path_buf());
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
     let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
@@ -370,6 +499,47 @@ async fn observe(
             Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
             Err(error) => publish(Update::Error(error.to_string())),
         }
+        if let Ok(snapshot) = administration.settings.snapshot() {
+            for service in [AiService::Tts, AiService::Asr] {
+                let plugin_id = selected_model_for_schema(service, &snapshot.values.speech);
+                if !schema_requested
+                    .get(&service)
+                    .is_some_and(|(id, _)| id == &plugin_id)
+                {
+                    next_schema_request = next_schema_request.wrapping_add(1);
+                    let generation = next_schema_request;
+                    schema_requested.insert(service, (plugin_id.clone(), generation));
+                    schema_cache.remove(&service);
+                    publish(Update::SpeechModelSchema {
+                        service,
+                        plugin_id: plugin_id.clone(),
+                        fields: vec![],
+                        status: if plugin_id.is_empty() {
+                            "Выберите модель".into()
+                        } else {
+                            "Чтение settings_schema из Python SDK…".into()
+                        },
+                    });
+                    if !plugin_id.is_empty() {
+                        let host = metadata.clone();
+                        let send = schema_tx.clone();
+                        tokio::spawn(async move {
+                            let result = async {
+                                let config = host
+                                    .metadata_host(&plugin_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                fetch_speech_settings_schema(&config, service, &plugin_id)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            }
+                            .await;
+                            let _ = send.send((service, plugin_id, generation, result));
+                        });
+                    }
+                }
+            }
+        }
         publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
         publish(Update::SpeechSessionStatus(
             administration.speech.snapshot(),
@@ -377,6 +547,20 @@ async fn observe(
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
+            Some((service, plugin_id, generation, result)) = schema_rx.recv() => {
+                if schema_requested.get(&service) != Some(&(plugin_id.clone(), generation)) { continue; }
+                match result {
+                    Ok(schema) => {
+                        let snapshot = administration.settings.snapshot().map_err(|error| error.to_string())?;
+                        publish_speech_schema(service, plugin_id.clone(), &schema, &snapshot.values.speech, publish);
+                        schema_cache.insert(service, (plugin_id, schema));
+                    },
+                    Err(error) => publish(Update::SpeechModelSchema {
+                        service, plugin_id, fields: vec![],
+                        status: format!("Схема недоступна: {error}"),
+                    }),
+                }
+            },
             command = receive.recv() => match command {
                 Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
@@ -409,8 +593,61 @@ async fn observe(
                         publish(Update::AdminError(error.to_string()));
                     }
                 },
+                Some(Command::ResetSpeechOptions(service, plugin_id)) => {
+                    let snapshot = administration.settings.snapshot().map_err(|error| error.to_string())?;
+                    if selected_model_for_schema(service, &snapshot.values.speech) != plugin_id {
+                        publish(Update::AdminError("Модель изменилась; сброс отклонён".into()));
+                    } else {
+                        let options = match service {
+                            AiService::Tts => Some(&administration.settings.tts.model_options),
+                            AiService::Asr => Some(&administration.settings.asr.model_options),
+                            _ => None,
+                        };
+                        if let Some(options) = options {
+                            let mut values = options.get();
+                            values.remove(&plugin_id);
+                            match options.set(values) {
+                                Ok(()) => {
+                                    if let Some((_, schema)) = schema_cache.get(&service) {
+                                        let current = administration.settings.snapshot().map_err(|error| error.to_string())?;
+                                        publish_speech_schema(service, plugin_id, schema, &current.values.speech, publish);
+                                    }
+                                    publish(Update::AdminSaved);
+                                },
+                                Err(error) => publish(Update::AdminError(error.to_string())),
+                            }
+                        }
+                    }
+                },
+                Some(Command::SaveSpeechOption(service, plugin_id, key, value)) => {
+                    match save_speech_option(administration, &schema_cache, service, &plugin_id, &key, &value) {
+                        Ok(()) => {
+                            let speech = administration.settings.snapshot().map_err(|error| error.to_string())?;
+                            if let Some((_, schema)) = schema_cache.get(&service) {
+                                publish_speech_schema(service, plugin_id, schema, &speech.values.speech, publish);
+                            }
+                            publish(Update::AdminSaved);
+                        },
+                        Err(error) => {
+                            publish(Update::AdminError(error));
+                            if let (Some((cached_plugin, schema)), Ok(snapshot)) = (
+                                schema_cache.get(&service),
+                                administration.settings.snapshot(),
+                            ) && cached_plugin == &plugin_id {
+                                publish_speech_schema(
+                                    service,
+                                    plugin_id,
+                                    schema,
+                                    &snapshot.values.speech,
+                                    publish,
+                                );
+                            }
+                        },
+                    }
+                },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
+                    schema_requested.clear();
                     publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },

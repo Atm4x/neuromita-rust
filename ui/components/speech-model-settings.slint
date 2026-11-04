@@ -1,0 +1,64 @@
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsText, SettingsEntryRow, SettingsChoiceRow, SettingsToggleRow, SettingsActionButton } from "settings-kit.slint";
+
+export struct SpeechParameterItem {
+    key: string,
+    kind: string,
+    value: string,
+    choices: [string],
+}
+
+export component SpeechModelSettings inherits VerticalLayout {
+    in property <string> plugin;
+    in property <string> state;
+    in property <[SpeechParameterItem]> fields;
+    callback changed(string, string);
+    callback reset();
+    spacing: 9px;
+    padding: 0px;
+    alignment: start;
+    Rectangle {
+        height: 1px;
+        vertical-stretch: 0;
+        background: SettingsTheme.border;
+    }
+    SettingsText { text: "Настройки выбранной модели"; font-size: 13px; font-weight: 700; height: 24px; }
+    SettingsText {
+        text: root.plugin == "" ? "Выберите модель" : root.state;
+        color: SettingsTheme.muted;
+        font-size: 11px;
+        wrap: word-wrap;
+        overflow: clip;
+        min-height: 20px;
+    }
+    for field in root.fields: VerticalLayout {
+        spacing: 4px;
+        padding: 0px;
+        vertical-stretch: 0;
+        if field.kind == "boolean": SettingsToggleRow {
+            width: 340px;
+            title: field.key;
+            checked: field.value == "true";
+            changed(value) => { root.changed(field.key, value ? "true" : "false"); }
+        }
+        if field.kind != "boolean" && field.choices.length > 0: SettingsChoiceRow {
+            width: 340px;
+            title: field.key;
+            options: field.choices;
+            value: field.value;
+            changed(value) => { root.changed(field.key, value); }
+        }
+        if field.kind != "boolean" && field.choices.length == 0: SettingsEntryRow {
+            width: 340px;
+            title: field.key;
+            value: field.value;
+            placeholder: field.kind == "string" ? "Текст" : "Число";
+            committed(value) => { root.changed(field.key, value); }
+        }
+    }
+    SettingsActionButton {
+        text: "Сбросить параметры модели";
+        enabled: root.plugin != "";
+        activated => { root.reset(); }
+    }
+}
