@@ -13,11 +13,12 @@ Working branch: `codex/preset-sandbox-slice-20261104`, based on main `095a4e71`.
 - [x] Ordered typed text transforms, based on Python `message_transforms.py`.
 - [x] Gemini configurable sampling, thinking and structured-output options.
 - [x] Stage supported Python presets and normalized template inventory, with explicit blockers.
-- [ ] Additional executable template backends (OpenRouter/OpenAI-compatible/ChatGPT OAuth).
+- [x] HTTP profile follow-up implements OpenRouter/OpenAI-compatible/Responses; see the separate follow-up report.
+- [ ] ChatGPT OAuth/account and forced-streaming contract.
 - [x] Connect imported credentials to normal persistent bootstrap; live Main check passed.
 - [x] Preserve provider preparation options during GUI connection edits.
 - [x] Verify final default/GUI tests, Clippy, formatting and GUI build.
-- [ ] Publish reviewed changes through PR to main.
+- [x] Publish reviewed Gemini changes through [PR #85](https://github.com/Atm4x/neuromita-rust/pull/85), merge `e8a199eb`.
 
 ## Contracts
 
@@ -55,6 +56,10 @@ its selected template is Google. An initial raw-JSON interpretation was correcte
 after tracing the controller-to-resolver call chain. The importer tests this case.
 
 ## Reviewed speech descendants
+
+Subsequent HTTP protocol work and updated remaining scope are tracked in
+[HTTP preset protocols](preset-http-protocols-20261104.md). Earlier blocked
+OpenRouter/Compatible imports below describe the PR #85 checkpoint.
 
 `speech-runtime-desktop` (`0b3de4bd`), `speech-session-controller` (`198074b5`),
 `speech-installed-autostart` (`8e5c409f`) and `speech-live-reconfiguration`

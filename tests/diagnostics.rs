@@ -82,6 +82,7 @@ impl GenerationProvider for ScriptedProvider {
             ]
             .into();
             let request = PreparedRequest {
+            protocol: "google_gemini_default".into(), dialect: "gemini_generate_content".into(),
                 provider: ProviderKind::Gemini,
                 model: "fixture-model".into(),
                 endpoint: "https://example.test/v1beta".into(),

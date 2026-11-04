@@ -97,7 +97,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let template = GeminiTemplate::google(&options.model, &key, settings)?;
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(template));
     let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new()?);
-    let generator = ResponseGenerator::new([provider])?;
+    let generator = ResponseGenerator::new([
+        provider,
+        Arc::new(neuromita::generation::openai::OpenAiProvider::new().map_err(|e| e.to_string())?)
+            as Arc<dyn GenerationProvider>,
+    ])?;
     let mut knowledge = KnowledgeRetrieval::lexical();
     if let Some(model) = std::env::var_os("NEUROMITA_MEMORY_EMBEDDING_MODEL") {
         let protocol = match model.to_str() {

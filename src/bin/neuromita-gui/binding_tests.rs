@@ -359,6 +359,8 @@ fn settings_render_and_bindings(window: &AppWindow) {
         ),
     )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        output_token_wire_key: "maxOutputTokens".into(),
+        template_id: "gemini".into(),
         temperature_enabled: true,
         tokens_enabled: true,
         provider: "google".into(),

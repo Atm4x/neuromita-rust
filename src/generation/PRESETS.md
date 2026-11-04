@@ -1,5 +1,14 @@
 # Preset selection at generation execution
 
+HTTP follow-up: [provider profiles and remaining scope](../../future/preset-http-protocols-20261104.md).
+Core now also supports typed Chat Completions and Responses templates, with
+Compatible, Mistral, OpenRouter, Ai.iO and LM Studio preparation profiles.
+`PresetGenerationEdit` explicitly identifies the protocol and authentication
+choice. `None` is an explicit no-auth request for these transports; Gemini still
+requires a credential. Actual protocol/dialect accompanies provider observations.
+The supported non-Gemini imports supersede the earlier blocker list below;
+ChatGPT Plan/OAuth remains separate and unavailable.
+
 ## Current connection and preparation contract (2026-11-04)
 
 Current persisted Gemini definitions use a typed `credential` reference, required

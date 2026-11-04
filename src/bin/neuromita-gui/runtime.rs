@@ -147,7 +147,12 @@ async fn start(
 ) -> Result<ApplicationLifecycle, String> {
     let provider: Arc<dyn GenerationProvider> =
         Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
-    let generator = ResponseGenerator::new([provider]).map_err(|e| e.to_string())?;
+    let generator = ResponseGenerator::new([
+        provider,
+        Arc::new(neuromita::generation::openai::OpenAiProvider::new().map_err(|e| e.to_string())?)
+            as Arc<dyn GenerationProvider>,
+    ])
+    .map_err(|e| e.to_string())?;
     let limits = RuntimeLimits {
         request_queue: NonZeroUsize::new(16).unwrap(),
         discovery_buffer: NonZeroUsize::new(128).unwrap(),

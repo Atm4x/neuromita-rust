@@ -150,7 +150,7 @@ impl PythonPresetImport {
             .transpose()?;
         let protocol = resolve_protocol(preset, template)?;
         if protocol != "google_gemini_default" {
-            return Err(invalid(&format!("unsupported import protocol: {protocol}")));
+            return self.convert_openai(id, preset, template, protocol);
         }
         for field in [
             "reserve_keys",
@@ -338,6 +338,151 @@ impl PythonPresetImport {
     pub fn credential_bytes(&self) -> Result<Vec<u8>, PresetCatalogError> {
         serde_json::to_vec_pretty(&self.credentials)
             .map_err(|_| invalid("cannot encode credential store"))
+    }
+
+    fn convert_openai(
+        &mut self,
+        id: &str,
+        preset: &Value,
+        template: Option<&Value>,
+        protocol: &str,
+    ) -> Result<(), PresetCatalogError> {
+        use super::openai::{JsonOutput, OpenAiPresetDefinition, OpenAiProtocol};
+        let protocol = match protocol {
+            "openai_compatible_default" => OpenAiProtocol::Compatible,
+            "mistral_default" => OpenAiProtocol::Mistral,
+            "openrouter_default" => OpenAiProtocol::OpenRouter,
+            "aiio_default" => OpenAiProtocol::Aiio,
+            "lmstudio_default" => OpenAiProtocol::LmStudio,
+            "openai_responses_default" => OpenAiProtocol::Responses,
+            _ => return Err(invalid(&format!("unsupported import protocol: {protocol}"))),
+        };
+        for field in [
+            "reserve_keys",
+            "fallbacks",
+            "generation_overrides",
+            "model_profile_overrides",
+        ] {
+            if has_entries(preset.get(field)) {
+                return Err(invalid(&format!("import requires support for {field}")));
+            }
+        }
+        let overrides = preset
+            .get("protocol_overrides")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("protocol overrides must be an object"))?;
+        if overrides.keys().any(|key| key != "transforms") {
+            return Err(invalid("unsupported protocol override"));
+        }
+        let transforms = match overrides.get("transforms") {
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|_| invalid("invalid message transforms"))?,
+            None => protocol.transforms(),
+        };
+        let settings = preset
+            .get("model_settings")
+            .ok_or_else(|| invalid("missing model settings"))?;
+        let values = settings
+            .get("values")
+            .ok_or_else(|| invalid("missing model setting values"))?;
+        let enabled = settings
+            .get("enabled")
+            .and_then(Value::as_array)
+            .ok_or_else(|| invalid("missing enabled model settings"))?
+            .iter()
+            .map(|v| v.as_str().ok_or_else(|| invalid("invalid enabled setting")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if enabled.iter().any(|id| {
+            ![
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "presence_penalty",
+                "frequency_penalty",
+                "reasoning_enabled",
+            ]
+            .contains(id)
+        }) {
+            return Err(invalid("unsupported enabled model setting"));
+        }
+        let number = |key: &str| {
+            values
+                .get(key)
+                .and_then(Value::as_f64)
+                .map(|v| v as f32)
+                .ok_or_else(|| invalid(&format!("missing number {key}")))
+        };
+        let optional = |key: &str| {
+            if enabled.contains(&key) {
+                number(key).map(Some)
+            } else {
+                Ok(None)
+            }
+        };
+        let mut options = protocol.options();
+        options.send_temperature = enabled.contains(&"temperature");
+        options.send_max_output_tokens = enabled.contains(&"max_tokens");
+        options.top_p = optional("top_p")?;
+        options.presence_penalty = optional("presence_penalty")?;
+        options.frequency_penalty = optional("frequency_penalty")?;
+        if enabled.contains(&"reasoning_enabled") {
+            options.reasoning_enabled = Some(
+                values
+                    .get("reasoning_enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| invalid("invalid reasoning_enabled"))?,
+            );
+        }
+        if settings
+            .get("support_overrides")
+            .and_then(|v| v.get("structured_output"))
+            == Some(&Value::Bool(false))
+        {
+            options.output = JsonOutput::Prompt;
+        }
+        let endpoint = preset
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                template
+                    .and_then(|t| t.get("url"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            })
+            .ok_or_else(|| invalid("explicit provider endpoint required"))?;
+        let key = text(preset, "key")?;
+        let credential_name = format!("python_preset_{id}");
+        let config = OpenAiPresetDefinition {
+            protocol,
+            endpoint: endpoint.into(),
+            model: text(preset, "default_model")?.into(),
+            credential: (!key.is_empty())
+                .then(|| CredentialReference::Local(credential_name.clone())),
+            temperature: number("temperature")?,
+            max_output_tokens: values
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| invalid("invalid max_tokens"))?,
+            timeout_ms: 60_000,
+            options,
+            transforms,
+        };
+        super::openai::OpenAiTemplate::new(config.clone(), (!key.is_empty()).then_some(key))?;
+        let record = PresetRecord {
+            name: text(preset, "name")?.into(),
+            definition: PresetDefinition::OpenAi(config),
+        };
+        let id = PresetId(
+            id.parse()
+                .map_err(|_| invalid("invalid Python preset ID"))?,
+        );
+        self.records.insert(id, record);
+        if !key.is_empty() {
+            self.credentials.insert(credential_name, key.into());
+        }
+        Ok(())
     }
 
     pub fn catalog_bytes(&self) -> Result<Vec<u8>, PresetCatalogError> {

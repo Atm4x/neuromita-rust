@@ -281,12 +281,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError
     StructuredResponse::parse(&text)
 }
 
-#[derive(Default)]
-pub(super) struct ResponseObservation {
-    pub answer_text: Option<Arc<str>>,
-    pub finish_reason: Option<Arc<str>>,
-    pub usage: Option<ProviderUsage>,
-}
+type ResponseObservation = crate::generation::http::ResponseMetadata;
 
 pub(super) fn observation_metadata(bytes: &[u8]) -> ResponseObservation {
     let Ok(Value::Object(root)) = serde_json::from_slice::<serde_json::Value>(bytes) else {

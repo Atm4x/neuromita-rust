@@ -49,6 +49,7 @@ component ApiFieldRow inherits VerticalLayout {
 
 component ApiParameterRow inherits HorizontalLayout {
     in property <PresetParameterItem> parameter;
+    in property <string> wire-key: root.parameter.wire-key;
     in property <bool> sent: root.parameter.sent;
     callback toggled(bool);
     in-out property <string> value;
@@ -59,7 +60,7 @@ component ApiParameterRow inherits HorizontalLayout {
     VerticalLayout { padding: 0px; spacing: 4px; horizontal-stretch: 1; alignment: center;
         HorizontalLayout { spacing: 8px;
             SettingsLabel { text: I18n.i18n(root.parameter.title-key, root.parameter.title); font-size: 12px; color: SettingsTheme.text; horizontal-stretch: 0; }
-            SettingsLabel { text: root.parameter.wire-key; font-size: 11px; color: SettingsTheme.muted; horizontal-stretch: 1; }
+            SettingsLabel { text: root.wire-key; font-size: 11px; color: SettingsTheme.muted; horizontal-stretch: 1; }
         }
         SettingsLabel { text: I18n.i18n(root.parameter.description-key, root.parameter.description); font-size: 11px; color: SettingsTheme.muted; wrap: word-wrap; }
     }
@@ -353,6 +354,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                             VerticalLayout { spacing: 0px; padding: 0px; alignment: start;
                                 for parameter in SettingsUi.preset-parameters: ApiParameterRow {
                                     parameter: parameter;
+                                    wire-key: parameter.id == "max_tokens" ? SettingsUi.preset-output-token-wire-key : parameter.wire-key;
                                     sent: parameter.id == "temperature" ? SettingsUi.preset-temperature-enabled : parameter.id == "max_tokens" ? SettingsUi.preset-tokens-enabled : parameter.sent;
                                     toggled(value) => {
                                         if parameter.id == "temperature" { SettingsUi.preset-temperature-enabled = value; }

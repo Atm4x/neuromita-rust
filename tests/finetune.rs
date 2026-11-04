@@ -156,12 +156,15 @@ impl GenerationProvider for ControlledGeneration {
         Box::pin(async move {
             let model: Arc<str> = match &template {
                 ProviderTemplate::Gemini(template) => template.model().into(),
+                ProviderTemplate::OpenAi(template) => template.model().into(),
             };
             let user_text: Arc<str> = context.view.messages().last().map_or_else(
                 || Arc::clone(&context.current_input),
                 |message| Arc::from(message.content.as_str()),
             );
             observer.request_prepared(PreparedRequest {
+                protocol: "google_gemini_default".into(),
+                dialect: "gemini_generate_content".into(),
                 provider: ProviderKind::Gemini,
                 model,
                 endpoint: "http://fixture.invalid/v1beta/models/fixture-model:generateContent"

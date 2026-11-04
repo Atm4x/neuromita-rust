@@ -79,6 +79,8 @@ pub struct ProviderUsage {
 
 #[derive(Debug, Clone)]
 pub struct PreparedRequest {
+    pub protocol: Arc<str>,
+    pub dialect: Arc<str>,
     pub provider: ProviderKind,
     pub model: Arc<str>,
     /// Endpoint without credentials, query or fragment.

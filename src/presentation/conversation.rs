@@ -6,9 +6,7 @@ use tokio::sync::watch;
 use super::{BoundProperty, CharactersPresenter, ChatModel, ChatPresenter, PresenterError};
 use crate::{
     character::{CharacterError, CharacterId, CharacterState},
-    generation::{
-        PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetId, ProviderTemplate,
-    },
+    generation::{PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetId},
     request::{CancelResult, RequestHandle, RequestId},
     settings::{PresetSelection, SettingsError, SettingsOwner, SettingsSnapshot, Volume},
     timeline::{
@@ -227,9 +225,7 @@ impl ConversationPresenter {
             .presets
             .get(preset)
             .and_then(|value| value.ok_or(PresetCatalogError::NotFound(preset)))
-            .map(|resolved| match resolved.template() {
-                ProviderTemplate::Gemini(template) => template.model().to_owned(),
-            });
+            .map(|resolved| resolved.template().model().to_owned());
         Ok(ConversationSnapshot {
             character,
             at,
