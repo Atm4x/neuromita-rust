@@ -14,9 +14,12 @@ table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:7px;bord
 </style>
 <h1>Ручная разметка VAD</h1>
 <p>Всё работает локально. Прослушайте клип и задайте интервалы вручную. Загрузка и редактирование не подтверждают проверку.</p>
+<p id="bundleStatus"></p>
+<details><summary>Открыть другие файлы или продолжить сохранённую разметку</summary>
 <label>Manifest JSON <input id="manifestFile" type="file" accept=".json,application/json"></label>
 <label>WAV-файлы <input id="wavFiles" type="file" accept=".wav,audio/wav" multiple></label>
 <label>sources.json (необязательно) <input id="sourcesFile" type="file" accept=".json,application/json"></label>
+</details>
 <p id="error" role="alert"></p>
 <label>Клип <select id="fixture"></select></label>
 <button id="export" disabled>Экспортировать полный manifest</button>
@@ -152,18 +155,21 @@ async function selectFixture(){
     $('position').textContent='Время: 0 мс · Сэмпл: 0';render();
   }catch(error){if(ticket===epoch)message(error)}
 }
+async function loadManifest(candidate){
+  if(!Array.isArray(candidate.fixtures)||!candidate.fixtures.length)fail('В manifest отсутствует fixtures.');
+  const ids=new Set();for(const f of candidate.fixtures){
+    if(typeof f.id!=='string'||!f.id||ids.has(f.id))fail('Нужны уникальные непустые id.');ids.add(f.id);localName(f.wav);
+    f.annotation_status??='unknown';validate(f,Number.MAX_SAFE_INTEGER);
+  }
+  manifest=candidate;$('fixture').replaceChildren();manifest.fixtures.forEach((f,i)=>{
+    const option=document.createElement('option');option.value=i;option.textContent=f.id+' · '+f.wav;$('fixture').append(option);
+  });$('export').disabled=false;await selectFixture();
+}
 $('manifestFile').onchange=async()=>{
   const ticket=++manifestEpoch;invalidateView();$('export').disabled=true;$('error').textContent='';
   try{
     const candidate=await jsonFile($('manifestFile').files[0]);if(ticket!==manifestEpoch)return;
-    if(!Array.isArray(candidate.fixtures)||!candidate.fixtures.length)fail('В manifest отсутствует fixtures.');
-    const ids=new Set();for(const f of candidate.fixtures){
-      if(typeof f.id!=='string'||!f.id||ids.has(f.id))fail('Нужны уникальные непустые id.');ids.add(f.id);localName(f.wav);
-      f.annotation_status??='unknown';validate(f,Number.MAX_SAFE_INTEGER);
-    }
-    manifest=candidate;$('fixture').replaceChildren();manifest.fixtures.forEach((f,i)=>{
-      const option=document.createElement('option');option.value=i;option.textContent=f.id+' · '+f.wav;$('fixture').append(option);
-    });$('export').disabled=false;await selectFixture();
+    await loadManifest(candidate);
   }catch(error){if(ticket===manifestEpoch)message(error)}
 };
 $('wavFiles').onchange=guard(async()=>{
@@ -212,5 +218,17 @@ $('export').onclick=guard(async()=>{
   const blob=new Blob([JSON.stringify(snapshot,null,2)+'\n'],{type:'application/json'}),href=URL.createObjectURL(blob);
   const link=document.createElement('a');link.href=href;link.download='manifest-manual.json';link.click();setTimeout(()=>URL.revokeObjectURL(href),1000);
 });
+async function loadBundledCorpus(){
+  const bundled=$('bundledCorpus');if(!bundled)return;
+  const data=JSON.parse(bundled.textContent),next=new Map();
+  for(const [name,base64] of Object.entries(data.wavs)){
+    localName(name);const bytes=Uint8Array.from(atob(base64),c=>c.charCodeAt(0));
+    next.set(name,new File([bytes],name,{type:'audio/wav'}));
+  }
+  files=next;sources=data.sources;
+  await loadManifest(data.manifest);
+  $('bundleStatus').textContent=`Корпус загружен: ${manifest.fixtures.length} записей. Выберите клип и нажмите ▶. Файлы искать не нужно.`;
+}
+guard(loadBundledCorpus)();
 </script>
 </html>
