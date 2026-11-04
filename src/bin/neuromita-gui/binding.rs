@@ -33,6 +33,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         options.model.clone(),
     )?;
     super::voice::bind(&window);
+    super::asr::bind(&window);
     let catalog = Rc::new(RefCell::new(catalog));
     window
         .global::<I18n>()
@@ -41,7 +42,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         HomePreview::python_reference(),
         options.locale,
     )));
-    if options.voice_preview.is_some() {
+    if options.voice_preview.is_some() || options.asr_preview {
         presenter
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Settings));
@@ -65,6 +66,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     render(&window, &presenter.borrow(), &catalog.borrow());
     if let Some(mode) = options.voice_preview {
         super::voice::preview(&window, mode);
+    }
+    if options.asr_preview {
+        super::asr::preview(&window);
     }
 
     let weak = window.as_weak();
@@ -220,6 +224,7 @@ struct Options {
     model: Option<String>,
     sandbox: bool,
     voice_preview: Option<VoicePreviewMode>,
+    asr_preview: bool,
 }
 
 impl Options {
@@ -231,11 +236,13 @@ impl Options {
             model: None,
             sandbox: false,
             voice_preview: None,
+            asr_preview: false,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
                 Some("--sandbox") => options.sandbox = true,
+                Some("--asr-preview") => options.asr_preview = true,
                 Some("--voice-preview") => {
                     let mode = arguments.next().ok_or("--voice-preview requires a mode")?;
                     options.voice_preview = Some(VoicePreviewMode::parse(

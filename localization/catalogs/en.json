@@ -1586,5 +1586,213 @@
   "voice.api.paid": {
     "source": "Проверка отправляет текст провайдеру. Платные модели расходуют баланс API.",
     "translation": "The test sends text to the provider. Paid models consume API balance."
+  },
+  "asr.status.unavailable": {
+    "source": "Распознавание не запущено",
+    "translation": "Recognition is stopped"
+  },
+  "asr.active": {
+    "source": "Микрофон активен",
+    "translation": "Microphone active"
+  },
+  "asr.recognition.enabled": {
+    "source": "Распознавание включено",
+    "translation": "Recognition enabled"
+  },
+  "asr.recognition.disabled": {
+    "source": "Распознавание выключено",
+    "translation": "Recognition disabled"
+  },
+  "asr.status": {
+    "source": "Статус",
+    "translation": "Status"
+  },
+  "asr.restart": {
+    "source": "Перезапустить",
+    "translation": "Restart"
+  },
+  "asr.recognizer": {
+    "source": "Модель распознавания",
+    "translation": "Recognition model"
+  },
+  "asr.models.empty": {
+    "source": "Нет установленных моделей",
+    "translation": "No installed models"
+  },
+  "asr.catalog": {
+    "source": "Каталог моделей",
+    "translation": "Model catalog"
+  },
+  "asr.input-device": {
+    "source": "Устройство ввода",
+    "translation": "Input device"
+  },
+  "asr.device.empty": {
+    "source": "Нет данных об устройствах",
+    "translation": "No input device data"
+  },
+  "asr.audio-backend": {
+    "source": "Аудиобэкенд",
+    "translation": "Audio backend"
+  },
+  "asr.behavior": {
+    "source": "Поведение и отправка",
+    "translation": "Behavior and sending"
+  },
+  "asr.instant": {
+    "source": "Мгновенная отправка",
+    "translation": "Instant send"
+  },
+  "asr.instant.note": {
+    "source": "Отправлять распознанный текст сразу.",
+    "translation": "Send recognized text immediately."
+  },
+  "asr.delay": {
+    "source": "Отправлять с паузой",
+    "translation": "Send after pause"
+  },
+  "asr.delay.note": {
+    "source": "Новая речь или печать перезапускает отсчёт.",
+    "translation": "New speech or typing restarts the countdown."
+  },
+  "asr.pause": {
+    "source": "Пауза до отправки",
+    "translation": "Pause before send"
+  },
+  "asr.pause.note": {
+    "source": "В секундах",
+    "translation": "In seconds"
+  },
+  "asr.merge-chat": {
+    "source": "Добавлять текст из чата",
+    "translation": "Include chat text"
+  },
+  "asr.merge-chat.note": {
+    "source": "Объединять речь с текстом в поле ввода.",
+    "translation": "Combine speech with the typed chat input."
+  },
+  "asr.pause-speaking": {
+    "source": "Приостанавливать распознавание, пока Мита говорит",
+    "translation": "Pause recognition while Mita speaks"
+  },
+  "asr.pause-speaking.note": {
+    "source": "Не распознавать речь во время ответа Миты.",
+    "translation": "Ignore speech while Mita is replying."
+  },
+  "asr.input-mode": {
+    "source": "Режим ввода",
+    "translation": "Input mode"
+  },
+  "asr.input-mode.note": {
+    "source": "Способ активации распознавания речи.",
+    "translation": "How speech recognition is activated."
+  },
+  "asr.parameters": {
+    "source": "Параметры распознавания",
+    "translation": "Recognition parameters"
+  },
+  "asr.language": {
+    "source": "Язык распознавания",
+    "translation": "Recognition language"
+  },
+  "asr.language.choose": {
+    "source": "Выберите модель распознавания",
+    "translation": "Select a recognition model"
+  },
+  "asr.language.note": {
+    "source": "Язык сохраняется отдельно для каждой модели.",
+    "translation": "The language is saved separately for each model."
+  },
+  "asr.sample-rate": {
+    "source": "Частота дискретизации",
+    "translation": "Sample rate"
+  },
+  "asr.sample-rate.note": {
+    "source": "Фиксированная частота: 16000 Гц.",
+    "translation": "Fixed sample rate: 16000 Hz."
+  },
+  "asr.chunk": {
+    "source": "Размер чанка",
+    "translation": "Chunk size"
+  },
+  "asr.chunk.note": {
+    "source": "Размер аудиоблока в сэмплах.",
+    "translation": "Audio block size in samples."
+  },
+  "asr.threshold": {
+    "source": "Порог голосовой активности",
+    "translation": "VAD threshold"
+  },
+  "asr.threshold.note": {
+    "source": "Порог голосовой активности.",
+    "translation": "Voice activity threshold."
+  },
+  "asr.silence": {
+    "source": "Тишина (сек)",
+    "translation": "Silence (sec)"
+  },
+  "asr.silence.note": {
+    "source": "Пауза для окончания фразы. Менее 0,4 с может обрезать речь.",
+    "translation": "Pause ending a phrase. Below 0.4 s may cut speech short."
+  },
+  "asr.pre-buffer": {
+    "source": "Предбуфер (сек)",
+    "translation": "Pre-buffer (sec)"
+  },
+  "asr.pre-buffer.note": {
+    "source": "Аудио до начала речи.",
+    "translation": "Audio before speech begins."
+  },
+  "asr.max-speech": {
+    "source": "Макс. речь (сек)",
+    "translation": "Max speech (sec)"
+  },
+  "asr.max-speech.note": {
+    "source": "Максимальная длительность одной фразы.",
+    "translation": "Maximum duration of one phrase."
+  },
+  "asr.min-speech": {
+    "source": "Мин. речь (сек)",
+    "translation": "Min speech (sec)"
+  },
+  "asr.min-speech.note": {
+    "source": "Отсеивать щелчки и короткие звуки. 0 — отключить.",
+    "translation": "Filter clicks and short sounds. 0 disables the filter."
+  },
+  "asr.apply": {
+    "source": "Применить",
+    "translation": "Apply"
+  },
+  "asr.reset": {
+    "source": "Сбросить",
+    "translation": "Reset"
+  },
+  "asr.microphone-level": {
+    "source": "Уровень микрофона",
+    "translation": "Microphone level"
+  },
+  "asr.monitor.note": {
+    "source": "Во время теста вы слышите себя. Распознавание временно приостановлено.",
+    "translation": "During the test you hear yourself. Recognition is temporarily paused."
+  },
+  "asr.monitor.stop": {
+    "source": "Остановить тест",
+    "translation": "Stop microphone test"
+  },
+  "asr.monitor.start": {
+    "source": "Проверить микрофон",
+    "translation": "Test microphone"
+  },
+  "asr.monitor.no-device": {
+    "source": "Устройство для проверки не выбрано",
+    "translation": "No device selected for testing"
+  },
+  "asr.title": {
+    "source": "Настройки микрофона",
+    "translation": "Microphone settings"
+  },
+  "asr.description": {
+    "source": "Устройства ввода, распознавание речи и проверка микрофона.",
+    "translation": "Input devices, speech recognition and microphone testing."
   }
 }
