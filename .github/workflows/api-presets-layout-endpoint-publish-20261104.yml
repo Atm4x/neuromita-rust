@@ -1,0 +1,36 @@
+name: Publish API preset layout and endpoint parity
+on:
+  push:
+    branches:
+      - bridge/api-presets-layout-endpoint-publish-20261104
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact Git bundle
+        shell: bash
+        env:
+          BASE_SHA: 0b7c0243d65d5fe891501174a344bc77db8221e2
+          TARGET_SHA: 46e70ec25be3bc18bf15c945ba2d844330e65ca4
+          TARGET_REF: refs/heads/codex/api-presets-layout-endpoint-parity-20261104
+        run: |
+          set -euo pipefail
+          base64 -d bridge/api-presets-layout-endpoint-20261104.bundle.b64 > outgoing.bundle
+          printf '%s  %s\n' 'a4361234b3bfbc82d257d3d0b79bd37421b54c9bc4f2bd18c33f3863a609ed7e' outgoing.bundle | sha256sum -c -
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git bundle verify outgoing.bundle
+          git fetch outgoing.bundle "${TARGET_REF}:refs/heads/verified-api-presets"
+          test "$(git rev-parse refs/heads/verified-api-presets)" = "${TARGET_SHA}"
+          git merge-base --is-ancestor "${BASE_SHA}" refs/heads/verified-api-presets
+          EXISTING="$(git ls-remote origin "${TARGET_REF}" | cut -f1)"
+          if [ -n "${EXISTING}" ] && [ "${EXISTING}" != "${BASE_SHA}" ] && [ "${EXISTING}" != "${TARGET_SHA}" ]; then
+            echo "Target branch moved: ${EXISTING}" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/verified-api-presets:${TARGET_REF}"
+          test "$(git ls-remote origin "${TARGET_REF}" | cut -f1)" = "${TARGET_SHA}"
