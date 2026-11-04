@@ -1567,6 +1567,10 @@
     "source": "Голоса персонажей",
     "translation": "Character voices"
   },
+  "voice.api.default-voice": {
+    "source": "Общий голос",
+    "translation": "Default voice"
+  },
   "voice.api.all": {
     "source": "Все персонажи",
     "translation": "All characters"
