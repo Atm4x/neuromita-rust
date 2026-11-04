@@ -146,7 +146,7 @@ pub fn render(window: &AppWindow, settings: &AsrPreferences) {
         .get_recognizers()
         .iter()
         .find(|entry| model_id(entry) == settings.recognizer_id);
-    ui.set_recognizer(chosen.unwrap_or_else(|| settings.recognizer_id.clone().into()));
+    ui.set_recognizer(chosen.unwrap_or_else(|| "".into()));
     ui.set_device(settings.device_id.clone().into());
     ui.set_audio_backend(settings.audio_backend.clone().into());
     ui.set_instant_send(settings.instant_send);
@@ -197,6 +197,7 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[Aud
         inventory
             .asr
             .iter()
+            .filter(|entry| entry.package_detected && entry.verified_assets)
             .map(|entry| {
                 format!(
                     "{} · {} ({})",
@@ -208,6 +209,13 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[Aud
             })
             .collect::<Vec<_>>(),
     )));
+    if !ui
+        .get_recognizers()
+        .iter()
+        .any(|entry| entry == ui.get_recognizer())
+    {
+        ui.set_recognizer("".into());
+    }
     ui.set_devices(ModelRc::new(VecModel::from(
         devices
             .iter()

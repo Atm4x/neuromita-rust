@@ -378,10 +378,10 @@ export component SettingsPage inherits Rectangle {
                     }
                     CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
                 }
-                if SettingsUi.section == 3: ScrollView {
-                    content-width: self.visible-width;
-                    VoiceSettingsPage {
-                        width: parent.width - 10px;
+                if SettingsUi.section == 3: SettingsScrollView {
+                    content-height: voice-page.preferred-height;
+                    voice-page := VoiceSettingsPage {
+                        width: parent.width;
                         connected: root.connected;
                         volume: SettingsUi.settings-volume;
                         in-chat: SettingsUi.settings-voice-launcher;
@@ -390,9 +390,9 @@ export component SettingsPage inherits Rectangle {
                     }
                 }
                 if SettingsUi.section == 6: AiEngineWorkspace {}
-                if SettingsUi.section == 5: ScrollView {
-                    content-width: self.visible-width;
-                    AsrSettingsPage { width: parent.width - 10px; }
+                if SettingsUi.section == 5: SettingsScrollView {
+                    content-height: asr-page.preferred-height;
+                    asr-page := AsrSettingsPage { width: parent.width; }
                 }
                 if SettingsUi.section == 4: LanguageSettingsPage {
                     language-selected(code) => { root.language-selected(code); }
