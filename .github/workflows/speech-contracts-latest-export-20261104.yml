@@ -21,7 +21,7 @@ jobs:
           git fetch --no-tags origin '+refs/heads/codex/ai-engine-slint-pyqt-20261104:refs/heads/audit-3'
           git fetch --no-tags origin '+refs/heads/codex/asr-pyqt-slint-parity-20261104:refs/heads/audit-4'
           mkdir -p /tmp/speech-export
-          git bundle create /tmp/speech-export/latest-speech.bundle $(git for-each-ref --format='%(refname)' refs/heads/audit-)
+          git bundle create /tmp/speech-export/latest-speech.bundle $(git for-each-ref --format='%(refname)' 'refs/heads/audit-*')
           git bundle verify /tmp/speech-export/latest-speech.bundle
           git bundle list-heads /tmp/speech-export/latest-speech.bundle > /tmp/speech-export/refs.txt
           sha256sum /tmp/speech-export/latest-speech.bundle > /tmp/speech-export/sha256.txt
