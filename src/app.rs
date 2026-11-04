@@ -24,8 +24,8 @@ use crate::{
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
     games::GamePolicy,
     generation::{
-        EnvironmentPresetCredentials, GenerationPreset, JsonPresetRepository, PresetCatalog,
-        PresetCatalogError, PresetId, PresetRepository, ResponseGenerator,
+        GenerationPreset, JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetId,
+        PresetRepository, ResponseGenerator,
     },
     identity::EventId,
     interaction::{TurnIntent, UserInput},
@@ -194,8 +194,13 @@ impl ApplicationConfig {
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
-        config.presets =
-            PresetCatalog::open(runtime, repository, Arc::new(EnvironmentPresetCredentials))?;
+        config.presets = PresetCatalog::open(
+            runtime,
+            repository,
+            Arc::new(crate::generation::ApplicationPresetCredentials::new(
+                data_directory.join("preset-credentials.json"),
+            )),
+        )?;
         config.settings = SettingsConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),

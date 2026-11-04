@@ -83,8 +83,8 @@ pub struct PreparedRequest {
     pub model: Arc<str>,
     /// Endpoint without credentials, query or fragment.
     pub endpoint: Arc<str>,
-    pub temperature: f32,
-    pub max_output_tokens: u32,
+    pub temperature: Option<f32>,
+    pub max_output_tokens: Option<u32>,
     /// The provider-neutral prompt used to produce `payload_json`.
     pub prompt: Arc<[PromptMessage]>,
     /// The exact JSON bytes sent as the request body.

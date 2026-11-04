@@ -49,6 +49,8 @@ component ApiFieldRow inherits VerticalLayout {
 
 component ApiParameterRow inherits HorizontalLayout {
     in property <PresetParameterItem> parameter;
+    in property <bool> sent: root.parameter.sent;
+    callback toggled(bool);
     in-out property <string> value;
     callback edited(string);
     changed value => { if (root.parameter.editable) { root.edited(root.value); } }
@@ -62,10 +64,10 @@ component ApiParameterRow inherits HorizontalLayout {
         SettingsLabel { text: I18n.i18n(root.parameter.description-key, root.parameter.description); font-size: 11px; color: SettingsTheme.muted; wrap: word-wrap; }
     }
     Centered { width: 20px;
-        if root.parameter.wire-key != "": Rectangle { width: 18px; height: 18px; border-radius: 4px; border-width: 1px;
-            border-color: root.parameter.sent ? SettingsTheme.accent : SettingsTheme.field-border;
-            background: root.parameter.sent ? SettingsTheme.accent : SettingsTheme.field;
-            if root.parameter.sent: Glyph { text: "\u{f00c}"; font-size: 11px; color: white; width: 100%; height: 100%; }
+        if root.parameter.wire-key != "": ActionSurface { label: root.parameter.title; enabled: root.parameter.editable; activated => { root.toggled(!root.sent); } width: 18px; height: 18px; border-radius: 4px; border-width: 1px;
+            border-color: root.sent ? SettingsTheme.accent : SettingsTheme.field-border;
+            background: root.sent ? SettingsTheme.accent : SettingsTheme.field;
+            if root.sent: Glyph { text: "\u{f00c}"; font-size: 11px; color: white; width: 100%; height: 100%; }
         }
     }
     Centered { width: 180px;
@@ -216,7 +218,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
     in property <bool> connected;
     spacing: 16px; padding: 2px; min-height: 0px; min-width: 0px;
     SectionHeading { title: I18n.i18n("settings.api.heading", "Подключение к моделям"); description: I18n.i18n("settings.api.subtitle", "Провайдеры, пресеты, ключи и параметры генерации ответов."); glyph: "\u{f1e6}"; }
-    SettingsLabel { visible: false; height: 0px; text: I18n.i18n("settings.api-preset.key-env", "API ключ (переменная окружения)"); }
+    SettingsLabel { visible: false; height: 0px; text: I18n.i18n("settings.api-preset.key-env", "API ключ (ссылка)"); }
     HorizontalLayout { spacing: 12px; vertical-stretch: 1;
         Rectangle {
             horizontal-stretch: 1; min-width: 310px; preferred-width: 0px;
@@ -322,7 +324,7 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                             }
                             HorizontalLayout { spacing: 16px;
                                 ApiFieldRow { title: I18n.i18n("settings.api-preset.model", "Модель"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.models-link", "Список моделей") : ""; link-activated => { SettingsUi.preset-help(1); } placeholder: I18n.i18n("settings.preset.model-placeholder", "Название модели"); value <=> SettingsUi.preset-model; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
-                                ApiFieldRow { title: I18n.i18n("settings.api-preset.key-label", "API ключ"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.key-link", "Получить ключ") : ""; link-activated => { SettingsUi.preset-help(2); } placeholder: I18n.i18n("settings.preset.key-placeholder", "Имя переменной окружения"); value <=> SettingsUi.preset-key-env; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
+                                ApiFieldRow { title: I18n.i18n("settings.api-preset.key-label", "API ключ"); link-label: SettingsUi.preset-template-id == "gemini" ? I18n.i18n("settings.preset.key-link", "Получить ключ") : ""; link-activated => { SettingsUi.preset-help(2); } placeholder: I18n.i18n("settings.preset.key-placeholder", "env:ИМЯ или local:ИМЯ"); value <=> SettingsUi.preset-key-env; min-width: 0px; preferred-width: 0px; horizontal-stretch: 1; }
                             }
                             CollapsibleSettingsSection { title: I18n.i18n("settings.preset.reserve-keys", "Резервные ключи"); glyph: "\u{f084}"; expanded <=> SettingsUi.preset-reserve-keys-open;
                                 SettingsLabel { text: I18n.i18n("settings.preset.reserve-keys-disabled", "Резервные ключи пока не поддерживаются текущим API-ядром."); color: SettingsTheme.muted; wrap: word-wrap; }
@@ -351,6 +353,11 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                             VerticalLayout { spacing: 0px; padding: 0px; alignment: start;
                                 for parameter in SettingsUi.preset-parameters: ApiParameterRow {
                                     parameter: parameter;
+                                    sent: parameter.id == "temperature" ? SettingsUi.preset-temperature-enabled : parameter.id == "max_tokens" ? SettingsUi.preset-tokens-enabled : parameter.sent;
+                                    toggled(value) => {
+                                        if parameter.id == "temperature" { SettingsUi.preset-temperature-enabled = value; }
+                                        if parameter.id == "max_tokens" { SettingsUi.preset-tokens-enabled = value; }
+                                    }
                                     value: parameter.id == "temperature" ? SettingsUi.preset-temperature : parameter.id == "max_tokens" ? SettingsUi.preset-tokens : parameter.id == "timeout" ? SettingsUi.preset-timeout : "";
                                     edited(value) => {
                                         if parameter.id == "temperature" { SettingsUi.preset-temperature = value; }

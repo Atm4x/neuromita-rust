@@ -166,8 +166,8 @@ impl GenerationProvider for ControlledGeneration {
                 model,
                 endpoint: "http://fixture.invalid/v1beta/models/fixture-model:generateContent"
                     .into(),
-                temperature: 0.7,
-                max_output_tokens: 128,
+                temperature: Some(0.7),
+                max_output_tokens: Some(128),
                 prompt: vec![
                     PromptMessage {
                         role: PromptRole::System,

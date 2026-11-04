@@ -110,10 +110,23 @@ impl RegistryInner {
         scope: DiagnosticScope,
         limit: usize,
     ) -> Vec<DiagnosticErrorSummary> {
-        self.diagnostics
-            .lock()
-            .expect("diagnostics mutex poisoned")
-            .errors(scope, limit)
+        let records = self.records.lock().expect("registry mutex poisoned");
+        let mut errors: Vec<_> = records
+            .values()
+            .filter(|record| record.snapshot().state.is_terminal())
+            .filter_map(|record| record.trace())
+            .filter(|trace| scope.allows(trace.metadata.character_id, trace.metadata.source))
+            .filter_map(|trace| trace.error_history_entry())
+            .collect();
+        errors.sort_by_key(|error| std::cmp::Reverse(error.at_unix_ms));
+        errors.extend(
+            self.diagnostics
+                .lock()
+                .expect("diagnostics mutex poisoned")
+                .errors(scope, limit),
+        );
+        errors.truncate(limit.max(1));
+        errors
     }
 }
 
@@ -275,6 +288,50 @@ mod tests {
         request::{ReactRequest, RequestSource},
         timeline::selection::TimelineSelection,
     };
+
+    #[test]
+    fn terminal_error_is_visible_before_archival_and_is_not_duplicated_afterward() {
+        let registry = RequestRegistry::new_with_diagnostics(4, DiagnosticsLimits::default());
+        let id = RequestId::new();
+        let record = RequestRecord::new(
+            Box::new(ReactRequest::new(
+                CharacterId::Crazy,
+                EventId::new(),
+                "fixture",
+                RequestSource::Presenter,
+            )),
+            id,
+            TimelineAdmission {
+                selection: TimelineSelection {
+                    branch_id: crate::timeline::domain::BranchId::new(),
+                    generation: 1,
+                },
+                context_epoch: 0,
+            },
+            std::sync::Weak::new(),
+        );
+        registry
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .insert(id, record.clone());
+        record.finish(RequestOutcome::InternalError(
+            Arc::<str>::from("fixture failure").into(),
+        ));
+        let scope = DiagnosticScope::character(CharacterId::Crazy);
+        let errors = registry.inner.diagnostic_errors(scope, 8);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].request_id, id.0);
+        registry.inner.complete(&record);
+        assert_eq!(registry.inner.diagnostic_errors(scope, 8).len(), 1);
+        assert!(
+            registry
+                .inner
+                .diagnostic_errors(DiagnosticScope::character(CharacterId::Kind), 8)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn registry_limits_apply_to_records_created_by_the_registry() {

@@ -7,7 +7,7 @@ use super::{
 };
 use neuromita::{
     character::CharacterId,
-    generation::{GeminiPresetDefinition, PresetDefinition, PresetId, PresetRecord},
+    generation::{GeminiConnectionEdit, PresetConnectionEdit, PresetId, PresetRecord},
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
     settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
@@ -42,9 +42,10 @@ pub struct AdministrationSnapshot {
 
 pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
     match command {
-        Command::UpdatePreset(id, record) => {
-            api.presets.update(id, record).map_err(|e| e.to_string())?
-        }
+        Command::UpdatePreset(id, record) => api
+            .presets
+            .update_connection(id, record)
+            .map_err(|e| e.to_string())?,
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
         Command::ActivePreset(id) => {
             api.presets
@@ -224,6 +225,25 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                         PresetsPresenter::request_url_template("gemini", &endpoint)
                             .unwrap_or_default();
                     ui.set_preset_url_template(request_url_template.into());
+                    match PresetsPresenter::template(ui.get_preset_template_id().as_str()) {
+                        Ok(template) => {
+                            ui.set_preset_temperature_enabled(template.options.send_temperature);
+                            ui.set_preset_tokens_enabled(template.options.send_max_output_tokens);
+                            if ui.get_preset_temperature().is_empty() {
+                                ui.set_preset_temperature(template.temperature.to_string().into());
+                            }
+                            if ui.get_preset_tokens().is_empty() {
+                                ui.set_preset_tokens(template.max_output_tokens.to_string().into());
+                            }
+                            if ui.get_preset_timeout().is_empty() {
+                                ui.set_preset_timeout(template.timeout_ms.to_string().into());
+                            }
+                            if ui.get_preset_key_env().is_empty() {
+                                ui.set_preset_key_env(template.credential.to_string().into());
+                            }
+                        }
+                        Err(error) => ui.set_settings_error(error.to_string().into()),
+                    }
                 }
             } else {
                 ui.set_settings_error("Этот провайдер пока не поддерживается ядром".into());
@@ -280,7 +300,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             return;
         };
         let window = component.global::<SettingsUi>();
-        let record = (|| -> Result<PresetRecord, String> {
+        let record = (|| -> Result<PresetConnectionEdit, String> {
             if window.get_preset_edit_id().is_empty() {
                 return Err("Choose a preset before editing".into());
             }
@@ -288,20 +308,25 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 return Err("Preset name is required".into());
             }
             if window.get_preset_template_id().is_empty() {
-                return Ok(PresetRecord {
+                return Ok(PresetConnectionEdit {
                     name: window.get_preset_name().into(),
-                    definition: PresetDefinition::Unconfigured,
+                    connection: None,
                 });
             }
             if window.get_preset_template_id() != "gemini" {
                 return Err("Unsupported preset provider".into());
             }
-            Ok(PresetRecord {
+            Ok(PresetConnectionEdit {
                 name: window.get_preset_name().into(),
-                definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                connection: Some(GeminiConnectionEdit {
+                    send_temperature: window.get_preset_temperature_enabled(),
+                    send_max_output_tokens: window.get_preset_tokens_enabled(),
                     endpoint: window.get_preset_endpoint().into(),
                     model: window.get_preset_model().into(),
-                    credential_env: window.get_preset_key_env().into(),
+                    credential: neuromita::generation::CredentialReference::parse(
+                        window.get_preset_key_env().as_str(),
+                    )
+                    .map_err(|error| error.to_string())?,
                     temperature: window
                         .get_preset_temperature()
                         .parse()
@@ -561,12 +586,14 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         .records
         .iter()
         .map(|record| PresetItem {
+            temperature_enabled: record.send_temperature,
+            tokens_enabled: record.send_max_output_tokens,
             id: record.id.0.to_string().into(),
             name: record.name.as_str().into(),
             model: record.model.as_str().into(),
             provider: record.provider.into(),
             endpoint: record.endpoint.as_str().into(),
-            key_env: record.credential_env.as_str().into(),
+            key_env: record.credential.as_str().into(),
             temperature: if record.configured {
                 record.temperature.to_string().into()
             } else {
@@ -614,6 +641,8 @@ fn mark_preset_baseline(ui: &SettingsUi) {
     ui.set_preset_baseline_endpoint(ui.get_preset_endpoint());
     ui.set_preset_baseline_key_env(ui.get_preset_key_env());
     ui.set_preset_baseline_template(ui.get_preset_template_id());
+    ui.set_preset_baseline_temperature_enabled(ui.get_preset_temperature_enabled());
+    ui.set_preset_baseline_tokens_enabled(ui.get_preset_tokens_enabled());
     ui.set_preset_baseline_temperature(ui.get_preset_temperature());
     ui.set_preset_baseline_tokens(ui.get_preset_tokens());
     ui.set_preset_baseline_timeout(ui.get_preset_timeout());
@@ -628,6 +657,8 @@ fn select_preset(ui: &SettingsUi, record: &PresetItem) {
     ui.set_preset_model(record.model.clone());
     ui.set_preset_endpoint(record.endpoint.clone());
     ui.set_preset_key_env(record.key_env.clone());
+    ui.set_preset_temperature_enabled(record.temperature_enabled);
+    ui.set_preset_tokens_enabled(record.tokens_enabled);
     ui.set_preset_temperature(record.temperature.clone());
     ui.set_preset_tokens(record.tokens.clone());
     ui.set_preset_timeout(record.timeout.clone());
@@ -680,6 +711,8 @@ pub fn clear_preset(ui: &SettingsUi) {
 pub fn created(window: &AppWindow, id: PresetId, record: &PresetRecord) {
     let ui = window.global::<SettingsUi>();
     let item = PresetItem {
+        temperature_enabled: false,
+        tokens_enabled: false,
         id: id.0.to_string().into(),
         name: record.name.as_str().into(),
         model: "".into(),
@@ -724,11 +757,10 @@ pub(super) fn provider_templates(
             name: provider.name.into(),
             icon: provider.icon.into(),
             format: provider.schema_label.into(),
-            endpoint: if provider.id == "gemini" {
-                neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into()
-            } else {
-                "".into()
-            },
+            endpoint: PresetsPresenter::template(provider.id)
+                .map(|template| template.endpoint)
+                .unwrap_or_default()
+                .into(),
             documentation: provider.documentation.into(),
             pricing: provider.pricing.into(),
             badge_kind: provider.badge_kind.into(),

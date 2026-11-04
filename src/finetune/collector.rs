@@ -224,8 +224,8 @@ fn build_sample(
     sample.provider_name = provider_name;
     sample.protocol_id = protocol_id;
     sample.dialect_id = dialect_id;
-    sample.temperature = Some(f64::from(request.temperature));
-    sample.max_tokens = Some(u64::from(request.max_output_tokens));
+    sample.temperature = request.temperature.map(f64::from);
+    sample.max_tokens = request.max_output_tokens.map(u64::from);
     sample.request_payload = Some(request.payload_json.to_string());
     sample.provider_response = Some(response.raw_body.to_string());
     sample.raw_response = Some(response_text);
@@ -272,8 +272,8 @@ mod tests {
             provider: ProviderKind::Gemini,
             model: "fixture".into(),
             endpoint: "https://example.test".into(),
-            temperature: 1.0,
-            max_output_tokens: 128,
+            temperature: Some(1.0),
+            max_output_tokens: Some(128),
             prompt: Vec::new().into(),
             payload_json: "opaque request".into(),
             captured_at: std::time::SystemTime::now(),

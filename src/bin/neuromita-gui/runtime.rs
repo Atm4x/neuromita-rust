@@ -33,7 +33,7 @@ pub enum Command {
     Abort,
     Diagnostics,
     NewPreset,
-    UpdatePreset(PresetId, PresetRecord),
+    UpdatePreset(PresetId, neuromita::generation::PresetConnectionEdit),
     DeletePreset(PresetId),
     ActivePreset(PresetId),
     AssignPreset(CharacterId, PresetSlot, PresetSelection),

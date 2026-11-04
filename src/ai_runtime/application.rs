@@ -307,49 +307,6 @@ impl AiApplicationConfig {
     }
 }
 
-#[cfg(test)]
-mod speech_binding_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn prepared_worker_must_match_exact_plugin_and_verified_revision() {
-        let selected = SpeechSelection {
-            service: AiService::Asr,
-            plugin_id: "whisper".into(),
-            asset_revision: Some("rev2".into()),
-            language_hint: Some("en".into()),
-            overrides: json!({"beam_size": 5}),
-        };
-        let prepared = ModelActivation {
-            service: AiService::Asr,
-            plugin_id: "whisper".into(),
-            settings: json!({}),
-            asset_revision: Some("rev2".into()),
-        };
-        assert!(matches_prepared_selection(Some(&selected), Some(&prepared)));
-        assert!(matches_prepared_selection(None, None));
-        assert!(!matches_prepared_selection(Some(&selected), None));
-        assert!(!matches_prepared_selection(None, Some(&prepared)));
-        let mismatched = ModelActivation {
-            asset_revision: Some("rev1".into()),
-            ..prepared.clone()
-        };
-        assert!(!matches_prepared_selection(
-            Some(&selected),
-            Some(&mismatched)
-        ));
-        let mismatched = ModelActivation {
-            plugin_id: "gigaam".into(),
-            ..prepared
-        };
-        assert!(!matches_prepared_selection(
-            Some(&selected),
-            Some(&mismatched)
-        ));
-    }
-}
-
 impl RunningAiApplication {
     pub fn observe_status(
         &self,
@@ -413,5 +370,48 @@ impl RunningAiApplication {
             Some(error) => Err(error.into()),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod speech_binding_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prepared_worker_must_match_exact_plugin_and_verified_revision() {
+        let selected = SpeechSelection {
+            service: AiService::Asr,
+            plugin_id: "whisper".into(),
+            asset_revision: Some("rev2".into()),
+            language_hint: Some("en".into()),
+            overrides: json!({"beam_size": 5}),
+        };
+        let prepared = ModelActivation {
+            service: AiService::Asr,
+            plugin_id: "whisper".into(),
+            settings: json!({}),
+            asset_revision: Some("rev2".into()),
+        };
+        assert!(matches_prepared_selection(Some(&selected), Some(&prepared)));
+        assert!(matches_prepared_selection(None, None));
+        assert!(!matches_prepared_selection(Some(&selected), None));
+        assert!(!matches_prepared_selection(None, Some(&prepared)));
+        let mismatched = ModelActivation {
+            asset_revision: Some("rev1".into()),
+            ..prepared.clone()
+        };
+        assert!(!matches_prepared_selection(
+            Some(&selected),
+            Some(&mismatched)
+        ));
+        let mismatched = ModelActivation {
+            plugin_id: "gigaam".into(),
+            ..prepared
+        };
+        assert!(!matches_prepared_selection(
+            Some(&selected),
+            Some(&mismatched)
+        ));
     }
 }

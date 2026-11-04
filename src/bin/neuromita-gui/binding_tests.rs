@@ -359,13 +359,15 @@ fn settings_render_and_bindings(window: &AppWindow) {
         ),
     )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        temperature_enabled: true,
+        tokens_enabled: true,
         provider: "google".into(),
         configured: true,
         id: "7".into(),
         name: "Main".into(),
         model: "fixture-model".into(),
         endpoint: "http://127.0.0.1:12345/v1beta/".into(),
-        key_env: "FIXTURE_KEY".into(),
+        key_env: "env:FIXTURE_KEY".into(),
         temperature: "0.7".into(),
         tokens: "3000".into(),
         timeout: "60".into(),

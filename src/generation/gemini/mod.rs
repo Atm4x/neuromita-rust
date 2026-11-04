@@ -1,4 +1,6 @@
+mod options;
 mod template;
+pub use options::{GeminiRequestOptions, GeminiThinking, SystemInstructionMode, ThinkingLevel};
 mod wire;
 
 pub use template::{GeminiTemplate, GenerationSettings, PresetError};
@@ -42,8 +44,14 @@ impl GeminiProvider {
             provider: ProviderKind::Gemini,
             model: template.model().into(),
             endpoint: endpoint.as_str().into(),
-            temperature: template.settings().temperature(),
-            max_output_tokens: template.settings().max_output_tokens(),
+            temperature: template
+                .options()
+                .send_temperature
+                .then(|| template.settings().temperature()),
+            max_output_tokens: template
+                .options()
+                .send_max_output_tokens
+                .then(|| template.settings().max_output_tokens()),
             prompt: encoded.prompt.into(),
             payload_json: payload_json.as_str().into(),
             captured_at: SystemTime::now(),

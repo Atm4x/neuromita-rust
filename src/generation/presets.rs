@@ -43,32 +43,72 @@ pub enum PresetCatalogError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeminiPresetDefinition {
+    pub options: super::gemini::GeminiRequestOptions,
+    pub transforms: Vec<super::MessageTransform>,
     pub endpoint: String,
     pub model: String,
-    /// Name of an environment variable; never the secret value itself.
-    pub credential_env: String,
+    /// Explicit credential source; never the secret value itself.
+    pub credential: super::CredentialReference,
     pub temperature: f32,
     pub max_output_tokens: u32,
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct PresetTemplate {
+    pub options: super::gemini::GeminiRequestOptions,
+    pub endpoint: String,
+    pub credential: super::CredentialReference,
+    pub temperature: f32,
+    pub max_output_tokens: u32,
+    pub timeout_ms: u64,
+}
+
+impl PresetTemplate {
+    pub fn for_provider(provider: super::ProviderKind) -> Self {
+        match provider {
+            super::ProviderKind::Gemini => Self {
+                options: Default::default(),
+                endpoint: GeminiTemplate::GOOGLE_ENDPOINT.into(),
+                credential: "GEMINI_API_KEY".into(),
+                temperature: 0.7,
+                max_output_tokens: 3000,
+                timeout_ms: 60_000,
+            },
+        }
+    }
+
+    pub fn configure(
+        &self,
+        name: String,
+        model: String,
+        credential: super::CredentialReference,
+    ) -> Result<PresetRecord, PresetCatalogError> {
+        let record = PresetRecord {
+            name,
+            definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                options: self.options.clone(),
+                transforms: Vec::new(),
+                endpoint: self.endpoint.clone(),
+                model,
+                credential,
+                temperature: self.temperature,
+                max_output_tokens: self.max_output_tokens,
+                timeout_ms: self.timeout_ms,
+            }),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+}
+
 impl GeminiPresetDefinition {
     fn validate(&self) -> Result<(), PresetCatalogError> {
-        if self.credential_env.is_empty()
-            || !self
-                .credential_env
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || self.credential_env.as_bytes()[0].is_ascii_digit()
-        {
-            return Err(PresetCatalogError::Invalid(
-                "invalid credential environment variable name".into(),
-            ));
-        }
+        self.credential.validate()?;
         self.template("validation-key").map(|_| ())
     }
 
-    fn template(&self, credential: &str) -> Result<GeminiTemplate, PresetCatalogError> {
+    pub(super) fn template(&self, credential: &str) -> Result<GeminiTemplate, PresetCatalogError> {
         let settings = GenerationSettings::new(
             self.temperature,
             self.max_output_tokens,
@@ -76,6 +116,11 @@ impl GeminiPresetDefinition {
         )
         .map_err(|err| PresetCatalogError::Invalid(err.to_string()))?;
         GeminiTemplate::new(&self.endpoint, &self.model, credential, settings)
+            .and_then(|template| {
+                template
+                    .with_transforms(self.transforms.clone())
+                    .with_options(self.options.clone())
+            })
             .map_err(|err| PresetCatalogError::Invalid(err.to_string()))
     }
 }
@@ -106,7 +151,7 @@ impl PresetDefinition {
                 ));
             }
             Self::Gemini(config) => {
-                let credential = credentials.get(&config.credential_env)?;
+                let credential = credentials.resolve(&config.credential)?;
                 ProviderTemplate::Gemini(config.template(&credential)?)
             }
         };
@@ -121,8 +166,25 @@ pub struct PresetRecord {
     pub definition: PresetDefinition,
 }
 
+/// Connection/settings fields editable independently of the provider pipeline.
+pub struct GeminiConnectionEdit {
+    pub send_temperature: bool,
+    pub send_max_output_tokens: bool,
+    pub endpoint: String,
+    pub model: String,
+    pub credential: super::CredentialReference,
+    pub temperature: f32,
+    pub max_output_tokens: u32,
+    pub timeout_ms: u64,
+}
+
+pub struct PresetConnectionEdit {
+    pub name: String,
+    pub connection: Option<GeminiConnectionEdit>,
+}
+
 impl PresetRecord {
-    fn validate(&self) -> Result<(), PresetCatalogError> {
+    pub(super) fn validate(&self) -> Result<(), PresetCatalogError> {
         if self.name.trim().is_empty() {
             return Err(PresetCatalogError::Invalid(
                 "preset name must not be empty".into(),
@@ -134,6 +196,18 @@ impl PresetRecord {
 
 pub trait PresetCredentials: Send + Sync {
     fn get(&self, key: &str) -> Result<String, PresetCatalogError>;
+    fn resolve(
+        &self,
+        reference: &super::CredentialReference,
+    ) -> Result<String, PresetCatalogError> {
+        reference.validate()?;
+        match reference {
+            super::CredentialReference::Environment(name) => self.get(name),
+            super::CredentialReference::Local(_) => {
+                Err(PresetCatalogError::MissingCredential(reference.to_string()))
+            }
+        }
+    }
 }
 
 pub struct EnvironmentPresetCredentials;
@@ -156,6 +230,21 @@ pub struct StoredPresets {
 }
 
 impl StoredPresets {
+    pub(super) fn from_records(
+        entries: BTreeMap<PresetId, PresetRecord>,
+    ) -> Result<Self, PresetCatalogError> {
+        let next_id = entries.keys().next_back().map_or(Ok(0), |id| {
+            id.0.checked_add(1).ok_or(PresetCatalogError::IdExhausted)
+        })?;
+        let stored = Self {
+            schema_version: 1,
+            next_id,
+            entries,
+        };
+        stored.validate()?;
+        Ok(stored)
+    }
+
     fn empty(next_id: u32) -> Self {
         Self {
             schema_version: 1,
@@ -410,6 +499,57 @@ impl PresetCatalog {
         Ok(())
     }
 
+    pub fn update_connection(
+        &self,
+        id: PresetId,
+        edit: PresetConnectionEdit,
+    ) -> Result<(), PresetCatalogError> {
+        let mut state = self.state.write().expect("preset catalog poisoned");
+        if state.runtime.contains_key(&id) {
+            return Err(PresetCatalogError::RuntimeOnly(id));
+        }
+        let current = state
+            .stored
+            .entries
+            .get(&id)
+            .ok_or(PresetCatalogError::NotFound(id))?;
+        let definition = match edit.connection {
+            None => PresetDefinition::Unconfigured,
+            Some(edit) => {
+                let (transforms, mut options) = match &current.definition {
+                    PresetDefinition::Gemini(config) => {
+                        (config.transforms.clone(), config.options.clone())
+                    }
+                    PresetDefinition::Unconfigured => {
+                        (Vec::new(), super::gemini::GeminiRequestOptions::default())
+                    }
+                };
+                options.send_temperature = edit.send_temperature;
+                options.send_max_output_tokens = edit.send_max_output_tokens;
+                PresetDefinition::Gemini(GeminiPresetDefinition {
+                    endpoint: edit.endpoint,
+                    model: edit.model,
+                    credential: edit.credential,
+                    temperature: edit.temperature,
+                    max_output_tokens: edit.max_output_tokens,
+                    timeout_ms: edit.timeout_ms,
+                    transforms,
+                    options,
+                })
+            }
+        };
+        let record = PresetRecord {
+            name: edit.name,
+            definition,
+        };
+        record.validate()?;
+        let mut next = state.stored.clone();
+        next.entries.insert(id, record);
+        self.persist(&next)?;
+        self.publish(&mut state, next);
+        Ok(())
+    }
+
     fn publish(&self, state: &mut CatalogState, stored: StoredPresets) {
         state.revision += 1;
         state.stored = stored;
@@ -448,14 +588,61 @@ mod tests {
         PresetRecord {
             name: model.into(),
             definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                options: Default::default(),
+                transforms: Vec::new(),
                 endpoint: "http://127.0.0.1:8888/v1beta/".into(),
                 model: model.into(),
-                credential_env: "MY_TEST_API_KEY".into(),
+                credential: "MY_TEST_API_KEY".into(),
                 temperature: 0.7,
                 max_output_tokens: 200,
                 timeout_ms: 4000,
             }),
         }
+    }
+
+    #[test]
+    fn connection_edits_preserve_the_existing_provider_pipeline() {
+        let catalog = PresetCatalog::new(BTreeMap::new());
+        let mut record = example("before");
+        let PresetDefinition::Gemini(config) = &mut record.definition else {
+            panic!()
+        };
+        config.transforms = vec![super::super::MessageTransform::EnsureAlternatingRoles];
+        config.options.send_temperature = false;
+        let id = catalog.create(record).unwrap();
+        catalog
+            .update_connection(
+                id,
+                PresetConnectionEdit {
+                    name: "renamed".into(),
+                    connection: Some(GeminiConnectionEdit {
+                        send_temperature: false,
+                        send_max_output_tokens: true,
+                        endpoint: "http://127.0.0.1:9999/v1beta/".into(),
+                        model: "after".into(),
+                        credential: "OTHER_KEY".into(),
+                        temperature: 1.0,
+                        max_output_tokens: 3000,
+                        timeout_ms: 1000,
+                    }),
+                },
+            )
+            .unwrap();
+        let record = catalog
+            .list()
+            .into_iter()
+            .find(|(key, _)| *key == id)
+            .unwrap()
+            .1;
+        let PresetDefinition::Gemini(config) = record.definition else {
+            panic!()
+        };
+        assert_eq!(config.model, "after");
+        assert!(!config.options.send_temperature);
+        assert_eq!(
+            config.transforms,
+            [super::super::MessageTransform::EnsureAlternatingRoles]
+        );
     }
 
     #[test]
@@ -506,7 +693,7 @@ mod tests {
             unreachable!()
         };
         config.model = "good".into();
-        config.credential_env = "BAD-ENV".into();
+        config.credential = "BAD-ENV".into();
         assert!(catalog.update(id, invalid).is_err());
         assert_eq!(catalog.list().len(), 1);
     }

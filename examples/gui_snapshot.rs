@@ -72,9 +72,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if mode.starts_with("api") && mode != "api-empty" {
         let catalog = neuromita::generation::PresetCatalog::new(Default::default());
         let definition = neuromita::generation::GeminiPresetDefinition {
+            options: Default::default(),
+            transforms: Vec::new(),
             endpoint: neuromita::generation::gemini::GeminiTemplate::GOOGLE_ENDPOINT.into(),
             model: "fixture-model".into(),
-            credential_env: "SNAPSHOT_UNUSED_KEY".into(),
+            credential: "SNAPSHOT_UNUSED_KEY".into(),
             temperature: 0.7,
             max_output_tokens: 128,
             timeout_ms: 60_000,
@@ -95,6 +97,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let id = catalog.create(record)?;
         let row = view::PresetItem {
+            temperature_enabled: true,
+            tokens_enabled: true,
             id: id.0.to_string().into(),
             name: name.into(),
             model: if unconfigured {
@@ -116,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             key_env: if unconfigured {
                 "".into()
             } else {
-                definition.credential_env.clone().into()
+                definition.credential.to_string().into()
             },
             temperature: if unconfigured {
                 "".into()
@@ -154,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings.set_preset_key_env(if unconfigured {
             "".into()
         } else {
-            definition.credential_env.into()
+            definition.credential.to_string().into()
         });
         settings.set_preset_temperature(if unconfigured {
             "".into()
