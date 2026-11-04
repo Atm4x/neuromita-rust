@@ -14,6 +14,7 @@ use crate::ai_runtime::{
 pub struct RuntimeStatePresenter {
     updates: Option<watch::Receiver<RuntimeSnapshot>>,
     supervisor: Weak<AiSupervisor>,
+    live_speech: Weak<crate::ai_runtime::live_speech::LiveSpeechRuntime>,
     startup_failure: Option<RuntimeSnapshot>,
 }
 
@@ -22,6 +23,7 @@ impl RuntimeStatePresenter {
         Self {
             updates,
             supervisor: Weak::new(),
+            live_speech: Weak::new(),
             startup_failure: None,
         }
     }
@@ -48,10 +50,20 @@ impl RuntimeStatePresenter {
         self
     }
 
+    pub(crate) fn with_live_speech(
+        mut self,
+        runtime: Weak<crate::ai_runtime::live_speech::LiveSpeechRuntime>,
+    ) -> Self {
+        self.live_speech = runtime;
+        self
+    }
+
     /// Reconcile a worker that exited outside any IPC operation.
     /// No new process or model is created by this call.
     pub async fn refresh_status(&self) -> RuntimeSnapshot {
-        if let Some(supervisor) = self.supervisor.upgrade() {
+        if let Some(runtime) = self.live_speech.upgrade() {
+            runtime.refresh().await
+        } else if let Some(supervisor) = self.supervisor.upgrade() {
             supervisor.refresh_status().await
         } else {
             self.snapshot()

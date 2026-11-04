@@ -14,6 +14,7 @@ pub mod hardware;
 pub mod install;
 pub mod installed_speech;
 mod layer;
+pub mod live_speech;
 pub mod managed;
 pub mod overlay;
 pub mod production;

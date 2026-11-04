@@ -38,6 +38,7 @@ pub enum InstalledSpeechError {
     Inspection(#[from] super::AiRuntimeError),
 }
 
+#[derive(Clone)]
 pub struct InstalledSpeechEnvironment {
     pub data_directory: PathBuf,
     pub sdk_root: PathBuf,
@@ -353,13 +354,12 @@ fn select_installed_backends(
         let kind = backend_kind(&name).ok_or_else(|| {
             InstalledSpeechError::Environment(format!("unsupported backend {name}"))
         })?;
-        if let Some(backend) = installed_backend(data, kind, version)? {
-            if !candidates
+        if let Some(backend) = installed_backend(data, kind, version)?
+            && !candidates
                 .iter()
                 .any(|item: &LockedBackend| item.kind == backend.kind)
-            {
-                candidates.push(backend);
-            }
+        {
+            candidates.push(backend);
         }
     }
     let chosen = unique(candidates, "compatible installed backend")?;

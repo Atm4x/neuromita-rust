@@ -107,10 +107,10 @@ pub fn load_installed_overlay(
     if path.is_symlink() || marker.is_symlink() {
         return Err(LayerError::Conflict);
     }
-    if let Ok(stat) = std::fs::metadata(&marker) {
-        if !stat.is_file() || stat.len() > 131_072 {
-            return Err(LayerError::Conflict);
-        }
+    if let Ok(stat) = std::fs::metadata(&marker)
+        && (!stat.is_file() || stat.len() > 131_072)
+    {
+        return Err(LayerError::Conflict);
     }
     let bytes = std::fs::read(&marker).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {

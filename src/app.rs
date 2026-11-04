@@ -19,6 +19,9 @@ use crate::{
     ai_runtime::{
         AiService,
         application::{AiApplicationConfig, AiApplicationError, RunningAiApplication},
+        live_speech::{
+            LiveSpeechRuntime, LiveSpeechTranscriber, LiveSpeechVoice, watch_speech_settings,
+        },
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
@@ -276,8 +279,8 @@ pub struct ApplicationLifecycle {
     presenter: GuiPresenter,
     server: ServerHandle,
     finetune: Option<FineTuneCollector>,
-    speech: Option<Arc<crate::ai_runtime::speech::PythonSpeechRecognizer>>,
-    speech_controller: tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>,
+    speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
+    speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     speech_startup_warning: Option<String>,
     id: Uuid,
     stop: CancellationToken,
@@ -365,6 +368,8 @@ struct ApplicationOwner {
     server_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
     ai_runtime: Option<RunningAiApplication>,
+    live_speech: Option<Arc<LiveSpeechRuntime>>,
+    speech_watch_task: Option<JoinHandle<()>>,
 }
 
 impl ApplicationLifecycle {
@@ -409,7 +414,8 @@ impl ApplicationLifecycle {
         let settings = SettingsLifecycle::prepare(settings).await?;
         let settings_owner = settings.owner();
         let mut speech_startup_warning = None;
-        let auto_speech = ai_installed_speech.is_some();
+        let live_environment = ai_installed_speech.as_ref().cloned();
+        let auto_speech = live_environment.is_some();
         let ai_runtime = match (ai_runtime, ai_speech_inventory, ai_installed_speech) {
             (Some(plan), Some(inventory), None) => {
                 let saved = settings_owner.snapshot_all()?.values.speech.clone();
@@ -438,7 +444,7 @@ impl ApplicationLifecycle {
         };
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
-        let ai_runtime = match (ai_runtime, ai_hardware) {
+        let mut ai_runtime = match (ai_runtime, ai_hardware) {
             (Some(configuration), Some(path)) if auto_speech => {
                 speech_startup_warning = Some(format!(
                     "automatic speech activation cannot combine with hardware selection at {}",
@@ -472,14 +478,6 @@ impl ApplicationLifecycle {
             }
             (None, None) => None,
         };
-        let speech = ai_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.speech_recognizer())
-            .map(Arc::new);
-        let voice = match &ai_runtime {
-            Some(runtime) if runtime.has_service(AiService::Tts) => runtime.voice_provider(),
-            _ => voice,
-        };
         let knowledge = match ai_knowledge {
             None => knowledge,
             Some(selection) => {
@@ -501,6 +499,36 @@ impl ApplicationLifecycle {
                     retriever = retriever.with_reranker(scorer, reranker.policy)?;
                 }
                 KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
+            }
+        };
+        // A stable speech boundary is needed even if no worker was installed at
+        // startup. The worker may appear or change after settings are edited.
+        let initial_speech = settings_owner.snapshot_all()?.values.speech.clone();
+        let live_speech = live_environment.map(|environment| {
+            Arc::new(LiveSpeechRuntime::new(
+                environment,
+                ai_runtime.take(),
+                &initial_speech,
+                speech_startup_warning.as_deref(),
+            ))
+        });
+        let speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>> =
+            if let Some(live) = &live_speech {
+                Some(Arc::new(LiveSpeechTranscriber(Arc::clone(live))))
+            } else {
+                ai_runtime
+                    .as_ref()
+                    .and_then(|running| running.speech_recognizer())
+                    .map(|recognizer| {
+                        Arc::new(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>
+                    })
+            };
+        let voice: Arc<dyn VoiceProvider> = if let Some(live) = &live_speech {
+            Arc::new(LiveSpeechVoice(Arc::clone(live)))
+        } else {
+            match &ai_runtime {
+                Some(running) if running.has_service(AiService::Tts) => running.voice_provider(),
+                _ => voice,
             }
         };
         let registry = Arc::new(RequestRegistry::new_with_diagnostics(
@@ -598,12 +626,19 @@ impl ApplicationLifecycle {
             games: Arc::clone(&games),
             reminders,
         });
-        let mut ai_runtime_status = crate::presentation::RuntimeStatePresenter::new(
-            ai_runtime.as_ref().map(|runtime| runtime.observe_status()),
-        );
+        let mut ai_runtime_status = if let Some(live) = &live_speech {
+            crate::presentation::RuntimeStatePresenter::new(Some(live.observe()))
+                .with_live_speech(Arc::downgrade(live))
+        } else {
+            crate::presentation::RuntimeStatePresenter::new(
+                ai_runtime.as_ref().map(|runtime| runtime.observe_status()),
+            )
+        };
         if let Some(runtime) = &ai_runtime {
             ai_runtime_status = ai_runtime_status.with_supervisor(runtime.supervisor_weak());
-        } else if let Some(reason) = &speech_startup_warning {
+        } else if live_speech.is_none()
+            && let Some(reason) = &speech_startup_warning
+        {
             let speech = bindings.settings.snapshot_all()?.values.speech.clone();
             let mut services = Vec::new();
             if speech.tts.enabled
@@ -617,6 +652,22 @@ impl ApplicationLifecycle {
             }
             ai_runtime_status = ai_runtime_status.with_startup_failure(&services, reason);
         }
+        let speech_controller = Arc::new(tokio::sync::Mutex::new(
+            crate::audio::controller::SpeechSessionController::default(),
+        ));
+        let speech_view = crate::presentation::SpeechSessionPresenter::new(
+            speech_controller.lock().await.observe(),
+        );
+        let speech_watch_task = live_speech.as_ref().map(|live| {
+            tokio::spawn(watch_speech_settings(
+                Arc::clone(live),
+                Arc::clone(&bindings.settings),
+                Arc::clone(&speech_controller),
+                bindings.settings.subscribe(),
+                initial_speech.clone(),
+                owners_stop.child_token(),
+            ))
+        });
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),
@@ -635,6 +686,8 @@ impl ApplicationLifecycle {
             server_task: None,
             lease,
             ai_runtime,
+            live_speech,
+            speech_watch_task,
         };
         owner.lease.publish(Arc::clone(&bindings));
         owner.server_task = Some(tokio::spawn(
@@ -648,9 +701,6 @@ impl ApplicationLifecycle {
             let result = owner.shutdown().await;
             let _ = completed.send(result);
         });
-        let speech_controller = crate::audio::controller::SpeechSessionController::default();
-        let speech_view =
-            crate::presentation::SpeechSessionPresenter::new(speech_controller.observe());
         Ok(Self {
             presenter: GuiPresenter {
                 speech: speech_view,
@@ -674,7 +724,7 @@ impl ApplicationLifecycle {
             server,
             finetune,
             speech,
-            speech_controller: tokio::sync::Mutex::new(speech_controller),
+            speech_controller,
             speech_startup_warning,
             id,
             stop,
@@ -692,7 +742,7 @@ impl ApplicationLifecycle {
     ) -> Option<(crate::audio::session::SpeechInputHandler, CancellationToken)> {
         let recognizer = self.speech.as_ref()?;
         let handler = crate::audio::session::SpeechInputHandler::new(
-            Arc::clone(recognizer) as Arc<dyn crate::audio::session::SpeechTranscriber>,
+            Arc::clone(recognizer),
             Arc::new(crate::audio::session::ChatReplyTarget { character, source }),
             playback,
         );
@@ -705,6 +755,7 @@ impl ApplicationLifecycle {
         config: crate::audio::controller::SpeechCaptureConfig,
         character: CharacterId,
     ) -> Result<(), crate::audio::controller::SpeechCaptureError> {
+        let mut controller = self.speech_controller.lock().await;
         let runtime = self.presenter.ai_runtime.refresh_status().await;
         if runtime.service(crate::ai_runtime::AiService::Asr).phase
             != crate::ai_runtime::runtime_status::RuntimePhase::ModelReady
@@ -725,11 +776,7 @@ impl ApplicationLifecycle {
                     "ASR worker has not been activated".into(),
                 )
             })?;
-        self.speech_controller
-            .lock()
-            .await
-            .start(handler, stop, config)
-            .await
+        controller.start(handler, stop, config).await
     }
 
     pub async fn stop_speech_capture(&self) {
@@ -977,6 +1024,11 @@ impl ApplicationOwner {
                 failure = Some(ApplicationError::Task(error.to_string()));
             }
         }
+        if let Some(task) = self.speech_watch_task.take()
+            && let Err(error) = task.await
+        {
+            failure = Some(ApplicationError::Task(error.to_string()));
+        }
         self.presenter_stop.cancel();
         if let Some(task) = self.releases_task.take()
             && let Err(error) = task.await
@@ -990,6 +1042,11 @@ impl ApplicationOwner {
         }
         if let Some(runtime) = self.ai_runtime.take()
             && let Err(error) = runtime.shutdown().await
+        {
+            failure = Some(ApplicationError::Ai(error));
+        }
+        if let Some(live) = self.live_speech.take()
+            && let Err(error) = live.shutdown().await
         {
             failure = Some(ApplicationError::Ai(error));
         }
