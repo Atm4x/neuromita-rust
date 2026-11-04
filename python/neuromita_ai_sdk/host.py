@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 from neuromita_ai_sdk import API_VERSION, InstallPlan, validate_settings
+from neuromita_ai_sdk.constraints import inspect_constraints, enforce_constraints
 from neuromita_ai_sdk import hardware
 
 
@@ -115,6 +116,11 @@ class PluginHost:
         return contract
 
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
+        if op == "configuration_constraints":
+            plugin = self._load_install_contract(args["plugin_id"])
+            with contextlib.redirect_stdout(sys.stderr):
+                settings = validate_settings(plugin.settings_schema(), args["settings"])
+                return inspect_constraints(plugin, settings, args.get("runtime"), hardware.probe())
         if op == "discover":
             return self.discover()
         if op == "hardware":
@@ -182,6 +188,15 @@ class PluginHost:
                     for item in capabilities
                 ):
                     raise ValueError("plugin did not declare the selected backend, device and precision")
+            contract = (self._load_install_contract(plugin_id)
+                        if (self.plugins_dir / plugin_id / "installplan.py").exists() else plugin)
+            providers = [contract] if contract is plugin else [contract, plugin]
+            for provider in providers:
+                if callable(getattr(provider, "configuration_constraints", None)):
+                    with contextlib.redirect_stdout(sys.stderr):
+                        settings = validate_settings(provider.settings_schema(), settings)
+                        restrictions = inspect_constraints(provider, settings, runtime, hardware.probe())
+                        enforce_constraints(restrictions, settings, runtime)
             try:
                 with contextlib.redirect_stdout(sys.stderr):
                     if runtime is None:

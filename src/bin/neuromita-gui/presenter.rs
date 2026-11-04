@@ -36,7 +36,7 @@ pub enum ShellCommand {
     TranslationsReloaded,
     ToggleBackend,
     ToggleClient,
-    Play,
+    LauncherFeedback(LocalizedText),
     Launcher(LauncherAction),
     Social(String),
     DismissNotice,
@@ -84,44 +84,24 @@ pub struct ComponentPreview {
     pub update: &'static str,
 }
 
-pub struct ReleasePreview {
-    pub title: &'static str,
-    pub date: &'static str,
-}
-
 pub struct HomePreview {
     pub backend: ComponentPreview,
     pub client: ComponentPreview,
-    pub releases: [ReleasePreview; 3],
 }
 
 impl HomePreview {
-    pub fn python_reference() -> Self {
+    pub fn runtime() -> Self {
         Self {
             backend: ComponentPreview {
                 kind: ComponentKind::Python,
-                version: "2026.10.15.3",
-                update: "2026.11.01",
+                version: "",
+                update: "",
             },
             client: ComponentPreview {
                 kind: ComponentKind::Unity,
-                version: "2026.10.15",
-                update: "2026.11.01",
+                version: "",
+                update: "",
             },
-            releases: [
-                ReleasePreview {
-                    title: "NeuroMita v2026.11.01",
-                    date: "01.11.2026",
-                },
-                ReleasePreview {
-                    title: "NeuroMita v2026.10.22",
-                    date: "22.10.2026",
-                },
-                ReleasePreview {
-                    title: "NeuroMita v2026.10.15",
-                    date: "15.10.2026",
-                },
-            ],
         }
     }
 }
@@ -171,12 +151,7 @@ impl ShellPresenter {
             ShellCommand::SelectLanguage(locale) => self.locale = locale,
             ShellCommand::ToggleBackend => self.backend_selected = !self.backend_selected,
             ShellCommand::ToggleClient => self.client_selected = !self.client_selected,
-            ShellCommand::Play => {
-                self.notice = Some(i18n(
-                    "preview.play.unavailable",
-                    "Макет интерфейса: запуск игры пока не подключён.",
-                ))
-            }
+            ShellCommand::LauncherFeedback(notice) => self.notice = Some(notice),
             ShellCommand::Launcher(LauncherAction::UpdateSettings) => {
                 self.page = Page::Settings;
                 self.notice = None;

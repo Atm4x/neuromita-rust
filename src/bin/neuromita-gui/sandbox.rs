@@ -57,6 +57,7 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::ai_engine::bind(window, dispatch.clone());
     super::voice::bind(window, dispatch.clone());
     super::asr::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
@@ -180,6 +181,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .global::<ConversationUi>()
                 .set_diagnostics(value.into());
         }
+        Update::Hardware(snapshot) => super::ai_engine::render(window, snapshot),
         Update::Connections(snapshot) => {
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
