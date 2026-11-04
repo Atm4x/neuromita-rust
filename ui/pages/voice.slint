@@ -24,6 +24,7 @@ export global VoiceUi {
     in-out property <bool> local-auto-load;
     in-out property <bool> local-lazy-init;
     in-out property <string> local-status;
+    in property <string> runtime-status;
     in-out property <[string]> api-profiles;
     in-out property <string> api-profile;
     in-out property <[string]> api-models;
@@ -303,6 +304,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
                 VerticalLayout { padding: 17px; spacing: 9px;
                     VoiceCardHeading { title: I18n.i18n("voice.local.status-title", "Состояние модели"); description: I18n.i18n("voice.local.status-hint", "Готовность выбранной модели к синтезу."); glyph: "\u{f058}"; }
                     StatusPill { ink: #ffb544; message: VoiceUi.local-status == "" ? I18n.i18n("voice.local.not-ready", "Требуется инициализация") : VoiceUi.local-status; }
+                    SettingsText { text: VoiceUi.runtime-status; color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
                     VoiceButton { text: I18n.i18n("voice.local.initialize", "Инициализировать"); glyph: "\u{f04b}"; horizontal-stretch: 1; accent: true; enabled: VoiceUi.preview-available; activated => { VoiceUi.local-initialize(); } }
                     SettingsText { text: I18n.i18n("voice.local.model-hint", "Параметры синтеза и голоса — в настройках выбранной модели."); color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
                 }

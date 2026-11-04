@@ -148,6 +148,10 @@ pub(super) fn render_catalog(
 
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::RuntimeStatus(snapshot) => {
+            super::voice::runtime_status(window, &snapshot);
+            super::asr::runtime_status(window, &snapshot);
+        }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
@@ -199,6 +203,9 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::AdminSaved => super::settings::saved(window, None),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
+            super::voice::runtime_status(window, &stopped);
+            super::asr::runtime_status(window, &stopped);
             window.set_core_connected(false);
             window.set_core_connecting(false);
             window.set_chat_sending(false);

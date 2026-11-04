@@ -8,6 +8,7 @@ mod releases;
 mod runtime;
 mod sandbox;
 mod settings;
+mod speech_status;
 mod voice;
 
 mod view {

@@ -1,7 +1,10 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
-    ai_runtime::speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    ai_runtime::{
+        runtime_status::RuntimeSnapshot,
+        speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::input_catalog::{AudioInputCatalog, AudioInputDevice},
     character::CharacterId,
@@ -56,6 +59,7 @@ pub enum Command {
 }
 
 pub enum Update {
+    RuntimeStatus(RuntimeSnapshot),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
@@ -230,6 +234,9 @@ async fn observe(
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
+    let mut runtime_status = administration.ai_runtime.observe();
+    let mut liveness = tokio::time::interval(Duration::from_secs(5));
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         publish(Update::Releases(releases.borrow_and_update().clone()));
         publish(Update::Connections(connections.borrow_and_update().clone()));
@@ -250,6 +257,7 @@ async fn observe(
             Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
             Err(error) => publish(Update::Error(error.to_string())),
         }
+        publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
@@ -326,6 +334,18 @@ async fn observe(
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
             result = selection.changed() => { result.map_err(|_| "Timeline observation closed")?; },
+            result = async {
+                match runtime_status.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if result.is_err() { runtime_status = None; }
+            },
+            _ = liveness.tick() => {
+                let status = administration.ai_runtime.refresh_status().await;
+                publish(Update::RuntimeStatus(status));
+            },
         }
     }
 }

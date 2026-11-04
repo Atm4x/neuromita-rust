@@ -6,7 +6,11 @@ use super::{
     view::{AppWindow, SettingsUi, VoiceUi},
 };
 use neuromita::{
-    ai_runtime::speech_catalog::{REMOTE_TTS_TEMPLATES, SpeechInventory},
+    ai_runtime::{
+        AiService,
+        runtime_status::RuntimeSnapshot,
+        speech_catalog::{REMOTE_TTS_TEMPLATES, SpeechInventory},
+    },
     character::character_catalog,
     settings::{TtsBackend, TtsPreferences},
 };
@@ -355,4 +359,9 @@ mod tests {
         );
         assert!(VoicePreviewMode::parse("other").is_err());
     }
+}
+
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
+    window.global::<VoiceUi>().set_runtime_status(text.into());
 }

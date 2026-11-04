@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
 use neuromita::{
-    ai_runtime::speech_catalog::SpeechInventory, audio::input_catalog::AudioInputDevice,
+    ai_runtime::{AiService, runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory},
+    audio::input_catalog::AudioInputDevice,
     settings::AsrPreferences,
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -243,7 +244,6 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory, devices: &[Aud
     ui.set_audio_backends(ModelRc::new(VecModel::from(
         backends.into_iter().map(Into::into).collect::<Vec<_>>(),
     )));
-    ui.set_status("Настройки доступны; микрофон не запущен".into());
     ui.set_monitored_device(if devices.is_empty() {
         "Доступные устройства не обнаружены".into()
     } else {
@@ -277,4 +277,12 @@ mod tests {
         assert!(millis("NaN", "VAD").is_err());
         assert!(millis("-1", "VAD").is_err());
     }
+}
+
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let status = super::speech_status::describe(&snapshot.service(AiService::Asr));
+    let ui = window.global::<AsrUi>();
+    ui.set_status(format!("{status} · Микрофон не запущен").into());
+    ui.set_runtime_ready(false);
+    ui.set_active(false);
 }

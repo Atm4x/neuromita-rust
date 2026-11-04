@@ -93,6 +93,7 @@ pub struct ApplicationConfig {
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
+    pub ai_speech_inventory: Option<crate::ai_runtime::speech_catalog::SpeechInventory>,
     pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
@@ -131,6 +132,7 @@ impl ApplicationConfig {
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
+            ai_speech_inventory: None,
             ai_hardware: None,
             ai_knowledge: None,
             settings: SettingsConfig {
@@ -141,6 +143,19 @@ impl ApplicationConfig {
             games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
         }
+    }
+
+    /// Attach an already prepared AI plan and an authoritative read-only speech catalog.
+    /// Persisted TTS/ASR settings are validated before any worker starts.
+    /// This does not prepare or install models.
+    pub fn with_prepared_speech_runtime(
+        mut self,
+        plan: AiApplicationConfig,
+        inventory: crate::ai_runtime::speech_catalog::SpeechInventory,
+    ) -> Self {
+        self.ai_runtime = Some(plan);
+        self.ai_speech_inventory = Some(inventory);
+        self
     }
 
     pub fn persistent(
@@ -230,6 +245,8 @@ pub enum ApplicationError {
     Timeline(#[from] TimelineError),
     #[error(transparent)]
     Ai(#[from] AiApplicationError),
+    #[error(transparent)]
+    SpeechBinding(#[from] crate::ai_runtime::application::AiSpeechBindingError),
     #[error("AI knowledge selection requires an activated embedding worker")]
     MissingEmbeddingWorker,
     #[error("AI reranking selection requires an activated reranker worker")]
@@ -348,6 +365,7 @@ impl ApplicationLifecycle {
             limits,
             voice,
             ai_runtime,
+            ai_speech_inventory,
             ai_hardware,
             ai_knowledge,
             settings,
@@ -374,6 +392,20 @@ impl ApplicationLifecycle {
         migrated?;
         let settings = SettingsLifecycle::prepare(settings).await?;
         let settings_owner = settings.owner();
+        let ai_runtime = match (ai_runtime, ai_speech_inventory) {
+            (Some(plan), Some(inventory)) => {
+                let saved = settings_owner.snapshot_all()?.values.speech.clone();
+                Some(plan.with_speech_settings(&saved, &inventory).await?)
+            }
+            (Some(plan), None) => Some(plan),
+            (None, Some(_)) => {
+                return Err(AiApplicationError::Invalid(
+                    "speech inventory requires a prepared AI application plan".into(),
+                )
+                .into());
+            }
+            (None, None) => None,
+        };
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let ai_runtime = match (ai_runtime, ai_hardware) {
@@ -519,9 +551,12 @@ impl ApplicationLifecycle {
             games: Arc::clone(&games),
             reminders,
         });
-        let ai_runtime_status = crate::presentation::RuntimeStatePresenter::new(
+        let mut ai_runtime_status = crate::presentation::RuntimeStatePresenter::new(
             ai_runtime.as_ref().map(|runtime| runtime.observe_status()),
         );
+        if let Some(runtime) = &ai_runtime {
+            ai_runtime_status = ai_runtime_status.with_supervisor(runtime.supervisor_weak());
+        }
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),

@@ -1,18 +1,39 @@
 //! Read-only presentation of the application's AI worker lifecycle.
 
+use std::sync::Weak;
+
 use tokio::sync::watch;
 
-use crate::ai_runtime::runtime_status::RuntimeSnapshot;
+use crate::ai_runtime::{AiSupervisor, runtime_status::RuntimeSnapshot};
 
 /// Read-only presenter-facing view of the supervisor's latest state.
 /// Subscribers receive coalesced snapshots rather than an event history.
 pub struct RuntimeStatePresenter {
     updates: Option<watch::Receiver<RuntimeSnapshot>>,
+    supervisor: Weak<AiSupervisor>,
 }
 
 impl RuntimeStatePresenter {
     pub(crate) fn new(updates: Option<watch::Receiver<RuntimeSnapshot>>) -> Self {
-        Self { updates }
+        Self {
+            updates,
+            supervisor: Weak::new(),
+        }
+    }
+
+    pub(crate) fn with_supervisor(mut self, supervisor: Weak<AiSupervisor>) -> Self {
+        self.supervisor = supervisor;
+        self
+    }
+
+    /// Reconcile a worker that exited outside any IPC operation.
+    /// No new process or model is created by this call.
+    pub async fn refresh_status(&self) -> RuntimeSnapshot {
+        if let Some(supervisor) = self.supervisor.upgrade() {
+            supervisor.refresh_status().await
+        } else {
+            self.snapshot()
+        }
     }
 
     pub fn snapshot(&self) -> RuntimeSnapshot {
@@ -45,6 +66,15 @@ mod tests {
             assert!(status.active_model.is_none());
         }
         assert!(presenter.observe().is_none());
+    }
+
+    #[tokio::test]
+    async fn detached_refresh_is_inert_and_never_starts_a_worker() {
+        let presenter = RuntimeStatePresenter::new(None);
+        let state = presenter.refresh_status().await;
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(state.service(service).phase, RuntimePhase::Stopped);
+        }
     }
 
     #[tokio::test]
