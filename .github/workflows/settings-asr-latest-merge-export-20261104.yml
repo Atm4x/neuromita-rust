@@ -1,0 +1,48 @@
+name: Export latest settings ASR branches
+on:
+  push:
+    branches:
+      - bridge/settings-asr-latest-merge-export-20261104
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Materialize branch refs and bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          for spec in \
+            "main:16fb8b7ef89ddf540de56a07a55c90f223cb1b0e" \
+            "tabs:d03a05de263844891019952faecdbe46213f87cb" \
+            "layout:5a157ced7ea8f6a15dda5e93134423d180f114c1" \
+            "speech:9573deb2ff197b1b70d410e2b0fc0805d2af03bc" \
+            "fixes:55c35f5a6a3da7af6d47e1681599333efd8189da"; do
+            ref="${spec%%:*}"
+            sha="${spec#*:}"
+            git cat-file -e "${sha}^{commit}" || git fetch origin "${sha}"
+            git update-ref "refs/heads/export-${ref}" "${sha}"
+          done
+          git bundle create settings-asr-latest.bundle \
+            refs/heads/export-main \
+            refs/heads/export-tabs \
+            refs/heads/export-layout \
+            refs/heads/export-speech \
+            refs/heads/export-fixes
+          git bundle verify settings-asr-latest.bundle
+          sha256sum settings-asr-latest.bundle > settings-asr-latest.bundle.sha256
+          git for-each-ref --format='%(refname) %(objectname)' refs/heads/export- > bundle-refs.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: settings-asr-latest-source
+          path: |
+            settings-asr-latest.bundle
+            settings-asr-latest.bundle.sha256
+            bundle-refs.txt
+          retention-days: 3
+          if-no-files-found: error
