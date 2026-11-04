@@ -86,33 +86,73 @@ fn parse_pulse_sources(text: &str) -> Vec<AudioInputDevice> {
 
 #[cfg(target_os = "windows")]
 fn parse_dshow_devices(text: &str) -> Vec<AudioInputDevice> {
-    let mut audio = false;
-    text.lines()
-        .take(512)
-        .filter_map(|line| {
-            if line.contains("DirectShow audio devices") {
-                audio = true;
-                return None;
+    let mut legacy_audio = false;
+    let mut pending = None;
+    let mut devices = Vec::new();
+    for line in text.lines().take(512) {
+        if line.contains("DirectShow audio devices") {
+            legacy_audio = true;
+            pending = None;
+        } else if line.contains("DirectShow video devices") {
+            legacy_audio = false;
+            pending = None;
+        }
+        let Some((_, message)) = line.split_once(']') else {
+            continue;
+        };
+        let message = message.trim();
+        if let Some(alternative) = message.strip_prefix("Alternative name ")
+            && let Some(name) = pending.take()
+            && let Some(identity) = alternative
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+            && identity.starts_with("@device_")
+            && identity.len() <= 506
+        {
+            let id = format!("audio={identity}");
+            if !devices
+                .iter()
+                .any(|device: &AudioInputDevice| device.id == id)
+            {
+                devices.push(AudioInputDevice {
+                    id,
+                    name,
+                    backend: "dshow".into(),
+                });
             }
-            if line.contains("DirectShow video devices") {
-                audio = false;
-                return None;
-            }
-            if !audio || line.contains("Alternative name") {
-                return None;
-            }
-            let text = line.rsplit_once(']')?.1.trim();
-            let name = text.strip_prefix('"')?.split('"').next()?.trim();
-            if name.is_empty() || name.len() > 512 {
-                return None;
-            }
-            Some(AudioInputDevice {
-                id: format!("audio={name}"),
-                name: name.into(),
-                backend: "dshow".into(),
-            })
-        })
-        .collect()
+        } else if let Some((name, suffix)) =
+            message.strip_prefix('"').and_then(|s| s.split_once('"'))
+        {
+            pending = (name.len() <= 512
+                && !name.is_empty()
+                && (suffix.trim() == "(audio)" || (suffix.trim().is_empty() && legacy_audio)))
+                .then(|| name.to_owned());
+        } else {
+            pending = None;
+        }
+    }
+    devices
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn dshow_uses_alternative_identity_for_same_name_and_ignores_video() {
+        let text = r#"[in#0 @ 123] "Camera" (video)
+[in#0 @ 123] Alternative name "@device_pnp_cam"
+[in#0 @ 123] "USB microphone" (audio)
+[in#0 @ 123] Alternative name "@device_cm_first"
+[in#0 @ 123] "USB microphone" (audio)
+[in#0 @ 123] Alternative name "@device_cm_second"
+[in#0 @ 123] "missing identifier" (audio)"#;
+        let ids: Vec<_> = parse_dshow_devices(text)
+            .into_iter()
+            .map(|device| device.id)
+            .collect();
+        assert_eq!(ids, ["audio=@device_cm_first", "audio=@device_cm_second"]);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

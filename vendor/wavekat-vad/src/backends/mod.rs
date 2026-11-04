@@ -1,0 +1,32 @@
+//! VAD backend implementations.
+//!
+//! Each backend is gated behind a feature flag. Enable the feature to make the
+//! module available:
+//!
+//! | Module | Feature | Backend |
+//! |--------|---------|---------|
+//! | [`webrtc`] | `webrtc` (default) | Google's WebRTC VAD |
+//! | [`silero`] | `silero` | Silero VAD v5 (ONNX) |
+//! | [`ten_vad`] | `ten-vad` | Agora's TEN-VAD (ONNX) |
+//! | [`firered`] | `firered` | FireRedVAD (ONNX) |
+//! | [`earshot`] | `earshot` | Earshot (pure Rust, no native deps) |
+//!
+//! All backends implement the [`VoiceActivityDetector`](crate::VoiceActivityDetector) trait.
+
+#[cfg(any(feature = "silero", feature = "ten-vad", feature = "firered"))]
+pub(crate) mod onnx;
+
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
+
+#[cfg(feature = "silero")]
+pub mod silero;
+
+#[cfg(feature = "ten-vad")]
+pub mod ten_vad;
+
+#[cfg(feature = "firered")]
+pub mod firered;
+
+#[cfg(feature = "earshot")]
+pub mod earshot;

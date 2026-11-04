@@ -1,0 +1,179 @@
+{
+  "direct": {
+    "ru": {
+      "f1": 0.9657666819061618,
+      "tp": 452058,
+      "fp": 20262,
+      "fn": 11786
+    },
+    "en": {
+      "f1": 0.8183999644289921,
+      "tp": 285293,
+      "fp": 28051,
+      "fn": 98560
+    },
+    "heldout": {
+      "ru": {
+        "f1": 0.954801107947988,
+        "tp": 248191,
+        "fp": 14209,
+        "fn": 9289
+      },
+      "en": {
+        "f1": 0.7952305950831065,
+        "tp": 131021,
+        "fp": 24883,
+        "fn": 42592
+      }
+    },
+    "noise": {
+      "emitted_segments": 9,
+      "emitted_seconds": 10.128,
+      "positive_vad_seconds": 4.32
+    },
+    "speech_endpoint": {
+      "annotated": 21,
+      "detected": 15,
+      "covered": 21,
+      "matched": 8,
+      "missed": 0,
+      "spurious": 0,
+      "merged": 6,
+      "split": 1
+    },
+    "timing": {
+      "onset": {
+        "n": 8,
+        "mean_ms": 278.5,
+        "median_ms": 126.03125,
+        "min_ms": 60.0,
+        "max_ms": 1350.0
+      },
+      "silence_emission": {
+        "n": 7,
+        "mean_ms": 310.2857142857143,
+        "median_ms": 498.0,
+        "min_ms": -604.0,
+        "max_ms": 554.0
+      }
+    }
+  },
+  "wavekat": {
+    "ru": {
+      "f1": 0.9657666819061618,
+      "tp": 452058,
+      "fp": 20262,
+      "fn": 11786
+    },
+    "en": {
+      "f1": 0.8183999644289921,
+      "tp": 285293,
+      "fp": 28051,
+      "fn": 98560
+    },
+    "heldout": {
+      "ru": {
+        "f1": 0.954801107947988,
+        "tp": 248191,
+        "fp": 14209,
+        "fn": 9289
+      },
+      "en": {
+        "f1": 0.7952305950831065,
+        "tp": 131021,
+        "fp": 24883,
+        "fn": 42592
+      }
+    },
+    "noise": {
+      "emitted_segments": 9,
+      "emitted_seconds": 10.128,
+      "positive_vad_seconds": 4.32
+    },
+    "speech_endpoint": {
+      "annotated": 21,
+      "detected": 15,
+      "covered": 21,
+      "matched": 8,
+      "missed": 0,
+      "spurious": 0,
+      "merged": 6,
+      "split": 1
+    },
+    "timing": {
+      "onset": {
+        "n": 8,
+        "mean_ms": 278.5,
+        "median_ms": 126.03125,
+        "min_ms": 60.0,
+        "max_ms": 1350.0
+      },
+      "silence_emission": {
+        "n": 7,
+        "mean_ms": 310.2857142857143,
+        "median_ms": 498.0,
+        "min_ms": -604.0,
+        "max_ms": 554.0
+      }
+    }
+  },
+  "silero": {
+    "ru": {
+      "f1": 0.9603997211247967,
+      "tp": 454586,
+      "fp": 28230,
+      "fn": 9258
+    },
+    "en": {
+      "f1": 0.9094168130694695,
+      "tp": 344493,
+      "fp": 29267,
+      "fn": 39360
+    },
+    "heldout": {
+      "ru": {
+        "f1": 0.9557155886600289,
+        "tp": 251487,
+        "fp": 17313,
+        "fn": 5993
+      },
+      "en": {
+        "f1": 0.8443435215041555,
+        "tp": 139437,
+        "fp": 17235,
+        "fn": 34176
+      }
+    },
+    "noise": {
+      "emitted_segments": 1,
+      "emitted_seconds": 0.768,
+      "positive_vad_seconds": 0.192
+    },
+    "speech_endpoint": {
+      "annotated": 21,
+      "detected": 14,
+      "covered": 21,
+      "matched": 5,
+      "missed": 0,
+      "spurious": 0,
+      "merged": 7,
+      "split": 1
+    },
+    "timing": {
+      "onset": {
+        "n": 5,
+        "mean_ms": 180.0,
+        "median_ms": 188.0,
+        "min_ms": 54.0,
+        "max_ms": 306.0
+      },
+      "silence_emission": {
+        "n": 4,
+        "mean_ms": 560.5,
+        "median_ms": 550.0,
+        "min_ms": 536.0,
+        "max_ms": 606.0
+      }
+    }
+  }
+}

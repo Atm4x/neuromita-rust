@@ -1,0 +1,323 @@
+{
+  "microphone_opened": false,
+  "cases": {
+    "silence": {
+      "config": {
+        "backend": "lavfi",
+        "device": "anullsrc=r=16000:cl=mono,atrim=end_sample=16384",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "auto",
+        "ptt_events": [],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": null,
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "auto",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 1053,
+        "finish": "eof",
+        "error": null,
+        "sample_count": 16384,
+        "peak_amplitude": 0,
+        "applied_ptt_events": 0,
+        "segments": []
+      },
+      "exit_code": 0
+    },
+    "speech": {
+      "config": {
+        "backend": "lavfi",
+        "device": "amovie=assets/eval/ru-01.wav,atrim=end_sample=119040",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "auto",
+        "ptt_events": [],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": null,
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "auto",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 7457,
+        "finish": "eof",
+        "error": null,
+        "sample_count": 119040,
+        "peak_amplitude": 3614,
+        "applied_ptt_events": 0,
+        "segments": [
+          {
+            "start_sample": 27648,
+            "end_sample": 104448,
+            "onset_decided_at_sample": 30720,
+            "emitted_at_sample": 104448,
+            "end_reason": "silence",
+            "sample_count": 76800,
+            "peak_amplitude": 3614,
+            "wav_path": null
+          }
+        ]
+      },
+      "exit_code": 0
+    },
+    "silence-ptt": {
+      "config": {
+        "backend": "lavfi",
+        "device": "anullsrc=r=16000:cl=mono,atrim=end_sample=16384",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "ptt",
+        "ptt_events": [
+          {
+            "time_ms": 0,
+            "pressed": true
+          },
+          {
+            "time_ms": 800,
+            "pressed": false
+          }
+        ],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": {
+          "pre_roll_samples": 3200,
+          "tail_samples": 2048,
+          "min_voiced_samples": 5600
+        },
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "ptt",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 1054,
+        "finish": "eof",
+        "error": null,
+        "sample_count": 16384,
+        "peak_amplitude": 0,
+        "applied_ptt_events": 2,
+        "segments": []
+      },
+      "exit_code": 0
+    },
+    "speech-ptt": {
+      "config": {
+        "backend": "lavfi",
+        "device": "amovie=assets/eval/ru-01.wav,atrim=end_sample=119040",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "ptt",
+        "ptt_events": [
+          {
+            "time_ms": 1700,
+            "pressed": true
+          },
+          {
+            "time_ms": 6150,
+            "pressed": false
+          }
+        ],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": {
+          "pre_roll_samples": 3200,
+          "tail_samples": 2048,
+          "min_voiced_samples": 5600
+        },
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "ptt",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 7465,
+        "finish": "eof",
+        "error": null,
+        "sample_count": 119040,
+        "peak_amplitude": 3614,
+        "applied_ptt_events": 2,
+        "segments": [
+          {
+            "start_sample": 23808,
+            "end_sample": 100096,
+            "onset_decided_at_sample": null,
+            "emitted_at_sample": 100096,
+            "end_reason": "release",
+            "sample_count": 76288,
+            "peak_amplitude": 3614,
+            "wav_path": null
+          }
+        ]
+      },
+      "exit_code": 0
+    },
+    "stop": {
+      "config": {
+        "backend": "lavfi",
+        "device": "anullsrc=r=16000:cl=mono,atrim=end_sample=16384",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "auto",
+        "ptt_events": [],
+        "stop_at_ms": 600,
+        "output_dir": null,
+        "ptt_policy": null,
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "auto",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 601,
+        "finish": "stop",
+        "error": null,
+        "sample_count": 9216,
+        "peak_amplitude": 0,
+        "applied_ptt_events": 0,
+        "segments": []
+      },
+      "exit_code": 0
+    },
+    "capture-error": {
+      "config": {
+        "backend": "lavfi",
+        "device": "invalid_vad_smoke_filter",
+        "provider": "direct",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "auto",
+        "ptt_events": [],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": null,
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "direct",
+        "mode": "auto",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 320,
+        "finish": "capture_error",
+        "error": "audio device exited unexpectedly: capture ended: exit code: 0xb3b6b908",
+        "sample_count": 0,
+        "peak_amplitude": 0,
+        "applied_ptt_events": 0,
+        "segments": []
+      },
+      "exit_code": 1
+    },
+    "speech-silero": {
+      "config": {
+        "backend": "lavfi",
+        "device": "amovie=assets/eval/ru-01.wav,atrim=end_sample=119040",
+        "provider": "silero",
+        "threshold": 0.5,
+        "duration_secs": 12,
+        "mode": "auto",
+        "ptt_events": [],
+        "stop_at_ms": null,
+        "output_dir": null,
+        "ptt_policy": null,
+        "segment": {
+          "pre_roll_samples": 3072,
+          "start_voice_samples": 768,
+          "end_silence_samples": 7168,
+          "min_segment_samples": 2560,
+          "max_segment_samples": 160000
+        }
+      },
+      "report": {
+        "backend": "lavfi",
+        "provider": "silero",
+        "mode": "auto",
+        "threshold": 0.5,
+        "sample_rate_hz": 16000,
+        "duration_limit_secs": 12,
+        "elapsed_ms": 7458,
+        "finish": "eof",
+        "error": null,
+        "sample_count": 119040,
+        "peak_amplitude": 3614,
+        "applied_ptt_events": 0,
+        "segments": [
+          {
+            "start_sample": 29440,
+            "end_sample": 105216,
+            "onset_decided_at_sample": 32768,
+            "emitted_at_sample": 105216,
+            "end_reason": "silence",
+            "sample_count": 75776,
+            "peak_amplitude": 3614,
+            "wav_path": null
+          }
+        ]
+      },
+      "exit_code": 0
+    }
+  }
+}

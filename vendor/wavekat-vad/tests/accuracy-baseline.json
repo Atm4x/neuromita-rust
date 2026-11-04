@@ -1,0 +1,27 @@
+{
+  "ten-vad": {
+    "precision": 0.942,
+    "recall": 0.915,
+    "f1": 0.928
+  },
+  "silero": {
+    "precision": 0.938,
+    "recall": 0.938,
+    "f1": 0.938
+  },
+  "webrtc": {
+    "precision": 0.821,
+    "recall": 0.983,
+    "f1": 0.895
+  },
+  "firered": {
+    "precision": 0.95,
+    "recall": 0.879,
+    "f1": 0.913
+  },
+  "earshot": {
+    "precision": 0.909,
+    "recall": 0.949,
+    "f1": 0.928
+  }
+}

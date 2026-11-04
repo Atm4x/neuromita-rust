@@ -1,12 +1,13 @@
 //! Explicit FFmpeg device adapters. The binaries are supplied by the host application;
 //! neither shell commands nor system-default device names are guessed by the core.
 
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStdout, Command},
+    time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +62,7 @@ impl CaptureBackend {
 pub struct FfmpegCapture {
     child: Child,
     stdout: Pcm16Frames<ChildStdout>,
+    live_deadline: Option<Instant>,
 }
 
 struct Pcm16Frames<R> {
@@ -94,6 +96,15 @@ impl<R: AsyncRead + Unpin> Pcm16Frames<R> {
             std::array::from_fn(|i| i16::from_le_bytes([self.bytes[2 * i], self.bytes[2 * i + 1]]));
         self.filled = 0;
         Ok(Some(frame))
+    }
+
+    async fn next_before(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<MonoPcm16Frame>, DeviceError> {
+        timeout_at(deadline, self.next())
+            .await
+            .map_err(|_| DeviceError::Stopped("timed out waiting for PCM".into()))?
     }
 }
 
@@ -139,6 +150,8 @@ impl FfmpegCapture {
         Ok(Self {
             child,
             stdout: Pcm16Frames::new(stdout),
+            live_deadline: (backend != CaptureBackend::Lavfi)
+                .then(|| Instant::now() + Duration::from_secs(8)),
         })
     }
 }
@@ -146,6 +159,18 @@ impl FfmpegCapture {
 impl AudioCapture for FfmpegCapture {
     fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>> {
         Box::pin(async move {
+            if let Some(deadline) = self.live_deadline {
+                let frame = self.stdout.next_before(deadline).await?;
+                if let Some(frame) = frame {
+                    self.live_deadline = Some(Instant::now() + Duration::from_secs(5));
+                    return Ok(Some(frame));
+                }
+                let reason = match self.child.try_wait()? {
+                    Some(status) => format!("capture ended: {status}"),
+                    None => "capture closed its PCM pipe".into(),
+                };
+                return Err(DeviceError::Stopped(reason));
+            }
             match self.stdout.next().await? {
                 Some(frame) => Ok(Some(frame)),
                 None => {
@@ -233,7 +258,25 @@ pub type SharedPlayback = Arc<dyn AudioPlayback>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    #[tokio::test]
+    async fn partial_pcm_and_cancelled_read_do_not_extend_live_deadline() {
+        let (mut sender, receiver) = tokio::io::duplex(1024);
+        let mut frames = Pcm16Frames::new(receiver);
+        let deadline = Instant::now() + Duration::from_millis(40);
+        sender.write_all(&[1, 2, 3]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), frames.next_before(deadline))
+                .await
+                .is_err()
+        );
+        tokio::time::sleep_until(deadline).await;
+        assert!(matches!(
+            frames.next_before(deadline).await,
+            Err(DeviceError::Stopped(_))
+        ));
+        assert_eq!(frames.filled, 3);
+    }
 
     #[tokio::test]
     async fn interrupted_pcm_read_preserves_partial_samples() {

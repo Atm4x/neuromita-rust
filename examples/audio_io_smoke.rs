@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if samples.len() < 1_536 {
         return Err("synthetic capture returned too little audio".into());
     }
-    let bytes = SpeechSegment { samples }.as_wav()?;
+    let bytes = SpeechSegment::from_samples(samples).as_wav()?;
     FfplayOutput { binary: ffplay }
         .play(
             AudioArtifact {
