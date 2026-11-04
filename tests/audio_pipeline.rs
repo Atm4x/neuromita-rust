@@ -130,7 +130,7 @@ fn application_config() -> ApplicationConfig {
     config.voice = Arc::new(Voice);
     let mut settings = AppSettings::initial_profile();
     settings.voice.in_launcher = true;
-    config.settings.source = SettingsSource::Initial(settings);
+    config.settings.source = SettingsSource::initial(settings);
     config
 }
 
@@ -183,7 +183,7 @@ async fn fixture_audio_pipeline_and_old_target_cannot_publish_into_restarted_cor
     let snapshot = app
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     assert!(

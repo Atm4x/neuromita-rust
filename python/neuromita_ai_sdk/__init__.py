@@ -69,3 +69,16 @@ class AiPlugin(Protocol):
     def unload(self) -> None: ...
 
 from .settings import validate_settings
+from .constraints import ConfigurationContext, ConfigurationConstraint, validate_constraints, enforce_constraints
+
+
+class DynamicConfigurationContract(Protocol):
+    """Optional plugin capability, exposed by InstallContract or an unsplit Plugin.
+
+    Receives settings, requested runtime and actual worker hardware. Returns
+    scalar-value restrictions with field, value, severity, code and message.
+    Inspection does not initialize a model. Host enforces forbidden values again
+    immediately before initialization, using fresh worker facts.
+    """
+
+    def configuration_constraints(self, context: ConfigurationContext) -> list[ConfigurationConstraint]: ...

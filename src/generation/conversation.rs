@@ -418,37 +418,36 @@ mod tests {
 
         let mut message = ConversationMessage::new(
             "hello-a-to-b",
-            ConversationSpeaker::Character(CharacterId::Mita),
+            ConversationSpeaker::Character(CharacterId::Crazy),
             json!("Привет!"),
-            [CharacterId::KindMita],
+            [CharacterId::Kind],
         );
         message.audience = ConversationAudience {
-            targets: [ConversationSpeaker::Character(CharacterId::KindMita)].into(),
+            targets: [ConversationSpeaker::Character(CharacterId::Kind)].into(),
             participants: [
-                ConversationSpeaker::Character(CharacterId::Mita),
-                ConversationSpeaker::Character(CharacterId::KindMita),
+                ConversationSpeaker::Character(CharacterId::Crazy),
+                ConversationSpeaker::Character(CharacterId::Kind),
                 ConversationSpeaker::Player,
             ]
             .into(),
-            seen_by: [CharacterId::KindMita].into(),
+            seen_by: [CharacterId::Kind].into(),
         };
         append(&mut store, branch, message);
 
-        let a = TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
-        let b =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::KindMita, None).unwrap();
-        let (a_messages, _) = project_history(&a, CharacterId::Mita, None);
-        let (b_messages, _) = project_history(&b, CharacterId::KindMita, None);
+        let a = TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
+        let b = TimelineMessageQueries::capture(&store, branch, CharacterId::Kind, None).unwrap();
+        let (a_messages, _) = project_history(&a, CharacterId::Crazy, None);
+        let (b_messages, _) = project_history(&b, CharacterId::Kind, None);
         assert_eq!(a_messages[0].role, LlmRole::Assistant);
         assert!(
             a_messages[0]
                 .text
-                .starts_with("[To: kind-mita; другие участники: player] ")
+                .starts_with("[To: Kind; другие участники: player] ")
         );
         assert_eq!(b_messages[0].role, LlmRole::User);
         assert_eq!(
             b_messages[0].text,
-            "[Собеседник: mita -> kind-mita; другие участники: player] Привет!"
+            "[Собеседник: Crazy -> Kind; другие участники: player] Привет!"
         );
     }
 
@@ -460,7 +459,7 @@ mod tests {
 
         let mut original = ConversationMessage::new(
             "private-b-to-player",
-            ConversationSpeaker::Character(CharacterId::KindMita),
+            ConversationSpeaker::Character(CharacterId::Kind),
             json!("Только для игрока"),
             [],
         );
@@ -472,14 +471,14 @@ mod tests {
 
         let mut retelling = ConversationMessage::new(
             "b-retells-private",
-            ConversationSpeaker::Character(CharacterId::KindMita),
+            ConversationSpeaker::Character(CharacterId::Kind),
             json!("Я говорила кое-что игроку"),
-            [CharacterId::Mita],
+            [CharacterId::Crazy],
         );
         retelling
             .audience
             .targets
-            .insert(ConversationSpeaker::Character(CharacterId::Mita));
+            .insert(ConversationSpeaker::Character(CharacterId::Crazy));
         retelling.links.push(crate::timeline::domain::CausalLink {
             relation: crate::timeline::domain::CausalRelation::CausedBy,
             event_id: original_id,
@@ -487,23 +486,23 @@ mod tests {
         let retelling_id = append(&mut store, branch, retelling);
         assert!(
             !store
-                .knows(branch, CharacterId::Mita, original_id, None)
+                .knows(branch, CharacterId::Crazy, original_id, None)
                 .unwrap()
         );
         assert!(
             store
-                .knows(branch, CharacterId::Mita, retelling_id, None)
+                .knows(branch, CharacterId::Crazy, retelling_id, None)
                 .unwrap()
         );
 
         let view =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
-        let (messages, _) = project_history(&view, CharacterId::Mita, None);
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
+        let (messages, _) = project_history(&view, CharacterId::Crazy, None);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, LlmRole::User);
         assert_eq!(
             messages[0].text,
-            "[Собеседник: kind-mita -> mita] Я говорила кое-что игроку"
+            "[Собеседник: Kind -> Crazy] Я говорила кое-что игроку"
         );
     }
 
@@ -521,7 +520,7 @@ mod tests {
         assert_eq!(message_text(&message).unwrap(), "Первый\nВторой");
         assert_eq!(
             speaker_prefix(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 MessageRole::User,
                 Some("player"),
                 &message

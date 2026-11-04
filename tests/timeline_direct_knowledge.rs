@@ -38,26 +38,26 @@ fn contract(
     neuromita::timeline::EventId,
 ) {
     let mut x = EventDraft::new(EventKind::UnityEvent);
-    x.observers.insert(CharacterId::Mita);
+    x.observers.insert(CharacterId::Crazy);
     let x_id = x.id;
     append(repo, branch, x).unwrap();
 
     let mut y = ConversationMessage::new(
         "y",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!("I saw X"),
-        [CharacterId::KindMita],
+        [CharacterId::Kind],
     );
     y.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: x_id,
     });
     assert_eq!(Event::kind(&y), EventKind::CharacterMessage);
-    assert!(Event::witnesses(&y).contains(&CharacterId::Mita));
-    assert!(Event::witnesses(&y).contains(&CharacterId::KindMita));
+    assert!(Event::witnesses(&y).contains(&CharacterId::Crazy));
+    assert!(Event::witnesses(&y).contains(&CharacterId::Kind));
     assert_eq!(
         Message::speaker(&y),
-        ConversationSpeaker::Character(CharacterId::Mita)
+        ConversationSpeaker::Character(CharacterId::Crazy)
     );
     let y_id = y.id;
     append_conversation_message(
@@ -75,9 +75,9 @@ fn contract(
 
     let mut z = ConversationMessage::new(
         "z",
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Kind),
         json!("A told me about X"),
-        [CharacterId::Mita],
+        [CharacterId::Crazy],
     );
     z.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
@@ -97,26 +97,16 @@ fn contract(
     )
     .unwrap();
 
-    assert!(repo.knows(branch, CharacterId::Mita, x_id, None).unwrap());
-    assert!(
-        !repo
-            .knows(branch, CharacterId::KindMita, x_id, None)
-            .unwrap()
-    );
-    assert!(
-        repo.knows(branch, CharacterId::KindMita, y_id, None)
-            .unwrap()
-    );
-    assert!(
-        repo.knows(branch, CharacterId::KindMita, z_id, None)
-            .unwrap()
-    );
-    let view = TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None).unwrap();
+    assert!(repo.knows(branch, CharacterId::Crazy, x_id, None).unwrap());
+    assert!(!repo.knows(branch, CharacterId::Kind, x_id, None).unwrap());
+    assert!(repo.knows(branch, CharacterId::Kind, y_id, None).unwrap());
+    assert!(repo.knows(branch, CharacterId::Kind, z_id, None).unwrap());
+    let view = TimelineMessageQueries::capture(repo, branch, CharacterId::Kind, None).unwrap();
     assert_eq!(view.count(), 2);
 
     let mut impossible = EventDraft::new(EventKind::CharacterMessage);
-    impossible.actor = Some(CharacterId::KindMita.to_string());
-    impossible.observers.insert(CharacterId::KindMita);
+    impossible.actor = Some(CharacterId::Kind.to_string());
+    impossible.observers.insert(CharacterId::Kind);
     impossible.links.push(CausalLink {
         relation: CausalRelation::ReactTo,
         event_id: x_id,
@@ -126,8 +116,8 @@ fn contract(
         Err(TimelineError::Invalid(_))
     ));
     let mut permitted = EventDraft::new(EventKind::CharacterMessage);
-    permitted.actor = Some(CharacterId::KindMita.to_string());
-    permitted.observers.insert(CharacterId::KindMita);
+    permitted.actor = Some(CharacterId::Kind.to_string());
+    permitted.observers.insert(CharacterId::Kind);
     permitted.links.push(CausalLink {
         relation: CausalRelation::ReactTo,
         event_id: y_id,
@@ -135,24 +125,16 @@ fn contract(
     append(repo, branch, permitted).unwrap();
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::KindMita);
+    reset.observers.insert(CharacterId::Kind);
     append(repo, branch, reset).unwrap();
-    assert!(
-        !repo
-            .knows(branch, CharacterId::KindMita, y_id, None)
-            .unwrap()
-    );
-    assert!(
-        !repo
-            .knows(branch, CharacterId::KindMita, z_id, None)
-            .unwrap()
-    );
+    assert!(!repo.knows(branch, CharacterId::Kind, y_id, None).unwrap());
+    assert!(!repo.knows(branch, CharacterId::Kind, z_id, None).unwrap());
 
     let mut after_reset = ConversationMessage::new(
         "after-reset",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!("Remember X?"),
-        [CharacterId::KindMita],
+        [CharacterId::Kind],
     );
     after_reset.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
@@ -172,20 +154,9 @@ fn contract(
         after_reset,
     )
     .unwrap();
-    assert!(
-        !repo
-            .knows(branch, CharacterId::KindMita, x_id, None)
-            .unwrap()
-    );
-    assert!(
-        !repo
-            .knows(branch, CharacterId::KindMita, y_id, None)
-            .unwrap()
-    );
-    assert!(
-        repo.knows(branch, CharacterId::KindMita, new_id, None)
-            .unwrap()
-    );
+    assert!(!repo.knows(branch, CharacterId::Kind, x_id, None).unwrap());
+    assert!(!repo.knows(branch, CharacterId::Kind, y_id, None).unwrap());
+    assert!(repo.knows(branch, CharacterId::Kind, new_id, None).unwrap());
     (branch, x_id, new_id)
 }
 
@@ -216,12 +187,12 @@ fn only_direct_events_are_known_in_sqlite_across_reopen() {
     let reopened = SqliteTimelineRepository::open(&path).unwrap();
     assert!(
         !reopened
-            .knows(branch, CharacterId::KindMita, old_id, None)
+            .knows(branch, CharacterId::Kind, old_id, None)
             .unwrap()
     );
     assert!(
         reopened
-            .knows(branch, CharacterId::KindMita, new_id, None)
+            .knows(branch, CharacterId::Kind, new_id, None)
             .unwrap()
     );
     drop(reopened);

@@ -160,13 +160,13 @@ fn config(
 }
 
 fn initial() -> SettingsSource {
-    SettingsSource::Initial(neuromita::settings::AppSettings::initial_profile())
+    SettingsSource::initial(neuromita::settings::AppSettings::initial_profile())
 }
 
 fn reply(_model: &str, text: &str) -> Result<RequestHandle, SubmitError> {
-    let event = ChatApi::publish_message(CharacterId::Mita, UserInput::new(text.into()).unwrap())?;
+    let event = ChatApi::publish_message(CharacterId::Crazy, UserInput::new(text.into()).unwrap())?;
     ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         event,
         RequestSource::Presenter,
     ))
@@ -214,7 +214,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     let old_chat = app.presenter().chat.clone();
     let old_characters = app.presenter().characters.clone();
     let old_volume = app.presenter().settings.voice.volume.clone();
-    let old_character = CharacterApi::get(CharacterId::Mita).unwrap();
+    let old_character = CharacterApi::get(CharacterId::Crazy).unwrap();
     let old_server = app.server().clone();
     let listen = old_server.address();
     let mut old_settings = SettingsApi::observe().unwrap();
@@ -266,7 +266,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
         SettingsApi::snapshot::<VoiceSettings>(),
         Err(SettingsError::Stopped)
     ));
-    assert!(CharacterApi::get(CharacterId::Mita).is_err());
+    assert!(CharacterApi::get(CharacterId::Crazy).is_err());
     let concurrent_rejections = tokio::task::spawn_blocking(|| {
         std::thread::scope(|scope| {
             for _ in 0..16 {
@@ -280,7 +280,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
                             SettingsApi::snapshot::<VoiceSettings>(),
                             Err(SettingsError::Stopped)
                         ));
-                        assert!(CharacterApi::get(CharacterId::Mita).is_err());
+                        assert!(CharacterApi::get(CharacterId::Crazy).is_err());
                     }
                 });
             }
@@ -348,7 +348,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     assert_ne!(app.at().branch_id, old_anchor.branch_id);
     assert!(app.timeline().is_empty());
     assert_eq!(
-        CharacterApi::get(CharacterId::Mita)
+        CharacterApi::get(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -368,7 +368,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     assert!(ChatApi::trace(accepted.id()).unwrap().is_none());
     assert!(
         old_chat
-            .reply(CharacterId::Mita, "stale presenter".into())
+            .reply(CharacterId::Crazy, "stale presenter".into())
             .is_err()
     );
     assert!(old_chat.cancel(active.id()).is_err());
@@ -379,7 +379,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     assert!(
         old_characters
             .observe(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 UserInput::new("stale observation".into()).unwrap()
             )
             .await
@@ -420,7 +420,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
     let request = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "third application".into())
+        .reply(CharacterId::Crazy, "third application".into())
         .unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.model, "third");
@@ -453,7 +453,7 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
         SettingsApi::snapshot::<VoiceSettings>(),
         Err(SettingsError::Stopped)
     ));
-    assert!(CharacterApi::get(CharacterId::Mita).is_err());
+    assert!(CharacterApi::get(CharacterId::Crazy).is_err());
     assert!(matches!(
         ApplicationLifecycle::start(config("unused", &sent, &storage, initial(), address)).await,
         Err(ApplicationError::Busy)

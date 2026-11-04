@@ -1,7 +1,8 @@
+import { CharacterCatalog } from "../characters/catalog.slint";
+import { CharacterPortrait } from "../characters/portrait.slint";
 import { SandboxTheme } from "theme.slint";
 import { Caption, GhostButton } from "controls.slint";
 import { ChatRow, ChatStatus } from "models.slint";
-import { Avatar } from "../components/avatar.slint";
 import { I18n } from "../i18n.slint";
 
 export component StatusText inherits Caption {
@@ -40,7 +41,6 @@ component BubbleFrame inherits Rectangle {
 export component MessageRow inherits VerticalLayout {
     in property <ChatRow> item;
     in property <string> character-name;
-    in property <image> avatar;
     in property <length> bubble-width;
     callback cancel(string);
     padding: 0px; padding-top: 4px; padding-bottom: 4px; spacing: 4px;
@@ -51,7 +51,8 @@ export component MessageRow inherits VerticalLayout {
         if !root.item.user: HorizontalLayout {
             padding: 0px; spacing: 0px; width: 44px;
             VerticalLayout { padding: 0px; alignment: end;
-                Avatar { source: root.item.speaker == "kind-mita" ? @image-url("../../assets/avatars/kind.png") : root.avatar; surface: SandboxTheme.canvas; width: 36px; height: 36px; }
+                if root.item.character-index >= 0: CharacterPortrait { character: root.item.character-index; surface: SandboxTheme.canvas; width: 36px; height: 36px; }
+                if root.item.character-index < 0: Rectangle { width: 36px; height: 36px; border-radius: 18px; background: SandboxTheme.panel; Caption { text: "?"; width: 100%; height: 100%; horizontal-alignment: center; } }
             }
             Rectangle { width: 8px; }
         }
@@ -64,8 +65,7 @@ export component MessageRow inherits VerticalLayout {
                 padding-top: 8px; padding-bottom: 8px; spacing: 2px;
                 Caption {
                     text: root.item.user ? I18n.i18n("sandbox.author.you", "Вы")
-                        : root.item.speaker == "mita" ? I18n.i18n("sandbox.character.mita", "Мита")
-                        : root.item.speaker == "kind-mita" ? I18n.i18n("sandbox.character.kind", "Добрая Мита")
+                        : root.item.character-index >= 0 ? CharacterCatalog.name(CharacterCatalog.entries[root.item.character-index])
                         : root.item.speaker == "World" ? I18n.i18n("sandbox.observation", "Наблюдение")
                         : root.item.speaker != "" ? root.item.speaker : root.character-name;
                     color: root.item.user ? #ffd7ea : #ff8fc8;

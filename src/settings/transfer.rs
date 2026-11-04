@@ -1,11 +1,8 @@
 use thiserror::Error;
 
-use crate::migration::{Migration, MigrationError};
+use crate::migration::Migration;
 
-use super::{
-    PythonSettingsMigration, RustSettingsMigration, SETTINGS_SCHEMA_VERSION, SettingsError,
-    StoredSettings,
-};
+use super::{PythonSettingsMigration, RustSettingsMigration, SettingsError, StoredSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsImportFormat {
@@ -19,25 +16,12 @@ pub enum SettingsTransferError {
     MalformedJson(String),
     #[error("settings transfer is not a complete envelope: {0}")]
     NotFullSettingsTransfer(String),
-    #[error("unsupported settings schema {found}; current schema is {SETTINGS_SCHEMA_VERSION}")]
-    UnsupportedSchema { found: u32 },
     #[error("invalid settings transfer: {0}")]
     InvalidEnvelope(String),
     #[error("invalid settings values: {0}")]
     InvalidValue(String),
     #[error("{format:?} settings migration is not implemented")]
     NotImplemented { format: SettingsImportFormat },
-    #[error(transparent)]
-    Migration(MigrationError),
-}
-
-impl From<MigrationError> for SettingsTransferError {
-    fn from(error: MigrationError) -> Self {
-        match error {
-            MigrationError::UnsupportedVersion { found, .. } => Self::UnsupportedSchema { found },
-            other => Self::Migration(other),
-        }
-    }
 }
 
 impl From<SettingsTransferError> for SettingsError {
@@ -58,11 +42,6 @@ pub struct SettingsTransfer {
 
 impl SettingsTransfer {
     pub fn new(stored: StoredSettings) -> Result<Self, SettingsTransferError> {
-        if stored.schema_version != SETTINGS_SCHEMA_VERSION {
-            return Err(SettingsTransferError::UnsupportedSchema {
-                found: stored.schema_version,
-            });
-        }
         stored
             .settings
             .validate()

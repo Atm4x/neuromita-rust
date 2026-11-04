@@ -45,14 +45,14 @@ fn contract(
 ) {
     let mut joined = event(
         EventKind::CharacterJoined,
-        &[CharacterId::Mita, CharacterId::KindMita],
+        &[CharacterId::Crazy, CharacterId::Kind],
         "joined",
     );
-    joined.actor = Some(CharacterId::KindMita.to_string());
-    let door = event(EventKind::UnityEvent, &[CharacterId::Mita], "DoorOpened");
+    joined.actor = Some(CharacterId::Kind.to_string());
+    let door = event(EventKind::UnityEvent, &[CharacterId::Crazy], "DoorOpened");
     let game = event(
         EventKind::GameAction,
-        &[CharacterId::Mita, CharacterId::KindMita],
+        &[CharacterId::Crazy, CharacterId::Kind],
         "ChessMove",
     );
     let batch = SemanticBatch::new("unity:turn-1", vec![joined, door, game]);
@@ -64,15 +64,15 @@ fn contract(
     );
     assert_eq!(
         present_characters(&repository.world(branch).unwrap()),
-        [CharacterId::KindMita].into_iter().collect()
+        [CharacterId::Kind].into_iter().collect()
     );
 
-    let mita = TimelineMessageQueries::capture(repository, branch, CharacterId::Mita, None)
+    let mita = TimelineMessageQueries::capture(repository, branch, CharacterId::Crazy, None)
         .unwrap()
         .world_events();
     assert_eq!(mita.len(), 3);
     assert_eq!(mita[1].payload["name"], "DoorOpened");
-    let kind = TimelineMessageQueries::capture(repository, branch, CharacterId::KindMita, None)
+    let kind = TimelineMessageQueries::capture(repository, branch, CharacterId::Kind, None)
         .unwrap()
         .world_events();
     assert_eq!(kind.len(), 2);
@@ -100,10 +100,10 @@ fn contract(
     );
     assert_eq!(repository.branch(branch).unwrap().head_sequence, 3);
 
-    let valid = event(EventKind::GameEnded, &[CharacterId::Mita], "ChessWin");
+    let valid = event(EventKind::GameEnded, &[CharacterId::Crazy], "ChessWin");
     let invalid = event(
         EventKind::CharacterContextReset,
-        &[CharacterId::Mita],
+        &[CharacterId::Crazy],
         "reset",
     );
     assert!(matches!(
@@ -129,7 +129,7 @@ fn contract(
     .unwrap();
     assert_eq!(repository.branch(branch).unwrap().head_sequence, 4);
     assert_eq!(
-        TimelineMessageQueries::capture(repository, branch, CharacterId::Mita, None)
+        TimelineMessageQueries::capture(repository, branch, CharacterId::Crazy, None)
             .unwrap()
             .world_events()
             .len(),
@@ -166,7 +166,7 @@ fn semantic_ingress_is_atomic_and_idempotent_in_sqlite() {
         assert_eq!(append(&mut reopened, branch, batch).unwrap(), first);
         assert_eq!(reopened.branch(branch).unwrap().head_sequence, 4);
         assert_eq!(
-            TimelineMessageQueries::capture(&reopened, branch, CharacterId::KindMita, None)
+            TimelineMessageQueries::capture(&reopened, branch, CharacterId::Kind, None)
                 .unwrap()
                 .world_events()
                 .len(),
@@ -211,7 +211,7 @@ async fn application_publishes_world_facts_without_creating_generation_requests(
     );
     let app = ApplicationLifecycle::start(config).await.unwrap();
     let selection = app.timeline_selection();
-    let door = event(EventKind::UnityEvent, &[CharacterId::Mita], "DoorOpened");
+    let door = event(EventKind::UnityEvent, &[CharacterId::Crazy], "DoorOpened");
     let first = app
         .publish_semantic_events(
             selection,
@@ -222,14 +222,14 @@ async fn application_publishes_world_facts_without_creating_generation_requests(
     assert_eq!(first.len(), 1);
     assert_eq!(app.at().through, 1);
     let mita = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     assert_eq!(mita.view.world_events()[0].payload["name"], "DoorOpened");
     let kind = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -262,7 +262,7 @@ fn sqlite_semantic_ingress_rejects_a_reselected_branch_before_commit() {
         "unity-old-turn",
         vec![event(
             EventKind::UnityEvent,
-            &[CharacterId::Mita],
+            &[CharacterId::Crazy],
             "OpenDoor",
         )],
     );

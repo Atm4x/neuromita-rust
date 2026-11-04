@@ -174,7 +174,7 @@ async fn terminal(
 }
 
 fn scope() -> DiagnosticScope {
-    DiagnosticScope::owner(CharacterId::Mita, RequestSource::Presenter)
+    DiagnosticScope::owner(CharacterId::Crazy, RequestSource::Presenter)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -184,7 +184,7 @@ async fn success_captures_exact_artifacts_usage_and_redacted_exports() {
     let handle = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "hello".into())
+        .reply(CharacterId::Crazy, "hello".into())
         .unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.request.model.as_ref(), "fixture-model");
@@ -257,7 +257,7 @@ async fn success_captures_exact_artifacts_usage_and_redacted_exports() {
         access.request(neuromita::request::RequestId(uuid::Uuid::new_v4())),
         Err(DiagnosticLookupError::NotFound(_))
     ));
-    let foreign = ChatApi::diagnostics(CharacterId::KindMita).unwrap();
+    let foreign = ChatApi::diagnostics(CharacterId::Kind).unwrap();
     assert!(matches!(
         foreign.request(handle.id()),
         Err(DiagnosticLookupError::OwnershipDenied(_))
@@ -272,7 +272,7 @@ async fn malformed_response_keeps_raw_body_and_error_history() {
     let handle = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "malformed".into())
+        .reply(CharacterId::Crazy, "malformed".into())
         .unwrap();
     let call = next(&mut calls).await;
     call.reply
@@ -332,7 +332,7 @@ async fn transport_partial_body_and_cancellation_are_visible() {
     let partial = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "partial".into())
+        .reply(CharacterId::Crazy, "partial".into())
         .unwrap();
     let call = next(&mut calls).await;
     call.reply
@@ -367,7 +367,7 @@ async fn transport_partial_body_and_cancellation_are_visible() {
     let cancelled = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "cancel".into())
+        .reply(CharacterId::Crazy, "cancel".into())
         .unwrap();
     let waiting = next(&mut calls).await;
     assert_eq!(cancelled.cancel(), CancelResult::Requested);
@@ -425,7 +425,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "initiate", "character": "mita", "instruction": "hello"})
+                json!({"command_id": Uuid::new_v4(), "command": "initiate", "character": "Crazy", "instruction": "hello"})
             )
             .as_bytes(),
         )
@@ -452,7 +452,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "mita", "request_id": request_id, "section": "usage"})
+                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "Crazy", "request_id": request_id, "section": "usage"})
             )
             .as_bytes(),
         )
@@ -470,7 +470,7 @@ async fn tcp_diagnostics_are_scoped_to_the_observing_client() {
         .write_all(
             format!(
                 "{}\n",
-                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "mita", "request_id": request_id})
+                json!({"command_id": Uuid::new_v4(), "command": "diagnostics", "character": "Crazy", "request_id": request_id})
             )
             .as_bytes(),
         )

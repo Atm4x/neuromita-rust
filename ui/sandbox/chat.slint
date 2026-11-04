@@ -1,3 +1,4 @@
+import { CharacterCatalog } from "../characters/catalog.slint";
 import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
@@ -16,7 +17,7 @@ component ConversationStrip inherits Rectangle {
         padding-left: 14px; padding-right: 14px; padding-top: 8px; padding-bottom: 8px; spacing: 14px;
         Glyph { text: Fa.heart; color: #ff7eb6; width: 14px; font-size: 14px; }
         Caption {
-            text: I18n.i18n("sandbox.conversation", "Разговор с ") + (root.character == 0 ? I18n.i18n("sandbox.conversation.mita", "Митой") : I18n.i18n("sandbox.conversation.kind", "Доброй Митой"));
+            text: I18n.i18n("sandbox.conversation", "Разговор с ") + CharacterCatalog.conversation-name(CharacterCatalog.entries[root.character]);
             font-weight: 700; font-size: 13.3333px; horizontal-stretch: 1;
         }
         GhostButton { text: I18n.i18n("sandbox.history", "История"); glyph: Fa.database; activated => { ConversationUi.history = true; } }
@@ -44,25 +45,28 @@ component ChatComposer inherits VerticalLayout {
             } }
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
-                if root.draft == "": Caption {
-                    x: edit.x; y: edit.y;
-                    text: I18n.i18n("sandbox.placeholder", "Напиши что-нибудь Мите…");
-                    color: SandboxTheme.muted; width: edit.width; height: edit.height;
-                    font-size: edit.font-size; vertical-alignment: center;
-                    accessible-role: none;
-                }
-                edit := TextInput {
-                    x: 2px; y: 4px; width: parent.width - 4px; height: parent.height - 8px;
-                    text <=> root.draft;
-                    enabled: true; font-family: SandboxTheme.font-family; font-size: 13.3333px;
-                    color: #f7edf5; selection-background-color: SandboxTheme.accent-alt;
-                    selection-foreground-color: white;
-                    single-line: false; wrap: word-wrap; vertical-alignment: center;
-                    key-pressed(event) => {
-                        if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.draft != "" {
-                            root.send(root.draft); return accept;
+                HorizontalLayout { padding-left: 2px; padding-right: 2px; padding-top: 4px; padding-bottom: 4px;
+                    edit := TextInput {
+                        text <=> root.draft;
+                        enabled: true; font-family: SandboxTheme.font-family; font-size: 13.3333px;
+                        color: #f7edf5; selection-background-color: SandboxTheme.accent-alt;
+                        selection-foreground-color: white;
+                        single-line: false; wrap: word-wrap; vertical-alignment: center;
+                        key-pressed(event) => {
+                            if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.draft != "" {
+                                root.send(root.draft); return accept;
+                            }
+                            return reject;
                         }
-                        return reject;
+                    }
+                }
+                if root.draft == "": HorizontalLayout { padding-left: 2px; padding-right: 2px; padding-top: 4px; padding-bottom: 4px;
+                    Caption {
+                        text: I18n.i18n("sandbox.placeholder", "Напиши что-нибудь Мите…");
+                        color: SandboxTheme.muted;
+                        font-size: 13.3333px; vertical-alignment: center;
+                        accessible-role: none;
+                        TouchArea { clicked => { edit.focus(); } }
                     }
                 }
             }
@@ -111,7 +115,7 @@ export component SandboxChat inherits Rectangle {
         Rectangle {
             vertical-stretch: 1; background: #090915; border-radius: 12px; clip: true;
             ScrollView {
-                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                width: parent.width; height: parent.height;
                 content-width: self.width;
                 VerticalLayout {
                     padding-left: 6px; padding-right: 6px; padding-top: 4px; padding-bottom: 4px;
@@ -119,8 +123,7 @@ export component SandboxChat inherits Rectangle {
                     for item in root.messages: MessageRow {
                         item: item;
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
-                        character-name: root.character == 0 ? I18n.i18n("sandbox.character.mita", "Мита") : I18n.i18n("sandbox.character.kind", "Добрая Мита");
-                        avatar: @image-url("../../assets/avatars/crazy.png");
+                        character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
                     }
                 }

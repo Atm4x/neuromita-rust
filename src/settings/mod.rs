@@ -1,5 +1,6 @@
 mod migration;
 mod model;
+mod speech;
 mod storage;
 mod transfer;
 
@@ -7,6 +8,7 @@ pub use crate::generation::PresetId;
 pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
+pub use speech::*;
 pub use storage::*;
 pub use transfer::{SettingsImportFormat, SettingsTransfer, SettingsTransferError};
 
@@ -52,9 +54,15 @@ pub struct SettingsSnapshot {
 }
 
 pub enum SettingsSource {
-    Initial(AppSettings),
+    Initial(Box<AppSettings>),
     Stored,
 }
+impl SettingsSource {
+    pub fn initial(settings: AppSettings) -> Self {
+        Self::Initial(Box::new(settings))
+    }
+}
+
 pub struct SettingsConfig {
     pub source: SettingsSource,
     pub repository: Arc<dyn SettingsRepository>,
@@ -101,7 +109,6 @@ impl SettingsOwner {
     pub(crate) fn export(&self) -> Result<SettingsTransfer, SettingsError> {
         let snapshot = self.snapshot_all()?;
         Ok(SettingsTransfer::new(StoredSettings {
-            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: snapshot.revision,
             settings: snapshot.values.clone(),
         })?)
@@ -252,9 +259,9 @@ impl SettingsLifecycle {
     pub(crate) async fn prepare(config: SettingsConfig) -> Result<Self, SettingsError> {
         let stored = match config.source {
             SettingsSource::Initial(settings) => {
+                let settings = *settings;
                 settings.validate()?;
                 StoredSettings {
-                    schema_version: SETTINGS_SCHEMA_VERSION,
                     revision: 0,
                     settings,
                 }
@@ -266,9 +273,6 @@ impl SettingsLifecycle {
                     .map_err(|error| SettingsError::Storage(error.to_string()))??
             }
         };
-        if stored.schema_version != SETTINGS_SCHEMA_VERSION {
-            return Err(SettingsError::Storage("unsupported settings schema".into()));
-        }
         stored.settings.validate()?;
         let snapshot = Arc::new(SettingsSnapshot {
             closed: false,
@@ -304,7 +308,6 @@ impl SettingsLifecycle {
             return Ok(());
         }
         let stored = StoredSettings {
-            schema_version: SETTINGS_SCHEMA_VERSION,
             revision: snapshot.revision,
             settings: snapshot.values.clone(),
         };
@@ -390,7 +393,7 @@ mod tests {
         });
         let lifecycle = Arc::new(
             SettingsLifecycle::prepare(SettingsConfig {
-                source: SettingsSource::Initial(AppSettings::initial_profile()),
+                source: SettingsSource::initial(AppSettings::initial_profile()),
                 repository,
             })
             .await

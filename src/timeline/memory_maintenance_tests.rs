@@ -11,8 +11,8 @@ use crate::{
 
 fn append_memory(timeline: &mut SessionTimeline, record: MemoryRecord) {
     let mut draft = EventDraft::new(EventKind::CharacterMemoryChanged);
-    draft.actor = Some(CharacterId::Mita.to_string());
-    draft.observers.insert(CharacterId::Mita);
+    draft.actor = Some(CharacterId::Crazy.to_string());
+    draft.observers.insert(CharacterId::Crazy);
     draft
         .payload
         .insert("change".into(), json!(MemoryChange::Upsert(record)));
@@ -40,17 +40,17 @@ fn expiry_commits_only_due_unprotected_memories_once_and_is_character_private() 
     let selected = timeline.selection();
     let initial = timeline.anchor();
     assert_eq!(
-        timeline.expire_character_memories(selected, CharacterId::Mita, 99),
+        timeline.expire_character_memories(selected, CharacterId::Crazy, 99),
         Ok(0)
     );
     assert_eq!(timeline.anchor(), initial);
     assert_eq!(
-        timeline.expire_character_memories(selected, CharacterId::Mita, 100),
+        timeline.expire_character_memories(selected, CharacterId::Crazy, 100),
         Ok(1)
     );
     assert_eq!(timeline.anchor().through, initial.through + 1);
     let state = timeline
-        .inspect_context_at(CharacterId::Mita, timeline.anchor())
+        .inspect_context_at(CharacterId::Crazy, timeline.anchor())
         .unwrap()
         .memories;
     assert_eq!(state.get(first).unwrap().state, MemoryState::Forgotten);
@@ -58,18 +58,18 @@ fn expiry_commits_only_due_unprotected_memories_once_and_is_character_private() 
     assert_eq!(state.get(late).unwrap().state, MemoryState::Active);
     assert!(
         timeline
-            .inspect_context_at(CharacterId::KindMita, timeline.anchor())
+            .inspect_context_at(CharacterId::Kind, timeline.anchor())
             .unwrap()
             .memories
             .all()
             .is_empty()
     );
     assert_eq!(
-        timeline.expire_character_memories(selected, CharacterId::Mita, 100),
+        timeline.expire_character_memories(selected, CharacterId::Crazy, 100),
         Ok(0)
     );
     assert_eq!(
-        timeline.expire_character_memories(selected, CharacterId::Mita, 200),
+        timeline.expire_character_memories(selected, CharacterId::Crazy, 200),
         Ok(1)
     );
 }
@@ -82,7 +82,7 @@ fn wrong_selection_cannot_start_expiration_maintenance() {
         .select_branch(old.branch_id, old)
         .expect("same branch can be reselected");
     assert_eq!(
-        timeline.expire_character_memories(old, CharacterId::Mita, 100),
+        timeline.expire_character_memories(old, CharacterId::Crazy, 100),
         Err(TimelineError::ConcurrentWrite)
     );
 }
@@ -109,7 +109,7 @@ async fn startup_maintenance_replays_expiration_without_running_a_scheduler() {
         let timeline = timeline.lock().unwrap();
         assert_eq!(timeline.anchor().through, before + 1);
         let memories = timeline
-            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .inspect_context_at(CharacterId::Crazy, timeline.anchor())
             .unwrap()
             .memories;
         assert_eq!(memories.get(expired).unwrap().state, MemoryState::Forgotten);
@@ -131,10 +131,10 @@ fn recall_is_tied_to_historical_prefix_without_restoring_it() {
     append_memory(&mut timeline, record);
     let captured_at = timeline.anchor();
     let snapshot = timeline
-        .inspect_context_at(CharacterId::Mita, captured_at)
+        .inspect_context_at(CharacterId::Crazy, captured_at)
         .unwrap();
     let recall = recall_forgotten(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         snapshot.history.at,
         &snapshot.memories,
         RecallSelector::Text {
@@ -148,10 +148,10 @@ fn recall_is_tied_to_historical_prefix_without_restoring_it() {
     assert_eq!(recall.facts[0].record.id, id);
     assert!(
         recall_forgotten(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             timeline.anchor(),
             &timeline
-                .inspect_context_at(CharacterId::KindMita, timeline.anchor())
+                .inspect_context_at(CharacterId::Kind, timeline.anchor())
                 .unwrap()
                 .memories,
             RecallSelector::Text {
@@ -165,13 +165,13 @@ fn recall_is_tied_to_historical_prefix_without_restoring_it() {
     );
     let selected = timeline.selection();
     assert_eq!(
-        timeline.expire_character_memories(selected, CharacterId::Mita, u64::MAX),
+        timeline.expire_character_memories(selected, CharacterId::Crazy, u64::MAX),
         Ok(0)
     );
     assert_eq!(timeline.anchor(), captured_at);
     assert_eq!(
         timeline
-            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .inspect_context_at(CharacterId::Crazy, timeline.anchor())
             .unwrap()
             .memories
             .get(id)
@@ -212,7 +212,7 @@ async fn periodic_maintenance_expires_after_startup_and_exits_with_owners() {
             let locked = timeline.lock().unwrap();
             (
                 locked
-                    .inspect_context_at(CharacterId::Mita, locked.anchor())
+                    .inspect_context_at(CharacterId::Crazy, locked.anchor())
                     .unwrap()
                     .memories,
                 locked.anchor(),
@@ -264,7 +264,7 @@ fn forgotten_recall_and_ttl_survive_sqlite_reopen_without_duplicate_expiration()
         record.expires_at_unix_ms = Some(500);
         append_memory(&mut timeline, record);
         assert_eq!(
-            timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 500),
+            timeline.expire_character_memories(timeline.selection(), CharacterId::Crazy, 500),
             Ok(1)
         );
         timeline.anchor().through
@@ -278,14 +278,14 @@ fn forgotten_recall_and_ttl_survive_sqlite_reopen_without_duplicate_expiration()
         .unwrap();
         assert_eq!(timeline.anchor().through, through);
         assert_eq!(
-            timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 500),
+            timeline.expire_character_memories(timeline.selection(), CharacterId::Crazy, 500),
             Ok(0)
         );
         let snap = timeline
-            .inspect_context_at(CharacterId::Mita, timeline.anchor())
+            .inspect_context_at(CharacterId::Crazy, timeline.anchor())
             .unwrap();
         let recalled = recall_forgotten(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             snap.history.at,
             &snap.memories,
             RecallSelector::Text {
@@ -309,23 +309,23 @@ fn committed_expiry_and_selection_invalidate_memory_observers() {
     let mut record = MemoryRecord::fact(id, MemoryPriority::Normal, "expires soon");
     record.expires_at_unix_ms = Some(100);
     append_memory(&mut timeline, record);
-    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
-    let mut kind = timeline.observe_memory_changes(CharacterId::KindMita);
+    let mut mita = timeline.observe_memory_changes(CharacterId::Crazy);
+    let mut kind = timeline.observe_memory_changes(CharacterId::Kind);
     assert!(!mita.has_changed().unwrap());
     assert_eq!(
-        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 99),
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Crazy, 99),
         Ok(0)
     );
     assert!(!mita.has_changed().unwrap());
     assert_eq!(
-        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 100),
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Crazy, 100),
         Ok(1)
     );
     assert!(mita.has_changed().unwrap());
     assert!(!kind.has_changed().unwrap());
     mita.borrow_and_update();
     assert_eq!(
-        timeline.expire_character_memories(timeline.selection(), CharacterId::Mita, 100),
+        timeline.expire_character_memories(timeline.selection(), CharacterId::Crazy, 100),
         Ok(0)
     );
     assert!(!mita.has_changed().unwrap());
@@ -344,10 +344,10 @@ fn accepted_memory_effect_notifies_after_commit_only() {
     use super::{GeneratedReply, conversation::ConversationAudience};
     use crate::{identity::RequestId, interaction::TurnIntent};
     let mut timeline = SessionTimeline::new();
-    let mut mita = timeline.observe_memory_changes(CharacterId::Mita);
-    let mut other = timeline.observe_memory_changes(CharacterId::KindMita);
+    let mut mita = timeline.observe_memory_changes(CharacterId::Crazy);
+    let mut other = timeline.observe_memory_changes(CharacterId::Kind);
     let turn = timeline
-        .capture_turn(CharacterId::Mita, None, timeline.anchor())
+        .capture_turn(CharacterId::Crazy, None, timeline.anchor())
         .unwrap();
     timeline
         .append_reply(GeneratedReply {
@@ -356,7 +356,7 @@ fn accepted_memory_effect_notifies_after_commit_only() {
             turn,
             expected_revision: 0,
             content: json!([{"text":"noted"}]),
-            audience: ConversationAudience::private_to(CharacterId::Mita),
+            audience: ConversationAudience::private_to(CharacterId::Crazy),
             effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
                 MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, "a fact"),
             ))],
@@ -371,7 +371,7 @@ fn accepted_memory_effect_notifies_after_commit_only() {
         turn,
         expected_revision: 0,
         content: json!([{"text":"duplicate"}]),
-        audience: ConversationAudience::private_to(CharacterId::Mita),
+        audience: ConversationAudience::private_to(CharacterId::Crazy),
         effects: vec![AppliedEffect::CharacterMemoryChanged(MemoryChange::Upsert(
             MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, "not accepted"),
         ))],

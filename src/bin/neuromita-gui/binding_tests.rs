@@ -5,7 +5,18 @@ mod probe {
         import { I18n } from "../../../ui/i18n.slint";
         import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
         import { SettingsTheme } from "../../../ui/settings/theme.slint";
+        import { SettingsScrollView } from "../../../ui/settings/scroll-view.slint";
+        import { SettingsToggleRow } from "../../../ui/components/settings-kit.slint";
         export { I18n }
+        export component ControlsProbe inherits Window {
+            preferred-width: 400px; preferred-height: 140px;
+            out property <length> row-top: row.y;
+            VerticalLayout { padding: 0px; spacing: 0px;
+                CollapsibleSettingsSection { title: "Title"; subtitle: "Subtitle"; glyph: "\u{f1de}"; }
+                row := SettingsToggleRow { title: "Toggle"; height: 60px; checked: true; }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
             out property <string> more: I18n.i18n("launcher.actions.more", "Дополнительно");
@@ -28,6 +39,29 @@ mod probe {
                 Rectangle { vertical-stretch: 1; }
             }
         }
+        export component OverflowProbe inherits Window {
+            preferred-width: 500px; preferred-height: 260px;
+            in-out property <int> expanded-count: 3;
+            in-out property <length> payload-height: 300px;
+            in-out property <length> offset <=> scroll.content-y;
+            out property <length> first-height: first.height;
+            out property <length> second-height: second.height;
+            out property <length> third-height: third.height;
+            out property <length> last-bottom: last.y + last.height;
+            out property <length> content-height: sections.preferred-height;
+            out property <bool> scrollable: scroll.scrollable;
+            scroll := SettingsScrollView {
+                width: parent.width; height: parent.height;
+                content-height: sections.preferred-height;
+                sections := VerticalLayout {
+                    width: parent.width; padding: 0px; spacing: 12px; alignment: start;
+                    first := CollapsibleSettingsSection { expanded: root.expanded-count > 0; Rectangle { height: root.payload-height; } }
+                    second := CollapsibleSettingsSection { expanded: root.expanded-count > 1; Rectangle { height: 200px; } }
+                    third := CollapsibleSettingsSection { expanded: root.expanded-count > 2; Rectangle { height: 300px; } }
+                    last := Rectangle { height: 40px; }
+                }
+            }
+        }
     }
 }
 
@@ -44,6 +78,27 @@ impl slint::platform::Platform for TestPlatform {
 #[test]
 fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let controls = probe::ControlsProbe::new().unwrap();
+    controls.show().unwrap();
+    controls
+        .window()
+        .set_size(slint::PhysicalSize::new(400, 140));
+    let image = controls.window().take_snapshot().unwrap();
+    let green_rows = image
+        .as_bytes()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| {
+            pixel[1] > pixel[0].saturating_add(40) && pixel[1] > pixel[2].saturating_add(30)
+        })
+        .map(|(index, _)| (index / 400) as f32)
+        .collect::<Vec<_>>();
+    assert!(!green_rows.is_empty());
+    assert!(green_rows[0] > controls.get_row_top() + 17.0);
+    assert!(*green_rows.last().unwrap() < controls.get_row_top() + 43.0);
+    controls.hide().unwrap();
     let accordion = probe::AccordionProbe::new().unwrap();
     accordion.show().unwrap();
     accordion
@@ -76,6 +131,32 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
         closed
     );
     accordion.hide().unwrap();
+    let overflow = probe::OverflowProbe::new().unwrap();
+    overflow.show().unwrap();
+    overflow
+        .window()
+        .set_size(slint::PhysicalSize::new(500, 260));
+    overflow.window().take_snapshot().unwrap();
+    assert!(overflow.get_scrollable());
+    assert!(overflow.get_first_height() > 350.0);
+    assert!(overflow.get_second_height() > 250.0);
+    assert!(overflow.get_third_height() > 350.0);
+    let first_height = overflow.get_first_height();
+    overflow.set_expanded_count(1);
+    overflow.window().take_snapshot().unwrap();
+    assert_eq!(overflow.get_first_height(), first_height);
+    overflow.set_payload_height(500.0);
+    overflow.set_expanded_count(3);
+    overflow.window().take_snapshot().unwrap();
+    assert!(overflow.get_first_height() > first_height + 199.0);
+    overflow.set_offset(260.0 - overflow.get_content_height());
+    overflow.window().take_snapshot().unwrap();
+    assert!((overflow.get_last_bottom() + overflow.get_offset() - 260.0).abs() < 1.0);
+    overflow.set_expanded_count(0);
+    overflow.window().take_snapshot().unwrap();
+    assert!(!overflow.get_scrollable());
+    assert_eq!(overflow.get_offset(), 0.0);
+    overflow.hide().unwrap();
     let catalog = Rc::new(RefCell::new(
         Localizer::bundled(FallbackPolicy::EnglishThenSource).unwrap(),
     ));
@@ -114,6 +195,23 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog));
     window.global::<I18n>().set_locale("ru".into());
+    super::super::sandbox::render_catalog(
+        &window,
+        neuromita::character::character_catalog().collect(),
+    );
+    let catalog = window
+        .global::<super::super::view::CharacterCatalog>()
+        .get_entries();
+    assert_eq!(
+        catalog.row_count(),
+        neuromita::character::CharacterId::ALL.len()
+    );
+    for id in neuromita::character::CharacterId::ALL {
+        let row = catalog.row_data(id.index()).unwrap();
+        assert_eq!(row.id, id.as_str());
+        assert_eq!(row.index, id.index() as i32);
+    }
+    assert_eq!(catalog.row_data(0).unwrap().name, "Безумная Мита");
     window.set_page(PageId::Sandbox);
     window.set_version("v0.1.0".into());
     window.set_core_connected(true);
@@ -255,7 +353,14 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 fn settings_render_and_bindings(window: &AppWindow) {
     use super::super::view::{PresetItem, SettingsUi};
     let settings = window.global::<SettingsUi>();
+    settings.set_preset_templates(ModelRc::new(VecModel::from(
+        super::super::settings::provider_templates(
+            &neuromita::presentation::PresetsPresenter::providers(),
+        ),
+    )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        provider: "google".into(),
+        configured: true,
         id: "7".into(),
         name: "Main".into(),
         model: "fixture-model".into(),
@@ -270,9 +375,16 @@ fn settings_render_and_bindings(window: &AppWindow) {
     settings.set_settings_persistence(1);
     settings.set_settings_voice_launcher(true);
     settings.set_settings_volume(65);
-    settings.set_mita_reply("active".into());
-    settings.set_mita_react("7".into());
-    settings.set_mita_initiate("active".into());
+    settings.set_character_presets(ModelRc::new(VecModel::from(
+        neuromita::character::CharacterId::ALL
+            .map(|_| super::super::view::CharacterPresets {
+                reply: "active".into(),
+                react: "7".into(),
+                initiate: "active".into(),
+                split: true,
+            })
+            .to_vec(),
+    )));
     let commands = Rc::new(RefCell::new(Vec::new()));
     let sent = commands.clone();
     super::super::settings::bind(
@@ -281,6 +393,20 @@ fn settings_render_and_bindings(window: &AppWindow) {
     );
     settings.invoke_preset_edit("7".into());
     assert_eq!(settings.get_preset_model(), "fixture-model");
+    assert_eq!(
+        settings.get_preset_request_url(),
+        "http://127.0.0.1:12345/v1beta/models/fixture-model:generateContent"
+    );
+    settings.set_preset_model("changed-model".into());
+    assert_eq!(
+        settings.get_preset_request_url(),
+        "http://127.0.0.1:12345/v1beta/models/changed-model:generateContent"
+    );
+    assert_eq!(
+        settings.get_preset_endpoint(),
+        "http://127.0.0.1:12345/v1beta/"
+    );
+    settings.set_preset_model("fixture-model".into());
     settings.invoke_preset_save();
     assert!(matches!(
         commands.borrow().last(),
@@ -296,14 +422,29 @@ fn settings_render_and_bindings(window: &AppWindow) {
     assert!(!settings.get_settings_error().is_empty());
     settings.set_settings_error("".into());
     settings.set_preset_temperature("0.7".into());
-    let previous_save = uuid::Uuid::new_v4();
-    settings.set_preset_save_token(previous_save.to_string().into());
     settings.invoke_preset_edit("7".into());
-    super::super::settings::saved(
-        window,
-        Some((neuromita::generation::PresetId(99), previous_save)),
-    );
+    super::super::settings::saved(window, None);
     assert_eq!(settings.get_preset_edit_id(), "7");
+    settings.invoke_preset_new();
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::NewPreset)
+    ));
+    let before = commands.borrow().len();
+    settings.set_preset_model("modified-before-switch".into());
+    assert!(settings.get_preset_dirty());
+    settings.invoke_preset_new();
+    assert_eq!(commands.borrow().len(), before);
+    assert_eq!(settings.get_preset_pending_id(), "__new__");
+    settings.invoke_preset_confirm_cancel();
+    assert!(settings.get_preset_pending_id().is_empty());
+    settings.invoke_preset_new();
+    settings.invoke_preset_confirm_discard();
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::NewPreset)
+    ));
+
     window.set_page(PageId::Settings);
     window.set_core_connected(true);
     window.global::<I18n>().set_locale("ru".into());
@@ -311,7 +452,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
         window
             .window()
             .set_size(slint::PhysicalSize::new(width, height));
-        for section in 0..4 {
+        for section in [0, 4, 7, 8, 9] {
             settings.set_section(section);
             let image = window.window().take_snapshot().unwrap();
             if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
@@ -378,21 +519,21 @@ fn memory_render_and_contract(window: &AppWindow) {
         super::super::settings::execute(
             app.presenter(),
             Command::AssignAllPresets(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 neuromita::settings::PresetSelection::Specific(neuromita::generation::PresetId(0)),
             ),
         )
         .unwrap();
         let after = app.presenter().settings.snapshot().unwrap();
         assert_eq!(after.revision, initial_revision + 1);
-        let assignments = after.values.characters.mita.presets;
+        let assignments = after.values.characters.crazy.presets;
         assert_eq!(assignments.reply, assignments.react);
         assert_eq!(assignments.reply, assignments.initiate);
         assert!(
             super::super::settings::execute(
                 app.presenter(),
                 Command::AssignAllPresets(
-                    CharacterId::Mita,
+                    CharacterId::Crazy,
                     neuromita::settings::PresetSelection::Specific(
                         neuromita::generation::PresetId(999)
                     )
@@ -405,10 +546,10 @@ fn memory_render_and_contract(window: &AppWindow) {
             after.revision
         );
         let characters = &app.presenter().characters;
-        let initial = characters.memories(CharacterId::Mita).await.unwrap();
+        let initial = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 initial,
                 vec![MemoryCommand::Add {
                     priority: MemoryPriority::Normal,
@@ -426,7 +567,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             &state,
         );
         let page = characters
-            .list_memories(CharacterId::Mita, Default::default())
+            .list_memories(CharacterId::Crazy, Default::default())
             .await
             .unwrap();
         memory::render(window, &state, &page);
@@ -440,10 +581,10 @@ fn memory_render_and_contract(window: &AppWindow) {
             .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
         ui.set_content("Изменённый текст".into());
-        let snapshot = characters.memories(CharacterId::Mita).await.unwrap();
+        let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 snapshot,
                 vec![MemoryCommand::Add {
                     priority: MemoryPriority::Normal,
@@ -453,7 +594,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             .await
             .unwrap();
         let page = characters
-            .list_memories(CharacterId::Mita, Default::default())
+            .list_memories(CharacterId::Crazy, Default::default())
             .await
             .unwrap();
         memory::render(window, &state, &page);

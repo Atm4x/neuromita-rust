@@ -63,7 +63,7 @@ fn content(role: Option<&str>, text: &str) -> Content {
 
 #[cfg(test)]
 fn history_contents(view: &MitaView) -> Vec<Content> {
-    project_history(view, crate::identity::CharacterId::Mita, None)
+    project_history(view, crate::identity::CharacterId::Crazy, None)
         .0
         .into_iter()
         .map(|message| {
@@ -282,30 +282,30 @@ mod tests {
                 .unwrap();
         }
         let mut private = EventDraft::new(EventKind::PlayerMessage);
-        private.observers.insert(CharacterId::Mita);
+        private.observers.insert(CharacterId::Crazy);
         private.actor = Some("player".into());
         private.payload.insert("content".into(), json!("secret"));
         let secret_id = private.id;
         add(&mut repository, branch, "private", private);
         let mut other = EventDraft::new(EventKind::PlayerMessage);
-        other.observers.insert(CharacterId::KindMita);
+        other.observers.insert(CharacterId::Kind);
         other.actor = Some("player".into());
         other
             .payload
             .insert("content".into(), json!("other secret"));
         add(&mut repository, branch, "other", other);
         let mut assistant = EventDraft::new(EventKind::CharacterMessage);
-        assistant.observers.insert(CharacterId::Mita);
-        assistant.actor = Some(CharacterId::Mita.to_string());
+        assistant.observers.insert(CharacterId::Crazy);
+        assistant.actor = Some(CharacterId::Crazy.to_string());
         assistant.payload.insert("content".into(), json!("I know"));
         add(&mut repository, branch, "assistant", assistant);
         let mut note = EventDraft::new(EventKind::SessionNote);
-        note.observers.insert(CharacterId::Mita);
+        note.observers.insert(CharacterId::Crazy);
         note.payload
             .insert("content".into(), json!("private world note"));
         add(&mut repository, branch, "note", note);
         let visible =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&visible);
         let encoded: Vec<_> = contents
             .iter()
@@ -324,22 +324,22 @@ mod tests {
         assert!(!format!("{encoded:?}").contains("other secret"));
 
         let mut hidden = EventDraft::new(EventKind::MessageHidden);
-        hidden.observers.insert(CharacterId::Mita);
+        hidden.observers.insert(CharacterId::Crazy);
         hidden
             .payload
             .insert("event_ids".into(), json!([secret_id.0.to_string()]));
         add(&mut repository, branch, "hide", hidden);
         let after_hide =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&after_hide);
         assert_eq!(contents.len(), 2);
         assert_eq!(serde_json::to_value(&contents[0]).unwrap()["role"], "model");
 
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         add(&mut repository, branch, "reset", reset);
         let after_reset =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&after_reset);
         assert!(contents.is_empty());
     }
@@ -366,11 +366,11 @@ mod tests {
             match kind {
                 EventKind::PlayerMessage => draft.actor = Some("player".into()),
                 EventKind::CharacterObservation => {
-                    draft.actor = Some(CharacterId::Mita.to_string())
+                    draft.actor = Some(CharacterId::Crazy.to_string())
                 }
                 _ => {}
             }
-            draft.observers.insert(CharacterId::Mita);
+            draft.observers.insert(CharacterId::Crazy);
             draft.payload.insert("content".into(), json!(content));
             let head = repository.branch(branch).unwrap().head_sequence;
             repository
@@ -379,12 +379,12 @@ mod tests {
         }
 
         let before_question =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, Some(1))
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, Some(1))
                 .unwrap();
         assert_eq!(history_contents(&before_question).len(), 1);
 
         let when_generation_starts =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let encoded: Vec<_> = history_contents(&when_generation_starts)
             .iter()
             .map(|message| serde_json::to_value(message).unwrap())
@@ -417,7 +417,7 @@ mod tests {
         for (key, content) in [("target", "old question"), ("newer", "new question")] {
             let mut draft = EventDraft::new(EventKind::PlayerMessage);
             draft.actor = Some("player".into());
-            draft.observers.insert(CharacterId::Mita);
+            draft.observers.insert(CharacterId::Crazy);
             draft.payload.insert("content".into(), json!(content));
             ids.push(draft.id);
             let head = store.branch(branch).unwrap().head_sequence;
@@ -426,9 +426,9 @@ mod tests {
                 .unwrap();
         }
         let view =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
-            character_id: CharacterId::Mita,
+            character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
             state: CharacterState {
@@ -465,7 +465,7 @@ mod tests {
                     generation: 1,
                 },
                 context_head: 2,
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 context_epoch: 0,
                 trigger: Some(ids[0]),
             },
@@ -515,17 +515,17 @@ mod tests {
         let mut store = TimelineStore::new();
         store.create_session(SessionId::new(), branch).unwrap();
         let mut cause = EventDraft::new(EventKind::UnityEvent);
-        cause.observers.insert(CharacterId::Mita);
+        cause.observers.insert(CharacterId::Crazy);
         cause.payload.insert("content".into(), json!("door opened"));
         let cause_id = cause.id;
         let mut question = EventDraft::new(EventKind::PlayerMessage);
-        question.observers.insert(CharacterId::Mita);
+        question.observers.insert(CharacterId::Crazy);
         question.actor = Some("player".into());
         question
             .payload
             .insert("content".into(), json!("Why did the door open?"));
         let mut secret = EventDraft::new(EventKind::PlayerMessage);
-        secret.observers.insert(CharacterId::KindMita);
+        secret.observers.insert(CharacterId::Kind);
         secret.actor = Some("player".into());
         secret
             .payload
@@ -541,9 +541,9 @@ mod tests {
                 .unwrap();
         }
         let view =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
-            character_id: CharacterId::Mita,
+            character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
             state: CharacterState {
@@ -584,7 +584,7 @@ mod tests {
                     generation: 1,
                 },
                 context_head: 3,
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 context_epoch: 0,
                 trigger: None,
             },

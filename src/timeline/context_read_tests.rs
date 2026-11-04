@@ -108,14 +108,14 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
     let mut inner = TimelineStore::new();
     inner.create_session(SessionId::new(), branch).unwrap();
     let mut observed = EventDraft::new(EventKind::CharacterObservation);
-    observed.actor = Some("mita".into());
-    observed.observers.insert(CharacterId::Mita);
+    observed.actor = Some("Crazy".into());
+    observed.observers.insert(CharacterId::Crazy);
     observed
         .payload
         .insert("content".into(), json!("known event"));
     let mut memory = EventDraft::new(EventKind::CharacterMemoryChanged);
-    memory.actor = Some("mita".into());
-    memory.observers.insert(CharacterId::Mita);
+    memory.actor = Some("Crazy".into());
+    memory.observers.insert(CharacterId::Crazy);
     memory.payload.insert(
         "change".into(),
         json!(crate::memory::MemoryChange::Upsert(
@@ -131,8 +131,8 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
         )),
     );
     let mut private = EventDraft::new(EventKind::CharacterObservation);
-    private.actor = Some("kind-mita".into());
-    private.observers.insert(CharacterId::KindMita);
+    private.actor = Some("Kind".into());
+    private.observers.insert(CharacterId::Kind);
     private
         .payload
         .insert("content".into(), json!("private event"));
@@ -151,7 +151,7 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
         reads: Arc::clone(&reads),
     });
     let capture = timeline
-        .capture_context(CharacterId::Mita, ContextPosition::Latest)
+        .capture_context(CharacterId::Crazy, ContextPosition::Latest)
         .unwrap();
     assert_eq!(reads.load(Ordering::Relaxed), 1);
     assert_eq!(capture.history.at.through, 3);

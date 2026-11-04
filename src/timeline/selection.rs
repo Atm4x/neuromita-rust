@@ -165,7 +165,7 @@ mod tests {
         store.create_session(SessionId::new(), branch).unwrap();
         let mut workspace = SessionWorkspace::default();
         let selected = workspace.select(&store, branch, None).unwrap();
-        let pinned = workspace.capture(&store, CharacterId::Mita, None).unwrap();
+        let pinned = workspace.capture(&store, CharacterId::Crazy, None).unwrap();
         let again = workspace.select(&store, branch, Some(selected)).unwrap();
         assert_ne!(again, selected);
         assert_eq!(
@@ -181,9 +181,9 @@ mod tests {
         store.create_session(SessionId::new(), branch).unwrap();
         let mut workspace = SessionWorkspace::default();
         workspace.select(&store, branch, None).unwrap();
-        let pinned = workspace.capture(&store, CharacterId::Mita, None).unwrap();
+        let pinned = workspace.capture(&store, CharacterId::Crazy, None).unwrap();
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         store
             .append(branch, 0, "reset", json!({}), vec![reset])
             .unwrap();
@@ -201,7 +201,7 @@ mod tests {
         store.create_session(SessionId::new(), branch).unwrap();
         let mut workspace = SessionWorkspace::default();
         workspace.select(&store, branch, None).unwrap();
-        let pinned = workspace.capture(&store, CharacterId::Mita, None).unwrap();
+        let pinned = workspace.capture(&store, CharacterId::Crazy, None).unwrap();
         store
             .append(
                 branch,

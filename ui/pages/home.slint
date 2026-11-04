@@ -51,6 +51,7 @@ component StatusCard inherits Rectangle {
 }
 
 component PlayButton inherits Rectangle {
+    in property <bool> game-running;
     callback play();
     callback menu-action(LauncherMenuAction);
     height: 62px;
@@ -60,16 +61,17 @@ component PlayButton inherits Rectangle {
         ActionSurface {
             border-radius: 0px; horizontal-stretch: 1;
             border-top-left-radius: 16px; border-bottom-left-radius: 16px;
-            label: I18n.i18n("launcher.actions.play", "Играть");
+            label: root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть");
             background: self.pressed ? Theme.accent-pressed : self.hovered ? Theme.accent-hover : @linear-gradient(90deg, Theme.accent, #c0476f);
             border-width: 1px; border-color: #c04c806b;
             HorizontalLayout {
                 padding: 0px; spacing: 5px; alignment: center;
                 VerticalLayout {
                     width: 13px; padding: 0px; alignment: center;
-                    Icon { source: Icons.play; width: 13px; height: 16px; colorize: white; }
+                    if root.game-running: Label { text: "■"; font-size: 15px; color: white; }
+                    if !root.game-running: Icon { source: Icons.play; width: 13px; height: 16px; colorize: white; }
                 }
-                Label { text: I18n.i18n("launcher.actions.play", "Играть"); font-size: Theme.primary-size; font-weight: 800; color: white; horizontal-stretch: 0; }
+                Label { text: root.game-running ? I18n.i18n("launcher.actions.stop", "Остановить") : I18n.i18n("launcher.actions.play", "Играть"); font-size: Theme.primary-size; font-weight: 800; color: white; horizontal-stretch: 0; }
             }
             activated => { root.play(); }
         }
@@ -132,6 +134,7 @@ export component HomePage inherits Rectangle {
     in property <[ReleaseItem]> releases;
     in property <bool> backend-selected;
     in property <bool> client-selected;
+    in property <bool> game-running;
     callback toggle-backend();
     callback toggle-client();
     callback play();
@@ -150,7 +153,7 @@ export component HomePage inherits Rectangle {
     HorizontalLayout {
         padding-left: 44px; padding-top: 42px; padding-right: 36px; padding-bottom: 32px; spacing: 24px;
         VerticalLayout {
-            min-width: 0px; preferred-width: (root.width - 104px) * 5 / 7; horizontal-stretch: 5;
+            min-width: 0px; preferred-width: 0px; horizontal-stretch: 5;
             padding: 0px; spacing: 14px;
             Label { height: 54px; min-width: 0px; text: I18n.i18n("launcher.home.welcome", "Добро пожаловать!"); font-size: Theme.title-size; font-weight: 700; }
             Label { height: 22px; min-width: 0px; text: I18n.i18n("launcher.home.subtitle", "Погрузись Miside по-новому с NeuroMita."); font-size: Theme.subtitle-size; color: Theme.muted; }
@@ -160,10 +163,10 @@ export component HomePage inherits Rectangle {
                 StatusCard { model: root.backend; icon: Icons.python; icon-color: #ffd86b; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
-            PlayButton { play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
+            PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
         }
         VerticalLayout {
-            min-width: 0px; preferred-width: (root.width - 104px) * 2 / 7; horizontal-stretch: 2;
+            min-width: 0px; preferred-width: 0px; horizontal-stretch: 2;
             padding: 0px; padding-bottom: 8px; spacing: 0px;
             Rectangle { vertical-stretch: 1; }
             ReleasesPanel { releases: root.releases; open-releases => { root.open-releases(); } }

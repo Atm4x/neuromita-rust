@@ -23,6 +23,14 @@
     "source": "Проверить файлы Unity",
     "translation": "Verify Unity files"
   },
+  "launcher.actions.stop": {
+    "source": "Остановить",
+    "translation": "Stop"
+  },
+  "launcher.game.operation-error": {
+    "source": "Не удалось запустить или остановить игру: {error}",
+    "translation": "Failed to start or stop the game: {error}"
+  },
   "launcher.releases.title": {
     "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
     "translation": "LATEST RELEASES"
@@ -34,10 +42,6 @@
   "page.sandbox.title": {
     "source": "Песочница / Sandbox",
     "translation": "Sandbox"
-  },
-  "preview.play.unavailable": {
-    "source": "Макет интерфейса: запуск игры пока не подключён.",
-    "translation": "UI preview: game launch is not connected yet."
   },
   "preview.action.unavailable": {
     "source": "Макет интерфейса: «{action}» пока не подключено.",
@@ -115,14 +119,6 @@
     "source": "Отменить",
     "translation": "Cancel"
   },
-  "sandbox.character.mita": {
-    "source": "Мита",
-    "translation": "Mita"
-  },
-  "sandbox.character.kind": {
-    "source": "Добрая Мита",
-    "translation": "Kind Mita"
-  },
   "sandbox.conversation": {
     "source": "Разговор с ",
     "translation": "Conversation with "
@@ -194,14 +190,6 @@
   "sandbox.context-unavailable": {
     "source": "Контекст: —",
     "translation": "Context: —"
-  },
-  "sandbox.conversation.kind": {
-    "source": "Доброй Митой",
-    "translation": "Kind Mita"
-  },
-  "sandbox.conversation.mita": {
-    "source": "Митой",
-    "translation": "Mita"
   },
   "sandbox.debug.api": {
     "source": "Открыть API-настройки",
@@ -555,53 +543,9 @@
     "source": "Сохранение…",
     "translation": "Saving…"
   },
-  "settings.api.title": {
-    "source": "API и модели",
-    "translation": "API and models"
-  },
-  "settings.api.description": {
-    "source": "Каталог пресетов генерации и параметры провайдера.",
-    "translation": "Generation presets and provider parameters."
-  },
-  "settings.presets": {
-    "source": "Пресеты",
-    "translation": "Presets"
-  },
   "settings.preset.new": {
     "source": "Создать пресет",
     "translation": "Create preset"
-  },
-  "settings.preset.edit": {
-    "source": "Редактирование пресета",
-    "translation": "Edit preset"
-  },
-  "settings.preset.name": {
-    "source": "Название",
-    "translation": "Name"
-  },
-  "settings.preset.model": {
-    "source": "Модель Gemini",
-    "translation": "Gemini model"
-  },
-  "settings.preset.endpoint": {
-    "source": "Адрес API",
-    "translation": "API URL"
-  },
-  "settings.preset.key-env": {
-    "source": "Переменная окружения с ключом",
-    "translation": "Credential environment variable"
-  },
-  "settings.preset.temperature": {
-    "source": "Температура",
-    "translation": "Temperature"
-  },
-  "settings.preset.tokens": {
-    "source": "Максимум токенов",
-    "translation": "Maximum tokens"
-  },
-  "settings.preset.timeout": {
-    "source": "Тайм-аут, миллисекунды",
-    "translation": "Timeout, milliseconds"
   },
   "settings.save": {
     "source": "Сохранить",
@@ -614,10 +558,6 @@
   "settings.delete": {
     "source": "Удалить",
     "translation": "Delete"
-  },
-  "settings.delete.confirm": {
-    "source": "Удалить пресет? Привязки останутся прежними и потребуют существующий пресет.",
-    "translation": "Delete this preset? Assignments remain unchanged and require an existing preset."
   },
   "settings.characters.description": {
     "source": "Профили, шаблоны поведения и история выбранного персонажа.",
@@ -635,10 +575,6 @@
     "source": "Инициатива",
     "translation": "Initiative"
   },
-  "settings.voice.description": {
-    "source": "Параметры голоса и места озвучивания.",
-    "translation": "Voice and playback settings."
-  },
   "settings.voice.launcher": {
     "source": "Озвучивать в лаунчере",
     "translation": "Speak in launcher"
@@ -646,14 +582,6 @@
   "settings.voice.game": {
     "source": "Озвучивать в игре",
     "translation": "Speak in game"
-  },
-  "settings.voice.volume": {
-    "source": "Громкость",
-    "translation": "Volume"
-  },
-  "settings.voice.id": {
-    "source": "Идентификатор голоса",
-    "translation": "Voice ID"
   },
   "conversation.clear.title": {
     "source": "Очистить видимую историю?",
@@ -974,5 +902,949 @@
   "settings.section-unavailable": {
     "source": "Этот раздел пока недоступен.",
     "translation": "This section is not available yet."
+  },
+  "character.crazy": {
+    "source": "Безумная Мита",
+    "translation": "Crazy Mita"
+  },
+  "character.crazy.with": {
+    "source": "Безумной Митой",
+    "translation": "Crazy Mita"
+  },
+  "character.kind": {
+    "source": "Добрая Мита",
+    "translation": "Kind Mita"
+  },
+  "character.kind.with": {
+    "source": "Доброй Митой",
+    "translation": "Kind Mita"
+  },
+  "character.cappie": {
+    "source": "Кепочка",
+    "translation": "Cappie"
+  },
+  "character.cappie.with": {
+    "source": "Кепочкой",
+    "translation": "Cappie"
+  },
+  "character.shorthair": {
+    "source": "Коротковолосая Мита",
+    "translation": "Short-haired Mita"
+  },
+  "character.shorthair.with": {
+    "source": "Коротковолосой Митой",
+    "translation": "Short-haired Mita"
+  },
+  "character.mila": {
+    "source": "Мила",
+    "translation": "Mila"
+  },
+  "character.mila.with": {
+    "source": "Милой",
+    "translation": "Mila"
+  },
+  "character.sleepy": {
+    "source": "Сонная Мита",
+    "translation": "Sleepy Mita"
+  },
+  "character.sleepy.with": {
+    "source": "Сонной Митой",
+    "translation": "Sleepy Mita"
+  },
+  "character.ghost": {
+    "source": "Призрачная Мита",
+    "translation": "Ghostly Mita"
+  },
+  "character.ghost.with": {
+    "source": "Призрачной Митой",
+    "translation": "Ghostly Mita"
+  },
+  "character.creepy": {
+    "source": "Жуткая Мита",
+    "translation": "Creepy Mita"
+  },
+  "character.creepy.with": {
+    "source": "Жуткой Митой",
+    "translation": "Creepy Mita"
+  },
+  "character.gamemaster": {
+    "source": "Мастер игры",
+    "translation": "Game Master"
+  },
+  "character.gamemaster.with": {
+    "source": "Мастером игры",
+    "translation": "Game Master"
+  },
+  "settings.preset.unset": {
+    "source": "Не выбран",
+    "translation": "Not selected"
+  },
+  "settings.preset.no-template": {
+    "source": "Без шаблона",
+    "translation": "No template"
+  },
+  "settings.api.heading": {
+    "source": "Подключение к моделям",
+    "translation": "Model connections"
+  },
+  "settings.api.subtitle": {
+    "source": "Провайдеры, пресеты, ключи и параметры генерации ответов.",
+    "translation": "Providers, presets, keys, and response generation parameters."
+  },
+  "settings.presets.search": {
+    "source": "Поиск пресетов...",
+    "translation": "Search presets..."
+  },
+  "settings.preset.add": {
+    "source": "+ Добавить пресет",
+    "translation": "+ Add preset"
+  },
+  "settings.preset.empty": {
+    "source": "Нет сохранённых пресетов",
+    "translation": "No saved presets"
+  },
+  "settings.preset.empty-hint": {
+    "source": "Создайте пресет для подключения модели",
+    "translation": "Create a preset to connect a model"
+  },
+  "settings.preset.active-short": {
+    "source": "Активен",
+    "translation": "Active"
+  },
+  "settings.preset.provider-missing": {
+    "source": "Провайдер не выбран",
+    "translation": "Provider not selected"
+  },
+  "settings.preset.check": {
+    "source": "Проверить",
+    "translation": "Check"
+  },
+  "settings.preset.connection": {
+    "source": "Подключение",
+    "translation": "Connection"
+  },
+  "settings.preset.generation": {
+    "source": "Параметры генерации",
+    "translation": "Generation parameters"
+  },
+  "settings.api-preset.name": {
+    "source": "Название пресета",
+    "translation": "Preset name"
+  },
+  "settings.preset.template": {
+    "source": "Шаблон / провайдер",
+    "translation": "Template / provider"
+  },
+  "settings.preset.documentation": {
+    "source": "Документация",
+    "translation": "Documentation"
+  },
+  "settings.preset.url": {
+    "source": "Ссылка API",
+    "translation": "API URL"
+  },
+  "settings.api-preset.model": {
+    "source": "Модель",
+    "translation": "Model"
+  },
+  "settings.api-preset.key-env": {
+    "source": "API ключ (переменная окружения)",
+    "translation": "API key (environment variable)"
+  },
+  "settings.preset.reserve-keys": {
+    "source": "Резервные ключи",
+    "translation": "Backup keys"
+  },
+  "settings.preset.reserve-keys-disabled": {
+    "source": "Резервные ключи пока не поддерживаются текущим API-ядром.",
+    "translation": "Backup keys are not yet supported by the current API core."
+  },
+  "settings.preset.reserve-providers": {
+    "source": "Резервные провайдеры",
+    "translation": "Backup providers"
+  },
+  "settings.preset.reserve-providers-disabled": {
+    "source": "Цепочки провайдеров пока не поддерживаются текущим API-ядром.",
+    "translation": "Provider chains are not yet supported by the current API core."
+  },
+  "settings.preset.delete-confirm": {
+    "source": "Удалить выбранный пресет? Это действие нельзя отменить.",
+    "translation": "Delete the selected preset? This cannot be undone."
+  },
+  "settings.preset.format": {
+    "source": "Формат параметров: ",
+    "translation": "Parameter format: "
+  },
+  "settings.preset.import": {
+    "source": "Импорт JSON",
+    "translation": "Import JSON"
+  },
+  "settings.preset.export": {
+    "source": "Экспорт JSON",
+    "translation": "Export JSON"
+  },
+  "settings.preset.customize": {
+    "source": "Настроить параметры",
+    "translation": "Configure parameters"
+  },
+  "settings.preset.params-presenter": {
+    "source": "Параметры принадлежат этому пресету. Поддерживаемые поля передаются ядром; остальные недоступны.",
+    "translation": "Parameters belong to this preset. Supported fields are sent by the core; other fields are unavailable."
+  },
+  "settings.parameter.temperature.title": {
+    "source": "Температура",
+    "translation": "Temperature"
+  },
+  "settings.parameter.temperature.description": {
+    "source": "Разнообразие ответов: ниже — предсказуемее, выше — свободнее.",
+    "translation": "Response variety: lower is more predictable, higher is more varied."
+  },
+  "settings.parameter.max_tokens.title": {
+    "source": "Макс. токенов",
+    "translation": "Max tokens"
+  },
+  "settings.parameter.max_tokens.description": {
+    "source": "Лимит выходных токенов, включая токены размышления.",
+    "translation": "Output token limit, including reasoning tokens."
+  },
+  "settings.parameter.top_p.title": {
+    "source": "Порог Top-P",
+    "translation": "Top-P"
+  },
+  "settings.parameter.top_p.description": {
+    "source": "Ограничивает выбор слов по суммарной вероятности.",
+    "translation": "Limits word selection by cumulative probability."
+  },
+  "settings.parameter.presence_penalty.title": {
+    "source": "Штраф присутствия",
+    "translation": "Presence penalty"
+  },
+  "settings.parameter.presence_penalty.description": {
+    "source": "Снижает вероятность повторного использования уже встречавшихся слов.",
+    "translation": "Reduces reuse of words already present in the response."
+  },
+  "settings.parameter.frequency_penalty.title": {
+    "source": "Штраф частоты",
+    "translation": "Frequency penalty"
+  },
+  "settings.parameter.frequency_penalty.description": {
+    "source": "Снижает вероятность слов пропорционально числу их повторений.",
+    "translation": "Penalizes words in proportion to how often they repeat."
+  },
+  "settings.parameter.top_k.title": {
+    "source": "Лимит Top-K",
+    "translation": "Top-K"
+  },
+  "settings.parameter.top_k.description": {
+    "source": "Число кандидатов при выборе следующего токена.",
+    "translation": "Number of candidates for the next token."
+  },
+  "settings.parameter.thinking_level.title": {
+    "source": "Глубина размышлений",
+    "translation": "Reasoning effort"
+  },
+  "settings.parameter.thinking_level.description": {
+    "source": "Низкий thinkingLevel сокращает размышления, но не отключает мышление.",
+    "translation": "A low thinkingLevel reduces reasoning but does not disable thinking."
+  },
+  "settings.parameter.thinking_budget.title": {
+    "source": "Бюджет мышления Gemini",
+    "translation": "Gemini thinking budget"
+  },
+  "settings.parameter.thinking_budget.description": {
+    "source": "Лимит токенов размышления: -1 — автоматически, 0 — отключить, если модель поддерживает.",
+    "translation": "Reasoning token limit: -1 is automatic, 0 disables it when supported."
+  },
+  "settings.parameter.include_thoughts.title": {
+    "source": "Возвращать сводки размышлений",
+    "translation": "Return thought summaries"
+  },
+  "settings.parameter.include_thoughts.description": {
+    "source": "Возвращает сводки размышлений и не управляет объёмом мышления.",
+    "translation": "Returns thought summaries without controlling the amount of thinking."
+  },
+  "settings.parameter.timeout.title": {
+    "source": "Тайм-аут",
+    "translation": "Timeout"
+  },
+  "settings.parameter.timeout.description": {
+    "source": "Время ожидания ответа API в миллисекундах.",
+    "translation": "API response timeout in milliseconds."
+  },
+  "settings.general.pyqt-description": {
+    "source": "Базовые параметры интерфейса, приватности, памяти и языка.",
+    "translation": "Basic interface, privacy, memory and language preferences."
+  },
+  "settings.general.visible-sections": {
+    "source": "Видимые разделы",
+    "translation": "Visible sections"
+  },
+  "settings.general.visible-sections-note": {
+    "source": "Включите только те разделы, которыми пользуетесь — остальные спрячутся из настроек и боковой панели.",
+    "translation": "Enable only the sections you use; the rest will be hidden from settings and the sidebar."
+  },
+  "settings.general.sandbox-panels": {
+    "source": "Панели песочницы",
+    "translation": "Sandbox panels"
+  },
+  "settings.general.sandbox-panels-note": {
+    "source": "Показывайте только нужные панели в правой части Песочницы.",
+    "translation": "Show only the panels you need in the Sandbox inspector."
+  },
+  "settings.general.panel-controls-pending": {
+    "source": "Управление видимостью панелей пока не предоставлено Rust-ядром.",
+    "translation": "Panel visibility controls are not yet provided by the Rust core."
+  },
+  "settings.general.privacy": {
+    "source": "Приватность",
+    "translation": "Privacy"
+  },
+  "settings.general.hide-private": {
+    "source": "Скрывать приватные данные",
+    "translation": "Hide private data"
+  },
+  "settings.general.hide-private-note": {
+    "source": "Сохраняет предпочтение маскирования; подключение к отображению секретов ещё требуется.",
+    "translation": "Stores the masking preference; secret display integration is still pending."
+  },
+  "settings.general.ipc": {
+    "source": "Локальное IPC-управление",
+    "translation": "Local IPC control"
+  },
+  "settings.general.ipc-note": {
+    "source": "Локальный IPC принимает только явно разрешённые команды на 127.0.0.1.",
+    "translation": "Local IPC accepts only explicitly allowed commands on 127.0.0.1."
+  },
+  "settings.general.ipc-pending": {
+    "source": "Настройка локального IPC пока недоступна в Rust API.",
+    "translation": "Local IPC settings are not yet available through the Rust API."
+  },
+  "settings.general.chat": {
+    "source": "Настройки чата",
+    "translation": "Chat settings"
+  },
+  "settings.general.state": {
+    "source": "Состояние приложения",
+    "translation": "Application state"
+  },
+  "settings.provider.subscription": {
+    "source": "Подписка",
+    "translation": "Subscription"
+  },
+  "settings.core.status": {
+    "source": "Состояние ядра",
+    "translation": "Core status"
+  },
+  "settings.saved-state": {
+    "source": "Сохранение",
+    "translation": "Persistence"
+  },
+  "settings.game.start": {
+    "source": "Запустить",
+    "translation": "Start"
+  },
+  "settings.game.beat-backend": {
+    "source": "Режим обработки",
+    "translation": "Processing mode"
+  },
+  "settings.game.beat-status": {
+    "source": "Статус и размер кеша будут доступны после подключения Beat presenter.",
+    "translation": "Status and cache size will be available after the Beat presenter is connected."
+  },
+  "settings.game.open": {
+    "source": "Открыть",
+    "translation": "Open"
+  },
+  "settings.game.rebuild": {
+    "source": "Переиндексировать",
+    "translation": "Reindex"
+  },
+  "settings.images.count-button": {
+    "source": "Подсчитать",
+    "translation": "Count"
+  },
+  "settings.images.find": {
+    "source": "Найти",
+    "translation": "Find"
+  },
+  "settings.language.custom.help": {
+    "source": "Для добавления языка поместите файл <код>.json в каталог локализации. Ключ _name задаёт название языка. Перезапустите приложение.",
+    "translation": "To add a language, place <code>.json in the localization directory. The _name key specifies the language name. Restart the application."
+  },
+  "settings.language.folder.unavailable": {
+    "source": "Открытие внешней папки пока не подключено к presenter.",
+    "translation": "Opening the external directory is not connected to the presenter yet."
+  },
+  "settings.models.history-ttl-enable": {
+    "source": "Включить TTL-архивирование истории",
+    "translation": "Enable history TTL expiration"
+  },
+  "settings.models.time-enable": {
+    "source": "Включить временной контекст",
+    "translation": "Enable time tracking"
+  },
+  "settings.models.compress-enable": {
+    "source": "Включить сжатие истории",
+    "translation": "Enable history compression"
+  },
+  "settings.models.rag.subtitle": {
+    "source": "Поиск по памяти: пресеты пайплайна, эмбеддинги, граф знаний и веса.",
+    "translation": "Memory search: retrieval settings, embeddings, databases and graph."
+  },
+  "settings.models.rag-retrieval": {
+    "source": "Поиск по памяти",
+    "translation": "Memory search"
+  },
+  "settings.models.rag-enabled": {
+    "source": "Включить автоматический RAG",
+    "translation": "Enable automatic RAG"
+  },
+  "settings.models.rag-embeddings": {
+    "source": "Эмбеддинги и индексы",
+    "translation": "Embeddings and storage"
+  },
+  "settings.models.rag-unavailable": {
+    "source": "Статус моделей и индексов будет подключён через presenter.",
+    "translation": "Index management and reindexing will be connected through a presenter."
+  },
+  "settings.preset.choose": {
+    "source": "Выберите пресет слева",
+    "translation": "Select a preset on the left"
+  },
+  "settings.preset.choose-hint": {
+    "source": "Или нажмите «Добавить пресет», чтобы создать новый",
+    "translation": "Or click Add preset to create one"
+  },
+  "settings.preset.name-placeholder": {
+    "source": "Название пресета",
+    "translation": "Preset name"
+  },
+  "settings.preset.url-placeholder": {
+    "source": "Адрес API",
+    "translation": "API address"
+  },
+  "settings.api-preset.key-label": {
+    "source": "API ключ",
+    "translation": "API key"
+  },
+  "settings.preset.model-placeholder": {
+    "source": "Название модели",
+    "translation": "Model name"
+  },
+  "settings.preset.key-placeholder": {
+    "source": "Имя переменной окружения",
+    "translation": "Environment variable name"
+  },
+  "settings.preset.models-link": {
+    "source": "Список моделей",
+    "translation": "Model list"
+  },
+  "settings.preset.key-link": {
+    "source": "Получить ключ",
+    "translation": "Get API key"
+  },
+  "settings.preset.not-configured": {
+    "source": "Не настроен",
+    "translation": "Not configured"
+  },
+  "settings.preset.unsaved": {
+    "source": "Есть несохранённые изменения. Сохранить перед переходом?",
+    "translation": "You have unsaved changes. Save before switching?"
+  },
+  "settings.preset.save-and-switch": {
+    "source": "Сохранить и перейти",
+    "translation": "Save and switch"
+  },
+  "settings.preset.discard-and-switch": {
+    "source": "Не сохранять",
+    "translation": "Discard changes"
+  },
+  "voice.title": {
+    "source": "Настройки озвучки",
+    "translation": "Voice settings"
+  },
+  "voice.subtitle": {
+    "source": "Голоса персонажей, подключение и воспроизведение.",
+    "translation": "Character voices, connections and playback."
+  },
+  "voice.enabled": {
+    "source": "Использовать озвучку",
+    "translation": "Enable voice"
+  },
+  "voice.on": {
+    "source": "Озвучка включена",
+    "translation": "Voice enabled"
+  },
+  "voice.off": {
+    "source": "Озвучка выключена",
+    "translation": "Voice disabled"
+  },
+  "voice.telegram.title": {
+    "source": "Подключение Telegram",
+    "translation": "Telegram connection"
+  },
+  "voice.telegram.description": {
+    "source": "Синтез через выбранного Telegram-бота.",
+    "translation": "Synthesis through the selected Telegram bot."
+  },
+  "voice.telegram.auto": {
+    "source": "Автоподключение Telegram",
+    "translation": "Connect to Telegram automatically"
+  },
+  "voice.telegram.connect": {
+    "source": "Подключиться к Telegram",
+    "translation": "Connect to Telegram"
+  },
+  "voice.telegram.service": {
+    "source": "Канал/Сервис",
+    "translation": "Channel / Service"
+  },
+  "voice.telegram.wait": {
+    "source": "Макс. ожидание (сек)",
+    "translation": "Max. wait (seconds)"
+  },
+  "voice.telegram.interval": {
+    "source": "Мин. интервал запросов (сек)",
+    "translation": "Min. request interval (seconds)"
+  },
+  "voice.telegram.api": {
+    "source": "Настройки Telegram API",
+    "translation": "Telegram API settings"
+  },
+  "voice.telegram.api-id": {
+    "source": "api_id из my.telegram.org",
+    "translation": "api_id from my.telegram.org"
+  },
+  "voice.telegram.hash": {
+    "source": "api_hash из my.telegram.org",
+    "translation": "api_hash from my.telegram.org"
+  },
+  "voice.telegram.phone": {
+    "source": "Номер телефона",
+    "translation": "Phone number"
+  },
+  "voice.telegram.status-title": {
+    "source": "Состояние подключения",
+    "translation": "Connection status"
+  },
+  "voice.telegram.disconnected": {
+    "source": "Telegram не подключён",
+    "translation": "Telegram not connected"
+  },
+  "voice.telegram.hint": {
+    "source": "При первом подключении Telegram запросит код входа.",
+    "translation": "Telegram will ask for a sign-in code on the first connection."
+  },
+  "voice.local": {
+    "source": "Локальная",
+    "translation": "Local"
+  },
+  "voice.local.title": {
+    "source": "Локальный движок озвучки",
+    "translation": "Local speech engine"
+  },
+  "voice.local.description": {
+    "source": "Выберите установленную модель и способ её загрузки.",
+    "translation": "Select an installed model and how to load it."
+  },
+  "voice.local.model": {
+    "source": "Локальная модель",
+    "translation": "Local model"
+  },
+  "voice.local.choose": {
+    "source": "Выберите модель",
+    "translation": "Select model"
+  },
+  "voice.local.language": {
+    "source": "Язык локальной озвучки",
+    "translation": "Local speech language"
+  },
+  "voice.local.auto": {
+    "source": "Автозагрузка модели",
+    "translation": "Automatically load model"
+  },
+  "voice.local.lazy": {
+    "source": "Инициализировать модель при запросе",
+    "translation": "Initialize model on request"
+  },
+  "voice.local.restart": {
+    "source": "Перезапустить озвучку",
+    "translation": "Restart voice"
+  },
+  "voice.local.engine": {
+    "source": "Настройки ИИ-движка",
+    "translation": "AI engine settings"
+  },
+  "voice.local.status-title": {
+    "source": "Состояние модели",
+    "translation": "Model status"
+  },
+  "voice.local.status-hint": {
+    "source": "Готовность выбранной модели к синтезу.",
+    "translation": "Selected model readiness for synthesis."
+  },
+  "voice.local.not-ready": {
+    "source": "Требуется инициализация",
+    "translation": "Initialization required"
+  },
+  "voice.local.initialize": {
+    "source": "Инициализировать",
+    "translation": "Initialize"
+  },
+  "voice.local.model-hint": {
+    "source": "Параметры синтеза и голоса — в настройках выбранной модели.",
+    "translation": "Synthesis and voice parameters are in the selected model settings."
+  },
+  "voice.output.title": {
+    "source": "Вывод и громкость",
+    "translation": "Output and volume"
+  },
+  "voice.output.volume": {
+    "source": "Громкость озвучки",
+    "translation": "Voice volume"
+  },
+  "voice.output.chat": {
+    "source": "Озвучивать в чате",
+    "translation": "Play voice in chat"
+  },
+  "voice.api.title": {
+    "source": "Профиль API озвучки",
+    "translation": "Voice API profile"
+  },
+  "voice.api.description": {
+    "source": "Подключение к провайдеру и голоса персонажей.",
+    "translation": "Provider connection and character voices."
+  },
+  "voice.api.profile": {
+    "source": "Профиль",
+    "translation": "Profile"
+  },
+  "voice.api.choose": {
+    "source": "Выберите профиль",
+    "translation": "Select profile"
+  },
+  "voice.api.key": {
+    "source": "API ключ",
+    "translation": "API key"
+  },
+  "voice.api.key-hint": {
+    "source": "Ключ провайдера",
+    "translation": "Provider key"
+  },
+  "voice.api.model": {
+    "source": "Модель",
+    "translation": "Model"
+  },
+  "voice.api.model-choose": {
+    "source": "Выберите модель",
+    "translation": "Select model"
+  },
+  "voice.api.usage": {
+    "source": "Бесплатные и платные модели зависят от выбранного провайдера.",
+    "translation": "Free and paid models depend on the selected provider."
+  },
+  "voice.api.speed": {
+    "source": "Скорость",
+    "translation": "Speed"
+  },
+  "voice.api.characters": {
+    "source": "Голоса персонажей",
+    "translation": "Character voices"
+  },
+  "voice.api.all": {
+    "source": "Все персонажи",
+    "translation": "All characters"
+  },
+  "voice.api.unknown": {
+    "source": "Не выбран",
+    "translation": "Not selected"
+  },
+  "voice.api.voice-catalog": {
+    "source": "Где искать голос? Каталог провайдера",
+    "translation": "Where to find a voice? Provider catalog"
+  },
+  "voice.api.voice-id": {
+    "source": "Идентификатор голоса",
+    "translation": "Voice identifier"
+  },
+  "voice.api.test-title": {
+    "source": "Проверка голоса",
+    "translation": "Test voice"
+  },
+  "voice.api.test-hint": {
+    "source": "Прослушайте голос выбранного персонажа.",
+    "translation": "Listen to the selected character’s voice."
+  },
+  "voice.api.test-button": {
+    "source": "Проверить и прослушать",
+    "translation": "Test and listen"
+  },
+  "voice.api.paid": {
+    "source": "Проверка отправляет текст провайдеру. Платные модели расходуют баланс API.",
+    "translation": "The test sends text to the provider. Paid models consume API balance."
+  },
+  "asr.status.unavailable": {
+    "source": "Распознавание не запущено",
+    "translation": "Recognition is stopped"
+  },
+  "asr.active": {
+    "source": "Микрофон активен",
+    "translation": "Microphone active"
+  },
+  "asr.recognition.enabled": {
+    "source": "Распознавание включено",
+    "translation": "Recognition enabled"
+  },
+  "asr.recognition.disabled": {
+    "source": "Распознавание выключено",
+    "translation": "Recognition disabled"
+  },
+  "asr.status": {
+    "source": "Статус",
+    "translation": "Status"
+  },
+  "asr.restart": {
+    "source": "Перезапустить",
+    "translation": "Restart"
+  },
+  "asr.recognizer": {
+    "source": "Модель распознавания",
+    "translation": "Recognition model"
+  },
+  "asr.models.empty": {
+    "source": "Нет установленных моделей",
+    "translation": "No installed models"
+  },
+  "asr.catalog": {
+    "source": "Каталог моделей",
+    "translation": "Model catalog"
+  },
+  "asr.input-device": {
+    "source": "Устройство ввода",
+    "translation": "Input device"
+  },
+  "asr.device.empty": {
+    "source": "Нет данных об устройствах",
+    "translation": "No input device data"
+  },
+  "asr.audio-backend": {
+    "source": "Аудиобэкенд",
+    "translation": "Audio backend"
+  },
+  "asr.behavior": {
+    "source": "Поведение и отправка",
+    "translation": "Behavior and sending"
+  },
+  "asr.instant": {
+    "source": "Мгновенная отправка",
+    "translation": "Instant send"
+  },
+  "asr.instant.note": {
+    "source": "Отправлять распознанный текст сразу.",
+    "translation": "Send recognized text immediately."
+  },
+  "asr.delay": {
+    "source": "Отправлять с паузой",
+    "translation": "Send after pause"
+  },
+  "asr.delay.note": {
+    "source": "Новая речь или печать перезапускает отсчёт.",
+    "translation": "New speech or typing restarts the countdown."
+  },
+  "asr.pause": {
+    "source": "Пауза до отправки",
+    "translation": "Pause before send"
+  },
+  "asr.pause.note": {
+    "source": "В секундах",
+    "translation": "In seconds"
+  },
+  "asr.merge-chat": {
+    "source": "Добавлять текст из чата",
+    "translation": "Include chat text"
+  },
+  "asr.merge-chat.note": {
+    "source": "Объединять речь с текстом в поле ввода.",
+    "translation": "Combine speech with the typed chat input."
+  },
+  "asr.pause-speaking": {
+    "source": "Приостанавливать распознавание, пока Мита говорит",
+    "translation": "Pause recognition while Mita speaks"
+  },
+  "asr.pause-speaking.note": {
+    "source": "Не распознавать речь во время ответа Миты.",
+    "translation": "Ignore speech while Mita is replying."
+  },
+  "asr.input-mode": {
+    "source": "Режим ввода",
+    "translation": "Input mode"
+  },
+  "asr.input-mode.note": {
+    "source": "Способ активации распознавания речи.",
+    "translation": "How speech recognition is activated."
+  },
+  "asr.parameters": {
+    "source": "Параметры распознавания",
+    "translation": "Recognition parameters"
+  },
+  "asr.language": {
+    "source": "Язык распознавания",
+    "translation": "Recognition language"
+  },
+  "asr.language.choose": {
+    "source": "Выберите модель распознавания",
+    "translation": "Select a recognition model"
+  },
+  "asr.language.note": {
+    "source": "Язык сохраняется отдельно для каждой модели.",
+    "translation": "The language is saved separately for each model."
+  },
+  "asr.sample-rate": {
+    "source": "Частота дискретизации",
+    "translation": "Sample rate"
+  },
+  "asr.sample-rate.note": {
+    "source": "Фиксированная частота: 16000 Гц.",
+    "translation": "Fixed sample rate: 16000 Hz."
+  },
+  "asr.chunk": {
+    "source": "Размер чанка",
+    "translation": "Chunk size"
+  },
+  "asr.chunk.note": {
+    "source": "Размер аудиоблока в сэмплах.",
+    "translation": "Audio block size in samples."
+  },
+  "asr.threshold": {
+    "source": "Порог голосовой активности",
+    "translation": "VAD threshold"
+  },
+  "asr.threshold.note": {
+    "source": "Порог голосовой активности.",
+    "translation": "Voice activity threshold."
+  },
+  "asr.silence": {
+    "source": "Тишина (сек)",
+    "translation": "Silence (sec)"
+  },
+  "asr.silence.note": {
+    "source": "Пауза для окончания фразы. Менее 0,4 с может обрезать речь.",
+    "translation": "Pause ending a phrase. Below 0.4 s may cut speech short."
+  },
+  "asr.pre-buffer": {
+    "source": "Предбуфер (сек)",
+    "translation": "Pre-buffer (sec)"
+  },
+  "asr.pre-buffer.note": {
+    "source": "Аудио до начала речи.",
+    "translation": "Audio before speech begins."
+  },
+  "asr.max-speech": {
+    "source": "Макс. речь (сек)",
+    "translation": "Max speech (sec)"
+  },
+  "asr.max-speech.note": {
+    "source": "Максимальная длительность одной фразы.",
+    "translation": "Maximum duration of one phrase."
+  },
+  "asr.min-speech": {
+    "source": "Мин. речь (сек)",
+    "translation": "Min speech (sec)"
+  },
+  "asr.min-speech.note": {
+    "source": "Отсеивать щелчки и короткие звуки. 0 — отключить.",
+    "translation": "Filter clicks and short sounds. 0 disables the filter."
+  },
+  "asr.apply": {
+    "source": "Применить",
+    "translation": "Apply"
+  },
+  "asr.reset": {
+    "source": "Сбросить",
+    "translation": "Reset"
+  },
+  "asr.microphone-level": {
+    "source": "Уровень микрофона",
+    "translation": "Microphone level"
+  },
+  "asr.monitor.note": {
+    "source": "Во время теста вы слышите себя. Распознавание временно приостановлено.",
+    "translation": "During the test you hear yourself. Recognition is temporarily paused."
+  },
+  "asr.monitor.stop": {
+    "source": "Остановить тест",
+    "translation": "Stop microphone test"
+  },
+  "asr.monitor.start": {
+    "source": "Проверить микрофон",
+    "translation": "Test microphone"
+  },
+  "asr.monitor.no-device": {
+    "source": "Устройство для проверки не выбрано",
+    "translation": "No device selected for testing"
+  },
+  "asr.title": {
+    "source": "Настройки микрофона",
+    "translation": "Microphone settings"
+  },
+  "asr.description": {
+    "source": "Устройства ввода, распознавание речи и проверка микрофона.",
+    "translation": "Input devices, speech recognition and microphone testing."
+  },
+  "asr.device.manual": {
+    "source": "Укажите идентификатор устройства вручную",
+    "translation": "Enter the input device identifier manually"
+  },
+  "settings.preset.url-model-placeholder": {
+    "source": "Укажите модель для формирования URL",
+    "translation": "Specify a model to construct the URL"
+  },
+  "settings.ai-engine.no-plan": {
+    "source": "AI runtime не настроен",
+    "translation": "AI runtime is not configured"
+  },
+  "settings.ai-engine.no-plan-detail": {
+    "source": "Режим процессов ещё не выбран. Сведения об оборудовании доступны независимо от AI runtime.",
+    "translation": "No process topology is selected. Hardware inventory is available independently of the AI runtime."
+  },
+  "launcher.game.queued": {
+    "source": "Команда лаунчера принята.",
+    "translation": "Launcher command accepted."
+  },
+  "launcher.core.title": {
+    "source": "Ядро Rust",
+    "translation": "Rust Core"
+  },
+  "launcher.core.running": {
+    "source": "Работает",
+    "translation": "Running"
+  },
+  "launcher.core.starting": {
+    "source": "Запускается…",
+    "translation": "Starting…"
+  },
+  "launcher.core.stopped": {
+    "source": "Не запущен",
+    "translation": "Not running"
+  },
+  "launcher.install.checking": {
+    "source": "Проверяется…",
+    "translation": "Checking…"
+  },
+  "launcher.install.detected": {
+    "source": "Установка обнаружена",
+    "translation": "Installation detected"
+  },
+  "launcher.install.missing": {
+    "source": "Не установлен",
+    "translation": "Not installed"
+  },
+  "settings.ai-engine.split-detail": {
+    "source": "TTS, ASR, RAG и Beats получают отдельные процессы: падения и конфликты зависимостей изолированы, но расход RAM и VRAM выше.",
+    "translation": "TTS, ASR, RAG and Beats run in separate processes: failures and dependency conflicts are isolated, but RAM and VRAM usage is higher."
+  },
+  "settings.ai-engine.maintenance-unavailable": {
+    "source": "Обслуживание недоступно",
+    "translation": "Maintenance is unavailable"
   }
 }

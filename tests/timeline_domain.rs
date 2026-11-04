@@ -39,7 +39,7 @@ fn branch_prefix_is_retained_without_inheriting_parent_future() {
     };
     let checkpoint_id = checkpoint.id;
     push(&mut timeline, root, "checkpoint", vec![checkpoint]);
-    let late = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let late = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let late_id = late.id;
     push(&mut timeline, root, "future", vec![late]);
     let child = BranchId::new();
@@ -75,7 +75,7 @@ fn branch_prefix_is_retained_without_inheriting_parent_future() {
 #[test]
 fn retry_returns_exact_receipt_even_after_head_advanced() {
     let (mut timeline, root) = setup();
-    let draft = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let draft = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let original = timeline
         .append(root, 0, "first", json!({}), vec![draft.clone()])
         .unwrap();
@@ -83,7 +83,7 @@ fn retry_returns_exact_receipt_even_after_head_advanced() {
         &mut timeline,
         root,
         "second",
-        vec![fact(EventKind::UnityEvent, CharacterId::Mita)],
+        vec![fact(EventKind::UnityEvent, CharacterId::Crazy)],
     );
     let mut replay = draft.clone();
     replay.occurred_at_unix_ms = 456789;
@@ -105,13 +105,13 @@ fn retry_returns_exact_receipt_even_after_head_advanced() {
 #[test]
 fn concurrent_expected_head_is_checked_and_batch_is_atomic() {
     let (mut timeline, root) = setup();
-    let known = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let known = fact(EventKind::UnityEvent, CharacterId::Crazy);
     push(&mut timeline, root, "first", vec![known]);
     assert_eq!(
         timeline.append(root, 0, "stale", json!({}), vec![]),
         Err(TimelineError::ConcurrentWrite)
     );
-    let valid = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let valid = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let invalid = EventDraft::new(EventKind::CharacterMessage);
     assert!(
         timeline
@@ -135,7 +135,7 @@ fn empty_batch_gets_receipt_without_inventing_event() {
         &mut timeline,
         root,
         "advance",
-        vec![fact(EventKind::UnityEvent, CharacterId::Mita)],
+        vec![fact(EventKind::UnityEvent, CharacterId::Crazy)],
     );
     assert_eq!(
         timeline
@@ -149,12 +149,12 @@ fn empty_batch_gets_receipt_without_inventing_event() {
 #[test]
 fn retelling_never_grants_prior_event_knowledge() {
     let (mut timeline, root) = setup();
-    let secret = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let secret = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let secret_id = secret.id;
     push(&mut timeline, root, "secret", vec![secret]);
-    let mut retelling = fact(EventKind::CharacterMessage, CharacterId::KindMita);
-    retelling.actor = Some(CharacterId::Mita.to_string());
-    retelling.observers.insert(CharacterId::Mita);
+    let mut retelling = fact(EventKind::CharacterMessage, CharacterId::Kind);
+    retelling.actor = Some(CharacterId::Crazy.to_string());
+    retelling.observers.insert(CharacterId::Crazy);
     retelling.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: secret_id,
@@ -163,31 +163,31 @@ fn retelling_never_grants_prior_event_knowledge() {
     push(&mut timeline, root, "retelling", vec![retelling]);
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, secret_id, None)
+            .knows(root, CharacterId::Kind, secret_id, None)
             .unwrap()
     );
     assert!(
         timeline
-            .knows(root, CharacterId::KindMita, report_id, None)
+            .knows(root, CharacterId::Kind, report_id, None)
             .unwrap()
     );
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, report_id, Some(1))
+            .knows(root, CharacterId::Kind, report_id, Some(1))
             .unwrap()
     );
 
-    let mut reset = fact(EventKind::CharacterContextReset, CharacterId::KindMita);
+    let mut reset = fact(EventKind::CharacterContextReset, CharacterId::Kind);
     reset.payload.insert("reason".into(), json!("forget"));
     push(&mut timeline, root, "reset", vec![reset]);
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, report_id, None)
+            .knows(root, CharacterId::Kind, report_id, None)
             .unwrap()
     );
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, secret_id, None)
+            .knows(root, CharacterId::Kind, secret_id, None)
             .unwrap()
     );
 }
@@ -195,12 +195,12 @@ fn retelling_never_grants_prior_event_knowledge() {
 #[test]
 fn response_cannot_target_unknown_or_future_events() {
     let (mut timeline, root) = setup();
-    let mut player = fact(EventKind::PlayerMessage, CharacterId::Mita);
-    player.actor = Some(CharacterId::KindMita.to_string());
+    let mut player = fact(EventKind::PlayerMessage, CharacterId::Crazy);
+    player.actor = Some(CharacterId::Kind.to_string());
     let id = player.id;
     push(&mut timeline, root, "player", vec![player]);
-    let mut response = fact(EventKind::CharacterMessage, CharacterId::KindMita);
-    response.actor = Some(CharacterId::KindMita.to_string());
+    let mut response = fact(EventKind::CharacterMessage, CharacterId::Kind);
+    response.actor = Some(CharacterId::Kind.to_string());
     response.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
         event_id: id,
@@ -210,10 +210,10 @@ fn response_cannot_target_unknown_or_future_events() {
             .append(root, 1, "unknown", json!({}), vec![response.clone()])
             .is_err()
     );
-    response.observers.insert(CharacterId::Mita);
-    response.actor = Some(CharacterId::Mita.to_string());
+    response.observers.insert(CharacterId::Crazy);
+    response.actor = Some(CharacterId::Crazy.to_string());
     push(&mut timeline, root, "known", vec![response]);
-    let mut missing = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let mut missing = fact(EventKind::UnityEvent, CharacterId::Crazy);
     missing.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: neuromita::timeline::EventId::new(),
@@ -227,24 +227,19 @@ fn response_cannot_target_unknown_or_future_events() {
 #[test]
 fn presence_changes_do_not_reveal_earlier_events() {
     let (mut timeline, root) = setup();
-    let mut joined = fact(EventKind::CharacterJoined, CharacterId::Mita);
-    joined.actor = Some(CharacterId::Mita.to_string());
+    let mut joined = fact(EventKind::CharacterJoined, CharacterId::Crazy);
+    joined.actor = Some(CharacterId::Crazy.to_string());
     push(&mut timeline, root, "join", vec![joined]);
-    let secret = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let secret = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let secret_id = secret.id;
     push(&mut timeline, root, "secret", vec![secret]);
-    let mut joined_later = fact(EventKind::CharacterJoined, CharacterId::KindMita);
-    joined_later.actor = Some(CharacterId::KindMita.to_string());
+    let mut joined_later = fact(EventKind::CharacterJoined, CharacterId::Kind);
+    joined_later.actor = Some(CharacterId::Kind.to_string());
     push(&mut timeline, root, "join-later", vec![joined_later]);
-    assert!(
-        timeline
-            .present(root)
-            .unwrap()
-            .contains(&CharacterId::KindMita)
-    );
+    assert!(timeline.present(root).unwrap().contains(&CharacterId::Kind));
     assert!(
         !timeline
-            .knows(root, CharacterId::KindMita, secret_id, None)
+            .knows(root, CharacterId::Kind, secret_id, None)
             .unwrap()
     );
 }
@@ -258,13 +253,13 @@ fn external_identity_is_unique_within_inherited_world_but_not_sibling_futures() 
     push(&mut timeline, root, "checkpoint", vec![checkpoint]);
     let child = BranchId::new();
     timeline.fork(root, cp, child).unwrap();
-    let mut source = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let mut source = fact(EventKind::UnityEvent, CharacterId::Crazy);
     source.external_message_id = Some("message-1".into());
     push(&mut timeline, root, "parent", vec![source]);
-    let mut alternative = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let mut alternative = fact(EventKind::UnityEvent, CharacterId::Crazy);
     alternative.external_message_id = Some("message-1".into());
     push(&mut timeline, child, "child", vec![alternative]);
-    let mut duplicate = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let mut duplicate = fact(EventKind::UnityEvent, CharacterId::Crazy);
     duplicate.external_message_id = Some("message-1".into());
     assert_eq!(
         timeline.append(child, 3, "dup", json!({}), vec![duplicate]),
@@ -311,25 +306,25 @@ fn empty_and_malformed_operation_commands_fail_before_mutation() {
 fn message_edits_are_per_character_and_preserve_original_facts() {
     use neuromita::timeline::domain::character_messages;
     let (mut timeline, root) = setup();
-    let mut message = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    let mut message = fact(EventKind::PlayerMessage, CharacterId::Crazy);
     message.actor = Some("player".into());
-    message.observers.insert(CharacterId::KindMita);
+    message.observers.insert(CharacterId::Kind);
     message.payload.insert("content".into(), json!("original"));
     let target = message.id;
     push(&mut timeline, root, "message", vec![message]);
 
-    let mut hide = fact(EventKind::MessageHidden, CharacterId::Mita);
+    let mut hide = fact(EventKind::MessageHidden, CharacterId::Crazy);
     hide.payload
         .insert("event_ids".into(), json!([target.0.to_string()]));
     push(&mut timeline, root, "hide", vec![hide]);
     let facts = timeline.world(root).unwrap();
-    assert!(character_messages(&facts, CharacterId::Mita).is_empty());
+    assert!(character_messages(&facts, CharacterId::Crazy).is_empty());
     assert_eq!(
-        character_messages(&facts, CharacterId::KindMita)[0].content,
+        character_messages(&facts, CharacterId::Kind)[0].content,
         "original"
     );
 
-    let mut revised = fact(EventKind::MessageRevised, CharacterId::Mita);
+    let mut revised = fact(EventKind::MessageRevised, CharacterId::Crazy);
     revised
         .payload
         .insert("event_id".into(), json!(target.0.to_string()));
@@ -339,11 +334,11 @@ fn message_edits_are_per_character_and_preserve_original_facts() {
     push(&mut timeline, root, "revise", vec![revised]);
     let facts = timeline.world(root).unwrap();
     assert_eq!(
-        character_messages(&facts, CharacterId::Mita)[0].content,
+        character_messages(&facts, CharacterId::Crazy)[0].content,
         "revised"
     );
     assert_eq!(
-        character_messages(&facts, CharacterId::KindMita)[0].content,
+        character_messages(&facts, CharacterId::Kind)[0].content,
         "original"
     );
     assert_eq!(
@@ -351,13 +346,13 @@ fn message_edits_are_per_character_and_preserve_original_facts() {
         json!("original")
     );
 
-    let mut restore = fact(EventKind::MessageRestored, CharacterId::Mita);
+    let mut restore = fact(EventKind::MessageRestored, CharacterId::Crazy);
     restore
         .payload
         .insert("event_id".into(), json!(target.0.to_string()));
     push(&mut timeline, root, "restore", vec![restore]);
     assert_eq!(
-        character_messages(&timeline.world(root).unwrap(), CharacterId::Mita)[0].content,
+        character_messages(&timeline.world(root).unwrap(), CharacterId::Crazy)[0].content,
         "revised"
     );
 }
@@ -365,13 +360,13 @@ fn message_edits_are_per_character_and_preserve_original_facts() {
 #[test]
 fn message_edit_cannot_reveal_unknown_identity_or_change_author() {
     let (mut timeline, root) = setup();
-    let mut secret = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    let mut secret = fact(EventKind::PlayerMessage, CharacterId::Crazy);
     secret.actor = Some("player".to_string());
     secret.payload.insert("content".into(), json!("private"));
     let event_id = secret.id;
     push(&mut timeline, root, "secret", vec![secret]);
 
-    let mut hidden = fact(EventKind::MessageHidden, CharacterId::KindMita);
+    let mut hidden = fact(EventKind::MessageHidden, CharacterId::Kind);
     hidden
         .payload
         .insert("event_ids".into(), json!([event_id.0.to_string()]));
@@ -380,7 +375,7 @@ fn message_edit_cannot_reveal_unknown_identity_or_change_author() {
         Err(TimelineError::Invalid("cannot modify unknown message"))
     );
 
-    let mut revision = fact(EventKind::MessageRevised, CharacterId::Mita);
+    let mut revision = fact(EventKind::MessageRevised, CharacterId::Crazy);
     revision
         .payload
         .insert("event_id".into(), json!(event_id.0.to_string()));
@@ -401,7 +396,7 @@ fn message_edit_cannot_reveal_unknown_identity_or_change_author() {
 fn context_reset_discards_message_projection_but_keeps_canonical_facts() {
     use neuromita::timeline::domain::character_messages;
     let (mut timeline, root) = setup();
-    let mut message = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    let mut message = fact(EventKind::PlayerMessage, CharacterId::Crazy);
     message.actor = Some("player".to_string());
     message
         .payload
@@ -411,16 +406,16 @@ fn context_reset_discards_message_projection_but_keeps_canonical_facts() {
         &mut timeline,
         root,
         "reset",
-        vec![fact(EventKind::CharacterContextReset, CharacterId::Mita)],
+        vec![fact(EventKind::CharacterContextReset, CharacterId::Crazy)],
     );
     assert_eq!(timeline.world(root).unwrap().len(), 2);
-    assert!(character_messages(&timeline.world(root).unwrap(), CharacterId::Mita).is_empty());
+    assert!(character_messages(&timeline.world(root).unwrap(), CharacterId::Crazy).is_empty());
 }
 
 #[test]
 fn duplicates_inside_same_batch_roll_back_atomically() {
     let (mut timeline, root) = setup();
-    let first = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let first = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let second = first.clone();
     assert_eq!(
         timeline.append(root, 0, "duplicates", json!({}), vec![first, second]),
@@ -438,10 +433,10 @@ fn invalid_causality_cannot_point_to_new_sibling_future() {
     push(&mut timeline, root, "checkpoint", vec![checkpoint]);
     let child = BranchId::new();
     timeline.fork(root, id, child).unwrap();
-    let source = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let source = fact(EventKind::UnityEvent, CharacterId::Crazy);
     let future = source.id;
     push(&mut timeline, root, "parent-future", vec![source]);
-    let mut caused = fact(EventKind::UnityEvent, CharacterId::Mita);
+    let mut caused = fact(EventKind::UnityEvent, CharacterId::Crazy);
     caused.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: future,
@@ -470,7 +465,7 @@ fn concurrent_writers_are_serialized_by_owner_and_only_one_can_claim_head() {
                         0,
                         &format!("concurrent:{index}"),
                         json!({}),
-                        vec![fact(EventKind::UnityEvent, CharacterId::Mita)],
+                        vec![fact(EventKind::UnityEvent, CharacterId::Crazy)],
                     )
                 })
             })
@@ -512,9 +507,9 @@ fn deterministic_branch_world_stress_preserves_contiguous_history_and_private_fa
             branches.push(child);
         } else {
             let actor = if (seed >> 32) & 1 == 0 {
-                CharacterId::Mita
+                CharacterId::Crazy
             } else {
-                CharacterId::KindMita
+                CharacterId::Kind
             };
             let draft = fact(EventKind::UnityEvent, actor);
             push(&mut timeline, branch, &format!("fact:{index}"), vec![draft]);
@@ -524,7 +519,7 @@ fn deterministic_branch_world_stress_preserves_contiguous_history_and_private_fa
             for (offset, event) in facts.iter().enumerate() {
                 assert_eq!(event.sequence, offset as u64 + 1);
             }
-            for character in [CharacterId::Mita, CharacterId::KindMita] {
+            for character in [CharacterId::Crazy, CharacterId::Kind] {
                 for known in timeline.view(*branch, character, None).unwrap() {
                     assert!(known.fact.draft.observers.contains(&character));
                     assert!(known.learned_at <= facts.len() as u64);
@@ -537,12 +532,12 @@ fn deterministic_branch_world_stress_preserves_contiguous_history_and_private_fa
 #[test]
 fn failed_batch_does_not_mutate_incremental_knowledge_index() {
     let (mut timeline, root) = setup();
-    let mut question = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    let mut question = fact(EventKind::PlayerMessage, CharacterId::Crazy);
     question.actor = Some("player".into());
     let question_id = question.id;
     push(&mut timeline, root, "question", vec![question]);
 
-    let reset = fact(EventKind::CharacterContextReset, CharacterId::Mita);
+    let reset = fact(EventKind::CharacterContextReset, CharacterId::Crazy);
     let invalid = EventDraft::new(EventKind::CharacterMessage);
     let head = timeline.branch(root).unwrap().head_sequence;
     assert!(
@@ -552,12 +547,12 @@ fn failed_batch_does_not_mutate_incremental_knowledge_index() {
     );
     assert!(
         timeline
-            .knows(root, CharacterId::Mita, question_id, None)
+            .knows(root, CharacterId::Crazy, question_id, None)
             .unwrap()
     );
 
-    let mut answer = fact(EventKind::CharacterMessage, CharacterId::Mita);
-    answer.actor = Some(CharacterId::Mita.to_string());
+    let mut answer = fact(EventKind::CharacterMessage, CharacterId::Crazy);
+    answer.actor = Some(CharacterId::Crazy.to_string());
     answer.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
         event_id: question_id,
@@ -569,14 +564,14 @@ fn failed_batch_does_not_mutate_incremental_knowledge_index() {
 #[test]
 fn reset_and_retelling_in_one_batch_do_not_restore_original_reply_rights() {
     let (mut timeline, root) = setup();
-    let mut question = fact(EventKind::PlayerMessage, CharacterId::Mita);
+    let mut question = fact(EventKind::PlayerMessage, CharacterId::Crazy);
     question.actor = Some("player".into());
     let question_id = question.id;
     push(&mut timeline, root, "question", vec![question]);
 
-    let reset = fact(EventKind::CharacterContextReset, CharacterId::Mita);
-    let mut report = fact(EventKind::CharacterMessage, CharacterId::Mita);
-    report.actor = Some(CharacterId::Mita.to_string());
+    let reset = fact(EventKind::CharacterContextReset, CharacterId::Crazy);
+    let mut report = fact(EventKind::CharacterMessage, CharacterId::Crazy);
+    report.actor = Some(CharacterId::Crazy.to_string());
     report.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: question_id,
@@ -585,17 +580,17 @@ fn reset_and_retelling_in_one_batch_do_not_restore_original_reply_rights() {
     push(&mut timeline, root, "reset-and-retell", vec![reset, report]);
     assert!(
         !timeline
-            .knows(root, CharacterId::Mita, question_id, None)
+            .knows(root, CharacterId::Crazy, question_id, None)
             .unwrap()
     );
     assert!(
         timeline
-            .knows(root, CharacterId::Mita, report_id, None)
+            .knows(root, CharacterId::Crazy, report_id, None)
             .unwrap()
     );
 
-    let mut invalid = fact(EventKind::CharacterMessage, CharacterId::Mita);
-    invalid.actor = Some(CharacterId::Mita.to_string());
+    let mut invalid = fact(EventKind::CharacterMessage, CharacterId::Crazy);
+    invalid.actor = Some(CharacterId::Crazy.to_string());
     invalid.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
         event_id: question_id,

@@ -2,6 +2,7 @@ mod characters;
 mod chat;
 mod connections;
 mod conversation;
+pub mod hardware;
 mod presets;
 mod releases;
 mod settings;
@@ -17,13 +18,16 @@ pub use conversation::{
     ConversationChange, ConversationChangePreview, ConversationError, ConversationPresenter,
     ConversationSnapshot,
 };
-pub use presets::PresetsPresenter;
+pub use presets::{
+    PresetParameterOption, PresetView, PresetsApi, PresetsPresenter, PresetsView, ProviderOption,
+};
 pub use releases::{
     ReleaseCommandError, ReleaseLoadState, ReleasesLifecycle, ReleasesPresenter, ReleasesSnapshot,
 };
 pub use settings::{
-    BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter, PresetSlot,
-    PresetsSettingsPresenter, PropertyObserver, SettingsPresenter, VoiceSettingsPresenter,
+    AsrSettingsPresenter, BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
+    InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
+    SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
 };
 
 pub struct GuiPresenter {

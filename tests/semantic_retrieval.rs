@@ -120,7 +120,7 @@ async fn semantic_recalls_paraphrase_and_counts_calls_against_lexical_baseline()
     assert_eq!(lexical[0].1, 0);
     assert_eq!(lexical[1].1, 0);
     let result = retrieval
-        .retrieve(CharacterId::Mita, &records, "хочу согреться")
+        .retrieve(CharacterId::Crazy, &records, "хочу согреться")
         .await
         .unwrap();
     assert_eq!(result.selected_ids[0], MemoryId(Uuid::from_u128(2)));
@@ -128,7 +128,7 @@ async fn semantic_recalls_paraphrase_and_counts_calls_against_lexical_baseline()
     assert_eq!(result.cost.embedded_texts, 3);
     assert_eq!(result.cost.cache_hits, 0);
     let repeated = retrieval
-        .retrieve(CharacterId::Mita, &records, "хочу согреться")
+        .retrieve(CharacterId::Crazy, &records, "хочу согреться")
         .await
         .unwrap();
     assert_eq!(repeated.cost.embedding_requests, 1);
@@ -147,21 +147,21 @@ async fn exact_snapshot_membership_and_content_versions_cover_update_merge_delet
         memory(2, MemoryPriority::High, "чай"),
     ];
     let first = retrieval
-        .retrieve(CharacterId::Mita, &main, "согреться")
+        .retrieve(CharacterId::Crazy, &main, "согреться")
         .await
         .unwrap();
     assert!(first.selected_ids.contains(&main[0].id) && first.selected_ids.contains(&main[1].id));
     let historical = main.clone();
     let fork = vec![memory(1, MemoryPriority::Normal, "ромашковый чай")];
     let changed = retrieval
-        .retrieve(CharacterId::Mita, &fork, "согреться")
+        .retrieve(CharacterId::Crazy, &fork, "согреться")
         .await
         .unwrap();
     assert_eq!(changed.selected_ids, vec![main[0].id]);
     assert_eq!(changed.cost.cache_hits, 0);
     assert_eq!(changed.cost.embedded_texts, 2);
     let old = retrieval
-        .retrieve(CharacterId::Mita, &historical, "согреться")
+        .retrieve(CharacterId::Crazy, &historical, "согреться")
         .await
         .unwrap();
     assert_eq!(old.cost.cache_hits, 2);
@@ -172,25 +172,25 @@ async fn exact_snapshot_membership_and_content_versions_cover_update_merge_delet
         "картина и ромашковый чай",
     )];
     let res = retrieval
-        .retrieve(CharacterId::Mita, &merged, "согреться")
+        .retrieve(CharacterId::Crazy, &merged, "согреться")
         .await
         .unwrap();
     assert_eq!(res.selected_ids, vec![main[0].id]);
     assert_eq!(res.cost.cache_hits, 0);
     let other = retrieval
-        .retrieve(CharacterId::KindMita, &merged, "согреться")
+        .retrieve(CharacterId::Kind, &merged, "согреться")
         .await
         .unwrap();
     assert_eq!(other.cost.cache_hits, 0);
     retrieval.clear_cache();
     let after_rebuild = retrieval
-        .retrieve(CharacterId::Mita, &main, "согреться")
+        .retrieve(CharacterId::Crazy, &main, "согреться")
         .await
         .unwrap();
     assert_eq!(after_rebuild.cost.cache_hits, 0);
     assert_eq!(after_rebuild.selected_ids[0], main[1].id);
     let empty = retrieval
-        .retrieve(CharacterId::Mita, &[], "согреться")
+        .retrieve(CharacterId::Crazy, &[], "согреться")
         .await
         .unwrap();
     assert!(empty.rendered.is_none() && empty.selected_ids.is_empty());
@@ -206,7 +206,7 @@ async fn provider_failure_does_not_silently_fallback() {
     let retrieval = SemanticMemoryRetriever::new(fixture, 4).unwrap();
     let err = retrieval
         .retrieve(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[memory(1, MemoryPriority::High, "чай")],
             "согреться",
         )
@@ -302,7 +302,7 @@ async fn verify_gemini_http(protocol: GeminiEmbeddingProtocol) {
     let retrieval = SemanticMemoryRetriever::new(provider, 8).unwrap();
     let res = retrieval
         .retrieve(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[memory(3, MemoryPriority::Normal, "ромашковый чай")],
             "согреться",
         )
@@ -347,7 +347,7 @@ async fn cancelled_document_embedding_does_not_populate_a_stale_cache() {
     let memo = vec![memory(1, MemoryPriority::High, "чай")];
     let previous = retrieval.clone();
     let task =
-        tokio::spawn(async move { previous.retrieve(CharacterId::Mita, &memo, "чай").await });
+        tokio::spawn(async move { previous.retrieve(CharacterId::Crazy, &memo, "чай").await });
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
         provider.started.notified(),
@@ -360,7 +360,7 @@ async fn cancelled_document_embedding_does_not_populate_a_stale_cache() {
     let next = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         retrieval.retrieve(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[memory(1, MemoryPriority::High, "чай")],
             "чай",
         ),
@@ -386,14 +386,14 @@ async fn semantic_ranking_preserves_prompt_budget_and_order_independence() {
         })
         .collect::<Vec<_>>();
     let first = retrieval
-        .retrieve(CharacterId::Mita, &memories, "хочу согреться")
+        .retrieve(CharacterId::Crazy, &memories, "хочу согреться")
         .await
         .unwrap();
     assert!(first.selected_ids.len() <= 12);
     assert!(first.rendered.as_ref().unwrap().chars().count() <= 6000);
     memories.reverse();
     let repeated = retrieval
-        .retrieve(CharacterId::Mita, &memories, "хочу согреться")
+        .retrieve(CharacterId::Crazy, &memories, "хочу согреться")
         .await
         .unwrap();
     assert_eq!(first.selected_ids, repeated.selected_ids);
@@ -413,7 +413,7 @@ async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_spac
     ];
     let result = retrieval
         .retrieve_filtered(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &memories,
             "согреться",
             SemanticRetrievalFilter {
@@ -434,7 +434,7 @@ async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_spac
 
     let no_matches = retrieval
         .retrieve_filtered(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &memories,
             "другая тема",
             SemanticRetrievalFilter {
@@ -451,7 +451,7 @@ async fn provenance_and_explicit_filter_preserve_snapshot_ids_and_embedding_spac
     assert_eq!(no_matches.cost.embedding_requests, 1);
 
     let no_memories = retrieval
-        .retrieve(CharacterId::Mita, &[], "другая тема")
+        .retrieve(CharacterId::Crazy, &[], "другая тема")
         .await
         .unwrap();
     assert_eq!(no_memories.status, RetrievalStatus::EmptyCorpus);
@@ -468,7 +468,7 @@ async fn invalid_similarity_filter_is_rejected_before_embedding_requests() {
     for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.01, 1.01] {
         let error = retrieval
             .retrieve_filtered(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 &[memory(1, MemoryPriority::Normal, "чай")],
                 "согреться",
                 SemanticRetrievalFilter {
@@ -495,7 +495,7 @@ async fn semantic_results_remain_distinguishable_from_provider_failure() {
     let memories = [memory(1, MemoryPriority::Normal, "чай")];
     let failure = retrieval
         .retrieve_filtered(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &memories,
             "согреться",
             SemanticRetrievalFilter {
@@ -507,7 +507,7 @@ async fn semantic_results_remain_distinguishable_from_provider_failure() {
     assert!(matches!(failure, EmbeddingError::Transport(_)));
 
     let empty = retrieval
-        .retrieve(CharacterId::Mita, &[], "согреться")
+        .retrieve(CharacterId::Crazy, &[], "согреться")
         .await
         .unwrap();
     assert_eq!(empty.status, RetrievalStatus::EmptyCorpus);
@@ -527,13 +527,13 @@ async fn explicit_fusion_reranks_synthetic_memory_without_changing_vector_defaul
     ];
     let query = "картина согреться";
     let vector = retrieval
-        .retrieve(CharacterId::Mita, &records, query)
+        .retrieve(CharacterId::Crazy, &records, query)
         .await
         .unwrap();
     assert_eq!(vector.selected_ids[0], records[1].id);
     let two_stage = retrieval
         .retrieve_with_fusion(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &records,
             query,
             SemanticRetrievalFilter::all(),
@@ -544,7 +544,7 @@ async fn explicit_fusion_reranks_synthetic_memory_without_changing_vector_defaul
     assert_eq!(two_stage.selected_ids[0], records[1].id);
     let rrf = retrieval
         .retrieve_with_fusion(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &records,
             query,
             SemanticRetrievalFilter::all(),
@@ -582,7 +582,7 @@ async fn forgotten_and_deleted_records_never_reach_embeddings_even_via_direct_re
     let mut deleted = memory(1902, MemoryPriority::Normal, "картина в мастерской");
     deleted.state = MemoryState::Deleted;
     let result = retriever
-        .retrieve(CharacterId::Mita, &[forgotten.clone(), deleted], "чай")
+        .retrieve(CharacterId::Crazy, &[forgotten.clone(), deleted], "чай")
         .await
         .unwrap();
     assert!(result.selected_ids.is_empty());
@@ -595,7 +595,7 @@ async fn forgotten_and_deleted_records_never_reach_embeddings_even_via_direct_re
     let mut restored = forgotten;
     restored.state = MemoryState::Active;
     let result = retriever
-        .retrieve(CharacterId::Mita, &[restored], "чай")
+        .retrieve(CharacterId::Crazy, &[restored], "чай")
         .await
         .unwrap();
     assert_eq!(result.selected_ids.len(), 1);

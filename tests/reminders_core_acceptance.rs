@@ -75,12 +75,12 @@ async fn start(policy: ReminderConfig) -> (ApplicationLifecycle, mpsc::Unbounded
 
 fn request() -> RequestHandle {
     let event = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("game acceptance".into()).unwrap(),
     )
     .unwrap();
     ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         event,
         RequestSource::Presenter,
     ))
@@ -135,7 +135,7 @@ async fn failed_delivery_blocks_until_explicit_retry_and_keeps_one_occurrence() 
     config.clock = clock.clone();
     config.start_scheduler = false;
     let (app, mut calls) = start(config).await;
-    let character = CharacterId::Mita;
+    let character = CharacterId::Crazy;
 
     let before = CharacterApi::get(character).unwrap().state().await.unwrap();
     let atomic = request();

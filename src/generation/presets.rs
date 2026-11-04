@@ -83,12 +83,14 @@ impl GeminiPresetDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "provider", content = "configuration", rename_all = "snake_case")]
 pub enum PresetDefinition {
+    Unconfigured,
     Gemini(GeminiPresetDefinition),
 }
 
 impl PresetDefinition {
     fn validate(&self) -> Result<(), PresetCatalogError> {
         match self {
+            Self::Unconfigured => Ok(()),
             Self::Gemini(config) => config.validate(),
         }
     }
@@ -98,6 +100,11 @@ impl PresetDefinition {
         credentials: &dyn PresetCredentials,
     ) -> Result<GenerationPreset, PresetCatalogError> {
         let template = match self {
+            Self::Unconfigured => {
+                return Err(PresetCatalogError::Invalid(
+                    "preset is not configured".into(),
+                ));
+            }
             Self::Gemini(config) => {
                 let credential = credentials.get(&config.credential_env)?;
                 ProviderTemplate::Gemini(config.template(&credential)?)
@@ -344,6 +351,17 @@ impl PresetCatalog {
             .collect()
     }
 
+    pub fn configured(&self, id: PresetId) -> Result<bool, PresetCatalogError> {
+        let state = self.state.read().expect("preset catalog poisoned");
+        if state.runtime.contains_key(&id) {
+            return Ok(true);
+        }
+        match state.stored.entries.get(&id) {
+            Some(record) => Ok(matches!(record.definition, PresetDefinition::Gemini(_))),
+            None => Err(PresetCatalogError::NotFound(id)),
+        }
+    }
+
     pub fn contains(&self, id: PresetId) -> bool {
         let state = self.state.read().expect("preset catalog poisoned");
         state.runtime.contains_key(&id) || state.stored.entries.contains_key(&id)
@@ -484,7 +502,9 @@ mod tests {
         ));
         let mut invalid = example("bad/model");
         assert!(catalog.create(invalid.clone()).is_err());
-        let PresetDefinition::Gemini(config) = &mut invalid.definition;
+        let PresetDefinition::Gemini(config) = &mut invalid.definition else {
+            unreachable!()
+        };
         config.model = "good".into();
         config.credential_env = "BAD-ENV".into();
         assert!(catalog.update(id, invalid).is_err());

@@ -6,10 +6,12 @@ use neuromita::localization::{
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
+    launcher_ui::{LauncherUi, load_config},
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
     view::{AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem},
+    voice::VoicePreviewMode,
 };
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -35,28 +37,35 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     window
         .global::<I18n>()
         .on_lookup(translation_lookup(catalog.clone()));
+    let launcher = Rc::new(RefCell::new(LauncherUi::new(
+        load_config(
+            options.unity_directory.as_deref(),
+            options.launcher_config.as_deref(),
+        )?,
+        window.as_weak(),
+    )?));
     let presenter = Rc::new(RefCell::new(ShellPresenter::new(
-        HomePreview::python_reference(),
+        HomePreview::runtime(),
         options.locale,
     )));
-    if options.sandbox {
+    if options.voice_preview.is_some() || options.asr_preview {
+        presenter
+            .borrow_mut()
+            .dispatch(ShellCommand::Navigate(Page::Settings));
+    } else if options.sandbox {
         presenter
             .borrow_mut()
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
     }
     window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
-    let releases = presenter
-        .borrow()
-        .home()
-        .releases
-        .iter()
-        .map(|item| ReleaseItem {
-            title: item.title.into(),
-            date: item.date.into(),
-        })
-        .collect::<Vec<_>>();
-    window.set_releases(ModelRc::new(VecModel::from(releases)));
+    window.set_releases(ModelRc::new(VecModel::<ReleaseItem>::default()));
     render(&window, &presenter.borrow(), &catalog.borrow());
+    if let Some(mode) = options.voice_preview {
+        super::voice::preview(&window, mode);
+    }
+    if options.asr_preview {
+        super::asr::preview(&window);
+    }
 
     let weak = window.as_weak();
     let dispatch = Rc::new(move |command| {
@@ -127,10 +136,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let handler = dispatch.clone();
     window.on_toggle_client(move || handler(ShellCommand::ToggleClient));
     let handler = dispatch.clone();
-    window.on_play(move || handler(ShellCommand::Play));
+    let launcher_for_play = launcher.clone();
+    window.on_play(move || {
+        let notice = launcher_for_play.borrow_mut().toggle_play();
+        handler(ShellCommand::LauncherFeedback(notice));
+    });
     let handler = dispatch.clone();
-    window
-        .on_launcher_action(move |action| handler(ShellCommand::Launcher(launcher_action(action))));
+    let launcher_for_action = launcher.clone();
+    window.on_launcher_action(move |action| {
+        let action = launcher_action(action);
+        match action {
+            LauncherAction::OpenUnityFolder => {
+                let notice = launcher_for_action.borrow().open_location();
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            action => handler(ShellCommand::Launcher(action)),
+        }
+    });
     let handler = dispatch.clone();
     window.on_social_selected(move |name| handler(ShellCommand::Social(name.into())));
     window.on_dismiss_notice(move || dispatch(ShellCommand::DismissNotice));
@@ -142,7 +164,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             window.set_notice(error.into());
         }
     });
-    window.run()?;
+    let result = window.run();
+    let shutdown = launcher.borrow_mut().shutdown();
+    result?;
+    shutdown.map_err(std::io::Error::other)?;
     Ok(())
 }
 
@@ -210,6 +235,10 @@ struct Options {
     data_directory: PathBuf,
     model: Option<String>,
     sandbox: bool,
+    voice_preview: Option<VoicePreviewMode>,
+    asr_preview: bool,
+    unity_directory: Option<PathBuf>,
+    launcher_config: Option<PathBuf>,
 }
 
 impl Options {
@@ -220,11 +249,38 @@ impl Options {
             data_directory: super::runtime::data_directory()?,
             model: None,
             sandbox: false,
+            voice_preview: None,
+            asr_preview: false,
+            unity_directory: None,
+            launcher_config: None,
         };
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
                 Some("--sandbox") => options.sandbox = true,
+                Some("--asr-preview") => options.asr_preview = true,
+                Some("--voice-preview") => {
+                    let mode = arguments.next().ok_or("--voice-preview requires a mode")?;
+                    options.voice_preview = Some(VoicePreviewMode::parse(
+                        mode.to_str().ok_or("voice preview mode must be UTF-8")?,
+                    )?);
+                }
+                Some("--unity-dir") => {
+                    options.unity_directory = Some(
+                        arguments
+                            .next()
+                            .ok_or("--unity-dir requires a path")?
+                            .into(),
+                    );
+                }
+                Some("--launcher-config") => {
+                    options.launcher_config = Some(
+                        arguments
+                            .next()
+                            .ok_or("--launcher-config requires a path")?
+                            .into(),
+                    );
+                }
                 Some("--model") => {
                     options.model = Some(
                         arguments
@@ -318,6 +374,10 @@ fn open_project_url(url: &str) -> Result<(), String> {
     {
         return Err("Недопустимая ссылка на внешний ресурс".into());
     }
+    open_external_url(url)
+}
+
+pub(super) fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
         let mut command = Command::new("explorer.exe");
