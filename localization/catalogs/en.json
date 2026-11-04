@@ -27,25 +27,9 @@
     "source": "Остановить",
     "translation": "Stop"
   },
-  "launcher.game.started": {
-    "source": "Игра запущена (PID {pid}).",
-    "translation": "Game started (PID {pid})."
-  },
-  "launcher.game.stopped": {
-    "source": "Игра остановлена.",
-    "translation": "Game stopped."
-  },
   "launcher.game.operation-error": {
     "source": "Не удалось запустить или остановить игру: {error}",
     "translation": "Failed to start or stop the game: {error}"
-  },
-  "launcher.game.location-opened": {
-    "source": "Каталог Unity открыт.",
-    "translation": "Unity directory opened."
-  },
-  "launcher.game.location-error": {
-    "source": "Не удалось открыть каталог Unity: {error}",
-    "translation": "Failed to open the Unity directory: {error}"
   },
   "launcher.releases.title": {
     "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
@@ -1814,5 +1798,53 @@
   "settings.preset.url-model-placeholder": {
     "source": "Укажите модель для формирования URL",
     "translation": "Specify a model to construct the URL"
+  },
+  "settings.ai-engine.no-plan": {
+    "source": "AI runtime не настроен",
+    "translation": "AI runtime is not configured"
+  },
+  "settings.ai-engine.no-plan-detail": {
+    "source": "Режим процессов ещё не выбран. Сведения об оборудовании доступны независимо от AI runtime.",
+    "translation": "No process topology is selected. Hardware inventory is available independently of the AI runtime."
+  },
+  "launcher.game.queued": {
+    "source": "Команда лаунчера принята.",
+    "translation": "Launcher command accepted."
+  },
+  "launcher.core.title": {
+    "source": "Ядро Rust",
+    "translation": "Rust Core"
+  },
+  "launcher.core.running": {
+    "source": "Работает",
+    "translation": "Running"
+  },
+  "launcher.core.starting": {
+    "source": "Запускается…",
+    "translation": "Starting…"
+  },
+  "launcher.core.stopped": {
+    "source": "Не запущен",
+    "translation": "Not running"
+  },
+  "launcher.install.checking": {
+    "source": "Проверяется…",
+    "translation": "Checking…"
+  },
+  "launcher.install.detected": {
+    "source": "Установка обнаружена",
+    "translation": "Installation detected"
+  },
+  "launcher.install.missing": {
+    "source": "Не установлен",
+    "translation": "Not installed"
+  },
+  "settings.ai-engine.split-detail": {
+    "source": "TTS, ASR, RAG и Beats получают отдельные процессы: падения и конфликты зависимостей изолированы, но расход RAM и VRAM выше.",
+    "translation": "TTS, ASR, RAG and Beats run in separate processes: failures and dependency conflicts are isolated, but RAM and VRAM usage is higher."
+  },
+  "settings.ai-engine.maintenance-unavailable": {
+    "source": "Обслуживание недоступно",
+    "translation": "Maintenance is unavailable"
   }
 }

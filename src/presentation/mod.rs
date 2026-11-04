@@ -2,6 +2,7 @@ mod characters;
 mod chat;
 mod connections;
 mod conversation;
+pub mod hardware;
 mod presets;
 mod releases;
 mod settings;

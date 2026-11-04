@@ -1,3 +1,5 @@
+import { AiEngineWorkspace, AiEngineUi, AiHardwareDevice } from "../settings/ai-engine.slint";
+export { AiEngineUi, AiHardwareDevice }
 import { SettingsSectionHeading, SettingsToggleRow, SettingsRow, SettingsText, SettingsEntryRow, SettingsChoiceRow, SettingsNumberRow, SettingsButtonRow } from "../components/settings-kit.slint";
 import { VoiceSettingsPage } from "voice.slint";
 import { AsrSettingsPage } from "asr.slint";
@@ -387,6 +389,7 @@ export component SettingsPage inherits Rectangle {
                         change-chat(value) => { SettingsUi.voice-launcher(value); }
                     }
                 }
+                if SettingsUi.section == 6: AiEngineWorkspace {}
                 if SettingsUi.section == 5: ScrollView {
                     content-width: self.visible-width;
                     AsrSettingsPage { width: parent.width - 10px; }

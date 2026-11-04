@@ -45,7 +45,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         window.as_weak(),
     )?));
     let presenter = Rc::new(RefCell::new(ShellPresenter::new(
-        HomePreview::python_reference(),
+        HomePreview::runtime(),
         options.locale,
     )));
     if options.voice_preview.is_some() || options.asr_preview {
@@ -58,17 +58,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .dispatch(ShellCommand::Navigate(Page::Sandbox));
     }
     window.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
-    let releases = presenter
-        .borrow()
-        .home()
-        .releases
-        .iter()
-        .map(|item| ReleaseItem {
-            title: item.title.into(),
-            date: item.date.into(),
-        })
-        .collect::<Vec<_>>();
-    window.set_releases(ModelRc::new(VecModel::from(releases)));
+    window.set_releases(ModelRc::new(VecModel::<ReleaseItem>::default()));
     render(&window, &presenter.borrow(), &catalog.borrow());
     if let Some(mode) = options.voice_preview {
         super::voice::preview(&window, mode);
@@ -174,11 +164,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             window.set_notice(error.into());
         }
     });
-    window.run()?;
-    launcher
-        .borrow_mut()
-        .shutdown()
-        .map_err(std::io::Error::other)?;
+    let result = window.run();
+    let shutdown = launcher.borrow_mut().shutdown();
+    result?;
+    shutdown.map_err(std::io::Error::other)?;
     Ok(())
 }
 

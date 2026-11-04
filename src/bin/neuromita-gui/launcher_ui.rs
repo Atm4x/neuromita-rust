@@ -15,10 +15,10 @@ impl LauncherUi {
     ) -> std::io::Result<Self> {
         let controller = neuromita::launcher::LauncherController::start(config, move |update| {
             let _ = window.upgrade_in_event_loop(move |window| {
+                window.set_launcher_inspected(true);
+                window.set_unity_installed(update.installed);
                 window.set_game_running(matches!(update.state, OwnedProcessState::Running { .. }));
-                if let Some(error) = update.error {
-                    window.set_notice(error.into());
-                }
+                window.set_notice(update.error.unwrap_or_default().into());
             });
         })?;
         Ok(Self { controller })
@@ -97,6 +97,6 @@ mod tests {
     fn missing_explicit_config_is_an_error() {
         let path =
             std::env::temp_dir().join(format!("absent-launcher-{}.json", uuid::Uuid::new_v4()));
-        assert!(matches!(load_config(None, Some(&path)), Err(_)));
+        assert!(load_config(None, Some(&path)).is_err());
     }
 }

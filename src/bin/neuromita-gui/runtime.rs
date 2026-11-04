@@ -46,6 +46,7 @@ pub enum Command {
     SaveAsr(AsrPreferences, String),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     Select(CharacterId),
@@ -56,6 +57,7 @@ pub enum Command {
 }
 
 pub enum Update {
+    Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
@@ -201,6 +203,7 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(hardware_snapshot().await);
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
@@ -270,6 +273,7 @@ async fn observe(
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+                Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
                     publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
                 },
@@ -386,4 +390,17 @@ impl Drop for MemoryWatch {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+async fn hardware_snapshot() -> Update {
+    let inventory =
+        tokio::task::spawn_blocking(neuromita::ai_runtime::system_hardware::SystemHardware::detect)
+            .await
+            .unwrap_or_else(
+                |error| neuromita::ai_runtime::system_hardware::SystemHardware {
+                    adapters: Vec::new(),
+                    errors: vec![error.to_string()],
+                },
+            );
+    Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
 }
