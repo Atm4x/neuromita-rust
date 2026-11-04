@@ -1,0 +1,37 @@
+name: Export pinned main and ASR layout source
+on:
+  push:
+    branches:
+      - bridge/asr-layout-main-export-20261104
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create verified bundle
+        shell: bash
+        env:
+          MAIN_SHA: 16fb8b7ef89ddf540de56a07a55c90f223cb1b0e
+          ASR_SHA: b28e5bb1e826fb7aaba005a28e534815c90e03cc
+        run: |
+          set -euo pipefail
+          git cat-file -e "${MAIN_SHA}^{commit}"
+          git cat-file -e "${ASR_SHA}^{commit}"
+          git update-ref refs/heads/pinned-main "${MAIN_SHA}"
+          git update-ref refs/heads/pinned-asr "${ASR_SHA}"
+          git bundle create asr-main-source.bundle refs/heads/pinned-main refs/heads/pinned-asr
+          git bundle verify asr-main-source.bundle
+          sha256sum asr-main-source.bundle > asr-main-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asr-main-source
+          path: |
+            asr-main-source.bundle
+            asr-main-source.bundle.sha256
+          retention-days: 2
+          if-no-files-found: error
