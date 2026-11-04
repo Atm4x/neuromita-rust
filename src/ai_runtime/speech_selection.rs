@@ -136,10 +136,8 @@ pub async fn inspect_speech_selection(
     )
     .await?;
     let mut reasons = inspection.install_probe.missing_reasons();
-    if !inspection.install_probe.installed {
-        if reasons.is_empty() {
-            reasons.push("plugin installation probe returned not installed".into());
-        }
+    if !inspection.install_probe.installed && reasons.is_empty() {
+        reasons.push("plugin installation probe returned not installed".into());
     }
     if inspection.requires_assets() && selected.asset_revision.is_none() {
         reasons.push("required assets have no verified model revision".into());

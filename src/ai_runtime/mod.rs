@@ -16,6 +16,7 @@ pub mod managed;
 pub mod overlay;
 pub mod production;
 pub mod resolver;
+pub mod runtime_status;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
@@ -32,7 +33,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
+    sync::{Mutex, watch},
     time::timeout,
 };
 use uuid::Uuid;
@@ -41,6 +42,7 @@ use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
 use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
+use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -480,6 +482,7 @@ pub struct AiSupervisor {
     config: PythonHostConfig,
     workers: Mutex<HashMap<WorkerKey, Arc<Mutex<WorkerProcess>>>>,
     activation_locks: Mutex<HashMap<WorkerKey, Arc<Mutex<()>>>>,
+    status: watch::Sender<RuntimeSnapshot>,
 }
 
 impl AiSupervisor {
@@ -489,7 +492,149 @@ impl AiSupervisor {
             config,
             workers: Mutex::new(HashMap::new()),
             activation_locks: Mutex::new(HashMap::new()),
+            status: watch::channel(RuntimeSnapshot::default()).0,
         }
+    }
+
+    pub fn observe_status(&self) -> watch::Receiver<RuntimeSnapshot> {
+        self.status.subscribe()
+    }
+
+    pub fn status_snapshot(&self) -> RuntimeSnapshot {
+        self.status.borrow().clone()
+    }
+
+    /// Refresh the observable state from child-process liveness without invoking plugin code.
+    pub async fn refresh_status(&self) -> RuntimeSnapshot {
+        let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
+        for worker in workers {
+            let mut process = worker.lock().await;
+            let generation = process.generation;
+            let failure = if process.failed {
+                Some("worker retired after an IPC failure".to_owned())
+            } else {
+                match process.child.try_wait() {
+                    Ok(None) => None,
+                    Ok(Some(exit)) => {
+                        process.failed = true;
+                        Some(format!("Python worker exited: {exit}"))
+                    }
+                    Err(error) => {
+                        process.failed = true;
+                        Some(format!("cannot query Python worker: {error}"))
+                    }
+                }
+            };
+            drop(process);
+            if let Some(reason) = failure {
+                self.status.send_modify(|snapshot| {
+                    for state in snapshot.services.values_mut() {
+                        if state.generation == Some(generation) {
+                            state.phase = RuntimePhase::Failed;
+                            state.active_model = None;
+                            state.pending_model = None;
+                            state.last_error = Some(reason.clone());
+                        }
+                    }
+                });
+            }
+        }
+        self.status_snapshot()
+    }
+
+    fn starting(&self, services: &[AiService], models: &[ModelActivation]) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.pending_model = models
+                    .iter()
+                    .find(|model| model.service == *service)
+                    .map(|model| model.plugin_id.clone());
+                state.last_error = None;
+                if state.active_model.is_none() {
+                    state.phase = RuntimePhase::Starting;
+                }
+            }
+        });
+    }
+
+    fn started(&self, services: &[AiService], models: &[ModelActivation], generation: Uuid) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.phase = if models.iter().any(|model| model.service == *service) {
+                    RuntimePhase::ModelReady
+                } else {
+                    RuntimePhase::WorkerRunning
+                };
+                state.generation = Some(generation);
+                state.active_model =
+                    models
+                        .iter()
+                        .find(|model| model.service == *service)
+                        .map(|model| LoadedModel {
+                            plugin_id: model.plugin_id.clone(),
+                            asset_revision: model.asset_revision.clone(),
+                        });
+                state.pending_model = None;
+                state.last_error = None;
+            }
+            if self.topology == ProcessTopology::Shared {
+                for (service, state) in &mut snapshot.services {
+                    if !services.contains(service) {
+                        *state = Default::default();
+                    }
+                }
+            }
+        });
+    }
+
+    fn activation_failed(&self, services: &[AiService], error: &AiRuntimeError) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.pending_model = None;
+                state.last_error = Some(error.to_string());
+                if state.active_model.is_none() {
+                    state.phase = if state.generation.is_some() {
+                        RuntimePhase::WorkerRunning
+                    } else {
+                        RuntimePhase::Failed
+                    };
+                }
+            }
+        });
+    }
+
+    fn request_failed(
+        &self,
+        service: AiService,
+        generation: Uuid,
+        error: &AiRuntimeError,
+        fatal: bool,
+    ) {
+        self.status.send_modify(|snapshot| {
+            let state = snapshot.services.entry(service).or_default();
+            if state.generation != Some(generation) {
+                return;
+            }
+            state.last_error = Some(error.to_string());
+            if fatal {
+                let affected = snapshot.services.values_mut().filter(|status| {
+                    self.topology == ProcessTopology::Shared
+                        && status.generation == Some(generation)
+                });
+                for status in affected {
+                    status.phase = RuntimePhase::Failed;
+                    status.active_model = None;
+                    status.pending_model = None;
+                }
+                let state = snapshot.services.entry(service).or_default();
+                state.phase = RuntimePhase::Failed;
+                state.active_model = None;
+                state.pending_model = None;
+            }
+        });
     }
 
     async fn activation_lock(&self, key: WorkerKey) -> Arc<Mutex<()>> {
@@ -508,12 +653,20 @@ impl AiSupervisor {
         if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config, &[], &[]).await?;
+        self.starting(&[service], &[]);
+        let worker = match WorkerProcess::launch(&self.config, &[], &[]).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(&[service], &error);
+                return Err(error);
+            }
+        };
         let generation = worker.generation;
         self.workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(worker)));
+        self.started(&[service], &[], generation);
         Ok(generation)
     }
 
@@ -538,12 +691,20 @@ impl AiSupervisor {
         if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config, composition.paths(), &[]).await?;
+        self.starting(composition.services(), &[]);
+        let worker = match WorkerProcess::launch(&self.config, composition.paths(), &[]).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(composition.services(), &error);
+                return Err(error);
+            }
+        };
         let generation = worker.generation;
         self.workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(worker)));
+        self.started(composition.services(), &[], generation);
         Ok(generation)
     }
 
@@ -673,7 +834,14 @@ impl AiSupervisor {
             runtime_profiles.retain(|service, _| selected.contains(service));
             runtime_profiles.insert(service, profile.clone());
         }
-        let mut candidate = WorkerProcess::launch(&self.config, layers, models).await?;
+        self.starting(services, models);
+        let mut candidate = match WorkerProcess::launch(&self.config, layers, models).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(services, &error);
+                return Err(error);
+            }
+        };
         let prepare = async {
             for (profile_service, profile) in &runtime_profiles {
                 if profile.backend == backend::BackendKind::RemoteApi {
@@ -777,6 +945,7 @@ impl AiSupervisor {
         if let Err(error) = prepare {
             let _ = candidate.child.start_kill();
             let _ = candidate.child.wait().await;
+            self.activation_failed(services, &error);
             return Err(error);
         }
         let _selection_guard = match verify {
@@ -785,6 +954,7 @@ impl AiSupervisor {
                 Err(error) => {
                     let _ = candidate.child.start_kill();
                     let _ = candidate.child.wait().await;
+                    self.activation_failed(services, &error);
                     return Err(error);
                 }
             },
@@ -797,6 +967,7 @@ impl AiSupervisor {
             .await
             .insert(key, Arc::new(Mutex::new(candidate)));
         drop(_selection_guard);
+        self.started(services, models, generation);
         if let Some(old) = old {
             let mut old = old.lock().await;
             let _ = old.child.start_kill();
@@ -814,8 +985,18 @@ impl AiSupervisor {
             return Err(AiRuntimeError::NotRunning);
         };
         let mut worker = worker.lock().await;
+        let generation = worker.generation;
         let _ = worker.child.start_kill();
         let _ = worker.child.wait().await;
+        self.status.send_modify(|snapshot| {
+            for (tracked, state) in &mut snapshot.services {
+                if (self.topology == ProcessTopology::Shared || *tracked == service)
+                    && state.generation == Some(generation)
+                {
+                    *state = Default::default();
+                }
+            }
+        });
         Ok(())
     }
 
@@ -850,6 +1031,10 @@ impl AiSupervisor {
         if current_generation != Some(generation) {
             return Err(AiRuntimeError::StaleGeneration);
         }
+        if let Err(error) = &result {
+            let fatal = worker.lock().await.failed;
+            self.request_failed(service, generation, error, fatal);
+        }
         result
     }
 
@@ -879,6 +1064,10 @@ impl AiSupervisor {
         };
         if current_generation != Some(generation) {
             return Err(AiRuntimeError::StaleGeneration);
+        }
+        if let Err(error) = &result {
+            let fatal = worker.lock().await.failed;
+            self.request_failed(service, generation, error, fatal);
         }
         result
     }
@@ -916,7 +1105,20 @@ impl AiSupervisor {
                     .and_then(|(_, revision)| revision.clone());
                 guard
                     .selections
-                    .insert(service, (plugin_id.into(), revision));
+                    .insert(service, (plugin_id.into(), revision.clone()));
+                let generation = guard.generation;
+                drop(guard);
+                self.status.send_modify(|snapshot| {
+                    let state = snapshot.services.entry(service).or_default();
+                    if state.generation == Some(generation) {
+                        state.active_model = Some(LoadedModel {
+                            plugin_id: plugin_id.into(),
+                            asset_revision: revision,
+                        });
+                        state.phase = RuntimePhase::ModelReady;
+                        state.last_error = None;
+                    }
+                });
             }
         }
         Ok(result)
@@ -1025,10 +1227,10 @@ pub async fn fetch_speech_plugin_inspection(
             ));
         }
         let mut selected = settings_overrides.as_object().cloned().unwrap_or_default();
-        if fields.contains_key("language") {
-            if let Some(language) = language_hint {
-                selected.insert("language".into(), Value::String(language.into()));
-            }
+        if fields.contains_key("language")
+            && let Some(language) = language_hint
+        {
+            selected.insert("language".into(), Value::String(language.into()));
         }
         let requested = Value::Object(selected);
         let effective = worker
@@ -1351,6 +1553,11 @@ class Plugin:
             settings: json!({}),
             asset_revision: Some("rev1".into()),
         };
+        let mut observed = supervisor.observe_status();
+        assert_eq!(
+            observed.borrow().service(AiService::Tts).phase,
+            RuntimePhase::Stopped
+        );
         supervisor
             .reconfigure(
                 AiService::Tts,
@@ -1360,6 +1567,11 @@ class Plugin:
             )
             .await
             .unwrap();
+        observed.changed().await.unwrap();
+        let active = observed.borrow_and_update().service(AiService::Tts);
+        assert_eq!(active.phase, RuntimePhase::ModelReady);
+        assert_eq!(active.active_model.unwrap().plugin_id, "fixture");
+        assert!(active.last_error.is_none());
         let result = supervisor
             .call(
                 AiService::Tts,
@@ -1379,6 +1591,11 @@ class Plugin:
                 .await
                 .is_err()
         );
+        let previous = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(previous.phase, RuntimePhase::ModelReady);
+        assert_eq!(previous.active_model.unwrap().plugin_id, "fixture");
+        assert!(previous.last_error.is_some());
+        assert!(previous.pending_model.is_none());
         assert!(
             supervisor
                 .call(
@@ -1389,7 +1606,34 @@ class Plugin:
                 .await
                 .is_ok()
         );
+        assert!(
+            supervisor
+                .call(AiService::Tts, "unknown_operation", json!({}))
+                .await
+                .is_err()
+        );
+        let nonfatal = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(nonfatal.phase, RuntimePhase::ModelReady);
+        assert!(nonfatal.last_error.is_some());
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        let died = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(died.phase, RuntimePhase::Failed);
+        assert!(died.active_model.is_none());
         supervisor.stop(AiService::Tts).await.unwrap();
+        let stopped = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(stopped.phase, RuntimePhase::Stopped);
+        assert!(stopped.active_model.is_none());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
