@@ -308,8 +308,8 @@ def serve(host: PluginHost) -> None:
     for line in sys.stdin:
         request_id: Any = None
         try:
-            if len(line) > 1024 * 1024:
-                raise ValueError("request exceeds 1 MiB")
+            if len(line) > 32 * 1024 * 1024:
+                raise ValueError("request exceeds 32 MiB")
             request = json.loads(line)
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")

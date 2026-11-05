@@ -16,10 +16,6 @@ component CharacterSelector inherits Rectangle {
     height: 32px;
     HorizontalLayout {
         padding-left: 7px; padding-right: 5px; spacing: 5px;
-        Centered { width: 24px; CharacterPortrait {
-            character: root.character;
-            width: 24px; height: 24px; surface: SandboxTheme.input;
-        } }
         Caption {
             text: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
             font-size: 12px; horizontal-stretch: 1;
@@ -56,8 +52,9 @@ component SessionSelection inherits VerticalLayout {
     HorizontalLayout {
         spacing: 8px; height: 32px;
         Caption { text: I18n.i18n("sandbox.label.character", "Персонаж"); color: SandboxTheme.muted; font-size: 12px; min-width: 104px; }
+        Centered { width: 32px; CharacterPortrait { character: root.character; width: 32px; height: 32px; surface: SandboxTheme.panel; } }
         CharacterSelector { character: root.character; horizontal-stretch: 1; selected(id) => { root.selected(id); } }
-        Centered { width: 26px; GearButton { label: I18n.i18n("sandbox.settings.character", "Настройки персонажа"); activated => { root.settings(); } } }
+        Centered { width: 28px; GearButton { width: 28px; height: 28px; background: self.hovered ? #c04c80 : #b74b7d; label: I18n.i18n("sandbox.settings.character", "Настройки персонажа"); activated => { root.settings(); } } }
     }
     ValueRow { title: I18n.i18n("sandbox.label.prompt", "Набор промптов"); value: root.preset; }
     ValueRow { title: I18n.i18n("sandbox.label.model", "Модель"); value: root.model == "" ? "—" : root.model; }

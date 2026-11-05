@@ -327,6 +327,7 @@ pub struct PresetGenerationEdit {
 }
 
 pub struct PresetConnectionEdit {
+    pub key: Option<super::SecretKey>,
     pub name: String,
     pub connection: Option<PresetGenerationEdit>,
 }
@@ -343,6 +344,14 @@ impl PresetRecord {
 }
 
 pub trait PresetCredentials: Send + Sync {
+    fn store(
+        &self,
+        _key: &super::SecretKey,
+    ) -> Result<super::CredentialReference, PresetCatalogError> {
+        Err(PresetCatalogError::Storage(
+            "credential store is read-only".into(),
+        ))
+    }
     fn get(&self, key: &str) -> Result<String, PresetCatalogError>;
     fn resolve(
         &self,
@@ -599,6 +608,27 @@ impl PresetCatalog {
         }
     }
 
+    pub fn editor_key(&self, id: PresetId) -> Result<Option<super::SecretKey>, PresetCatalogError> {
+        let state = self.state.read().expect("preset catalog poisoned");
+        let record = state
+            .stored
+            .entries
+            .get(&id)
+            .ok_or(PresetCatalogError::NotFound(id))?;
+        let reference = match &record.definition {
+            PresetDefinition::Gemini(config) => Some(&config.credential),
+            PresetDefinition::OpenAi(config) => config.credential.as_ref(),
+            PresetDefinition::Unconfigured => None,
+        };
+        reference
+            .map(|reference| {
+                self.credentials
+                    .resolve(reference)
+                    .map(super::SecretKey::new)
+            })
+            .transpose()
+    }
+
     pub fn contains(&self, id: PresetId) -> bool {
         let state = self.state.read().expect("preset catalog poisoned");
         state.runtime.contains_key(&id) || state.stored.entries.contains_key(&id)
@@ -664,7 +694,28 @@ impl PresetCatalog {
         let edit_name = edit.name;
         let definition = match edit.connection {
             None => PresetDefinition::Unconfigured,
-            Some(edit) => {
+            Some(mut connection) => {
+                if let Some(key) = edit.key {
+                    connection.credential = if key.expose().is_empty() {
+                        None
+                    } else {
+                        let previous = match &current.definition {
+                            PresetDefinition::Gemini(config) => Some(&config.credential),
+                            PresetDefinition::OpenAi(config) => config.credential.as_ref(),
+                            PresetDefinition::Unconfigured => None,
+                        };
+                        if let Some(reference) = previous.filter(|r| {
+                            self.credentials
+                                .resolve(r)
+                                .is_ok_and(|value| value == key.expose())
+                        }) {
+                            Some(reference.clone())
+                        } else {
+                            Some(self.credentials.store(&key)?)
+                        }
+                    };
+                }
+                let edit = connection;
                 if let PresetProtocol::OpenAi(protocol) = edit.protocol {
                     let (transforms, mut options) = match &current.definition {
                         PresetDefinition::OpenAi(config) if config.protocol == protocol => {
@@ -785,6 +836,66 @@ mod tests {
     }
 
     #[test]
+    fn editor_reads_and_replaces_real_key_without_persisting_it_in_the_catalog() {
+        let directory = std::env::temp_dir().join(format!("key-editor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let credentials = Arc::new(super::super::ApplicationPresetCredentials::new(
+            directory.join("keys.json"),
+        ));
+        let reference = credentials
+            .store(&super::super::SecretKey::new("original-fixture-key"))
+            .unwrap();
+        let repository = Arc::new(JsonPresetRepository::new(directory.join("presets.json")));
+        let catalog =
+            PresetCatalog::open(Default::default(), repository.clone(), credentials.clone())
+                .unwrap();
+        let mut record = example("model");
+        let PresetDefinition::Gemini(config) = &mut record.definition else {
+            panic!()
+        };
+        config.credential = reference.clone();
+        let id = catalog.create(record).unwrap();
+        assert_eq!(
+            catalog.editor_key(id).unwrap().unwrap().expose(),
+            "original-fixture-key"
+        );
+        catalog
+            .update_connection(
+                id,
+                PresetConnectionEdit {
+                    key: Some(super::super::SecretKey::new("replacement-fixture-key")),
+                    name: "edited".into(),
+                    connection: Some(PresetGenerationEdit {
+                        protocol: PresetProtocol::Gemini,
+                        send_temperature: true,
+                        send_max_output_tokens: true,
+                        endpoint: "http://127.0.0.1:8888/v1beta/".into(),
+                        model: "model".into(),
+                        credential: None,
+                        temperature: 0.7,
+                        max_output_tokens: 128,
+                        timeout_ms: 1000,
+                    }),
+                },
+            )
+            .unwrap();
+        let reopened =
+            PresetCatalog::open(Default::default(), repository, credentials.clone()).unwrap();
+        let key = reopened.editor_key(id).unwrap().unwrap();
+        assert_eq!(key.expose(), "replacement-fixture-key");
+        assert!(!format!("{key:?}").contains("replacement-fixture-key"));
+        let json = std::fs::read_to_string(directory.join("presets.json")).unwrap();
+        assert!(
+            !json.contains("original-fixture-key") && !json.contains("replacement-fixture-key")
+        );
+        assert_eq!(
+            credentials.resolve(&reference).unwrap(),
+            "original-fixture-key"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn connection_edits_preserve_the_existing_provider_pipeline() {
         let catalog = PresetCatalog::new(BTreeMap::new());
         let mut record = example("before");
@@ -798,6 +909,7 @@ mod tests {
             .update_connection(
                 id,
                 PresetConnectionEdit {
+                    key: None,
                     name: "renamed".into(),
                     connection: Some(PresetGenerationEdit {
                         protocol: PresetProtocol::Gemini,

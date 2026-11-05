@@ -9,8 +9,9 @@ export component Card inherits Rectangle {
 export component SettingsLabel inherits Caption { font-family: SettingsTheme.font-family; }
 export component SettingsField inherits Field {
     font-family: SettingsTheme.font-family;
-    background: SettingsTheme.field;
-    border-color: root.focused ? SettingsTheme.field-focus-border : SettingsTheme.field-border;
+    background: root.enabled ? SettingsTheme.field : SettingsTheme.input;
+    text-color: root.enabled ? SettingsTheme.text : SettingsTheme.muted;
+    border-color: !root.enabled ? SettingsTheme.border : root.focused ? SettingsTheme.field-focus-border : SettingsTheme.field-border;
     border-radius: 10px;
 }
 export component SettingsButton inherits HeaderButton {

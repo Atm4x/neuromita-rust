@@ -6,6 +6,8 @@ import sys
 
 import base64
 import io
+import json
+from pathlib import Path
 import re
 import wave
 
@@ -39,12 +41,18 @@ def _normalized(text: str) -> str:
 _FILTER = frozenset(map(_normalized, HALLUCINATIONS))
 
 
+def _language_schema(plugin_id: str) -> dict:
+    manifest = json.loads(Path(__file__).with_name("languages.json").read_text(encoding="utf-8"))
+    details = manifest[plugin_id]
+    return {"type": "string", "default": details["default"], "choices": [entry["id"] for entry in details["choices"]]}
+
+
 def schema(plugin_id: str) -> dict:
     if plugin_id == "google":
-        return {"language": {"type": "string", "default": "ru-RU"}}
+        return {"language": _language_schema("google")}
     if plugin_id == "whisper":
         return {
-            "language": {"type": "string", "default": "ru"},
+            "language": _language_schema(plugin_id),
             "device": {"type": "string", "default": "cpu", "choices": ["cpu", "cuda"]},
             "model": {"type": "string", "default": "large-v3-turbo", "choices": list(WHISPER_MODELS)},
             "compute_type": {"type": "string", "default": "auto", "choices": ["auto", "int8", "float16", "float32", "int8_float16"]},
@@ -52,13 +60,13 @@ def schema(plugin_id: str) -> dict:
         }
     if plugin_id in ("gigaam", "gigaam_onnx"):
         return {
-            "language": {"type": "string", "default": "ru", "choices": ["ru"]},
+            "language": _language_schema(plugin_id),
             "model": {"type": "string", "default": "v3_e2e_rnnt" if plugin_id == "gigaam" else "v2_rnnt", "choices": list(GIGAAM_MODELS)},
             "device": {"type": "string", "default": "cpu", "choices": ["cpu", "cuda"] if plugin_id == "gigaam" else ["cpu", "dml"]},
         }
     if plugin_id == "whisper_onnx":
         return {
-            "language": {"type": "string", "default": "ru"},
+            "language": _language_schema(plugin_id),
             "device": {"type": "string", "default": "cpu", "choices": ["cpu", "dml"]},
             "max_tokens": {"type": "integer", "default": 192, "choices": [96, 128, 160, 192, 224, 256]},
         }

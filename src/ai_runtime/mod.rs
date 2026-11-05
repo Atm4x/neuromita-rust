@@ -12,7 +12,9 @@ pub mod constraints;
 mod distribution;
 pub mod hardware;
 pub mod install;
+pub mod installed_speech;
 mod layer;
+pub mod live_speech;
 pub mod managed;
 pub mod overlay;
 pub mod production;
@@ -21,6 +23,7 @@ pub mod runtime_status;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;
+pub mod speech_languages;
 pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;
@@ -47,7 +50,7 @@ use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
 use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

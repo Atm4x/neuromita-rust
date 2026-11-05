@@ -1,9 +1,18 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
-    ai_runtime::speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    ai_runtime::{
+        runtime_status::{RuntimePhase, RuntimeSnapshot},
+        speech::Transcript,
+        speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
-    audio::input_catalog::{AudioInputCatalog, AudioInputDevice},
+    audio::{
+        controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
+        input_catalog::AudioInputDevice,
+        monitor::MonitorSnapshot,
+        session::{SpeechConversation, SpeechFuture, SpeechSessionError},
+    },
     character::CharacterId,
     generation::PresetRecord,
     generation::{
@@ -43,7 +52,7 @@ pub enum Command {
     VoiceName(String),
     SaveTts(TtsPreferences),
     SaveCharacterVoice(Option<CharacterId>, String),
-    SaveAsr(AsrPreferences, String),
+    SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
     RefreshHardware,
@@ -54,9 +63,20 @@ pub enum Command {
     Cancel(RequestId),
     Refresh,
     Volume(u8),
+    SpeechSessionEnabled(bool),
+    SpeechPushToTalk(bool),
+    MicrophoneTest(bool, String, String),
 }
 
 pub enum Update {
+    RuntimeStatus(RuntimeSnapshot),
+    SpeechSessionStatus(SpeechSessionSnapshot),
+    MicrophoneTestStatus(MonitorSnapshot),
+    RecognizedText {
+        text: String,
+        auto_send_after: Option<Duration>,
+        merge_with_draft: bool,
+    },
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
@@ -127,18 +147,92 @@ impl Drop for DesktopRuntime {
     }
 }
 
-async fn discover_input_devices(directory: &std::path::Path) -> Vec<AudioInputDevice> {
-    let configured = std::env::var_os("NEUROMITA_FFMPEG").map(PathBuf::from);
-    let candidates = [
-        configured,
-        Some(directory.join("AIData/bin/ffmpeg.exe")),
-        Some(directory.join("AIData/bin/ffmpeg")),
-    ];
-    let executable = candidates
-        .into_iter()
-        .flatten()
-        .find(|path| path.is_absolute() && path.is_file());
-    AudioInputCatalog::discover(executable.as_deref()).await
+fn find_binary(directory: &std::path::Path, variable: &str, filename: &str) -> Option<PathBuf> {
+    [
+        std::env::var_os(variable).map(PathBuf::from),
+        Some(directory.join("AIData/bin").join(filename)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_absolute() && path.is_file())
+}
+
+struct DesktopTranscriptSink(mpsc::UnboundedSender<Transcript>);
+
+impl SpeechConversation for DesktopTranscriptSink {
+    fn reply<'a>(
+        &'a self,
+        transcript: &'a Transcript,
+    ) -> SpeechFuture<'a, Option<neuromita::voice::AudioArtifact>> {
+        Box::pin(async move {
+            self.0
+                .send(transcript.clone())
+                .map_err(|_| SpeechSessionError::DispatchClosed)?;
+            Ok(None)
+        })
+    }
+}
+
+fn dispatch_policy(preferences: &AsrPreferences) -> Option<Duration> {
+    preferences.instant_send.then(|| {
+        if preferences.delayed_send {
+            Duration::from_millis(u64::from(preferences.send_delay_ms))
+        } else {
+            Duration::ZERO
+        }
+    })
+}
+
+async fn enable_speech_session(
+    app: &ApplicationLifecycle,
+    directory: &std::path::Path,
+    conversation: Arc<dyn SpeechConversation>,
+) -> Result<(), String> {
+    let administration = app.presenter();
+    let runtime = administration.ai_runtime.refresh_status().await;
+    if runtime.service(neuromita::ai_runtime::AiService::Asr).phase != RuntimePhase::ModelReady {
+        return Err("ASR модель не инициализирована; выберите и активируйте её в AI Engine".into());
+    }
+    let settings = administration
+        .settings
+        .snapshot()
+        .map_err(|e| e.to_string())?;
+    let preferences = &settings.values.speech.asr;
+    let devices = administration
+        .audio_input
+        .devices()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !devices.iter().any(|device| {
+        device.id == preferences.device_id && device.backend == preferences.audio_backend
+    }) {
+        return Err("Выбранное устройство ввода не найдено или не соответствует backend".into());
+    }
+    let ffmpeg = find_binary(
+        directory,
+        "NEUROMITA_FFMPEG",
+        if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        },
+    )
+    .unwrap_or_default();
+    let ffplay = find_binary(
+        directory,
+        "NEUROMITA_FFPLAY",
+        if cfg!(windows) {
+            "ffplay.exe"
+        } else {
+            "ffplay"
+        },
+    )
+    .unwrap_or_default();
+    let config = SpeechCaptureConfig::from_preferences(preferences, ffmpeg, ffplay)
+        .map_err(|e| e.to_string())?;
+    app.start_speech_capture_routed(config, conversation)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn start(
@@ -180,7 +274,12 @@ async fn start(
         }
         None => ApplicationConfig::persistent_unconfigured(generator, limits, bind, directory),
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .with_installed_speech_runtime(
+        neuromita::ai_runtime::installed_speech::InstalledSpeechEnvironment::for_desktop(
+            directory.to_path_buf(),
+        ),
+    );
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
@@ -195,10 +294,6 @@ async fn run(
 ) {
     publish(Update::Connecting);
     let catalog = SpeechModelCatalog::for_desktop(directory.clone());
-    publish(Update::SpeechInventory(
-        Box::new(catalog.snapshot().await),
-        discover_input_devices(&directory).await,
-    ));
     let app = match start(&directory, initial_model.as_deref()).await {
         Ok(app) => app,
         Err(error) => {
@@ -208,11 +303,21 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    match app.presenter().audio_input.devices().await {
+        Ok(devices) => publish(Update::SpeechInventory(
+            Box::new(catalog.snapshot().await),
+            devices,
+        )),
+        Err(error) => publish(Update::AdminError(error.to_string())),
+    }
+    if let Some(problem) = app.speech_startup_warning() {
+        publish(Update::AdminError(format!("Speech runtime: {problem}")));
+    }
     publish(hardware_snapshot().await);
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(app.presenter(), &catalog, &mut receive, &stop, &publish).await {
+    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -222,12 +327,14 @@ async fn run(
 }
 
 async fn observe(
-    administration: &GuiPresenter,
+    app: &ApplicationLifecycle,
+    directory: &std::path::Path,
     catalog: &SpeechModelCatalog,
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
 ) -> Result<(), String> {
+    let administration = app.presenter();
     let mut releases = administration.releases.observe();
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
@@ -238,26 +345,41 @@ async fn observe(
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
     let mut presets = presenter.observe_presets();
     let mut selection = presenter.observe_selection().map_err(|e| e.to_string())?;
+    let mut runtime_status = administration.ai_runtime.observe();
+    let mut speech_status = administration.speech.observe();
+    let mut microphone_test = administration.audio_input.observe_test();
+    let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
+    let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
+    let mut liveness = tokio::time::interval(Duration::from_secs(5));
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh_views = true;
     loop {
-        publish(Update::Releases(releases.borrow_and_update().clone()));
-        publish(Update::Connections(connections.borrow_and_update().clone()));
-        requests.borrow_and_update();
-        settings.borrow_and_update();
-        presets.borrow_and_update();
-        selection.borrow_and_update();
-        match administration.settings.snapshot() {
-            Ok(settings) => publish(Update::Administration(Box::new(
-                super::settings::AdministrationSnapshot {
-                    settings,
-                    presets: administration.presets.snapshot(),
-                },
-            ))),
-            Err(error) => publish(Update::AdminError(error.to_string())),
+        if refresh_views {
+            publish(Update::Releases(releases.borrow_and_update().clone()));
+            publish(Update::Connections(connections.borrow_and_update().clone()));
+            requests.borrow_and_update();
+            settings.borrow_and_update();
+            presets.borrow_and_update();
+            selection.borrow_and_update();
+            match administration.settings.snapshot() {
+                Ok(settings) => publish(Update::Administration(Box::new(
+                    super::settings::AdministrationSnapshot {
+                        settings,
+                        presets: administration.presets.snapshot(),
+                    },
+                ))),
+                Err(error) => publish(Update::AdminError(error.to_string())),
+            }
+            match presenter.snapshot(character).await {
+                Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
+                Err(error) => publish(Update::Error(error.to_string())),
+            }
+            publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
+            publish(Update::SpeechSessionStatus(
+                administration.speech.snapshot(),
+            ));
         }
-        match presenter.snapshot(character).await {
-            Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
-            Err(error) => publish(Update::Error(error.to_string())),
-        }
+        refresh_views = true;
         tokio::select! {
             biased;
             _ = stop.cancelled() => return Ok(()),
@@ -278,9 +400,35 @@ async fn observe(
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+                Some(Command::SpeechSessionEnabled(enabled)) => {
+                    let result = if enabled {
+                        enable_speech_session(app, directory, Arc::clone(&transcript_sink)).await
+                    } else {
+                        app.stop_speech_capture().await;
+                        Ok(())
+                    };
+                    if let Err(error) = result { publish(Update::AdminError(error)); }
+                    publish(Update::SpeechSessionStatus(administration.speech.snapshot()));
+                },
+                Some(Command::SpeechPushToTalk(pressed)) => {
+                    if let Err(error) = app.press_speech_button(pressed).await && pressed {
+                        publish(Update::AdminError(error.to_string()));
+                    }
+                },
+                Some(Command::MicrophoneTest(enabled, backend, device)) => {
+                    let result = if enabled {
+                        administration.audio_input.start_test(&backend, &device).await
+                    } else {
+                        administration.audio_input.stop_test().await
+                    };
+                    if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
+                },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
-                    publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), discover_input_devices(&catalog.data_directory).await));
+                    match administration.audio_input.devices().await {
+                        Ok(devices) => publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices)),
+                        Err(error) => publish(Update::AdminError(error.to_string())),
+                    }
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
@@ -328,13 +476,47 @@ async fn observe(
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
             },
+            transcript = transcript_updates.recv() => {
+                if let Some(transcript) = transcript {
+                    let text = transcript.text.trim();
+                    if !text.is_empty() {
+                        let preferences = administration.settings.asr.preferences.get();
+                        publish(Update::RecognizedText {
+                            text: text.to_owned(),
+                            auto_send_after: dispatch_policy(&preferences),
+                            merge_with_draft: preferences.merge_chat,
+                        });
+                    }
+                }
+            },
             update = memories.updates.recv(), if !memories.closed => { match update { Some(update) => publish(update), None => memories.closed = true } },
+            result = speech_status.changed() => {
+                result.map_err(|_| "Speech session observation closed")?;
+                publish(Update::SpeechSessionStatus(speech_status.borrow_and_update().clone()));
+            },
+            result = microphone_test.changed() => {
+                result.map_err(|_| "Microphone test observation closed")?;
+                publish(Update::MicrophoneTestStatus(microphone_test.borrow_and_update().clone()));
+                refresh_views = false;
+            },
             result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
             result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
             result = selection.changed() => { result.map_err(|_| "Timeline observation closed")?; },
+            result = async {
+                match runtime_status.as_mut() {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if result.is_err() { runtime_status = None; }
+            },
+            _ = liveness.tick() => {
+                let status = administration.ai_runtime.refresh_status().await;
+                publish(Update::RuntimeStatus(status));
+            },
         }
     }
 }
@@ -408,4 +590,37 @@ async fn hardware_snapshot() -> Update {
                 },
             );
     Update::Hardware(neuromita::presentation::hardware::HardwarePresenter::present(inventory))
+}
+
+#[cfg(test)]
+mod speech_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn manual_speech_does_not_trigger_reply() {
+        let mut settings = AsrPreferences::default();
+        assert_eq!(dispatch_policy(&settings), None);
+        settings.instant_send = true;
+        settings.delayed_send = false;
+        assert_eq!(dispatch_policy(&settings), Some(Duration::ZERO));
+        settings.delayed_send = true;
+        settings.send_delay_ms = 2400;
+        assert_eq!(
+            dispatch_policy(&settings),
+            Some(Duration::from_millis(2400))
+        );
+    }
+
+    #[tokio::test]
+    async fn speech_sink_only_delivers_transcripts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = DesktopTranscriptSink(tx);
+        sink.reply(&Transcript {
+            text: "spoken words".into(),
+            language: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(rx.recv().await.unwrap().text, "spoken words");
+    }
 }

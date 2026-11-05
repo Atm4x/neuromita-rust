@@ -6,7 +6,7 @@ pub mod gemini;
 mod http;
 pub mod openai;
 mod presets;
-pub use credentials::{ApplicationPresetCredentials, CredentialReference};
+pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretKey};
 mod provider;
 pub mod python_import;
 mod structured;

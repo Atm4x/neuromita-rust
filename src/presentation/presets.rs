@@ -34,6 +34,8 @@ pub struct PresetParameterOption {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PresetView {
+    pub api_key: Option<crate::generation::SecretKey>,
+    pub credential_error: Option<String>,
     pub output_token_wire_key: &'static str,
     pub template_id: &'static str,
     pub send_temperature: bool,
@@ -147,7 +149,10 @@ impl PresetsPresenter {
                         definition.timeout_ms,
                     ),
                 };
+                let key = self.catalog.editor_key(id);
                 PresetView {
+                    api_key: key.as_ref().ok().cloned().flatten(),
+                    credential_error: key.err().map(|error| error.to_string()),
                     output_token_wire_key: match &record.definition {
                         PresetDefinition::Gemini(_) => "maxOutputTokens",
                         PresetDefinition::OpenAi(config)

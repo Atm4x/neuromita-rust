@@ -109,7 +109,7 @@ impl<G: VoiceGate> SpeechSegmenter<G> {
             || config.end_silence_frames == 0
             || config.min_segment_frames == 0
             || config.max_segment_frames < config.min_segment_frames
-            || config.max_segment_frames > 625
+            || config.max_segment_frames > 37_500
         {
             return Err(SegmentError::InvalidConfiguration);
         }
@@ -236,6 +236,23 @@ mod tests {
             min_segment_frames: 2,
             max_segment_frames: 30,
         }
+    }
+
+    #[test]
+    fn speech_longer_than_ten_seconds_is_not_forcibly_cut() {
+        let mut config = config(SpeechMode::PushToTalk);
+        config.max_segment_frames = 2_000;
+        let mut segmenter = SpeechSegmenter::new(DeterministicGate, config).unwrap();
+        segmenter.set_pressed(true);
+        for _ in 0..1_500 {
+            assert!(segmenter.process([1; FRAME_SAMPLES]).is_none());
+        }
+        let segment = segmenter.set_pressed(false).unwrap();
+        assert_eq!(segment.samples.len(), 1_500 * FRAME_SAMPLES);
+        assert_eq!(
+            segment.as_wav().unwrap().len(),
+            44 + 1_500 * FRAME_SAMPLES * 2
+        );
     }
 
     #[test]

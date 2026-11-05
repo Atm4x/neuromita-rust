@@ -1,6 +1,6 @@
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
-export struct PresetItem { output-token-wire-key: string, template-id: string, id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string, configured: bool, temperature-enabled: bool, tokens-enabled: bool }
+export struct PresetItem { key-error: string, output-token-wire-key: string, template-id: string, id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string, configured: bool, temperature-enabled: bool, tokens-enabled: bool }
 export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, pricing: string, badge-kind: string, available: bool }
 export struct PresetParameterItem { id: string, wire-key: string, title: string, title-key: string, description: string, description-key: string, editable: bool, sent: bool }
 export global SettingsUi {
@@ -58,6 +58,7 @@ export global SettingsUi {
     in-out property <string> preset-url-template;
     out property <string> preset-request-url: preset-url-template == "" ? preset-endpoint :
         (preset-model == "" ? "" : preset-url-template.replace-all("{model}", preset-model));
+    in-out property <bool> preset-key-revealed;
     in-out property <string> preset-key-env;
     in-out property <bool> preset-temperature-enabled;
     in-out property <bool> preset-tokens-enabled;

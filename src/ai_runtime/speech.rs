@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use super::{AiRuntimeError, AiService, AiSupervisor};
 
-const MAX_WAV_BYTES: usize = 700_000;
+const MAX_WAV_BYTES: usize = 44 + 600 * 16_000 * 2;
 
 #[derive(Debug, Error)]
 pub enum SpeechRecognitionError {

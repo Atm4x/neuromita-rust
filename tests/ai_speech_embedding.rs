@@ -61,6 +61,17 @@ async fn typed_asr_client_accepts_mock_segment_and_rejects_bad_audio() {
     let segment = recognizer.transcribe_wav(&wav()).await.unwrap();
     assert_eq!(segment.text, "");
     assert!(recognizer.transcribe_wav(b"invalid").await.is_err());
+    let longer_than_old_ipc_bound = neuromita::audio::segment::SpeechSegment {
+        samples: vec![0; 60 * 16_000],
+    }
+    .as_wav()
+    .unwrap();
+    assert!(
+        recognizer
+            .transcribe_wav(&longer_than_old_ipc_bound)
+            .await
+            .is_ok()
+    );
     sup.stop(AiService::Asr).await.unwrap();
 }
 

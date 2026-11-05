@@ -26,6 +26,8 @@ import { ApiPresetsWorkspace } from "../settings/api-presets.slint";
 import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "../settings/form-controls.slint";
 export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem }
 
+export struct SettingsHeaderInfo { title: string, description: string, glyph: string }
+
 component PresetChoice inherits Rectangle {
     in property <string> value;
     callback selected(string);
@@ -123,11 +125,11 @@ component CharacterWorkspace inherits HorizontalLayout {
                     SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }
                 }
             }
-            SettingsScrollView {
+            character-scroll := SettingsScrollView {
                 vertical-stretch: 1;
                 content-height: sections.preferred-height;
                 sections := VerticalLayout {
-                    width: parent.width;
+                    width: character-scroll.visible-width;
                     padding: 0px; spacing: 12px; alignment: start;
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
 VerticalLayout {
@@ -233,6 +235,20 @@ export component SettingsPage inherits Rectangle {
     callback guide();
     callback language-selected(string);
     property <string> delete-id;
+    property <[SettingsHeaderInfo]> headers: [
+        { title: I18n.i18n("settings.general.title", "Общие настройки"), description: I18n.i18n("settings.general.pyqt-description", "Базовые параметры интерфейса, приватности, памяти и языка."), glyph: Fa.gear },
+        { title: I18n.i18n("settings.api.heading", "Подключение к моделям"), description: I18n.i18n("settings.api.subtitle", "Провайдеры, пресеты, ключи и параметры генерации ответов."), glyph: "\u{f1e6}" },
+        { title: I18n.i18n("settings.characters.title", "Настройки персонажей"), description: I18n.i18n("settings.characters.description", "Профили, шаблоны поведения и история выбранного персонажа."), glyph: "\u{f007}" },
+        { title: I18n.i18n("voice.title", "Настройки озвучки"), description: I18n.i18n("voice.subtitle", "Голоса персонажей, подключение и воспроизведение."), glyph: "\u{f028}" },
+        { title: I18n.i18n("settings.language.title", "Язык интерфейса"), description: I18n.i18n("settings.language.subtitle", "Выбор языка интерфейса и подключение кастомных переводов."), glyph: "\u{f0ac}" },
+        { title: I18n.i18n("asr.title", "Настройки микрофона"), description: I18n.i18n("asr.description", "Устройства ввода, распознавание речи и проверка микрофона."), glyph: "\u{f130}" },
+        { title: I18n.i18n("settings.ai-engine.title", "Управление ИИ-движком"), description: I18n.i18n("settings.ai-engine.description", "Аппаратный профиль, модели, режим workers и обслуживание AI-окружений."), glyph: "\u{f2db}" },
+        { title: I18n.i18n("settings.game.title", "Связь с игрой"), description: I18n.i18n("settings.game.subtitle", "Параметры подключения и обмена данными с игрой."), glyph: "\u{f11b}" },
+        { title: I18n.i18n("settings.models.title", "Модели и поведение"), description: I18n.i18n("settings.models.subtitle", "Управление логикой ответа, памятью, мышлением и RAG."), glyph: "\u{f544}" },
+        { title: I18n.i18n("settings.images.title", "Изображения и камера"), description: I18n.i18n("settings.images.subtitle", "Захват экрана, камера, описание изображений и хранение."), glyph: "\u{f03e}" },
+        { title: I18n.i18n("settings.updates", "Обновления"), description: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."), glyph: "\u{f2f1}" },
+        { title: I18n.i18n("settings.data", "Сбор данных"), description: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."), glyph: Fa.database },
+    ];
     in-out property <bool> general-sections-expanded: true;
     property <string> voice-draft: SettingsUi.settings-voice-name;
     background: SettingsTheme.canvas;
@@ -277,6 +293,11 @@ export component SettingsPage inherits Rectangle {
                         if (section == 2 && root.connected) { MemoryUi.select(SettingsUi.selected-character); }
                     }
                 }
+                SettingsSectionHeading {
+                    title: root.headers[SettingsUi.section].title;
+                    description: root.headers[SettingsUi.section].description;
+                    glyph: root.headers[SettingsUi.section].glyph;
+                }
                 if SettingsUi.settings-error != "": Card {
                     background: SettingsTheme.error-background;
                     HorizontalLayout { padding: 12px; spacing: 10px;
@@ -284,17 +305,12 @@ export component SettingsPage inherits Rectangle {
                         Centered { SettingsButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { SettingsUi.settings-error = ""; } } }
                     }
                 }
-                if SettingsUi.section == 0: SettingsScrollView {
+                if SettingsUi.section == 0: general-scroll := SettingsScrollView {
                     content-height: general-content.preferred-height;
                     general-content := VerticalLayout {
-                        width: parent.width;
-                        padding: 2px; padding-right: 10px;
+                        width: general-scroll.visible-width;
+                        padding: 2px;
                         spacing: SettingsTheme.section-gap; alignment: start;
-                        SectionHeading {
-                            title: I18n.i18n("settings.general.title", "Общие настройки");
-                            description: I18n.i18n("settings.general.pyqt-description", "Базовые параметры интерфейса, приватности, памяти и языка.");
-                            glyph: Fa.gear;
-                        }
                         CollapsibleSettingsSection {
                             title: I18n.i18n("settings.general.visible-sections", "Видимые разделы");
                             subtitle: I18n.i18n("settings.general.visible-sections-note", "Включите только те разделы, которыми пользуетесь — остальные спрячутся из настроек и боковой панели.");
@@ -370,18 +386,13 @@ export component SettingsPage inherits Rectangle {
                     connected: root.connected;
                 }
                 if SettingsUi.section == 2: VerticalLayout {
-                    padding-left: 2px; padding-right: 6px; padding-bottom: 2px; spacing: 12px;
-                    SectionHeading {
-                        title: I18n.i18n("settings.characters.title", "Настройки персонажей");
-                        description: I18n.i18n("settings.characters.description", "Профили, шаблоны поведения и история выбранного персонажа.");
-                        glyph: "\u{f007}";
-                    }
+                    padding: 2px; spacing: 12px;
                     CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
                 }
-                if SettingsUi.section == 3: ScrollView {
-                    content-width: self.visible-width;
-                    VoiceSettingsPage {
-                        width: parent.width - 10px;
+                if SettingsUi.section == 3: voice-scroll := SettingsScrollView {
+                    content-height: voice-page.preferred-height;
+                    voice-page := VoiceSettingsPage {
+                        width: voice-scroll.visible-width;
                         connected: root.connected;
                         volume: SettingsUi.settings-volume;
                         in-chat: SettingsUi.settings-voice-launcher;
@@ -390,9 +401,9 @@ export component SettingsPage inherits Rectangle {
                     }
                 }
                 if SettingsUi.section == 6: AiEngineWorkspace {}
-                if SettingsUi.section == 5: ScrollView {
-                    content-width: self.visible-width;
-                    AsrSettingsPage { width: parent.width - 10px; }
+                if SettingsUi.section == 5: asr-scroll := SettingsScrollView {
+                    content-height: asr-page.preferred-height;
+                    asr-page := AsrSettingsPage { width: asr-scroll.visible-width; }
                 }
                 if SettingsUi.section == 4: LanguageSettingsPage {
                     language-selected(code) => { root.language-selected(code); }

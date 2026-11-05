@@ -6,7 +6,7 @@ mod probe {
         import { CollapsibleSettingsSection } from "../../../ui/components/collapsible-section.slint";
         import { SettingsTheme } from "../../../ui/settings/theme.slint";
         import { SettingsScrollView } from "../../../ui/settings/scroll-view.slint";
-        import { SettingsToggleRow } from "../../../ui/components/settings-kit.slint";
+        import { SettingsToggleRow, SettingsNumberRow, SettingsButtonRow } from "../../../ui/components/settings-kit.slint";
         export { I18n }
         export component ControlsProbe inherits Window {
             preferred-width: 400px; preferred-height: 140px;
@@ -20,6 +20,18 @@ mod probe {
         export component TranslationProbe inherits Window {
             out property <string> welcome: I18n.i18n("launcher.home.welcome", "Добро пожаловать!");
             out property <string> more: I18n.i18n("launcher.actions.more", "Дополнительно");
+        }
+        export component RowSizingProbe inherits Window {
+            preferred-width: 500px; preferred-height: 200px;
+            out property <length> first-height: first.height;
+            out property <length> second-top: second.y;
+            out property <length> second-bottom: second.y + second.height;
+            out property <length> button-top: button.y;
+            VerticalLayout { padding: 0px; spacing: 10px; alignment: start;
+                first := SettingsNumberRow { title: "Minimum rounds"; value: 1; }
+                second := SettingsNumberRow { title: "Maximum turns"; value: 24; }
+                button := SettingsButtonRow { title: "Launch game"; button-text: "Launch"; }
+            }
         }
         export component AccordionProbe inherits Window {
             background: SettingsTheme.panel;
@@ -50,11 +62,13 @@ mod probe {
             out property <length> last-bottom: last.y + last.height;
             out property <length> content-height: sections.preferred-height;
             out property <bool> scrollable: scroll.scrollable;
+            out property <length> viewport-width: scroll.visible-width;
+            out property <length> viewport-left: sections.x;
             scroll := SettingsScrollView {
                 width: parent.width; height: parent.height;
                 content-height: sections.preferred-height;
                 sections := VerticalLayout {
-                    width: parent.width; padding: 0px; spacing: 12px; alignment: start;
+                    width: scroll.visible-width; padding: 0px; spacing: 12px; alignment: start;
                     first := CollapsibleSettingsSection { expanded: root.expanded-count > 0; Rectangle { height: root.payload-height; } }
                     second := CollapsibleSettingsSection { expanded: root.expanded-count > 1; Rectangle { height: 200px; } }
                     third := CollapsibleSettingsSection { expanded: root.expanded-count > 2; Rectangle { height: 300px; } }
@@ -99,6 +113,14 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     assert!(green_rows[0] > controls.get_row_top() + 17.0);
     assert!(*green_rows.last().unwrap() < controls.get_row_top() + 43.0);
     controls.hide().unwrap();
+    let rows = probe::RowSizingProbe::new().unwrap();
+    rows.show().unwrap();
+    rows.window().set_size(slint::PhysicalSize::new(500, 200));
+    rows.window().take_snapshot().unwrap();
+    assert!(rows.get_first_height() >= 40.0);
+    assert!(rows.get_second_top() >= rows.get_first_height() + 9.0);
+    assert!(rows.get_button_top() >= rows.get_second_bottom() + 9.0);
+    rows.hide().unwrap();
     let accordion = probe::AccordionProbe::new().unwrap();
     accordion.show().unwrap();
     accordion
@@ -138,6 +160,9 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
         .set_size(slint::PhysicalSize::new(500, 260));
     overflow.window().take_snapshot().unwrap();
     assert!(overflow.get_scrollable());
+    assert_eq!(overflow.get_viewport_left(), 0.0);
+    let viewport_width = overflow.get_viewport_width();
+    assert!(viewport_width < 500.0 && viewport_width > 480.0);
     assert!(overflow.get_first_height() > 350.0);
     assert!(overflow.get_second_height() > 250.0);
     assert!(overflow.get_third_height() > 350.0);
@@ -155,6 +180,7 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     overflow.set_expanded_count(0);
     overflow.window().take_snapshot().unwrap();
     assert!(!overflow.get_scrollable());
+    assert_eq!(overflow.get_viewport_width(), viewport_width);
     assert_eq!(overflow.get_offset(), 0.0);
     overflow.hide().unwrap();
     let catalog = Rc::new(RefCell::new(
@@ -359,6 +385,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
         ),
     )));
     settings.set_settings_presets(ModelRc::new(VecModel::from(vec![PresetItem {
+        key_error: "".into(),
         output_token_wire_key: "maxOutputTokens".into(),
         template_id: "gemini".into(),
         temperature_enabled: true,
@@ -519,6 +546,22 @@ fn memory_render_and_contract(window: &AppWindow) {
         ))
         .await
         .unwrap();
+        super::super::settings::execute(
+            app.presenter(),
+            super::super::runtime::Command::SelectAsrRecognizer("whisper".into()),
+        )
+        .unwrap();
+        let mut absent_dropdown = app.presenter().settings.asr.preferences.get();
+        absent_dropdown.recognizer_id.clear();
+        super::super::settings::execute(
+            app.presenter(),
+            super::super::runtime::Command::SaveAsr(absent_dropdown, None),
+        )
+        .unwrap();
+        assert_eq!(
+            app.presenter().settings.asr.preferences.get().recognizer_id,
+            "whisper"
+        );
         let initial_revision = app.presenter().settings.snapshot().unwrap().revision;
         super::super::settings::execute(
             app.presenter(),

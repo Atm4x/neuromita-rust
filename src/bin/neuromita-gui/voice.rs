@@ -6,7 +6,11 @@ use super::{
     view::{AppWindow, SettingsUi, VoiceUi},
 };
 use neuromita::{
-    ai_runtime::speech_catalog::{REMOTE_TTS_TEMPLATES, SpeechInventory},
+    ai_runtime::{
+        AiService,
+        runtime_status::RuntimeSnapshot,
+        speech_catalog::{REMOTE_TTS_TEMPLATES, SpeechInventory},
+    },
     character::character_catalog,
     settings::{TtsBackend, TtsPreferences},
 };
@@ -333,6 +337,11 @@ pub fn preview(window: &AppWindow, mode: VoicePreviewMode) {
     ui.set_character(0);
     ui.set_voice_id("demo-voice-identifier".into());
     ui.set_sample_text("Привет! Я Мита. Давай проверим, как звучит мой голос.".into());
+}
+
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
+    window.global::<VoiceUi>().set_runtime_status(text.into());
 }
 
 #[cfg(test)]

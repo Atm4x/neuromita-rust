@@ -1,4 +1,6 @@
+mod audio_input;
 mod characters;
+pub use audio_input::AudioInputPresenter;
 mod chat;
 mod connections;
 mod conversation;
@@ -7,6 +9,7 @@ mod presets;
 mod releases;
 mod runtime;
 mod settings;
+mod speech;
 
 pub use characters::{
     CharactersPresenter, MemoryCapacityPreview, MemoryListPage, MemoryListQuery, MemoryObserver,
@@ -31,8 +34,11 @@ pub use settings::{
     InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
     SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
 };
+pub use speech::SpeechSessionPresenter;
 
 pub struct GuiPresenter {
+    pub audio_input: AudioInputPresenter,
+    pub speech: SpeechSessionPresenter,
     pub ai_runtime: RuntimeStatePresenter,
     pub releases: ReleasesPresenter,
     pub connections: ConnectionsPresenter,

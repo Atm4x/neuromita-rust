@@ -9,7 +9,7 @@ use neuromita::{
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
     timeline::domain::MessageRole,
 };
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
@@ -149,6 +149,61 @@ pub(super) fn render_catalog(
 
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::RecognizedText {
+            text,
+            auto_send_after,
+            merge_with_draft,
+        } => {
+            let previous = window.get_chat_draft();
+            let combined = if previous.trim().is_empty() {
+                text
+            } else {
+                format!(
+                    "{}{}{}",
+                    previous,
+                    if merge_with_draft { " " } else { "\n" },
+                    text
+                )
+            };
+            window.set_chat_draft(combined.clone().into());
+            if let Some(delay) = auto_send_after {
+                if delay.is_zero() {
+                    window.invoke_chat_send(combined.into());
+                } else {
+                    let weak = window.as_weak();
+                    slint::Timer::single_shot(delay, move || {
+                        if let Some(window) = weak.upgrade()
+                            && window.get_chat_draft() == combined
+                            && !window.get_chat_sending()
+                        {
+                            window.invoke_chat_send(combined.into());
+                        }
+                    });
+                }
+            }
+        }
+        Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
+        Update::MicrophoneTestStatus(snapshot) => {
+            let ui = window.global::<super::view::AsrUi>();
+            ui.set_testing(snapshot.running);
+            ui.set_mic_level(i32::from(snapshot.level));
+            ui.set_monitored_device(
+                ui.get_device_entries()
+                    .iter()
+                    .find(|entry| entry.id == snapshot.device.as_str())
+                    .map(|entry| entry.caption)
+                    .unwrap_or_else(|| snapshot.device.into()),
+            );
+            if let Some(error) = snapshot.error {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+            }
+        }
+        Update::RuntimeStatus(snapshot) => {
+            super::voice::runtime_status(window, &snapshot);
+            super::asr::runtime_status(window, &snapshot);
+        }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
@@ -201,6 +256,10 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::AdminSaved => super::settings::saved(window, None),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
+            super::voice::runtime_status(window, &stopped);
+            super::asr::runtime_status(window, &stopped);
+            super::asr::session_status(window, &Default::default());
             window.set_core_connected(false);
             window.set_core_connecting(false);
             window.set_chat_sending(false);
@@ -240,7 +299,10 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
         Ok(model) => {
-            window.set_chat_model(model.as_str().into());
+            window.set_chat_model(match &snapshot.preset_name {
+                Some(name) => format!("{name} ({model})").into(),
+                None => model.as_str().into(),
+            });
             window.set_chat_generation_error("".into());
         }
         Err(error) => {
