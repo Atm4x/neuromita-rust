@@ -32,8 +32,12 @@ impl GeminiProvider {
         template: GeminiTemplate,
         observer: &mut dyn GenerationObserver,
     ) -> Result<super::StructuredResponse, GenerationError> {
-        let encoded =
-            wire::encode_observed(context.context, &template, &context.prepared_knowledge);
+        let encoded = wire::encode_observed(
+            context.context,
+            &template,
+            &context.prepared_knowledge,
+            context.prompt.as_ref(),
+        );
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
             GenerationError::Response(format!("cannot encode provider request: {error}"))
         })?;

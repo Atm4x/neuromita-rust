@@ -1,10 +1,13 @@
 mod dsl;
 mod expression;
+mod post_dsl;
+pub use post_dsl::{PostDslProgram, PostDslResult};
 
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, Weak},
 };
 
 use serde_json::Value;
@@ -75,14 +78,83 @@ impl RenderedPrompt {
     }
 }
 
+const MAX_SNAPSHOT_FILES: usize = 2048;
+const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SNAPSHOT_FILE_BYTES: usize = 1024 * 1024;
+
+/// Request-scoped, fully owned prompt sources; no disk reads during execution.
+#[derive(Debug, Clone)]
+pub struct PromptSetSnapshot {
+    root: PathBuf,
+    base: PathBuf,
+    set_name: String,
+    defaults: BTreeMap<String, Value>,
+    files: Arc<BTreeMap<PathBuf, Arc<str>>>,
+    post_dsl: Option<PostDslProgram>,
+}
+
+impl PromptSetSnapshot {
+    pub fn name(&self) -> &str {
+        &self.set_name
+    }
+
+    pub fn has_template(&self, template: &str) -> bool {
+        self.files.contains_key(&self.base.join(template))
+    }
+
+    pub fn post_dsl(&self) -> Option<PostDslProgram> {
+        self.post_dsl.clone()
+    }
+
+    pub fn render(
+        &self,
+        context_variables: BTreeMap<String, Value>,
+        template: &str,
+    ) -> Result<RenderedPrompt, PromptError> {
+        let mut vars = self.defaults.clone();
+        vars.extend(context_variables);
+        for feature in [
+            "SEED_INITIAL_MEMORIES",
+            "SEED_CHARACTER_MEMORIES",
+            "SEED_WORLD_LORE",
+            "SEED_ROOMS_LORE",
+            "SEED_MITAS_LORE",
+            "SEED_ENTITY_LINKS",
+        ] {
+            vars.entry(feature.to_owned()).or_insert(Value::Bool(false));
+        }
+        vars.insert(
+            "PROMPT_SET_NAME".into(),
+            Value::String(self.set_name.clone()),
+        );
+        let mut runtime = dsl::Interpreter::from_snapshot(
+            self.root.clone(),
+            self.base.clone(),
+            Arc::clone(&self.files),
+            vars,
+        );
+        let (stable, context) = runtime.render_main(template)?;
+        Ok(RenderedPrompt {
+            set_name: self.set_name.clone(),
+            stable,
+            context,
+            initialization: runtime.declarations(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PromptCatalog {
     root: PathBuf,
+    admitted: Arc<Mutex<BTreeMap<(CharacterId, String), Weak<PromptSetSnapshot>>>>,
 }
 
 impl PromptCatalog {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            admitted: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -187,6 +259,135 @@ impl PromptCatalog {
         Ok(name)
     }
 
+    /// Captures the selected character's prompt resources and shared includes
+    /// before a request is placed in the queue.
+    pub fn capture(
+        &self,
+        character: CharacterId,
+        selected: Option<&str>,
+    ) -> Result<Option<Arc<PromptSetSnapshot>>, PromptError> {
+        if selected.is_none() && self.list(character)?.is_empty() {
+            return Ok(None);
+        }
+        let name = self.resolve_set(character, selected)?;
+        let root = self.root.canonicalize()?;
+        let base = root
+            .join(character.to_string())
+            .join(&name)
+            .canonicalize()?;
+        if !base.starts_with(root.join(character.to_string())) {
+            return Err(PromptError::InvalidSelection(name));
+        }
+        let mut files = BTreeMap::new();
+        let mut total = 0;
+        // A set may include scripts from another set belonging to the same
+        // character, or the shared directories, so those are captured together.
+        for directory in [
+            root.join(character.to_string()),
+            root.join("Common"),
+            root.join("Structural"),
+            root.join("_CommonPrompts"),
+            root.join("_CommonScripts"),
+        ] {
+            if directory.exists() {
+                capture_directory(&directory, &root, &mut files, &mut total)?;
+            }
+        }
+        if !files.contains_key(&base.join("main_template.txt")) {
+            return Err(PromptError::MissingSet(format!(
+                "{character}/{name}/main_template.txt"
+            )));
+        }
+        let key = (character, name.clone());
+        if let Some(previous) = self
+            .admitted
+            .lock()
+            .expect("prompt cache poisoned")
+            .get(&key)
+            .and_then(Weak::upgrade)
+            && previous.files.as_ref() == &files
+        {
+            return Ok(Some(previous));
+        }
+        let config = files
+            .get(&base.join("config.json"))
+            .map(|content| serde_json::from_str::<Value>(content))
+            .transpose()?;
+        let defaults = config_defaults(config.as_ref())?;
+        let params = config
+            .as_ref()
+            .and_then(|v| v.get("custom_params"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let post_script = files.get(&base.join("PostScripts/main_rules.postscript"));
+        let post_dsl = if post_script.is_some() || !params.is_empty() {
+            Some(
+                PostDslProgram::parse(post_script.map_or("", |s| s.as_ref()), defaults.clone())?
+                    .with_custom_params(&params)?,
+            )
+        } else {
+            None
+        };
+        let snapshot = Arc::new(PromptSetSnapshot {
+            root,
+            base,
+            set_name: name,
+            defaults,
+            files: Arc::new(files),
+            post_dsl,
+        });
+        self.admitted
+            .lock()
+            .expect("prompt cache poisoned")
+            .insert(key, Arc::downgrade(&snapshot));
+        Ok(Some(snapshot))
+    }
+
+    pub fn load_post_rules(
+        &self,
+        character: CharacterId,
+        set_name: &str,
+    ) -> Result<Option<PostDslProgram>, PromptError> {
+        Self::validate_set_name(set_name)?;
+        let dir = self.root.join(character.to_string()).join(set_name);
+        let path = dir.join("PostScripts/main_rules.postscript");
+        let script = match fs::read_to_string(path) {
+            Ok(script) => Some(script),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let config = dir.join("config.json");
+        let config: Option<Value> = if config.is_file() {
+            Some(serde_json::from_slice(&fs::read(config)?)?)
+        } else {
+            None
+        };
+        let params = config
+            .as_ref()
+            .and_then(|data| data.get("custom_params"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if script.is_none() && params.is_empty() {
+            return Ok(None);
+        }
+        let defaults = self.read_defaults(&dir)?;
+        let parsed = PostDslProgram::parse(script.as_deref().unwrap_or(""), defaults)?
+            .with_custom_params(&params)?;
+        Ok(Some(parsed))
+    }
+
+    fn read_defaults(&self, dir: &Path) -> Result<BTreeMap<String, Value>, PromptError> {
+        let config_path = dir.join("config.json");
+        let value: Option<Value> = if config_path.is_file() {
+            Some(serde_json::from_slice(&fs::read(config_path)?)?)
+        } else {
+            None
+        };
+        config_defaults(value.as_ref())
+    }
+
     pub fn render(
         &self,
         character: CharacterId,
@@ -196,26 +397,18 @@ impl PromptCatalog {
     ) -> Result<RenderedPrompt, PromptError> {
         let set_name = self.resolve_set(character, selected)?;
         let dir = self.root.join(character.to_string()).join(&set_name);
-        let config_path = dir.join("config.json");
-        let mut vars = BTreeMap::new();
-        if config_path.is_file() {
-            let value: Value = serde_json::from_slice(&fs::read(config_path)?)?;
-            let config = value
-                .as_object()
-                .ok_or_else(|| PromptError::Dsl("config.json must be an object".into()))?;
-            let defaults = config
-                .get("variables")
-                .and_then(Value::as_object)
-                .unwrap_or(config);
-            for (key, value) in defaults {
-                if key != "metadata"
-                    && !matches!(key.as_str(), "author" | "version" | "description")
-                {
-                    vars.insert(key.clone(), value.clone());
-                }
-            }
-        }
+        let mut vars = self.read_defaults(&dir)?;
         vars.extend(context_variables);
+        for feature in [
+            "SEED_INITIAL_MEMORIES",
+            "SEED_CHARACTER_MEMORIES",
+            "SEED_WORLD_LORE",
+            "SEED_ROOMS_LORE",
+            "SEED_MITAS_LORE",
+            "SEED_ENTITY_LINKS",
+        ] {
+            vars.entry(feature.to_owned()).or_insert(Value::Bool(false));
+        }
         vars.insert("PROMPT_SET_NAME".into(), Value::String(set_name.clone()));
         let mut runtime = dsl::Interpreter::new(&self.root, &dir, vars)?;
         let rendered = runtime.render_main(template)?;
@@ -226,6 +419,94 @@ impl PromptCatalog {
             initialization: runtime.declarations(),
         })
     }
+}
+
+fn config_defaults(config: Option<&Value>) -> Result<BTreeMap<String, Value>, PromptError> {
+    let mut vars = BTreeMap::new();
+    if let Some(value) = config {
+        let config = value
+            .as_object()
+            .ok_or_else(|| PromptError::Dsl("config.json must be an object".into()))?;
+        let defaults = config
+            .get("variables")
+            .and_then(Value::as_object)
+            .unwrap_or(config);
+        for (key, value) in defaults {
+            if key != "metadata"
+                && key != "custom_params"
+                && !matches!(key.as_str(), "author" | "version" | "description")
+            {
+                vars.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(params) = config.get("custom_params").and_then(Value::as_array) {
+            for param in params {
+                if let (Some(name), Some(initial)) = (
+                    param.get("name").and_then(Value::as_str),
+                    param.get("initial"),
+                ) {
+                    vars.entry(name.to_owned()).or_insert(initial.clone());
+                }
+            }
+        }
+    }
+    Ok(vars)
+}
+
+fn capture_directory(
+    directory: &Path,
+    root: &Path,
+    files: &mut BTreeMap<PathBuf, Arc<str>>,
+    total: &mut usize,
+) -> Result<(), PromptError> {
+    if !directory.starts_with(root) {
+        return Err(PromptError::Dsl("prompt directory escaped root".into()));
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(PromptError::Dsl(format!(
+                "prompt symlink is unsupported: {}",
+                entry.path().display()
+            )));
+        }
+        if kind.is_dir() {
+            capture_directory(&entry.path(), root, files, total)?;
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        if !matches!(
+            entry.path().extension().and_then(|s| s.to_str()),
+            Some("txt" | "script" | "system" | "postscript" | "json")
+        ) {
+            continue;
+        }
+        if files.len() >= MAX_SNAPSHOT_FILES {
+            return Err(PromptError::Dsl("too many prompt files in snapshot".into()));
+        }
+        let length = entry.metadata()?.len() as usize;
+        if length > MAX_SNAPSHOT_FILE_BYTES || length > MAX_SNAPSHOT_BYTES.saturating_sub(*total) {
+            return Err(PromptError::Dsl(
+                "prompt snapshot size limit exceeded".into(),
+            ));
+        }
+        let data = fs::read_to_string(entry.path())?
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim_end()
+            .to_owned();
+        *total += data.len();
+        if *total > MAX_SNAPSHOT_BYTES {
+            return Err(PromptError::Dsl(
+                "prompt snapshot size limit exceeded".into(),
+            ));
+        }
+        files.insert(entry.path(), Arc::from(data));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -259,6 +540,75 @@ mod tests {
         .unwrap();
         root
     }
+    #[test]
+    fn admitted_snapshot_is_immutable_after_files_change_or_disappear() {
+        let root = root();
+        let set = root.join("Crazy/Default");
+        fs::create_dir_all(set.join("PostScripts")).unwrap();
+        fs::create_dir_all(root.join("_CommonPrompts")).unwrap();
+        fs::write(set.join("config.json"), r#"{"variables":{"player_name":"Old"},"custom_params":[{"name":"Love","initial":4,"change_command":"love_change","op":"add"}]}"#).unwrap();
+        fs::write(
+            set.join("main_template.txt"),
+            "[<_CommonPrompts/shared.txt>]\n[<Main/identity.txt>]\n[<@Main/state.script>]",
+        )
+        .unwrap();
+        fs::write(root.join("_CommonPrompts/shared.txt"), "Shared-old").unwrap();
+        fs::write(set.join("Main/identity.txt"), "Hello [{player_name}]").unwrap();
+        fs::write(set.join("Main/state.script"), "RETURN 'State-old'").unwrap();
+        fs::write(set.join("PostScripts/main_rules.postscript"),
+            "RULE text\n MATCH TEXT \"old\"\n ACTIONS\n REPLACE_MATCH WITH \"archived\"\n END_ACTIONS\nEND_RULE").unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let admitted = catalog.capture(CharacterId::Crazy, None).unwrap().unwrap();
+        let another = catalog.capture(CharacterId::Crazy, None).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&admitted, &another));
+        fs::write(
+            set.join("config.json"),
+            r#"{"variables":{"player_name":"New"}}"#,
+        )
+        .unwrap();
+        fs::write(set.join("Main/state.script"), "RETURN 'State-new'").unwrap();
+        fs::write(root.join("_CommonPrompts/shared.txt"), "Shared-new").unwrap();
+        fs::write(
+            set.join("PostScripts/main_rules.postscript"),
+            "broken new postscript",
+        )
+        .unwrap();
+        fs::remove_file(set.join("Main/identity.txt")).unwrap();
+        let rendered = admitted
+            .render(BTreeMap::new(), "main_template.txt")
+            .unwrap();
+        assert_eq!(rendered.stable, vec!["Shared-old", "Hello Old"]);
+        assert_eq!(rendered.context, vec!["State-old"]);
+        let old = admitted
+            .post_dsl()
+            .unwrap()
+            .apply(
+                crate::generation::StructuredResponse::spoken("old"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(old.response.full_text().as_ref(), "archived");
+        assert!(catalog.capture(CharacterId::Crazy, None).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_prompt_is_rejected_before_admission_and_symlinks_do_not_escape() {
+        let root = root();
+        let catalog = PromptCatalog::new(&root);
+        assert!(matches!(
+            catalog.capture(CharacterId::Crazy, Some("missing")),
+            Err(PromptError::MissingSet(_))
+        ));
+        fs::write(root.join("Crazy/Default/config.json"), "not JSON").unwrap();
+        assert!(
+            catalog
+                .capture(CharacterId::Crazy, Some("Default"))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn list_select_and_render_are_isolated_by_request() {
         let dir = root();
@@ -298,6 +648,59 @@ mod tests {
     }
 
     #[test]
+    fn post_rules_use_selected_character_set_and_capture_config() {
+        let root = root();
+        let default_dir = root.join("Crazy/Default");
+        fs::create_dir_all(default_dir.join("PostScripts")).unwrap();
+        fs::write(
+            default_dir.join("config.json"),
+            r#"{"custom_params":[{"name":"Love","change_command":"love_change","initial":10,"op":"add","type":"int","change_min":-2,"change_max":2}]}"#,
+        ).unwrap();
+        fs::write(
+            default_dir.join("PostScripts/main_rules.postscript"),
+            "RULE stars\n MATCH REGEX \"\\*\\*\"\n ACTIONS\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+        ).unwrap();
+        let other_dir = root.join("Crazy/Other");
+        fs::create_dir_all(other_dir.join("PostScripts")).unwrap();
+        fs::write(other_dir.join("main_template.txt"), "Other template").unwrap();
+        fs::write(other_dir.join("PostScripts/main_rules.postscript"),
+            "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"world\"\n END_ACTIONS\nEND_RULE\n").unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let defaults = catalog
+            .load_post_rules(CharacterId::Crazy, "Default")
+            .unwrap()
+            .unwrap();
+        let other = catalog
+            .load_post_rules(CharacterId::Crazy, "Other")
+            .unwrap()
+            .unwrap();
+        let mut text = crate::generation::StructuredResponse::spoken("**hello**");
+        text.custom_fields = Some(serde_json::Map::from_iter([(
+            "love_change".into(),
+            Value::from(100),
+        )]));
+        let first = defaults.apply(text.clone(), &BTreeMap::new()).unwrap();
+        assert_eq!(first.response.full_text().as_ref(), "hello");
+        assert_eq!(first.variables["Love"], 12.0);
+        let second = other
+            .apply(
+                crate::generation::StructuredResponse::spoken("hello"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(second.response.full_text().as_ref(), "world");
+        fs::write(default_dir.join("config.json"), "{broken JSON").unwrap();
+        let captured = defaults.apply(text, &BTreeMap::new()).unwrap();
+        assert_eq!(captured.variables["Love"], 12.0);
+        assert!(
+            catalog
+                .load_post_rules(CharacterId::Crazy, "Default")
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn captures_initialization_without_mutating_timeline() {
         let root = root();
         let scripts = root.join("Crazy/Default");
@@ -326,5 +729,102 @@ mod tests {
             matches!(&rendered.initialization[1], PromptInitializationDeclaration::Relation { relation, .. } if relation == "knows")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(test)]
+    mod prompt_seed_compatibility_tests {
+        use super::*;
+        use crate::identity::CharacterId;
+
+        fn root() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "neuromita-prompt-seed-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(dir.join("Crazy/Default/Main")).unwrap();
+            dir
+        }
+
+        #[test]
+        fn config_controls_seed_feature() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("main_template.txt"), "[<Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "IF SEED_CHARACTER_MEMORIES != False THEN\nSEED_MEMORY High | seeded from config\nENDIF\n").unwrap();
+            let catalog = PromptCatalog::new(&root);
+            assert!(
+                catalog
+                    .render(
+                        CharacterId::Crazy,
+                        None,
+                        BTreeMap::new(),
+                        "main_template.txt"
+                    )
+                    .unwrap()
+                    .initialization
+                    .is_empty()
+            );
+            fs::write(
+                set.join("config.json"),
+                r#"{"SEED_CHARACTER_MEMORIES":true}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                catalog
+                    .render(
+                        CharacterId::Crazy,
+                        None,
+                        BTreeMap::new(),
+                        "main_template.txt"
+                    )
+                    .unwrap()
+                    .initialization
+                    .len(),
+                1
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn local_assignment_uses_first_local_value() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("main_template.txt"), "[<@ Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "SET LOCAL label = 'first'\nSET LOCAL label = 'second'\nSET label = label + '-updated'\nRETURN label\n").unwrap();
+            let result = PromptCatalog::new(&root)
+                .render(
+                    CharacterId::Crazy,
+                    None,
+                    BTreeMap::new(),
+                    "main_template.txt",
+                )
+                .unwrap();
+            assert_eq!(result.context, vec!["first-updated"]);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn seed_strings_interpolate_config_variables() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("config.json"), r#"{"player_name":"Игрок"}"#).unwrap();
+            fs::write(set.join("main_template.txt"), "[<Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "SEED_MEMORY High | Mita knows {player_name}\nSEED_ISLAND relationship | Friend of {player_name}\n").unwrap();
+            let result = PromptCatalog::new(&root)
+                .render(
+                    CharacterId::Crazy,
+                    None,
+                    BTreeMap::new(),
+                    "main_template.txt",
+                )
+                .unwrap();
+            assert!(
+                matches!(&result.initialization[0], PromptInitializationDeclaration::Memory {content, ..} if content == "Mita knows Игрок")
+            );
+            assert!(
+                matches!(&result.initialization[1], PromptInitializationDeclaration::Island {content, ..} if content == "Friend of Игрок")
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

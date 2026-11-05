@@ -6,7 +6,7 @@ use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::{
-        GenerationError, PromptMessage, PromptRole, ProviderUsage,
+        GenerationError, PreparedPrompt, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
         structured::{StructuredResponse, gemini_message_schema},
     },
@@ -101,7 +101,7 @@ pub(super) fn encode_with_memory(
     template: &GeminiTemplate,
     memory: &Option<String>,
 ) -> GenerateContent {
-    encode_observed(context, template, memory).body
+    encode_observed(context, template, memory, None).body
 }
 
 pub(super) struct EncodedRequest {
@@ -113,13 +113,17 @@ pub(super) fn encode_observed(
     context: CharacterContext,
     template: &GeminiTemplate,
     memory: &Option<String>,
+    prepared: Option<&PreparedPrompt>,
 ) -> EncodedRequest {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
-    let mut prompt = Vec::with_capacity(conversation.messages.len() + 1);
-    prompt.push(PromptMessage {
-        role: PromptRole::System,
-        text: Arc::from(conversation.system_instruction.as_str()),
-    });
+    let mut prompt = conversation
+        .system_segments(&context, prepared)
+        .into_iter()
+        .map(|text| PromptMessage {
+            role: PromptRole::System,
+            text: Arc::from(text),
+        })
+        .collect::<Vec<_>>();
     prompt.extend(conversation.messages.iter().map(|message| PromptMessage {
         role: match message.role {
             LlmRole::User => PromptRole::User,
@@ -132,12 +136,21 @@ pub(super) fn encode_observed(
 
 fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> EncodedRequest {
     if !template.options().structured_output {
-        prompt[0].text = format!(
-            "{}\nReturn only JSON conforming to this response schema:\n{}",
-            prompt[0].text,
-            gemini_message_schema()
-        )
-        .into();
+        let index = prompt
+            .iter()
+            .take_while(|m| m.role == PromptRole::System)
+            .count();
+        prompt.insert(
+            index,
+            PromptMessage {
+                role: PromptRole::System,
+                text: format!(
+                    "Return only JSON conforming to this response schema:\n{}",
+                    gemini_message_schema()
+                )
+                .into(),
+            },
+        );
     }
     let prompt = crate::generation::apply_message_transforms(prompt, template.transforms());
     let mut prompt = crate::generation::apply_message_transforms(
@@ -172,12 +185,17 @@ fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> E
     }
     let instructions = prompt
         .iter()
-        .filter(|m| m.role == PromptRole::System)
-        .map(|m| m.text.as_ref())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+        .filter(|m| m.role == PromptRole::System && !m.text.trim().is_empty())
+        .map(|m| Part {
+            text: Some(m.text.to_string()),
+            thought: None,
+        })
+        .collect::<Vec<_>>();
     let body = GenerateContent {
-        system_instruction: (!instructions.is_empty()).then(|| content(None, &instructions)),
+        system_instruction: (!instructions.is_empty()).then_some(Content {
+            role: None,
+            parts: instructions,
+        }),
         contents: prompt
             .iter()
             .filter(|m| m.role != PromptRole::System)
@@ -498,6 +516,8 @@ mod tests {
         let view =
             TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
+            variables: Default::default(),
+            memory_relations: Vec::new(),
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
@@ -614,6 +634,8 @@ mod tests {
         let view =
             TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
+            variables: Default::default(),
+            memory_relations: Vec::new(),
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
@@ -743,6 +765,46 @@ mod tests {
             assert!(decode(&serde_json::to_vec(&body).unwrap()).is_err());
         }
         assert!(decode(b"not json").is_err());
+    }
+
+    #[test]
+    fn native_prompt_keeps_stable_and_dynamic_as_separate_parts() {
+        let template = GeminiTemplate::google(
+            "test-model",
+            "test-key",
+            super::super::GenerationSettings::new(0.5, 64, std::time::Duration::from_secs(2))
+                .unwrap(),
+        )
+        .unwrap();
+        let encoded = encode_prompt(
+            vec![
+                PromptMessage {
+                    role: PromptRole::System,
+                    text: "stable fragment".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::System,
+                    text: "dynamic fragment".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::User,
+                    text: "question".into(),
+                },
+            ],
+            &template,
+        );
+        let wire = serde_json::to_value(encoded.body).unwrap();
+        assert_eq!(
+            wire["systemInstruction"]["parts"][0]["text"],
+            "stable fragment"
+        );
+        assert_eq!(
+            wire["systemInstruction"]["parts"][1]["text"],
+            "dynamic fragment"
+        );
+        assert_eq!(wire["contents"][0]["parts"][0]["text"], "question");
+        assert_eq!(encoded.prompt[0].text.as_ref(), "stable fragment");
+        assert_eq!(encoded.prompt[1].text.as_ref(), "dynamic fragment");
     }
 
     #[test]

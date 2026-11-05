@@ -241,6 +241,13 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
         }
+        Update::CharacterDebug {
+            character,
+            fields,
+            error,
+        } => {
+            super::settings::render_character_debug(window, character, &fields, error.as_deref());
+        }
         Update::Administration(snapshot) => {
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);

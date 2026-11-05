@@ -1,0 +1,552 @@
+{
+  "reference": "Python NeuroMita bridge/session-timeline-export-20261101, src/DSL/dsl_engine.py",
+  "harness": "Python synthetic Character with set_variable and no memory subsystem; case-insensitive path resolution to emulate Windows; config.json initial values; seed flags disabled",
+  "known_python_semantics_differences": {
+    "Cappie/Default": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Cappie/Lite": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Crazy/Lite": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Creepy/Default": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Creepy/Lite": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Ghost/Default": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Ghost/Lite": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Mila/Default": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Mila/Lite": "Python implicit None local variable shadows later Character.set_variable attitude_band",
+    "Kind/LiteJson": "Python implicit None local variable shadows Love=0; comparison None>=5 generates DSL ERROR"
+  },
+  "sets": {
+    "Crazy/By_mactep_kot_new_mini": {
+      "stable": [
+        "58a0324705d83aa4d28d7058a1af3545a3efc1b07021ff5d6d3eeee75de06a24",
+        "2ed4038edae9e1222145e8c4781c37568098920ac32c6ea50797ee8c39ad177c",
+        "f2120725fe7766762144201f7d785e878a411c0db2685e506d43a8305443dc42",
+        "0442ccf2ae27e5fb5c65a1639015249d7f3656a2cd14ef562b82278f98c5e805",
+        "5751eefff33c158e9e9d3acb409ed84b106f4879efb727f9900f3b680a1dff09",
+        "cbcd83c52a3cf7607829bb801304d667454cde4070cf81ee5cd16cdd832be6cd",
+        "9182c87c4ad9cbf8adddbd2814725d119fba7e79713079544fde98db51467040",
+        "25f9fb69dfa192e0a7fd9a953074a87bf35be854d18f9f1ebfe124d88bef6c42",
+        "93ce0d17d97ab3e67f17540e5d7b191c245b6653168e7fe2338f65af53561d1d",
+        "30b229fdf9e88ce876d5e630506de813643a7bfd4b6b0b71c5778ab49371caea",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Crazy/By_mactep_kot_new_mini_Json": {
+      "stable": [
+        "0183cb2a64defe55982ea4232d0dd1c693d8b5d2de57499e60a3b8fe48223180",
+        "5fafa707a9b8dd4134c562f4b8d894d82444388e4dfc12c1521a72946a6a12b5",
+        "90d6ee6f49152e346b47e232525a48bb6ff09fe80042fb6edb845a3221534d97",
+        "0442ccf2ae27e5fb5c65a1639015249d7f3656a2cd14ef562b82278f98c5e805",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f",
+        "5355a46e3808607650f907c75d6a2f4cb216be5ebc428f683819f884b936c162",
+        "bfacc78f5e16b96d0a50802b0aef312bbd703658dd7b17dadb8c01d27dbd9b66",
+        "9182c87c4ad9cbf8adddbd2814725d119fba7e79713079544fde98db51467040",
+        "39f50980a10b7102c7605ee705b4eb77f151fbb9d00e555d22beb2b24086f6e4",
+        "93ce0d17d97ab3e67f17540e5d7b191c245b6653168e7fe2338f65af53561d1d",
+        "30b229fdf9e88ce876d5e630506de813643a7bfd4b6b0b71c5778ab49371caea",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Crazy/Default": {
+      "stable": [
+        "dbecf4eed7f59e398a780af7172a5126ccddf119e0f55a74aefaded398929098",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "d02c330a6d5c286f3e0292eb4786a826af3f2d78f0879fab02d50d6418061b5c",
+        "f9f4ffd4a2d61211f3e434a2ac6ac957f907b5a223e285279f6bee71ca31df44",
+        "12a73627996abad7583db9057a1e39fcd3f76436ef4699cac1c86f2e241db151",
+        "1b5d7b7ba922b8b84a1339d94e8a16bcbe249991c426cbea4db4800b3a94d3cb",
+        "4561d6dc68646bb2b0418285eff80e66935b6a625f714896b2f99776ad2701c3"
+      ],
+      "context": [
+        "c1bf24624309f501189207711a017f5a9f7808710dae551af4c86be8318b6822"
+      ],
+      "python_error_markers": 0
+    },
+    "Crazy/DefaultJson": {
+      "stable": [
+        "7b78fe89f6c47a640a8dc17f50413a570aa3d7ada4c57e362da54319fd1be0c1",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "d02c330a6d5c286f3e0292eb4786a826af3f2d78f0879fab02d50d6418061b5c",
+        "9b8c5cd829d98363b33c79f21906bcad75b03f8df43bd039759c51976486c2c0",
+        "bb1582be7d9e6ae5562bf5a6fc9f4fa96c0be5393ceedb5be727c39ef082caa8",
+        "1cd6293a9332af2bd87f969a9285d384886e3d5fe1d84f4fe06f97f0884bc9eb",
+        "24613ac47e0e809d8cd7854d7ff565b2ccf10b9e6e7cc31cce6c4d4975e5ca0f",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Crazy/Lite": {
+      "stable": [
+        "dbecf4eed7f59e398a780af7172a5126ccddf119e0f55a74aefaded398929098",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "55c128f26dcc3eda8aa491b0d6f1f11ec8528ad250ba9e9243cc20914f1af0b6",
+        "6a5fb826cc42be6803f285c25bfe06c61cec218b8e33dc093000e210625520af",
+        "b6aa3be897f709d3eee854932a50467123c9127a194a145e3c7f5c103aa7a118",
+        "edf64fd0d16b72f25989f574d53402937ad955bdaeed6d71b1c6f0c9663900eb",
+        "4561d6dc68646bb2b0418285eff80e66935b6a625f714896b2f99776ad2701c3"
+      ],
+      "context": [
+        "078182d7e6aa08c105eba89e1be23aff45123b6abb8943ddaa217c8403185686"
+      ],
+      "python_error_markers": 0
+    },
+    "Crazy/LiteJson": {
+      "stable": [
+        "7b78fe89f6c47a640a8dc17f50413a570aa3d7ada4c57e362da54319fd1be0c1",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "55c128f26dcc3eda8aa491b0d6f1f11ec8528ad250ba9e9243cc20914f1af0b6",
+        "aa293db44d5f83be0aeaf8e2517418d3571774884f59d42d52c9af807e8945c6",
+        "b6aa3be897f709d3eee854932a50467123c9127a194a145e3c7f5c103aa7a118",
+        "7aae87b391e0b0eeec26aaf981eb8a22af10589aeab14719adf309840570e1d5",
+        "28e430fddd34f886ddbb3a82f19f8e2ae727f17e30d744a867e22922696913a9",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Kind/Default": {
+      "stable": [
+        "56f1fdf2b02e65aee6e54f6fcaef7af6bc942c5c342e6ea2ecd22c80bb96f6da",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "9ecb4d69e14af694d33e155bde5a3facd5ded0885feda7f84a7adc58865c7f0c",
+        "4da2405bc2a9136663310005a3a96b9be8c3f56630ffa550afb914a0b19cfa4d",
+        "c412e2b52db8cfb9d619ad715fd0e5c395ff8cad0b8fb9c40d06ad51ee4b2b11",
+        "98848d3501c7b4226ecdb8bd52e5c27da584b54f32c3937d4e6a3bf9ca52c7c1",
+        "40cfde94fc3b3177f74a28076333886ea2d6f8192870c0084935e6d1bcb12e45",
+        "1263abf8e113d2108906594dc3358c9495818682369da3f0a84a9e42e2e5fb42"
+      ],
+      "context": [
+        "020646584225fd88c5cafe7ab478faabfb5404bbe7370f5811405fe34860e3b8"
+      ],
+      "python_error_markers": 0
+    },
+    "Kind/DefaultJson": {
+      "stable": [
+        "dda0043b180a0f368f6ff4a6a60ca74aa5b44b4cc9b0c7541ee5f9759e97a75e",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "3515ea52b9e323b5480fd516ddb2354c874ee38a973ef1d3bc68441912ecfc64",
+        "3d85bc4d40622eed8440ea49ac3a01954db7720b06bad86b0aa18b27e8c22f86",
+        "c412e2b52db8cfb9d619ad715fd0e5c395ff8cad0b8fb9c40d06ad51ee4b2b11",
+        "676d830dfabd0b03e443ea5c262fa436dd655ac367f114e6be28525648162857",
+        "e2b45e7a26852a25853ec4ac8f6755fbc89af7ecfbf4055a2b0a93516370c4c6",
+        "a0495465f71683862ef96b258483e344a928272b2f4ffb3f7ea9579ff186cb6b",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Kind/Lite": {
+      "stable": [
+        "56f1fdf2b02e65aee6e54f6fcaef7af6bc942c5c342e6ea2ecd22c80bb96f6da",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "0b4428f40056f5f40d60da31d7ac8535fdde68c31a11e61e4e2a00f133f394e6",
+        "9ecb4d69e14af694d33e155bde5a3facd5ded0885feda7f84a7adc58865c7f0c",
+        "f2a008429c6f972b7b0ed2cc8465c38c6c2b7a29cd0e205aa8038b70c16814e6",
+        "1263abf8e113d2108906594dc3358c9495818682369da3f0a84a9e42e2e5fb42"
+      ],
+      "context": [
+        "020646584225fd88c5cafe7ab478faabfb5404bbe7370f5811405fe34860e3b8"
+      ],
+      "python_error_markers": 0
+    },
+    "Kind/LiteJson": {
+      "stable": [
+        "dda0043b180a0f368f6ff4a6a60ca74aa5b44b4cc9b0c7541ee5f9759e97a75e",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "c567ccb0a9a95a090bd7722da6454eb2d2b6ebc2ce4bb3840bb766da579a9518",
+        "9913c5b7b8596b4ac276971ed42ebb2735812a01287547ccd35acd0a1c482fcd",
+        "4b9f9332c8030f46888fafded913ca3e606dcadddcb3576566198a0b8988379e",
+        "f2a008429c6f972b7b0ed2cc8465c38c6c2b7a29cd0e205aa8038b70c16814e6",
+        "d698f8b883d4729eebf2d65251d35fba39f331ee7740d7d5db3eb97761ffeb7a",
+        "491e9b0edd20a70975176468e8e53108c4ba075eab3c20212bfbd3c45adc9b4f",
+        "816fe3139f25737be4acdc3cf12bdd960a4a84a7be800442c9321a4e033d0a02",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 1
+    },
+    "Cappie/Default": {
+      "stable": [
+        "0be9ca3b99d8698cea30a245987e3af23f86a032b23e4d18e975480e0bf40f99",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "ee15f87c8442ab0bfe225b603d1612ee6cbb0dd18bbd515a660d459f1a295ee9",
+        "3b1fa3ac37fff640b3eade3a608accf0b99324675b3a9a60b401a1b42257c021",
+        "ddb286f3bfd2903a67494dc2f7acd3ee980a160d79a2f05b6d58b8ce8471cc83",
+        "5199375287e5cb12f4a05657cdac7b528c90a1a37b2292751413009c536f5433",
+        "59eb4843a3896ad17dd05d5b0abe9cc7f3bdf36410a5e58d63e7d59ed0e5e818",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "b89b107c5a750d3f4c13cce6d73a45778665745682663da4f94861a4819f9ef6",
+        "f24b9cf5258b1e54dad511b7b4fd10b1457872b0494f775c57bef040eba58ec5"
+      ],
+      "context": [
+        "15213ca9d295aea7c1fdc4db249d3c8a568eb5123fb38c3a02d2f7731b692bcc"
+      ],
+      "python_error_markers": 0
+    },
+    "Cappie/DefaultJson": {
+      "stable": [
+        "8dfc58264409889845cee039aaf5fa924b8ec0b8d1a55a26f830a6c165af4adb",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "32ddc9f92c30d3ff983c002d107001906b7a02110931dfcfe94b511d608b0f78",
+        "e128b3a2262bb4a2d2bdded31145aad59ab21c8a004f232bc6815148ffc1e78a",
+        "ddb286f3bfd2903a67494dc2f7acd3ee980a160d79a2f05b6d58b8ce8471cc83",
+        "480538de5cf808d60aa8896b786d0cc1b637e118a18398f84a00bb8050e0c114",
+        "0ad602f78b838ad354b9d6e0de4cfa3f83dea23ea5c024c98e767b640df1f2e6",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "b89b107c5a750d3f4c13cce6d73a45778665745682663da4f94861a4819f9ef6",
+        "dbb64e118822b545c7f52e9470fa5adca9e0d98673db0081164c89578edc3ee1",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Cappie/Lite": {
+      "stable": [
+        "0be9ca3b99d8698cea30a245987e3af23f86a032b23e4d18e975480e0bf40f99",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "2874be50638d8e6a088ddbb725067fe2f084bb804a40207f09b7e76b02a66358",
+        "3b1fa3ac37fff640b3eade3a608accf0b99324675b3a9a60b401a1b42257c021",
+        "59eb4843a3896ad17dd05d5b0abe9cc7f3bdf36410a5e58d63e7d59ed0e5e818",
+        "f24b9cf5258b1e54dad511b7b4fd10b1457872b0494f775c57bef040eba58ec5"
+      ],
+      "context": [
+        "15213ca9d295aea7c1fdc4db249d3c8a568eb5123fb38c3a02d2f7731b692bcc"
+      ],
+      "python_error_markers": 0
+    },
+    "ShortHair/Default": {
+      "stable": [
+        "4b9697586d360ecc28b570a279ffe7eca61e9ac479e87f45d51d2d292b80d1af",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "4745d9f70e17cbd5581e3981eb034cad3f57bda3a86f3ccc7ae1346025e3e1b5",
+        "2e90956426bdca83b197969f19cb746ce2a1fe6eb521996664c5b401a61da948",
+        "36328174bd81c935c8400fe37d472d096f9b83b05b434a8d9aeece21979774bd",
+        "28c2537f3b23035bab7254a5233daa6c01de96ab23ef6ed71acabaf08ffc5130",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "ad694cd611b577ceca60f54ecc39d1bc4482ca3074d23efc3dc18600afbda37a",
+        "59e768ff51d0e92aab01a7c8baa3169307ea8eaec5c4e6dcc95873bd1e9b6348"
+      ],
+      "context": [
+        "72c8a9134d073110eb6f60c1bcb88debaf0a1190e5a669bd40bab4b2bf25f9c7"
+      ],
+      "python_error_markers": 0
+    },
+    "ShortHair/DefaultJson": {
+      "stable": [
+        "e7c9a491f9140f2f9ccee0f0b77da1bb0ef9bcf83943c7a21aac2103c5d3f444",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "7231a12962bc58e7bd0ec7b0cf83e7b53fe3fcba61dc9ac6f13e6a6446f86dee",
+        "180a6456ec67b9e6684b55ee0ea965685eed9a4bf025327efff4ccd3b4e96cb5",
+        "36328174bd81c935c8400fe37d472d096f9b83b05b434a8d9aeece21979774bd",
+        "03ca5361d565abfd66b039c073bb882e51dac032916e2e9bb0ce64e6eaf56137",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "ad694cd611b577ceca60f54ecc39d1bc4482ca3074d23efc3dc18600afbda37a",
+        "42ab3cb67c610f5c0a40f0011188bd294f8f6b8337b8d94ec2d78b3ebfcc3a08",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "ShortHair/Lite": {
+      "stable": [
+        "4b9697586d360ecc28b570a279ffe7eca61e9ac479e87f45d51d2d292b80d1af",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "cba7c1289b1dd454f550198a6a66f68d0df35b1989916e5d7b212bfcd3bbbac0",
+        "2e90956426bdca83b197969f19cb746ce2a1fe6eb521996664c5b401a61da948",
+        "28c2537f3b23035bab7254a5233daa6c01de96ab23ef6ed71acabaf08ffc5130",
+        "59e768ff51d0e92aab01a7c8baa3169307ea8eaec5c4e6dcc95873bd1e9b6348"
+      ],
+      "context": [
+        "72c8a9134d073110eb6f60c1bcb88debaf0a1190e5a669bd40bab4b2bf25f9c7"
+      ],
+      "python_error_markers": 0
+    },
+    "Mila/Default": {
+      "stable": [
+        "0aa2f45cfe30aafa34fea18f632b8425675f6a91ae6a2cea5a3571bb34653bb0",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "b0b3a445e7a20d563715e3065e311d90d69606c98b9257b2625eebba403c4f1d",
+        "0f64e3e199b3cbf07c43c9579bbf64c2297ad7908fd2a15cfc0c33959d564db4",
+        "6149acbba907833cf6385a452efb2ff738cbde6ae15eb2fe083047239519022c",
+        "7e2b6b16ad92dbb9bbfa5eabdf3525f4fdfad85c1219adc824c4afbf9021866d",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "8b11f8463e4a98bc6fdc4ce395860eae606b1e77110dd40a55689012b90b0487",
+        "0a8912a7954a59cf5e48a1a644cfbe41ad1a191b80f9b10149253c42524589e9"
+      ],
+      "context": [
+        "55d3b59b0832c20b3cdb0fdd0867f63eb4afcc8bfca91bbadf9a0a5bf248e7f8"
+      ],
+      "python_error_markers": 0
+    },
+    "Mila/DefaultJson": {
+      "stable": [
+        "4d64b4875d937d79fbb1053903dae6764ad883ab9e77a87bbe0c82cb1dd0b226",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "ef20f38ab34ea7b23efe1f143411e43075206f98c9d74f325e85a957dfe3f55c",
+        "2422f4003346695dc2a6302b6b5cce66bb596207a2ca0a3adb60eb258b326448",
+        "d351ace6aa38b9b0c533407c9621a1a4507ec54c3b9c5ce554f1704e8cde2c62",
+        "57d08b4d4a8d64afd2e8a4089cdc7c1d38be2ed857e11e95bfb4751a8f9145de",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "8b11f8463e4a98bc6fdc4ce395860eae606b1e77110dd40a55689012b90b0487",
+        "a94b280809598d5f605ab47c0c0a5e14f3ef5d2481b5b6680c8eedd8ddebbc15",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Mila/Lite": {
+      "stable": [
+        "0aa2f45cfe30aafa34fea18f632b8425675f6a91ae6a2cea5a3571bb34653bb0",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "d08ab6998d0ebc363683410f864d8b458ba3b9adf3f840cd70b0a8c89bd7cec4",
+        "0f64e3e199b3cbf07c43c9579bbf64c2297ad7908fd2a15cfc0c33959d564db4",
+        "7e2b6b16ad92dbb9bbfa5eabdf3525f4fdfad85c1219adc824c4afbf9021866d",
+        "0a8912a7954a59cf5e48a1a644cfbe41ad1a191b80f9b10149253c42524589e9"
+      ],
+      "context": [
+        "55d3b59b0832c20b3cdb0fdd0867f63eb4afcc8bfca91bbadf9a0a5bf248e7f8"
+      ],
+      "python_error_markers": 0
+    },
+    "Sleepy/Default": {
+      "stable": [
+        "846093f4aab09afbc7b811214e2bf23d87f0fcdee5e3212e1fe5d45eceed494b",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "954f4a65c3456cfde11c885d911be863bceb4c7df5b3f8d0d4ebefc13a3ae9a9",
+        "47bf86e87f4cba8e8ff5c6e17eb575e65d465aacec82d333f1831129d4b94a29",
+        "7f9b11dddf9953c1ee3419d5cc803892499565ced6ccaca63bf98866d3a4393e",
+        "2a4024e70093a0c50bc987e449de5ab8b65bfda56a203d1b312626998193c45d",
+        "56c3415c8605d4093662353c80461e848f4a739b958af0d15689eb9f268a8356",
+        "b923de5647be35dea3f23063f1f9ac773dbeb4508b194823193299a1f0617b9f",
+        "a141f64fac75f3a1aa84a9cbcb962cb0ce95d53ecf8de49ac0dd96e8091d78b1",
+        "1cdd947bfa7caa0d1afa23410ed22cf4206c21e240c5dbe9b2286dd32805348e"
+      ],
+      "context": [
+        "bc174a35245cec01d9dcf55b95b4eb05fe55106d63195583d93216c7bdda32b0"
+      ],
+      "python_error_markers": 0
+    },
+    "Sleepy/DefaultJson": {
+      "stable": [
+        "e31000d537202c17a23ea4dcffa7f435255bdad63530aecbbf91bb40409fbb81",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "80c27e09b6ac758677bc22bda2d729cee38fcc75b044c1948090de081514dfe2",
+        "66557825562e6d62975b95fa70883da9d2808cfc22b91a2970126c0eac6eb349",
+        "cc003c9139d9f4683f7c7058e8a21cb1626a023a23417c2b8d1f68e4c6690c91",
+        "7c97d8720cf9ed9824452166dedd4a859cc579cb52ffcd1b10563c5347c8f4da",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "1cd6293a9332af2bd87f969a9285d384886e3d5fe1d84f4fe06f97f0884bc9eb",
+        "7c3ca8b343e8a61e3c14b55d80196734f31018e1054bce7d88bbf6f5f1cbda9a",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Sleepy/Lite": {
+      "stable": [
+        "846093f4aab09afbc7b811214e2bf23d87f0fcdee5e3212e1fe5d45eceed494b",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "30272d364622407e66953a088c7e58d805fbdb3d5c347795db97f512b2d7f048",
+        "c9c2a0f3c96c8b8ab8f3f29f8d2deb81ade5daf66c8c7448fe3fad9b530ef190",
+        "c4748b51ec559fa24a65ad1e90fdbde91654a5f6a8b33e5eb7423850460c2631",
+        "1cdd947bfa7caa0d1afa23410ed22cf4206c21e240c5dbe9b2286dd32805348e"
+      ],
+      "context": [
+        "bc174a35245cec01d9dcf55b95b4eb05fe55106d63195583d93216c7bdda32b0"
+      ],
+      "python_error_markers": 0
+    },
+    "Ghost/Default": {
+      "stable": [
+        "1d433cd017e04d61ceb143805e6fda6dc7aa0ed52c414ab4ff3ca2d7eea697f3",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "f32fc39ddf269c0a1de06135043fd18c13491ea36a2e3492144882f4ec4d3579",
+        "bf168aac355df0cef23158062d790f0c8ab04d7c904d830b17586628c80f56e8",
+        "b0b175e0bb71ed64a1d0b287167c0ea0057a5261c56a008f51ca7c9ad959f20e",
+        "c6e384e8c7f015a02ae61a1c269ef333c0a59247b3cd1b10af8351c6343c8576",
+        "0ca77004683f750d42aa42026cdc89338fd695af31cd3e52bf3f898f5179543d"
+      ],
+      "context": [
+        "0df48f8606f97a58b6f43c9fa11c87a3170ac226227f96f970f9c729d7762332"
+      ],
+      "python_error_markers": 0
+    },
+    "Ghost/DefaultJson": {
+      "stable": [
+        "403e22e4ee3c6d70f62a0e87cc620020a1c549929b8bef21ae569db1fa195151",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "593ee3a4cd5475c01dbc21e62a3a32ce45f17e1ee58366e97184049d843fa0c1",
+        "24e3eed9a80ef503058d7e279b8f99308478aaf2d9c53dab8235bc4ad5b1e8d0",
+        "b0b175e0bb71ed64a1d0b287167c0ea0057a5261c56a008f51ca7c9ad959f20e",
+        "33b08aa12b4c539039f32f9e4899812ffe0a453db5d8b21efaf951741ae8c109",
+        "edf2cbdbf4a26f3858473af6d484fbc3db1f52309a0acb3e1bab971d4e9e1df1",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Ghost/Lite": {
+      "stable": [
+        "1d433cd017e04d61ceb143805e6fda6dc7aa0ed52c414ab4ff3ca2d7eea697f3",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "f32fc39ddf269c0a1de06135043fd18c13491ea36a2e3492144882f4ec4d3579",
+        "150bda3b18c614e78d7d450e722525ba0a9e92df79059e42b73a8104be777a79",
+        "1433a0787f483fb46a640006033a5bf39634f3cd13669f4a5a0109252120dc80",
+        "0ca77004683f750d42aa42026cdc89338fd695af31cd3e52bf3f898f5179543d"
+      ],
+      "context": [
+        "0df48f8606f97a58b6f43c9fa11c87a3170ac226227f96f970f9c729d7762332"
+      ],
+      "python_error_markers": 0
+    },
+    "Creepy/Default": {
+      "stable": [
+        "ebe3e01fe90e092cfbc96e19bf025e21a6a97d331d23bfc1ddc21d6368efee7d",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "3e82a53e95625671b6c585d457abac0396cf5e9719617c7ac93435450ff2c0cf",
+        "4e4dd71de34800c1f5c67d84abc3bfe1106ae0d024f25b47540df394f8de126c",
+        "e681b89574efdddcea955a63bc864c8f7483c9d06bccddbaf2009199b3e5b6b2",
+        "4f1cd16bc20f23a0b8a082d94faf8176bc6c070c41791a57c20878db5b73b9f3",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "a706e019d36a739414f36d8e0e06140510beb456a8f35bda63e8a6c05306fe26",
+        "d9aefcdfbfdf666c2ff771dcc039a94e33110e60293626dc65e700e46ec129f1"
+      ],
+      "context": [
+        "9f301502eccdc3086a9aeba136c19205bfbee4a99936a03419e27cf439ae8464"
+      ],
+      "python_error_markers": 0
+    },
+    "Creepy/DefaultJson": {
+      "stable": [
+        "1f824f474e032d3bbd62d0f85f155237f7258df6fb0e19185dfb1c66ea2fb993",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "3e82a53e95625671b6c585d457abac0396cf5e9719617c7ac93435450ff2c0cf",
+        "f9c0900aebe3627b07054269137a51431810100d397b5e24e7af7b9d87525a20",
+        "e681b89574efdddcea955a63bc864c8f7483c9d06bccddbaf2009199b3e5b6b2",
+        "8d2b286f0f2ba3262f832693a0fb07a1445c86f6d4c1bb46967196737b5f1761",
+        "27ace93539a12842d3ab0c878702463125f3506dc82ab9dcd01228e55f3d36e2",
+        "a706e019d36a739414f36d8e0e06140510beb456a8f35bda63e8a6c05306fe26",
+        "da00df029370df48331767c788f89e93cc08985ce0a651b40393bee77667bcc2",
+        "ed711936207fc78ef43d6a7be0e0dfa7970485702e6b200521941345a0cc095f"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "Creepy/Lite": {
+      "stable": [
+        "ebe3e01fe90e092cfbc96e19bf025e21a6a97d331d23bfc1ddc21d6368efee7d",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "03fc97fd600c03564166e7bb0ce6584c84ce5e5ed0e1626189b2bd136a3f765c",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8",
+        "39baea77e3c1023da6b641b159ea3889b3962e9c43a7bb449d1a1d87c9c77328",
+        "cf3973e4fb4f84e137ad5348a4d79937ae47975ffa13117c57071802cd0df85c",
+        "4e4dd71de34800c1f5c67d84abc3bfe1106ae0d024f25b47540df394f8de126c",
+        "4f1cd16bc20f23a0b8a082d94faf8176bc6c070c41791a57c20878db5b73b9f3",
+        "d9aefcdfbfdf666c2ff771dcc039a94e33110e60293626dc65e700e46ec129f1"
+      ],
+      "context": [
+        "9f301502eccdc3086a9aeba136c19205bfbee4a99936a03419e27cf439ae8464"
+      ],
+      "python_error_markers": 0
+    },
+    "GameMaster/DefaultJson": {
+      "stable": [
+        "431798d534e6fa247ead62095c5f8d1d672394c87f4d0a8e52c419a00a2e4133",
+        "630bd95f5b6b8c0bf09ebca044c596994babf488fa5442bdb55e96dd424ec4cd",
+        "734781934c74f54947791fde30ff8bebd0492c644f74fbbb2d9e1c2bbcd8a149",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "GameMaster/Lite": {
+      "stable": [
+        "a440e8494288b5773be9b17f5a907e64066bc02dcb3615141977b143ca55f733",
+        "d360c3af1056d4dce9d68ba66004797276fd5f7c30dac8b37c3e3a2bc4f00deb",
+        "177e077a3eb742c9adddbc91e91dc81290d0559c1613750d72caad3100339a23",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    },
+    "GameMaster/default": {
+      "stable": [
+        "a440e8494288b5773be9b17f5a907e64066bc02dcb3615141977b143ca55f733",
+        "d360c3af1056d4dce9d68ba66004797276fd5f7c30dac8b37c3e3a2bc4f00deb",
+        "f80e8fff70cf1316d68b1beaec025b293c027baf6315cf0a355db17ba4b75d06",
+        "a7aa5ca4dcf38e9ac0f4a847ce189c6a80a9cb4311d5055d8d16f66c7a3567b8"
+      ],
+      "context": [],
+      "python_error_markers": 0
+    }
+  }
+}

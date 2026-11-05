@@ -239,10 +239,14 @@ impl OpenAiProvider {
     ) -> Result<StructuredResponse, GenerationError> {
         let conversation =
             LlmConversation::from_context_with_memory(&input.context, &input.prepared_knowledge);
-        let mut prompt = vec![PromptMessage {
-            role: PromptRole::System,
-            text: conversation.system_instruction.into(),
-        }];
+        let mut prompt = conversation
+            .system_segments(&input.context, input.prompt.as_ref())
+            .into_iter()
+            .map(|text| PromptMessage {
+                role: PromptRole::System,
+                text: text.into(),
+            })
+            .collect::<Vec<_>>();
         prompt.extend(conversation.messages.into_iter().map(|m| PromptMessage {
             role: match m.role {
                 LlmRole::User => PromptRole::User,
@@ -335,8 +339,12 @@ fn encode(
     config: &OpenAiPresetDefinition,
 ) -> (Vec<PromptMessage>, Value) {
     if config.options.output != JsonOutput::Schema {
+        let index = prompt
+            .iter()
+            .take_while(|m| m.role == PromptRole::System)
+            .count();
         prompt.insert(
-            0,
+            index,
             PromptMessage {
                 role: PromptRole::System,
                 text: format!(
@@ -485,6 +493,42 @@ fn decode(bytes: &[u8], protocol: OpenAiProtocol) -> Result<StructuredResponse, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_preserves_system_segment_order_before_user_messages() {
+        let def = OpenAiPresetDefinition {
+            protocol: OpenAiProtocol::Compatible,
+            endpoint: "https://api.example.com/v1/chat/completions".into(),
+            model: "test".into(),
+            credential: None,
+            temperature: 0.2,
+            max_output_tokens: 100,
+            timeout_ms: 1000,
+            options: OpenAiProtocol::Compatible.options(),
+            transforms: Vec::new(),
+        };
+        let prompt = vec![
+            PromptMessage {
+                role: PromptRole::System,
+                text: "stable".into(),
+            },
+            PromptMessage {
+                role: PromptRole::System,
+                text: "dynamic".into(),
+            },
+            PromptMessage {
+                role: PromptRole::User,
+                text: "question".into(),
+            },
+        ];
+        let (transformed, body) = encode(prompt, &def);
+        assert_eq!(transformed[0].text.as_ref(), "stable");
+        assert_eq!(transformed[1].text.as_ref(), "dynamic");
+        assert_eq!(transformed[2].text.as_ref(), "question");
+        assert_eq!(body["messages"][0]["content"], "stable");
+        assert_eq!(body["messages"][1]["content"], "dynamic");
+        assert_eq!(body["messages"][2]["content"], "question");
+    }
 
     #[test]
     fn truncated_refused_tool_and_incomplete_outputs_are_rejected() {
