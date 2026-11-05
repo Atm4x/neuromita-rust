@@ -38,6 +38,7 @@ pub use speech::SpeechSessionPresenter;
 
 pub struct GuiPresenter {
     pub audio_input: AudioInputPresenter,
+    pub prompts: Option<std::sync::Arc<crate::prompts::PromptCatalog>>,
     pub speech: SpeechSessionPresenter,
     pub ai_runtime: RuntimeStatePresenter,
     pub releases: ReleasesPresenter,

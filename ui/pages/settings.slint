@@ -21,10 +21,10 @@ import { GameSettingsPage } from "../settings/game-page.slint";
 import { ModelsSettingsPage } from "../settings/models-page.slint";
 import { ImagesSettingsPage } from "../settings/images-page.slint";
 
-import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem } from "../settings/presets-state.slint";
+import { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem } from "../settings/presets-state.slint";
 import { ApiPresetsWorkspace } from "../settings/api-presets.slint";
 import { Card, SettingsLabel, SettingsField, SettingsButton, EditorField, SectionHeading } from "../settings/form-controls.slint";
-export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem }
+export { SettingsUi, CharacterPresets, PresetItem, PresetTemplateItem, PromptSetItem }
 
 export struct SettingsHeaderInfo { title: string, description: string, glyph: string }
 
@@ -49,6 +49,52 @@ component PresetChoice inherits Rectangle {
     }
 }
 
+
+component PromptSetChoice inherits Rectangle {
+    in property <int> character;
+    in property <string> value;
+    callback selected(string);
+    height: 40px;
+    background: SettingsTheme.field;
+    border-width: 1px;
+    border-color: SettingsTheme.field-border;
+    border-radius: 10px;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 8px;
+        SettingsLabel {
+            text: root.value == "" ? I18n.i18n("settings.characters.prompt-unavailable", "Наборы промптов не найдены") : root.value;
+            color: root.value == "" ? SettingsTheme.muted : SettingsTheme.text;
+            horizontal-stretch: 1;
+        }
+        Glyph { text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
+    }
+    TouchArea { mouse-cursor: pointer; clicked => { if (root.value != "") { menu.show(); } } }
+    menu := PopupWindow {
+        y: root.height + 3px;
+        width: root.width;
+        height: min(300px, SettingsUi.prompt-set-options.length * 36px + 8px);
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: SettingsTheme.popup;
+            border-radius: 9px;
+            border-width: 1px;
+            border-color: SettingsTheme.border;
+            ScrollView {
+                width: 100%; height: 100%; content-width: self.visible-width;
+                VerticalLayout {
+                    padding: 4px; spacing: 2px; alignment: start;
+                    for item in SettingsUi.prompt-set-options: QuickAction {
+                        visible: item.character == root.character;
+                        text: item.name;
+                        activated => { root.selected(item.name); menu.close(); }
+                    }
+                }
+            }
+        }
+    }
+}
 
 component CharacterWorkspace inherits HorizontalLayout {
     in property <bool> connected;
@@ -134,29 +180,38 @@ component CharacterWorkspace inherits HorizontalLayout {
                     CollapsibleSettingsSection { title: I18n.i18n("settings.characters.prompt-set", "Набор промптов"); glyph: "\u{f15c}"; expanded <=> root.prompt-expanded;
 VerticalLayout {
                             padding: 0px; spacing: 12px;
-                            SettingsField {
-                                placeholder: I18n.i18n("settings.characters.prompt-unavailable", "Каталог наборов промптов не подключён");
-                                enabled: false; height: 38px;
-                                HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: end;
-                                    Glyph { width: 18px; text: "\u{f077}"; font-size: 11px; color: SettingsTheme.accent; }
-                                }
+                            PromptSetChoice {
+                                character: root.character;
+                                value: SettingsUi.character-prompt-sets[root.character];
+                                selected(value) => { if (root.connected) { SettingsUi.character-prompt-set(root.character, value); } }
                             }
-                            VerticalLayout {
+                            for item in SettingsUi.prompt-set-options: VerticalLayout {
+                                visible: item.character == root.character && item.name == SettingsUi.character-prompt-sets[root.character];
                                 padding: 0px; spacing: 4px;
                                 HorizontalLayout { height: 20px; spacing: 8px;
                                     SettingsLabel { text: I18n.i18n("settings.characters.author", "Автор:"); font-weight: 600; }
-                                    SettingsLabel { text: "—"; horizontal-stretch: 1; }
+                                    SettingsLabel { text: item.author == "" ? "—" : item.author; horizontal-stretch: 1; }
                                 }
                                 HorizontalLayout { height: 20px; spacing: 8px;
                                     SettingsLabel { text: I18n.i18n("settings.characters.version", "Версия:"); font-weight: 600; }
-                                    SettingsLabel { text: "—"; horizontal-stretch: 1; }
+                                    SettingsLabel { text: item.version == "" ? "—" : item.version; horizontal-stretch: 1; }
                                 }
                                 SettingsLabel { text: I18n.i18n("settings.characters.prompt-description", "Описание:"); font-weight: 600; }
-                                SettingsLabel { text: "—"; }
+                                SettingsLabel { text: item.description == "" ? "—" : item.description; wrap: word-wrap; }
                             }
                             HorizontalLayout { spacing: 6px;
-                                SettingsButton { text: I18n.i18n("settings.characters.open-prompt-folder", "Открыть папку набора"); glyph: "\u{f07c}"; enabled: false; horizontal-stretch: 1; height: 34px; border-radius: 10px; }
-                                SettingsButton { text: I18n.i18n("settings.characters.reload", "Перезагрузить"); glyph: Fa.refresh; enabled: false; horizontal-stretch: 1; height: 34px; border-radius: 10px; }
+                                SettingsButton {
+                                    text: I18n.i18n("settings.characters.open-prompt-folder", "Открыть папку набора");
+                                    glyph: "\u{f07c}"; enabled: root.connected && SettingsUi.character-prompt-sets[root.character] != "";
+                                    horizontal-stretch: 1; height: 34px; border-radius: 10px;
+                                    activated => { SettingsUi.prompt-open-folder(root.character); }
+                                }
+                                SettingsButton {
+                                    text: I18n.i18n("settings.characters.reload", "Перезагрузить");
+                                    glyph: Fa.refresh; enabled: root.connected;
+                                    horizontal-stretch: 1; height: 34px; border-radius: 10px;
+                                    activated => { SettingsUi.prompt-reload(); }
+                                }
                             }
                         }
                     }

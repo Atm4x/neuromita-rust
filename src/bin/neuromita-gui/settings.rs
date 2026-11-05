@@ -2,7 +2,7 @@ use super::{
     runtime::Command,
     view::{
         AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
-        SettingsUi,
+        PromptSetItem, SettingsUi,
     },
 };
 use neuromita::{
@@ -38,10 +38,26 @@ fn area_for_section(index: i32) -> Option<SettingsArea> {
 pub struct AdministrationSnapshot {
     pub settings: Arc<SettingsSnapshot>,
     pub presets: PresetsView,
+    pub prompt_sets: Vec<neuromita::prompts::PromptSetInfo>,
 }
 
 pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
     match command {
+        Command::SelectPromptSet(character, name) => {
+            let catalog = api
+                .prompts
+                .as_ref()
+                .ok_or("Prompt catalog is not configured")?;
+            catalog
+                .resolve_set(character, Some(&name))
+                .map_err(|e| e.to_string())?;
+            api.settings
+                .characters
+                .for_character(character)
+                .prompt_set
+                .set(Some(name))
+                .map_err(|e| e.to_string())?;
+        }
         Command::UpdatePreset(id, record) => api
             .presets
             .update_connection(id, record)
@@ -438,6 +454,23 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     let send = dispatch.clone();
+    settings.on_character_prompt_set(move |character, name| {
+        let Some(character) = CharacterId::from_index(character) else {
+            return;
+        };
+        if !name.is_empty() {
+            send(Command::SelectPromptSet(character, name.into()));
+        }
+    });
+    let send = dispatch.clone();
+    settings.on_prompt_reload(move || send(Command::RefreshPromptCatalog));
+    let send = dispatch.clone();
+    settings.on_prompt_open_folder(move |index| {
+        if let Some(character) = CharacterId::from_index(index) {
+            send(Command::OpenPromptFolder(character));
+        }
+    });
+    let send = dispatch.clone();
     let weak = window.as_weak();
     settings.on_character_preset(move |character, operation, value| {
         let Some(component) = weak.upgrade() else {
@@ -568,6 +601,49 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
         })
         .collect::<Vec<_>>();
     window.set_character_presets(ModelRc::new(VecModel::from(rows)));
+    let prompt_options = model
+        .prompt_sets
+        .iter()
+        .map(|set| PromptSetItem {
+            character: set.character.index() as i32,
+            name: set.name.as_str().into(),
+            author: set.author.as_str().into(),
+            version: set.version.as_str().into(),
+            description: set.description.as_str().into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_prompt_set_options(ModelRc::new(VecModel::from(prompt_options)));
+    let prompt_selections = CharacterId::ALL
+        .into_iter()
+        .map(|id| {
+            let requested = settings
+                .values
+                .characters
+                .for_character(id)
+                .prompt_set
+                .as_deref();
+            if let Some(name) = requested {
+                if model
+                    .prompt_sets
+                    .iter()
+                    .any(|set| set.character == id && set.name == name)
+                {
+                    return name.into();
+                }
+                return "".into();
+            }
+            model
+                .prompt_sets
+                .iter()
+                .filter(|set| set.character == id)
+                .find(|set| set.name.eq_ignore_ascii_case("Default"))
+                .or_else(|| model.prompt_sets.iter().find(|set| set.character == id))
+                .map(|set| set.name.as_str())
+                .unwrap_or_default()
+                .into()
+        })
+        .collect::<Vec<_>>();
+    window.set_character_prompt_sets(ModelRc::new(VecModel::from(prompt_selections)));
     let templates = provider_templates(&model.presets.providers);
     window.set_preset_templates(ModelRc::new(VecModel::from(templates)));
     let parameters = model
