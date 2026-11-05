@@ -1,6 +1,6 @@
 # GameLink TCP contract (2026-11-05)
 
-GameLink is enabled by `ApplicationConfig::game_link` and uses newline-delimited JSON. Every incoming frame has a `command_id` UUID and a `command` discriminator. It shares the canonical Core/Timeline and request system with the local launcher. Its requests are marked `RequestSource::Game(session_id)` and use the `in_game` voice policy; LocalControl requests use launcher voice policy.
+GameLink is enabled by `ApplicationConfig::game_link` and uses newline-delimited JSON. Every incoming frame has a `command_id` UUID and a `command` discriminator. It shares the canonical Core/Timeline and request system with the local launcher. Its requests are marked `RequestSource::Game(session_id)` and use the `in_game` voice policy. The existing TCP transport retains the same voice policy for `RequestSource::Client` requests.
 
 ## Session lifecycle
 

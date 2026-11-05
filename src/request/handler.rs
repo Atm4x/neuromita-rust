@@ -121,8 +121,7 @@ impl MessageHandler {
         let voice_settings = settings.values.voice.clone();
         let voice_enabled = match message.source() {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
-            RequestSource::Client(_) => voice_settings.in_launcher,
-            RequestSource::Game(_) => voice_settings.in_game,
+            RequestSource::Client(_) | RequestSource::Game(_) => voice_settings.in_game,
         };
         let prepared = tokio::select! {
             biased;
