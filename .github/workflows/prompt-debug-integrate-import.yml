@@ -1,0 +1,38 @@
+name: Import Prompt Debug Integration Git Bundle
+on:
+  push:
+    branches:
+      - bridge/prompt-debug-integrate-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Validate full original Git history and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=3433487564e41a2cce582d060e3329b91afb698e
+          HEAD=6316dc3eff7e3faaea471165d63315ade08c292e
+          TARGET=refs/heads/codex/prompt-debug-gui-integrate-20261106
+          : > /tmp/prompt-debug.bundle.xz
+          for part in bridge_payloads/prompt-debug/part*.b64; do
+            base64 --decode "$part" >> /tmp/prompt-debug.bundle.xz
+          done
+          echo '5a2da4b453640c8b1d71e5afe69f2f5b14751152c7819bc6e09d95bd81a75c7b  /tmp/prompt-debug.bundle.xz' | sha256sum -c
+          xz --decompress --stdout /tmp/prompt-debug.bundle.xz > /tmp/prompt-debug.bundle
+          echo '170bb00f0bea6c6a4491501c8afd79b506fbb610c68445cff7818c1da511ef05  /tmp/prompt-debug.bundle' | sha256sum -c
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/prompt-debug.bundle
+          git fetch /tmp/prompt-debug.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
