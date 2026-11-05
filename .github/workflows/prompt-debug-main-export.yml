@@ -1,0 +1,30 @@
+name: Export Prompt Debug Integration Main
+on:
+  push:
+    branches:
+      - bridge/prompt-debug-main-export-20261106
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export main history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin refs/heads/main:refs/heads/integration-main
+          test "$(git rev-parse refs/heads/integration-main)" = 3433487564e41a2cce582d060e3329b91afb698e
+          git bundle create prompt-debug-main.bundle refs/heads/integration-main
+          git bundle verify prompt-debug-main.bundle
+          sha256sum prompt-debug-main.bundle > prompt-debug-main.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prompt-debug-main-source
+          path: |
+            prompt-debug-main.bundle
+            prompt-debug-main.bundle.sha256
+          retention-days: 1
