@@ -282,7 +282,7 @@ fn active(id: Uuid) -> RequestHandle {
 #[tokio::test]
 async fn voice_failure_keeps_the_accepted_message_identity_in_status_and_replay() {
     let mut fixture = Fixture::start(|_| {}).await;
-    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_launcher = true).unwrap();
     let mut client = fixture.connect().await;
     let command_id = Uuid::new_v4();
     let request = reply(command_id, "Crazy", "reply with unavailable voice");
