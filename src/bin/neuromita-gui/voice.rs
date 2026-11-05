@@ -49,6 +49,13 @@ fn model_id(label: &str) -> String {
         .to_owned()
 }
 
+fn api_profile_id(label: &str) -> &str {
+    REMOTE_TTS_TEMPLATES
+        .iter()
+        .find(|template| template.name == label)
+        .map_or(label, |template| template.id)
+}
+
 fn read(window: &AppWindow) -> Result<TtsPreferences, String> {
     let ui = window.global::<VoiceUi>();
     let mut value = TtsPreferences {
@@ -73,7 +80,7 @@ fn read(window: &AppWindow) -> Result<TtsPreferences, String> {
         local_language: ui.get_local_language().into(),
         local_auto_load: ui.get_local_auto_load(),
         local_lazy_init: ui.get_local_lazy_init(),
-        api_profile: model_id(&ui.get_api_profile()),
+        api_profile: api_profile_id(&ui.get_api_profile()).to_owned(),
         api_model: ui.get_api_model().into(),
         api_speed_percent: ui
             .get_api_speed()
@@ -204,7 +211,7 @@ pub fn render(window: &AppWindow, settings: &TtsPreferences) {
     let api_profile = REMOTE_TTS_TEMPLATES
         .iter()
         .find(|template| template.id == settings.api_profile)
-        .map(|template| format!("{} · {}", template.id, template.name))
+        .map(|template| template.name.to_owned())
         .unwrap_or_else(|| settings.api_profile.clone());
     ui.set_api_profile(api_profile.into());
     ui.set_api_models(ModelRc::new(VecModel::from(
@@ -289,10 +296,11 @@ pub fn inventory(window: &AppWindow, models: &SpeechInventory) {
     ui.set_api_profiles(ModelRc::new(VecModel::from(
         REMOTE_TTS_TEMPLATES
             .iter()
-            .map(|template| format!("{} · {}", template.id, template.name).into())
+            .map(|template| template.name.into())
             .collect::<Vec<_>>(),
     )));
-    let active_provider = model_id(&ui.get_api_profile());
+    let profile = ui.get_api_profile();
+    let active_provider = api_profile_id(&profile);
     ui.set_api_models(ModelRc::new(VecModel::from(
         REMOTE_TTS_TEMPLATES
             .iter()
@@ -336,7 +344,6 @@ pub fn preview(window: &AppWindow, mode: VoicePreviewMode) {
     ui.set_api_speed(100);
     ui.set_character(0);
     ui.set_voice_id("demo-voice-identifier".into());
-    ui.set_sample_text("Привет! Я Мита. Давай проверим, как звучит мой голос.".into());
 }
 
 pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {

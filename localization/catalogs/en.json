@@ -1859,6 +1859,10 @@
     "source": "TTS, ASR, RAG и Beats получают отдельные процессы: падения и конфликты зависимостей изолированы, но расход RAM и VRAM выше.",
     "translation": "TTS, ASR, RAG and Beats run in separate processes: failures and dependency conflicts are isolated, but RAM and VRAM usage is higher."
   },
+  "voice.api.sample": {
+    "source": "Привет! Я Мита. Давай проверим, как звучит мой голос.",
+    "translation": "Hi! I'm Mita. Let's hear how my voice sounds."
+  },
   "settings.ai-engine.maintenance-unavailable": {
     "source": "Обслуживание недоступно",
     "translation": "Maintenance is unavailable"
