@@ -14,17 +14,26 @@ component VoiceTab inherits ActionSurface {
     horizontal-stretch: 0;
     border-width: 0px;
     border-radius: 16px;
-    background: root.selected ? transparent : root.hovered ? SettingsTheme.button-hover : SettingsTheme.field;
-    animate background { duration: 140ms; easing: ease-out; }
+    background: transparent;
+
+    Rectangle {
+        x: 3px; y: 4px;
+        width: parent.width - 6px; height: parent.height - 8px;
+        border-radius: 16px;
+        background: root.selected ? transparent : root.hovered ? SettingsTheme.button-hover : SettingsTheme.field;
+        animate background { duration: 140ms; easing: ease-out; }
+    }
 
     Rectangle {
         property <length> portrait-size: root.selected ? 56px : root.hovered ? 52px : 50px;
-        width: self.portrait-size;
-        height: self.portrait-size;
+        width: self.portrait-size + 6px;
+        height: self.portrait-size + 6px;
         x: (parent.width - self.width) / 2;
-        y: root.selected ? 6px : root.hovered ? 8px : 10px;
+        y: root.selected ? 3px : root.hovered ? 5px : 6px;
+        opacity: root.selected || root.hovered ? 1 : 0.82;
         border-radius: self.width / 2;
         background: transparent;
+        clip: true;
         border-width: root.selected ? 1.5px : 0px;
         border-color: SettingsTheme.accent;
         animate width { duration: 230ms; easing: ease-out; }
@@ -88,6 +97,7 @@ export component CharacterVoiceTabs inherits VerticalLayout {
     changed selected => { root.ensure-visible(); }
     min-width: 0px;
     preferred-width: 0px;
+    max-width: 100000px;
     horizontal-stretch: 1;
     padding: 0px;
     spacing: 0px;
@@ -103,9 +113,11 @@ export component CharacterVoiceTabs inherits VerticalLayout {
     }
 
     chrome := Rectangle {
+        clip: true;
         height: 207px;
         min-width: 0px;
         preferred-width: 0px;
+        max-width: 100000px;
         horizontal-stretch: 1;
         vertical-stretch: 0;
         background: transparent;
@@ -117,6 +129,8 @@ export component CharacterVoiceTabs inherits VerticalLayout {
         Path {
             width: 100%;
             height: 100%;
+            viewbox-width: chrome.canvas-w;
+            viewbox-height: chrome.canvas-h;
             fill: @linear-gradient(0deg, #171827, #111321);
             stroke: #55506560;
             stroke-width: 1px;
@@ -142,11 +156,16 @@ export component CharacterVoiceTabs inherits VerticalLayout {
                 height: 82px;
                 vertical-stretch: 0;
                 spacing: 0px;
-                viewport := Flickable {
-                    changed width => { root.ensure-visible(); }
+                Rectangle {
+                    clip: true;
                     horizontal-stretch: 1;
                     min-width: 0px;
                     preferred-width: 0px;
+                    max-width: 100000px;
+                    height: 82px;
+                viewport := Flickable {
+                    width: 100%;
+                    changed width => { root.ensure-visible(); }
                     height: 82px;
                     content-width: (CharacterCatalog.entries.length + 1) * 96px + 32px;
                     content-height: 82px;
@@ -179,12 +198,18 @@ export component CharacterVoiceTabs inherits VerticalLayout {
                         }
                     }
                 }
-                if chrome.overflow: HorizontalLayout {
+                }
+                if chrome.overflow: VerticalLayout {
                     width: 72px;
-                    padding-left: 4px;
-                    padding-right: 4px;
-                    spacing: 4px;
+                    height: 82px;
+                    padding-top: 2px; padding-bottom: 0px;
+                    padding-left: 0px; padding-right: 0px;
+                    spacing: 0px;
                     alignment: center;
+                    HorizontalLayout {
+                    height: 32px;
+                    padding-left: 4px; padding-right: 4px;
+                    spacing: 4px;
                     VoiceScrollButton {
                         glyph: "\u{f053}";
                         enabled: root.offset > 0;
@@ -194,6 +219,7 @@ export component CharacterVoiceTabs inherits VerticalLayout {
                         glyph: "\u{f054}";
                         enabled: -viewport.content-x + viewport.width < viewport.content-width - 1px;
                         activated => { root.offset = min(CharacterCatalog.entries.length, root.offset + 2); }
+                    }
                     }
                 }
             }

@@ -1,4 +1,8 @@
 {
+  "settings.characters.prompt-empty": {
+    "source": "Наборы промптов не найдены",
+    "translation": "No prompt sets found"
+  },
   "settings.preset.toggle-key": {
     "source": "Показать/скрыть ключ",
     "translation": "Show/hide key"
@@ -806,10 +810,6 @@
   "settings.characters.prompt-set": {
     "source": "Набор промптов",
     "translation": "Prompt set"
-  },
-  "settings.characters.prompt-unavailable": {
-    "source": "Каталог наборов промптов не подключён",
-    "translation": "Prompt sets are unavailable"
   },
   "settings.characters.generation-presets": {
     "source": "Пресеты генерации",

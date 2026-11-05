@@ -45,6 +45,7 @@ use crate::{
         CharactersPresenter, ConnectionsPresenter, ConversationPresenter, GuiPresenter,
         PresenterRunner, PresetsPresenter, ReleasesPresenter, SettingsPresenter,
     },
+    prompts::PromptCatalog,
     reminders::{ReminderConfig, ReminderService},
     request::{
         ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
@@ -91,6 +92,7 @@ pub struct ApplicationConfig {
     pub releases: Arc<dyn crate::releases::ReleaseFeed>,
     pub migrations: StartupMigrations,
     pub presets: PresetCatalog,
+    pub prompts: Option<Arc<PromptCatalog>>,
     pub generator: ResponseGenerator,
     pub knowledge: KnowledgeRetrieval,
     pub limits: RuntimeLimits,
@@ -132,6 +134,7 @@ impl ApplicationConfig {
             server: ServerConfig::test_protocol(bind, CharacterId::Crazy),
             timeline: TimelineConfig::Transient,
             presets,
+            prompts: None,
             generator,
             knowledge: KnowledgeRetrieval::lexical(),
             limits,
@@ -149,6 +152,11 @@ impl ApplicationConfig {
             games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
         }
+    }
+
+    pub fn with_prompt_catalog(mut self, catalog: PromptCatalog) -> Self {
+        self.prompts = Some(Arc::new(catalog));
+        self
     }
 
     /// Attach an already prepared AI plan and an authoritative read-only speech catalog.
@@ -390,6 +398,7 @@ impl ApplicationLifecycle {
             releases: release_feed,
             migrations,
             presets,
+            prompts,
             generator,
             knowledge,
             limits,
@@ -594,6 +603,7 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
+                prompts: prompts.clone(),
                 finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,
@@ -719,6 +729,7 @@ impl ApplicationLifecycle {
                 audio_input: crate::presentation::AudioInputPresenter::new(Arc::clone(
                     &audio_input,
                 )),
+                prompts: prompts.clone(),
                 speech: speech_view,
                 ai_runtime: ai_runtime_status,
                 releases,

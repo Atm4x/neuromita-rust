@@ -30,6 +30,7 @@ pub(crate) struct MessageHandler {
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
+    pub(crate) prompts: Option<Arc<crate::prompts::PromptCatalog>>,
     pub(crate) finetune: Option<FineTuneCollector>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
@@ -115,7 +116,7 @@ impl MessageHandler {
                 record.admission(),
             ) => context,
         };
-        let context = match prepared {
+        let mut context = match prepared {
             Ok(context) => context,
             Err(CharacterError::StaleState) => {
                 record.cancel_with_reason(CancelReason::ContextChanged);
@@ -143,6 +144,79 @@ impl MessageHandler {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
+        if self.prompts.is_none()
+            && settings
+                .values
+                .characters
+                .for_character(message.character_id())
+                .prompt_set
+                .is_some()
+        {
+            record.finish(RequestOutcome::InternalError(record.failure(
+                "prompt catalog is not configured for the explicitly selected prompt set".into(),
+            )));
+            return;
+        }
+        if let Some(catalog) = &self.prompts {
+            let selection = settings
+                .values
+                .characters
+                .for_character(message.character_id())
+                .prompt_set
+                .as_deref();
+            let variables = std::collections::BTreeMap::from([
+                (
+                    "attitude".to_owned(),
+                    serde_json::json!(context.state.attitude),
+                ),
+                (
+                    "boredom".to_owned(),
+                    serde_json::json!(context.state.boredom),
+                ),
+                ("stress".to_owned(), serde_json::json!(context.state.stress)),
+                (
+                    "CURRENT_INPUT".to_owned(),
+                    serde_json::json!(context.current_input.as_ref()),
+                ),
+                (
+                    "CHARACTER_ID".to_owned(),
+                    serde_json::json!(context.character_id.to_string()),
+                ),
+                ("SEED_INITIAL_MEMORIES".to_owned(), serde_json::json!(false)),
+                (
+                    "SEED_CHARACTER_MEMORIES".to_owned(),
+                    serde_json::json!(false),
+                ),
+                ("SEED_WORLD_LORE".to_owned(), serde_json::json!(false)),
+                ("SEED_ROOMS_LORE".to_owned(), serde_json::json!(false)),
+                ("SEED_MITAS_LORE".to_owned(), serde_json::json!(false)),
+                ("SEED_ENTITY_LINKS".to_owned(), serde_json::json!(false)),
+            ]);
+            let template = if matches!(message.intent(), crate::interaction::TurnIntent::React(_)) {
+                "react_template.txt"
+            } else {
+                "main_template.txt"
+            };
+            let result = catalog.list(message.character_id()).and_then(|sets| {
+                if sets.is_empty() && selection.is_none() {
+                    Ok(None)
+                } else {
+                    catalog
+                        .render(message.character_id(), selection, variables, template)
+                        .map(Some)
+                }
+            });
+            match result {
+                Ok(Some(rendered)) => context.prompt = Arc::from(rendered.system_text()),
+                Ok(None) => {}
+                Err(error) => {
+                    record.finish(RequestOutcome::InternalError(
+                        record.failure(error.to_string()),
+                    ));
+                    return;
+                }
+            }
+        }
         let voice_options = voice_enabled.then_some(VoiceOptions {
             voice: voice_settings.voice,
             volume: voice_settings.volume,

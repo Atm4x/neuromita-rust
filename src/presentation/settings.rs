@@ -117,6 +117,7 @@ pub enum PresetSlot {
 }
 
 pub struct CharacterSettingsPresenter {
+    pub prompt_set: BoundProperty<Option<String>>,
     pub assignments: BoundProperty<OperationPresets>,
     pub reply: BoundProperty<PresetSelection>,
     pub react: BoundProperty<PresetSelection>,
@@ -126,6 +127,23 @@ pub struct CharacterSettingsPresenter {
 impl CharacterSettingsPresenter {
     fn new(owner: Arc<SettingsOwner>, character: CharacterId) -> Self {
         Self {
+            prompt_set: BoundProperty::new(
+                Arc::clone(&owner),
+                move |settings| {
+                    settings
+                        .characters
+                        .for_character(character)
+                        .prompt_set
+                        .clone()
+                },
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).prompt_set = value;
+                        })
+                        .map(|_| ())
+                },
+            ),
             assignments: BoundProperty::new(
                 Arc::clone(&owner),
                 move |settings| settings.characters.for_character(character).presets,

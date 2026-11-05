@@ -29,6 +29,49 @@ use uuid::Uuid;
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn explicit_prompt_set_requires_a_catalog_before_provider_invocation() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    app.presenter()
+        .settings
+        .characters
+        .for_character(CharacterId::Crazy)
+        .prompt_set
+        .set(Some("Default".into()))
+        .unwrap();
+    let request = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "Test prompt selection".into())
+        .unwrap();
+    let result = timeout(Duration::from_secs(2), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert!(
+        server.calls.try_recv().is_err(),
+        "a missing catalog must not fall back to the built-in prompt"
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn factory_preset_is_saved_selected_generated_and_reloaded_through_presenters() {
     use neuromita::generation::{
         JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetCredentials,
