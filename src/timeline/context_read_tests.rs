@@ -120,6 +120,7 @@ fn context_uses_one_prefix_read_for_history_state_and_memory() {
         "change".into(),
         json!(crate::memory::MemoryChange::Upsert(
             crate::memory::MemoryRecord {
+                entities: Vec::new(),
                 id: crate::memory::MemoryId::new(),
                 priority: crate::memory::MemoryPriority::High,
                 content: "known memory".into(),

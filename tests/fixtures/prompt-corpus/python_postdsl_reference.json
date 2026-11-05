@@ -1,0 +1,104 @@
+{
+  "reference": "Python PostDslInterpreter, sample text and synthetic character state, FIELD rules applied with love_change=2.0/secret_trial=true",
+  "text_input": "Hello. love_change: +2 <secret_revealed> <action name=\"Wave\" value1=\"4\" value2=\"true\"/> *hello*",
+  "sets": {
+    "Crazy/By_mactep_kot_new_mini": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 5,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false
+      }
+    },
+    "Crazy/By_mactep_kot_new_mini_Json": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 5,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false
+      }
+    },
+    "Crazy/Default": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 7.0,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false,
+        "secretTrial": true
+      }
+    },
+    "Crazy/DefaultJson": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 7.0,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false,
+        "secretTrial": true
+      }
+    },
+    "Crazy/Lite": {
+      "text_sha256": "7c7e598f758de948593c42c25d8ccfa1979caa53bd2caba275bcb16da795d29a",
+      "variables": {
+        "Love": 7,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": true,
+        "current_action": "Wave",
+        "action_param1": 4,
+        "action_param2": true
+      }
+    },
+    "Crazy/LiteJson": {
+      "text_sha256": "7c7e598f758de948593c42c25d8ccfa1979caa53bd2caba275bcb16da795d29a",
+      "variables": {
+        "Love": 7,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": true,
+        "current_action": "Wave",
+        "action_param1": 4,
+        "action_param2": true
+      }
+    },
+    "GameMaster/DefaultJson": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 5,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false
+      }
+    },
+    "GameMaster/Lite": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 5,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false
+      }
+    },
+    "GameMaster/default": {
+      "text_sha256": "30be1cfa9896a2ccfda4c03f171e3186754a04cae90525ab649b2fd8c2073eba",
+      "variables": {
+        "Love": 5,
+        "attitude": 60,
+        "boredom": 20,
+        "stress": 10,
+        "secretExposed": false
+      }
+    }
+  }
+}

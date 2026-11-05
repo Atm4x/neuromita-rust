@@ -199,7 +199,10 @@ impl SemanticMemoryRetriever {
         fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
         let memories = memories
             .iter()
-            .filter(|record| record.kind == MemoryKind::Fact && record.state == MemoryState::Active)
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.state == MemoryState::Active
+            })
             .cloned()
             .collect::<Vec<_>>();
         let space = self.provider.space().clone();

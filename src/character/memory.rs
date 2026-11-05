@@ -71,6 +71,7 @@ impl MemoryIsland {
 pub enum MemoryKind {
     #[default]
     Fact,
+    RagOnly,
     Island(MemoryIsland),
 }
 
@@ -80,6 +81,8 @@ pub struct MemoryRecord {
     pub id: MemoryId,
     pub priority: MemoryPriority,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<String>,
     #[serde(default, skip_serializing_if = "is_fact")]
     pub kind: MemoryKind,
     #[serde(default, skip_serializing_if = "is_active")]
@@ -117,6 +120,7 @@ impl MemoryRecord {
             id,
             priority,
             content: content.into(),
+            entities: Vec::new(),
             kind: MemoryKind::Fact,
             state: MemoryState::Active,
             protected: false,
@@ -133,7 +137,13 @@ impl MemoryRecord {
 
     pub fn is_valid(&self) -> bool {
         let content = self.content.trim();
-        !content.is_empty() && content.chars().count() <= 2000
+        !content.is_empty()
+            && content.chars().count() <= 2000
+            && self.entities.len() <= 32
+            && self
+                .entities
+                .iter()
+                .all(|name| !name.trim().is_empty() && name.chars().count() <= 200)
     }
 }
 
@@ -151,6 +161,13 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    SeedFromPrompt {
+        priority: MemoryPriority,
+        content: String,
+        entities: Vec<String>,
+        rag_only: bool,
+    },
+    LinkEntities(MemoryRelation),
     /// Explicit lexical Jaccard dedup on active facts only. This does not run inference.
     /// A threshold of 800 represents Python MEMORY_DEDUP_THRESHOLD=0.8.
     AddLexicallyDeduplicated {
@@ -269,6 +286,22 @@ impl MemoryCapacityPlan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRelation {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
+
+impl MemoryRelation {
+    pub fn is_valid(&self) -> bool {
+        [&self.subject, &self.predicate, &self.object]
+            .iter()
+            .all(|value| !value.trim().is_empty() && value.chars().count() <= 200)
+    }
+}
+
 /// Canonical committed operation; upserts include complete values, not partial deltas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -279,6 +312,7 @@ impl MemoryCapacityPlan {
 )]
 pub enum MemoryChange {
     Upsert(MemoryRecord),
+    UpsertRelation(MemoryRelation),
     Delete(MemoryId),
     /// An explicit, auditable protection transition separate from model-authored upserts.
     SetProtection {
@@ -290,11 +324,13 @@ pub enum MemoryChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CharacterMemories {
     records: BTreeMap<MemoryId, MemoryRecord>,
+    relations: BTreeSet<MemoryRelation>,
 }
 
 impl CharacterMemories {
     pub(crate) fn ensure_unique(&self) -> Result<(), &'static str> {
         let mut facts = BTreeSet::new();
+        let mut rag_only = BTreeSet::new();
         let mut islands = BTreeSet::new();
         for record in self.records.values() {
             if record.state == MemoryState::Deleted {
@@ -306,6 +342,11 @@ impl CharacterMemories {
                         return Err("duplicate memory content");
                     }
                 }
+                MemoryKind::RagOnly => {
+                    if !rag_only.insert(normalized_content(&record.content)) {
+                        return Err("duplicate RAG-only memory content");
+                    }
+                }
                 MemoryKind::Island(island) => {
                     if !islands.insert(island) {
                         return Err("duplicate memory island");
@@ -314,6 +355,10 @@ impl CharacterMemories {
             }
         }
         Ok(())
+    }
+
+    pub fn relations(&self) -> Vec<MemoryRelation> {
+        self.relations.iter().cloned().collect()
     }
 
     /// Current active, non-expired facts are projected by explicit maintenance;
@@ -332,6 +377,17 @@ impl CharacterMemories {
         self.records
             .values()
             .filter(|record| record.kind == MemoryKind::Fact && record.available_at(as_of_unix_ms))
+            .cloned()
+            .collect()
+    }
+
+    pub fn searchable_at(&self, as_of_unix_ms: u64) -> Vec<MemoryRecord> {
+        self.records
+            .values()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.available_at(as_of_unix_ms)
+            })
             .cloned()
             .collect()
     }
@@ -377,6 +433,15 @@ impl CharacterMemories {
 
     pub fn apply_committed(&mut self, change: &MemoryChange) -> Result<(), &'static str> {
         match change {
+            MemoryChange::UpsertRelation(relation) => {
+                if !relation.is_valid() {
+                    return Err("invalid entity relation");
+                }
+                if !self.relations.contains(relation) && self.relations.len() >= 1024 {
+                    return Err("entity relation capacity exceeded");
+                }
+                self.relations.insert(relation.clone());
+            }
             MemoryChange::Upsert(record) => {
                 if !record.is_valid() {
                     return Err("invalid memory record");
@@ -551,6 +616,72 @@ impl CharacterMemories {
                             *priority,
                             content.clone(),
                         ));
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
+                }
+                MemoryCommand::SeedFromPrompt {
+                    priority,
+                    content,
+                    entities,
+                    rag_only,
+                } => {
+                    if content.trim().is_empty()
+                        || content.chars().count() > 2000
+                        || entities.len() > 32
+                        || entities
+                            .iter()
+                            .any(|name| name.trim().is_empty() || name.chars().count() > 200)
+                    {
+                        return Err("invalid seeded memory record");
+                    }
+                    let expected_kind = if *rag_only {
+                        MemoryKind::RagOnly
+                    } else {
+                        MemoryKind::Fact
+                    };
+                    let matches = next
+                        .records
+                        .values()
+                        .filter(|record| record.content == *content)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if matches.len() > 1 {
+                        return Err("ambiguous exact seeded memory match");
+                    }
+                    if let Some(mut previous) = matches.into_iter().next() {
+                        if previous.kind != expected_kind {
+                            return Err("prompt seed conflicts with retained memory kind");
+                        }
+                        if previous.state == MemoryState::Active
+                            && (!rag_only || previous.priority == *priority)
+                        {
+                            continue;
+                        }
+                        if previous.protected {
+                            return Err("protected memory cannot be re-seeded");
+                        }
+                        previous.state = MemoryState::Active;
+                        previous.priority = *priority;
+                        let change = MemoryChange::Upsert(previous);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    } else {
+                        let mut record =
+                            MemoryRecord::fact(MemoryId::new(), *priority, content.clone());
+                        record.kind = expected_kind;
+                        record.entities = entities.clone();
+                        let change = MemoryChange::Upsert(record);
+                        next.apply_committed(&change)?;
+                        changes.push(change);
+                    }
+                }
+                MemoryCommand::LinkEntities(relation) => {
+                    if !relation.is_valid() {
+                        return Err("invalid entity relation");
+                    }
+                    if !next.relations.contains(relation) {
+                        let change = MemoryChange::UpsertRelation(relation.clone());
                         next.apply_committed(&change)?;
                         changes.push(change);
                     }
@@ -748,6 +879,7 @@ mod tests {
         let id = MemoryId::new();
         let mut book = CharacterMemories::default();
         book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+            entities: Vec::new(),
             id,
             priority: MemoryPriority::Low,
             content: "Player likes TEA".into(),
@@ -773,6 +905,7 @@ mod tests {
         assert_eq!(
             changes[0],
             MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: "Player likes TEA".into(),
@@ -811,6 +944,7 @@ mod tests {
         let mut book = CharacterMemories::default();
         for (id, content) in [(left, "tea"), (right, "coffee")] {
             book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: content.into(),
@@ -846,6 +980,7 @@ mod tests {
         let mut book = CharacterMemories::default();
         for (id, content) in [(a, "first"), (b, "second")] {
             book.apply_committed(&MemoryChange::Upsert(MemoryRecord {
+                entities: Vec::new(),
                 id,
                 priority: MemoryPriority::Normal,
                 content: content.into(),

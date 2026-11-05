@@ -1,4 +1,5 @@
 export struct PromptSetItem { character: int, name: string, author: string, version: string, description: string }
+export struct CharacterDebugItem { label: string, value: string }
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
@@ -35,6 +36,10 @@ export global SettingsUi {
     in-out property <[CharacterPresets]> character-presets;
     in-out property <[PromptSetItem]> prompt-set-options;
     in-out property <[string]> character-prompt-sets;
+    in-out property <[CharacterDebugItem]> character-debug-values;
+    in-out property <int> character-debug-character: -1;
+    in-out property <string> character-debug-error;
+    in-out property <bool> character-debug-expanded: false;
     in-out property <int> selected-character;
     in-out property <bool> character-prompt-expanded: true;
     in-out property <string> preset-edit-id;
@@ -87,6 +92,7 @@ export global SettingsUi {
     callback preset-delete(string);
     callback preset-activate(string);
     callback character-prompt-set(int, string);
+    callback character-debug-select(int);
     callback prompt-reload();
     callback prompt-open-folder(int);
     callback character-preset(int, int, string);

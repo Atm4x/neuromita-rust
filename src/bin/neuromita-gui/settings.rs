@@ -1,13 +1,14 @@
 use super::{
     runtime::Command,
     view::{
-        AppWindow, CharacterPresets, PresetItem, PresetParameterItem, PresetTemplateItem,
-        PromptSetItem, SettingsUi,
+        AppWindow, CharacterDebugItem, CharacterPresets, PresetItem, PresetParameterItem,
+        PresetTemplateItem, PromptSetItem, SettingsUi,
     },
 };
 use neuromita::{
     character::CharacterId,
     generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
+    presentation::CharacterDebugField,
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
     settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
@@ -465,6 +466,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     let send = dispatch.clone();
     settings.on_prompt_reload(move || send(Command::RefreshPromptCatalog));
     let send = dispatch.clone();
+    settings.on_character_debug_select(move |index| {
+        if let Some(character) = CharacterId::from_index(index) {
+            send(Command::DebugSelect(character));
+        }
+    });
+    let send = dispatch.clone();
     settings.on_prompt_open_folder(move |index| {
         if let Some(character) = CharacterId::from_index(index) {
             send(Command::OpenPromptFolder(character));
@@ -546,6 +553,26 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         }
     });
     settings.on_voice_name(move |value| dispatch(Command::VoiceName(value.into())));
+}
+
+pub fn render_character_debug(
+    window: &AppWindow,
+    character: CharacterId,
+    fields: &[CharacterDebugField],
+    error: Option<&str>,
+) {
+    let settings = window.global::<SettingsUi>();
+    settings.set_character_debug_character(character.index() as i32);
+    settings.set_character_debug_error(error.unwrap_or_default().into());
+    settings.set_character_debug_values(ModelRc::new(VecModel::from(
+        fields
+            .iter()
+            .map(|field| CharacterDebugItem {
+                label: field.label.as_str().into(),
+                value: field.value.as_str().into(),
+            })
+            .collect::<Vec<_>>(),
+    )));
 }
 
 pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {

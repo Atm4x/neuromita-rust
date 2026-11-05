@@ -117,3 +117,58 @@ pub(crate) fn character_memories_at(
     }
     Ok(book)
 }
+
+pub(crate) fn validate_character_variables(
+    vars: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<(), &'static str> {
+    if vars.is_empty() || vars.len() > 64 {
+        return Err("invalid character variables count");
+    }
+    for (name, value) in vars {
+        if name.len() > 80
+            || !name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || matches!(
+                name.as_str(),
+                "CHARACTER_ID"
+                    | "CURRENT_INPUT"
+                    | "ACCEPTED_REPLIES"
+                    | "attitude"
+                    | "boredom"
+                    | "stress"
+            )
+            || serde_json::to_vec(value).map_or(true, |data| data.len() > 4096)
+        {
+            return Err("invalid character variable value or name");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn character_variables_at(
+    facts: &[TimelineFact],
+    character: CharacterId,
+) -> Result<std::collections::BTreeMap<String, serde_json::Value>, TimelineError> {
+    let mut values = std::collections::BTreeMap::new();
+    for fact in facts {
+        if fact.draft.kind != EventKind::CharacterVariablesChanged
+            || fact.draft.actor.as_deref().and_then(CharacterId::parse) != Some(character)
+        {
+            continue;
+        }
+        let changed: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_value(
+                fact.draft
+                    .payload
+                    .get("variables")
+                    .cloned()
+                    .ok_or(TimelineError::Invalid("missing character variables"))?,
+            )
+            .map_err(|_| TimelineError::Invalid("invalid character variables"))?;
+        validate_character_variables(&changed).map_err(TimelineError::Invalid)?;
+        values.extend(changed);
+    }
+    Ok(values)
+}
