@@ -7,7 +7,15 @@ mod probe {
         import { SettingsTheme } from "../../../ui/settings/theme.slint";
         import { SettingsScrollView } from "../../../ui/settings/scroll-view.slint";
         import { SettingsToggleRow, SettingsNumberRow, SettingsButtonRow } from "../../../ui/components/settings-kit.slint";
+        import { CharacterVoiceTabs } from "../../../ui/components/character-voice-tabs.slint";
+        import { CharacterCatalog, CharacterOption } from "../../../ui/characters/catalog.slint";
+        export { CharacterCatalog, CharacterOption }
         export { I18n }
+        export component VoiceTabsProbe inherits Window {
+            preferred-width: 600px; preferred-height: 234px;
+            background: SettingsTheme.canvas;
+            CharacterVoiceTabs { selected: 0; }
+        }
         export component ControlsProbe inherits Window {
             preferred-width: 400px; preferred-height: 140px;
             out property <length> row-top: row.y;
@@ -113,6 +121,48 @@ fn existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision() {
     assert!(green_rows[0] > controls.get_row_top() + 17.0);
     assert!(*green_rows.last().unwrap() < controls.get_row_top() + 43.0);
     controls.hide().unwrap();
+    let voice = probe::VoiceTabsProbe::new().unwrap();
+    voice
+        .global::<probe::CharacterCatalog>()
+        .set_entries(ModelRc::new(VecModel::from(
+            neuromita::character::character_catalog()
+                .enumerate()
+                .map(|(index, item)| probe::CharacterOption {
+                    index: index as i32,
+                    id: item.id.as_str().into(),
+                    name: item.name.source().into(),
+                    name_key: item.name.id().into(),
+                    conversation_name: item.conversation_name.source().into(),
+                    conversation_key: item.conversation_name.id().into(),
+                    initial: item.id.as_str().chars().next().unwrap().to_string().into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+    voice.show().unwrap();
+    voice.window().set_size(slint::PhysicalSize::new(600, 234));
+    let surface = voice.window().take_snapshot().unwrap();
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * 600 + x) * 4;
+        &surface.as_bytes()[offset..offset + 3]
+    };
+    assert_eq!(
+        pixel(248, 107),
+        &[10, 10, 24],
+        "inactive tabs must leave a gap before the editor surface"
+    );
+    let arrow_rows = (27..109)
+        .filter(|y| (570..596).any(|x| pixel(x, *y).iter().all(|channel| *channel > 200)))
+        .collect::<Vec<_>>();
+    assert!(
+        !arrow_rows.is_empty(),
+        "enabled right scroll arrow must be visible"
+    );
+    let arrow_center = (arrow_rows[0] + arrow_rows[arrow_rows.len() - 1]) / 2;
+    assert!(
+        (60..80).contains(&arrow_center),
+        "scroll arrows must be vertically centered in the tab strip: {arrow_center}"
+    );
+    voice.hide().unwrap();
     let rows = probe::RowSizingProbe::new().unwrap();
     rows.show().unwrap();
     rows.window().set_size(slint::PhysicalSize::new(500, 200));

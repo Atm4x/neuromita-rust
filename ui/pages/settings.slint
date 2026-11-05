@@ -64,7 +64,7 @@ component PromptSetChoice inherits Rectangle {
         padding-right: 10px;
         spacing: 8px;
         SettingsLabel {
-            text: root.value == "" ? I18n.i18n("settings.characters.prompt-unavailable", "Наборы промптов не найдены") : root.value;
+            text: root.value == "" ? I18n.i18n("settings.characters.prompt-empty", "Наборы промптов не найдены") : root.value;
             color: root.value == "" ? SettingsTheme.muted : SettingsTheme.text;
             horizontal-stretch: 1;
         }

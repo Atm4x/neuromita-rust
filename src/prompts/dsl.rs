@@ -95,11 +95,11 @@ impl Interpreter {
     fn file(&mut self, name: &str, parent: Option<&Path>) -> Result<String, PromptError> {
         let path = self.resolve(name, parent)?;
         let content = self.read(&path)?;
-        let result = (|| match path.extension().and_then(|ext| ext.to_str()) {
+        let result = match path.extension().and_then(|ext| ext.to_str()) {
             Some("txt") => self.expand(&content, path.parent().unwrap(), true),
             Some("script") | Some("system") => self.script(&content, &path),
             _ => Err(PromptError::Dsl(format!("unsupported prompt file: {name}"))),
-        })();
+        };
         self.recursion.pop();
         result
     }
@@ -172,10 +172,7 @@ impl Interpreter {
     ) -> Result<String, PromptError> {
         let mut value = input.to_owned();
         let mut offset = 0;
-        loop {
-            let Some(start_rel) = value[offset..].find("[<") else {
-                break;
-            };
+        while let Some(start_rel) = value[offset..].find("[<") {
             let start = offset + start_rel;
             let end = value[start..]
                 .find(">]")

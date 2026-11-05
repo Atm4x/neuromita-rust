@@ -14,6 +14,15 @@ description. Runtime character state takes precedence over configured variable
 defaults during a request. Paths are canonicalized, bounded to the prompts
 root, and cycle/depth/file-size checked.
 
+The default selection policy is intentional UI/UX: when no set is saved,
+the catalog chooses a case-insensitive `Default`, otherwise the first set in
+the sorted catalog. The selector displays that effective choice. This policy
+is retained following the user's clarification; an explicitly selected missing
+set is never replaced with another one.
+An explicitly selected set also fails before provider invocation when an
+application was started without a PromptCatalog; it cannot silently use the
+built-in character prompt instead.
+
 ## Ownership and lifecycle
 
 `PromptCatalog` owns file discovery and a **new Interpreter per request**.

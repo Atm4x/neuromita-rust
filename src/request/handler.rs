@@ -144,6 +144,19 @@ impl MessageHandler {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
+        if self.prompts.is_none()
+            && settings
+                .values
+                .characters
+                .for_character(message.character_id())
+                .prompt_set
+                .is_some()
+        {
+            record.finish(RequestOutcome::InternalError(record.failure(
+                "prompt catalog is not configured for the explicitly selected prompt set".into(),
+            )));
+            return;
+        }
         if let Some(catalog) = &self.prompts {
             let selection = settings
                 .values

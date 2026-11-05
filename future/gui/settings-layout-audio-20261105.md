@@ -42,6 +42,14 @@ ASR view → desktop command adapter → AudioInputPresenter → AudioInputOwner
 
 ## Verification
 
+CharacterVoiceTabs follow-up: source `ui/widgets/character_voice_tabs.py`
+uses inactive backgrounds inset by (3,4), avatars 50 px inactive / 56 px selected
+(plus a separate 3 px selection ring margin), and scroll buttons at y=26 in an
+82 px strip. Slint now follows those bounds, uses an explicit Path viewBox,
+clips the avatar viewport and vertically centers the arrow row through layout.
+The raster regression checks the inactive-tab gap above the editor and the
+enabled arrow's vertical position using the Core character catalog.
+
 Follow-up: the Language page also sizes its content against visible-width with
 the same 2 px outer padding as General. Its locale popup has a bounded, clipped
 background and a SettingsScrollView; all locale rows remain inside the popup.
