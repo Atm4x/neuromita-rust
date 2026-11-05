@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 fn memory(id: u128, priority: MemoryPriority, content: &str) -> MemoryRecord {
     MemoryRecord {
+        entities: Vec::new(),
         id: MemoryId(Uuid::from_u128(id)),
         priority,
         content: content.into(),

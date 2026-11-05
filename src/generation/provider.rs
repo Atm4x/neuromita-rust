@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse};
 use crate::character::CharacterContext;
+use crate::prompts::PostDslProgram;
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum GenerationError {
@@ -25,8 +26,37 @@ pub enum GenerationError {
     Response(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPrompt {
+    pub set_name: Arc<str>,
+    /// Stable template segments, independent of the request-specific context.
+    pub stable: Arc<[Arc<str>]>,
+    /// Dynamic template segments for this particular character snapshot.
+    pub dynamic: Arc<[Arc<str>]>,
+}
+
+impl PreparedPrompt {
+    pub fn new(set_name: String, stable: Vec<String>, dynamic: Vec<String>) -> Self {
+        let into_segments = |segments: Vec<String>| -> Arc<[Arc<str>]> {
+            segments
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(Arc::from)
+                .collect::<Vec<_>>()
+                .into()
+        };
+        Self {
+            set_name: set_name.into(),
+            stable: into_segments(stable),
+            dynamic: into_segments(dynamic),
+        }
+    }
+}
+
 pub struct GenerationRequest {
     pub context: CharacterContext,
+    pub prompt: Option<PreparedPrompt>,
+    pub post_dsl: Option<PostDslProgram>,
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
 }
@@ -39,9 +69,21 @@ impl GenerationRequest {
     ) -> Self {
         Self {
             context,
+            prompt: None,
+            post_dsl: None,
             preset,
             prepared_knowledge,
         }
+    }
+
+    pub fn with_post_dsl(mut self, program: Option<PostDslProgram>) -> Self {
+        self.post_dsl = program;
+        self
+    }
+
+    pub fn with_prompt(mut self, prompt: Option<PreparedPrompt>) -> Self {
+        self.prompt = prompt;
+        self
     }
 }
 
@@ -52,6 +94,7 @@ pub use crate::turn::TurnProposal as ProposedResponse;
 #[derive(Clone)]
 pub struct GenerationInput {
     pub context: CharacterContext,
+    pub prompt: Option<PreparedPrompt>,
     pub prepared_knowledge: Option<String>,
 }
 
@@ -188,6 +231,8 @@ impl ResponseGenerator {
         observer: &mut dyn GenerationObserver,
     ) -> Result<ProposedResponse, GenerationError> {
         let template = request.preset.template().clone();
+        let post_dsl = request.post_dsl;
+        let context_variables = request.context.variables.clone();
         let kind = template.kind();
         let provider = self
             .providers
@@ -195,13 +240,31 @@ impl ResponseGenerator {
             .ok_or(GenerationError::Unavailable(kind))?;
         let input = GenerationInput {
             context: request.context,
+            prompt: request.prompt,
             prepared_knowledge: request.prepared_knowledge,
         };
         let structured = provider
             .generate_observed(input, template, observer)
             .await?;
+        let (structured, variables) = match post_dsl {
+            Some(program) => {
+                let output = match program.apply(structured, &context_variables) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let failure = GenerationError::Response(format!("post-DSL: {error}"));
+                        observer.failed(&failure);
+                        return Err(failure);
+                    }
+                };
+                for message in &output.logs {
+                    tracing::debug!(target: "neuromita::prompts::post_dsl", %message, "post-DSL LOG");
+                }
+                (output.response, output.variables)
+            }
+            None => (structured, Default::default()),
+        };
         match ProposedResponse::from_structured(structured) {
-            Ok(response) => Ok(response),
+            Ok(response) => Ok(response.with_character_variables(variables)),
             Err(error) => {
                 observer.failed(&error);
                 Err(error)

@@ -613,7 +613,7 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
-                prompts: prompts.clone(),
+                prompt_preparation: crate::request::prompt_preparation::PromptPreparation::new(),
                 finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,
@@ -626,7 +626,14 @@ impl ApplicationLifecycle {
         let ingress: Arc<dyn RequestIngress> = Arc::new(TimelineRequestIngress {
             timeline: Arc::clone(&timeline),
         });
-        let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
+        let api = Arc::new(ChatApiState::new(
+            registry,
+            handlers,
+            ingress,
+            Arc::clone(&settings_owner),
+            Arc::clone(&presets),
+            prompts.clone(),
+        ));
         let reminders_stop = CancellationToken::new();
         let (reminders, reminders_task) = ReminderService::start(
             Arc::clone(&timeline),

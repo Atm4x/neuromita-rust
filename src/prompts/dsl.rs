@@ -1,7 +1,8 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use serde_json::Value;
@@ -18,10 +19,12 @@ pub(super) struct Interpreter {
     root: PathBuf,
     base: PathBuf,
     vars: BTreeMap<String, Value>,
+    declared_local_vars: BTreeSet<String>,
     static_infos: Vec<String>,
     context_infos: Vec<String>,
     recursion: Vec<PathBuf>,
     declarations: Vec<PromptInitializationDeclaration>,
+    files: Option<Arc<BTreeMap<PathBuf, Arc<str>>>>,
 }
 
 #[derive(Default)]
@@ -41,11 +44,50 @@ impl Interpreter {
             root: root.canonicalize()?,
             base: base.canonicalize()?,
             vars,
+            declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
             context_infos: Vec::new(),
             recursion: Vec::new(),
             declarations: Vec::new(),
+            files: None,
         })
+    }
+
+    pub fn from_snapshot(
+        root: PathBuf,
+        base: PathBuf,
+        files: Arc<BTreeMap<PathBuf, Arc<str>>>,
+        vars: BTreeMap<String, Value>,
+    ) -> Self {
+        Self {
+            root,
+            base,
+            vars,
+            declared_local_vars: BTreeSet::new(),
+            static_infos: Vec::new(),
+            context_infos: Vec::new(),
+            recursion: Vec::new(),
+            declarations: Vec::new(),
+            files: Some(files),
+        }
+    }
+
+    fn read_text(&self, path: &Path) -> Result<String, PromptError> {
+        if let Some(files) = &self.files {
+            return files
+                .get(path)
+                .map(|content| content.to_string())
+                .ok_or_else(|| {
+                    PromptError::Dsl(format!(
+                        "file absent from admitted prompt snapshot: {}",
+                        path.display()
+                    ))
+                });
+        }
+        if fs::metadata(path)?.len() > MAX_FILE_SIZE {
+            return Err(PromptError::Dsl("prompt file too large".into()));
+        }
+        Ok(fs::read_to_string(path)?)
     }
 
     pub fn declarations(&self) -> Vec<PromptInitializationDeclaration> {
@@ -64,10 +106,28 @@ impl Interpreter {
             &self.base
         };
         let source = base.join(file);
-        let result = source.canonicalize().map_err(|error| {
-            PromptError::Dsl(format!("could not resolve {}: {error}", source.display()))
-        })?;
-        if !result.starts_with(&self.root) || !result.is_file() {
+        let result = if self.files.is_some() {
+            let mut result = PathBuf::new();
+            for component in source.components() {
+                match component {
+                    Component::ParentDir => {
+                        result.pop();
+                    }
+                    Component::CurDir => {}
+                    other => result.push(other.as_os_str()),
+                }
+            }
+            result
+        } else {
+            source.canonicalize().map_err(|error| {
+                PromptError::Dsl(format!("could not resolve {}: {error}", source.display()))
+            })?
+        };
+        let exists = self
+            .files
+            .as_ref()
+            .map_or_else(|| result.is_file(), |files| files.contains_key(&result));
+        if !result.starts_with(&self.root) || !exists {
             return Err(PromptError::Dsl(format!(
                 "template escaped prompt root: {file}"
             )));
@@ -85,11 +145,9 @@ impl Interpreter {
                 path.display()
             )));
         }
-        if fs::metadata(path)?.len() > MAX_FILE_SIZE {
-            return Err(PromptError::Dsl("prompt file too large".into()));
-        }
+        let content = self.read_text(path)?;
         self.recursion.push(path.to_owned());
-        Ok(fs::read_to_string(path)?)
+        Ok(content)
     }
 
     fn file(&mut self, name: &str, parent: Option<&Path>) -> Result<String, PromptError> {
@@ -296,7 +354,7 @@ impl Interpreter {
 
     fn tagged(&mut self, tag: &str, file: &str, parent: &Path) -> Result<String, PromptError> {
         let path = self.resolve(file, Some(parent))?;
-        let raw = fs::read_to_string(&path)?;
+        let raw = self.read_text(&path)?;
         let start = format!("[#{}]", tag.to_ascii_uppercase());
         let end = format!("[/{}]", tag.to_ascii_uppercase());
         let upper = raw.to_ascii_uppercase();
@@ -369,6 +427,7 @@ impl Interpreter {
                     }
                     _ if !active => {}
                     "SET" => {
+                        let local = arg.trim().starts_with("LOCAL ");
                         let arg = arg.trim().strip_prefix("LOCAL ").unwrap_or(arg.trim());
                         let (name, expr) = arg
                             .split_once('=')
@@ -379,8 +438,13 @@ impl Interpreter {
                         {
                             return Err(PromptError::Dsl("invalid SET name".into()));
                         }
-                        let value = self.evaluate(expr, parent)?;
-                        self.vars.insert(name.into(), value);
+                        if !local || !self.declared_local_vars.contains(name) {
+                            let value = self.evaluate(expr, parent)?;
+                            self.vars.insert(name.into(), value);
+                            if local {
+                                self.declared_local_vars.insert(name.into());
+                            }
+                        }
                     }
                     "RETURN" => return Ok(Some(self.argument(arg, parent)?)),
                     "RUN" => {
@@ -416,7 +480,12 @@ impl Interpreter {
                         } else {
                             (remaining, Vec::new())
                         };
-                        let content = content.trim().to_owned();
+                        let content = content.trim();
+                        let content = if content.contains('{') {
+                            text(&self.evaluate(&format!("f\"\"\"{content}\"\"\""), parent)?)
+                        } else {
+                            content.to_owned()
+                        };
                         if !content.is_empty() {
                             self.declarations
                                 .push(PromptInitializationDeclaration::Memory {
@@ -431,11 +500,17 @@ impl Interpreter {
                         let (kind, content) = arg.split_once('|').ok_or_else(|| {
                             PromptError::Dsl("SEED_ISLAND requires type | content".into())
                         })?;
-                        if !content.trim().is_empty() {
+                        let content = content.trim();
+                        let content = if content.contains('{') {
+                            text(&self.evaluate(&format!("f\"\"\"{content}\"\"\""), parent)?)
+                        } else {
+                            content.to_owned()
+                        };
+                        if !content.is_empty() {
                             self.declarations
                                 .push(PromptInitializationDeclaration::Island {
                                     kind: kind.trim().into(),
-                                    content: content.trim().into(),
+                                    content,
                                 });
                         }
                     }

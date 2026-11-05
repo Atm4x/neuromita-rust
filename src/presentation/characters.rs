@@ -122,7 +122,7 @@ impl MemoryListPage {
                 MemoryState::Deleted => summary.deleted += 1,
             }
             match record.kind {
-                MemoryKind::Fact => summary.facts += 1,
+                MemoryKind::Fact | MemoryKind::RagOnly => summary.facts += 1,
                 MemoryKind::Island(_) => summary.islands += 1,
             }
             if record.protected {

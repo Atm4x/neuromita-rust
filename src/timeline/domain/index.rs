@@ -136,6 +136,7 @@ impl<'a> AppendIndex<'a> {
                 | EventKind::CharacterMemoryChanged
                 | EventKind::CharacterStateChanged
                 | EventKind::CharacterWorkingStateReplaced
+                | EventKind::CharacterVariablesChanged
                 | EventKind::ReminderScheduled
                 | EventKind::ReminderUpdated
                 | EventKind::ReminderDeleted
@@ -162,6 +163,12 @@ impl<'a> AppendIndex<'a> {
                 if !payload::<CharacterWorkingState>(draft, "working_state")?.is_valid() {
                     return Err(TimelineError::Invalid("invalid working state"));
                 }
+            }
+            EventKind::CharacterVariablesChanged => {
+                let vars: std::collections::BTreeMap<String, serde_json::Value> =
+                    payload(draft, "variables")?;
+                crate::character::projection::validate_character_variables(&vars)
+                    .map_err(TimelineError::Invalid)?;
             }
             EventKind::CharacterMemoryChanged => {
                 let change = payload::<MemoryChange>(draft, "change")?;

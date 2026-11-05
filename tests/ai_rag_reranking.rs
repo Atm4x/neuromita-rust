@@ -164,6 +164,7 @@ async fn reranker_reorders_authoritative_memory_selection_after_vector_fusion() 
     let records = [(1, "tea"), (2, "art")]
         .into_iter()
         .map(|(id, content)| MemoryRecord {
+            entities: Vec::new(),
             id: MemoryId(Uuid::from_u128(id)),
             priority: MemoryPriority::Normal,
             content: content.into(),

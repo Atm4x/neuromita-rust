@@ -146,11 +146,14 @@ pub struct GenerationFocus {
 #[derive(Debug, Clone)]
 pub struct CharacterContext {
     pub character_id: CharacterId,
+    /// Variables captured by the character owner at the same Timeline anchor.
+    pub variables: std::collections::BTreeMap<String, serde_json::Value>,
     pub description: Arc<str>,
     pub prompt: Arc<str>,
     pub state: CharacterState,
     pub working_state: CharacterWorkingState,
     pub memories: Vec<MemoryRecord>,
+    pub memory_relations: Vec<crate::memory::MemoryRelation>,
     pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,
@@ -175,6 +178,7 @@ pub struct CharacterView {
     pub state: CharacterState,
     pub working_state: CharacterWorkingState,
     pub memories: Vec<MemoryRecord>,
+    pub memory_relations: Vec<crate::memory::MemoryRelation>,
     pub memory_islands: Vec<MemoryRecord>,
     pub history: HistoryView,
     pub view: MitaView,

@@ -239,7 +239,17 @@ impl Parser<'_> {
                         if self.next() != Token::Right {
                             return Err(PromptError::Dsl("function call missing ')'".into()));
                         }
-                        call(&name, args)?
+                        if name == "default" && args.len() == 2 {
+                            let key = args[0].as_str().ok_or_else(|| {
+                                PromptError::Dsl("default() requires a string variable name".into())
+                            })?;
+                            self.vars
+                                .get(key)
+                                .cloned()
+                                .unwrap_or_else(|| args[1].clone())
+                        } else {
+                            call(&name, args)?
+                        }
                     } else {
                         self.vars.get(&name).cloned().unwrap_or(Value::Null)
                     }
@@ -300,12 +310,36 @@ fn binary(op: &str, left: Value, right: Value) -> Result<Value, PromptError> {
         return Ok(Value::Bool(truthy(&left) || truthy(&right)));
     }
     match op {
-        "==" => return Ok(Value::Bool(left == right)),
-        "!=" => return Ok(Value::Bool(left != right)),
+        "==" => {
+            return Ok(Value::Bool(if left.is_number() && right.is_number() {
+                left.as_f64() == right.as_f64()
+            } else {
+                left == right
+            }));
+        }
+        "!=" => {
+            return Ok(Value::Bool(if left.is_number() && right.is_number() {
+                left.as_f64() != right.as_f64()
+            } else {
+                left != right
+            }));
+        }
         _ => {}
     }
-    if op == "+" && (left.is_string() || right.is_string()) {
+    if op == "+" && left.is_string() && right.is_string() {
         return Ok(Value::String(format!("{}{}", text(&left), text(&right))));
+    }
+    if let (Some(a), Some(b)) = (left.as_i64(), right.as_i64()) {
+        let result = match op {
+            "+" => a.checked_add(b),
+            "-" => a.checked_sub(b),
+            "*" => a.checked_mul(b),
+            "%" if b != 0 => Some(a.rem_euclid(b)),
+            _ => None,
+        };
+        if let Some(result) = result {
+            return Ok(Value::from(result));
+        }
     }
     let a = left
         .as_f64()
@@ -341,6 +375,19 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, PromptError> {
         ("str", [v]) => Ok(Value::String(text(v))),
         ("int", [v]) => v
             .as_i64()
+            .or_else(|| {
+                if let Value::Number(n) = v {
+                    n.as_f64().and_then(|v| {
+                        if v.is_finite() && v >= i64::MIN as f64 && v < i64::MAX as f64 {
+                            Some(v.trunc() as i64)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
             .or_else(|| text(v).parse().ok())
             .map(|v| Value::Number(v.into()))
             .ok_or_else(|| PromptError::Dsl("int() conversion failed".into())),
@@ -356,11 +403,14 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, PromptError> {
                 .ok_or_else(|| PromptError::Dsl("abs() expects number".into()))?
                 .abs(),
         ),
-        ("round", [v]) => number(
-            v.as_f64()
-                .ok_or_else(|| PromptError::Dsl("round() expects number".into()))?
-                .round(),
-        ),
+        ("round", [v]) => v
+            .as_f64()
+            .and_then(|v| {
+                let rounded = v.round();
+                (rounded >= i64::MIN as f64 && rounded < i64::MAX as f64)
+                    .then_some(Value::from(rounded as i64))
+            })
+            .ok_or_else(|| PromptError::Dsl("round() expects finite bounded number".into())),
         ("round", [v, digits]) => {
             let digits = digits
                 .as_i64()
@@ -376,6 +426,21 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, PromptError> {
                     .round()
                     / factor,
             )
+        }
+        ("random", []) => number(uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64),
+        ("random", [a, b]) => {
+            let min = a
+                .as_i64()
+                .ok_or_else(|| PromptError::Dsl("random bounds must be integers".into()))?;
+            let max = b
+                .as_i64()
+                .ok_or_else(|| PromptError::Dsl("random bounds must be integers".into()))?;
+            let span = max
+                .checked_sub(min)
+                .and_then(|n| n.checked_add(1))
+                .ok_or_else(|| PromptError::Dsl("random bounds invalid".into()))?;
+            let sample = (uuid::Uuid::new_v4().as_u128() % (span as u128)) as i64;
+            Ok(Value::from(min + sample))
         }
         ("min", [a, b]) => binary("<", a.clone(), b.clone()).map(|v| {
             if v == Value::Bool(true) {

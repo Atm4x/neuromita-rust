@@ -131,6 +131,7 @@ pub(crate) struct GeneratedReply {
 
 pub(crate) struct TimelineContextSnapshot {
     pub(crate) state: crate::character::CharacterState,
+    pub(crate) variables: std::collections::BTreeMap<String, serde_json::Value>,
     pub(crate) working_state: CharacterWorkingState,
     pub(crate) memories: CharacterMemories,
     pub(crate) known: Vec<domain::KnownEvent>,
@@ -550,8 +551,11 @@ impl SessionTimeline {
                 .map_err(|error| error.to_string())?;
         let memories = crate::character::projection::character_memories_at(&facts, character)
             .map_err(|error| error.to_string())?;
+        let variables = crate::character::projection::character_variables_at(&facts, character)
+            .map_err(|error| error.to_string())?;
         let (game, game_token) = Self::game_from_facts(character, at, &facts)?;
         Ok(TimelineContextSnapshot {
+            variables,
             game,
             game_token,
             history,
@@ -1163,6 +1167,22 @@ impl SessionTimeline {
                     );
                     drafts.push(memory);
                 }
+                AppliedEffect::CharacterVariablesChanged(vars) => {
+                    let mut change = EventDraft::new(EventKind::CharacterVariablesChanged);
+                    change.actor = Some(character.to_string());
+                    change.observers.insert(character);
+                    change.links.push(CausalLink {
+                        relation: CausalRelation::CausedBy,
+                        event_id: id,
+                    });
+                    change.payload.insert(
+                        "variables".into(),
+                        serde_json::to_value(vars).map_err(|_| {
+                            domain::TimelineError::Invalid("invalid character variables")
+                        })?,
+                    );
+                    drafts.push(change);
+                }
                 AppliedEffect::CharacterWorkingStateReplaced(state) => {
                     if !state.is_valid() {
                         return Err(domain::TimelineError::Invalid("invalid working state"));
@@ -1631,6 +1651,7 @@ mod tests {
             })
             .unwrap();
             let original = MemoryRecord {
+                entities: Vec::new(),
                 id: memory_id,
                 priority: MemoryPriority::High,
                 content: "first fact".into(),
@@ -1657,6 +1678,7 @@ mod tests {
                 .unwrap();
             initial = timeline.anchor();
             let changed = MemoryRecord {
+                entities: Vec::new(),
                 id: memory_id,
                 priority: MemoryPriority::Critical,
                 content: "corrected fact".into(),

@@ -133,6 +133,7 @@ async fn benchmark(
             .memories
             .into_iter()
             .map(|memory| MemoryRecord {
+                entities: Vec::new(),
                 id: MemoryId(memory.id),
                 content: memory.content,
                 priority: memory.priority.into(),

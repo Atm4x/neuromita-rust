@@ -17,6 +17,7 @@ pub enum ResponseEffect {
     /// Validated model-authored game commands, applied atomically with the reply.
     Game(Vec<ModelGameAction>),
     MutateReminders(Vec<crate::reminders::ReminderRequest>),
+    ChangeCharacterVariables(std::collections::BTreeMap<String, Value>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +138,17 @@ impl TurnProposal {
             segments: segments.into(),
             effects: effects.into(),
         }
+    }
+    pub(crate) fn with_character_variables(
+        mut self,
+        variables: std::collections::BTreeMap<String, Value>,
+    ) -> Self {
+        if !variables.is_empty() {
+            let mut effects = self.effects.to_vec();
+            effects.push(ResponseEffect::ChangeCharacterVariables(variables));
+            self.effects = effects.into();
+        }
+        self
     }
     pub fn text(&self) -> &Arc<str> {
         &self.text
