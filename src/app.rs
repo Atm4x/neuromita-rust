@@ -650,6 +650,7 @@ impl ApplicationLifecycle {
         let server_stop = CancellationToken::new();
         let bindings = Arc::new(ApiBindings {
             chat: api,
+            timeline: Arc::clone(&timeline),
             characters,
             settings: settings_owner,
             presets: Arc::clone(&presets),

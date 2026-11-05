@@ -7,7 +7,11 @@ use crate::{
         InitiateRequest, ReactRequest, ReplyRequest, RequestHandle, RequestSource, RequestState,
     },
     runtime::ApiBindings,
-    timeline::conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
+    timeline::{
+        conversation::{ConversationAudience, ConversationMessage, ConversationSpeaker},
+        domain::EventKind,
+        ingress::{SemanticBatch, SemanticEvent},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -16,9 +20,10 @@ use std::{
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::mpsc,
     task::JoinSet,
@@ -33,6 +38,8 @@ pub struct GameLinkConfig {
     pub outbound_capacity: usize,
     pub max_sessions: usize,
     pub max_requests_per_session: usize,
+    pub disconnected_session_ttl: Duration,
+    pub max_events_per_batch: usize,
 }
 impl GameLinkConfig {
     pub fn new(bind: SocketAddr) -> Self {
@@ -41,7 +48,9 @@ impl GameLinkConfig {
             max_command_bytes: 65536,
             outbound_capacity: 64,
             max_sessions: 16,
-            max_requests_per_session: 128,
+            max_requests_per_session: 4096,
+            disconnected_session_ttl: Duration::from_secs(1800),
+            max_events_per_batch: 64,
         }
     }
 }
@@ -58,13 +67,15 @@ impl GameLinkHandle {
 
 struct Session {
     token: Uuid,
-    connection: Option<(Uuid, mpsc::Sender<Value>)>,
+    connection: Option<(Uuid, mpsc::Sender<Value>, CancellationToken)>,
+    disconnected_at: Option<Instant>,
     receipts: HashMap<Uuid, (Value, Receipt)>,
 }
 #[derive(Clone)]
 enum Receipt {
     Request(RequestHandle),
     Published(EventId),
+    Events(Vec<EventId>),
 }
 
 #[derive(Default)]
@@ -74,9 +85,24 @@ impl Sessions {
         &self,
         connection: Uuid,
         outbound: mpsc::Sender<Value>,
+        disconnect: CancellationToken,
         max: usize,
+        ttl: Duration,
     ) -> Result<(Uuid, Uuid), &'static str> {
         let mut sessions = self.0.lock().expect("game sessions poisoned");
+        sessions.retain(|_, session| {
+            let expired = session
+                .disconnected_at
+                .is_some_and(|at| at.elapsed() >= ttl);
+            if expired {
+                for (_, receipt) in session.receipts.values() {
+                    if let Receipt::Request(handle) = receipt {
+                        handle.cancel();
+                    }
+                }
+            }
+            !expired
+        });
         if sessions.len() >= max {
             return Err("game session capacity reached");
         }
@@ -86,7 +112,8 @@ impl Sessions {
             id,
             Session {
                 token,
-                connection: Some((connection, outbound)),
+                connection: Some((connection, outbound, disconnect)),
+                disconnected_at: None,
                 receipts: HashMap::new(),
             },
         );
@@ -98,13 +125,18 @@ impl Sessions {
         token: Uuid,
         connection: Uuid,
         outbound: mpsc::Sender<Value>,
+        disconnect: CancellationToken,
     ) -> Result<Vec<RequestHandle>, &'static str> {
         let mut sessions = self.0.lock().expect("game sessions poisoned");
         let session = sessions.get_mut(&id).ok_or("unknown session")?;
         if session.token != token {
             return Err("invalid session credential");
         }
-        session.connection = Some((connection, outbound));
+        if let Some((_, _, old_disconnect)) = session.connection.take() {
+            old_disconnect.cancel();
+        }
+        session.connection = Some((connection, outbound, disconnect));
+        session.disconnected_at = None;
         Ok(session
             .receipts
             .values()
@@ -114,14 +146,31 @@ impl Sessions {
             })
             .collect())
     }
+    fn is_active(&self, id: Uuid, connection: Uuid) -> bool {
+        self.0
+            .lock()
+            .expect("game sessions poisoned")
+            .get(&id)
+            .and_then(|s| s.connection.as_ref())
+            .is_some_and(|(active, _, _)| *active == connection)
+    }
+    fn can_record(&self, id: Uuid, max: usize) -> Result<(), &'static str> {
+        let sessions = self.0.lock().expect("game sessions poisoned");
+        let session = sessions.get(&id).ok_or("session not found")?;
+        if session.receipts.len() >= max {
+            return Err("session receipt capacity reached");
+        }
+        Ok(())
+    }
     fn clear(&self, id: Uuid, connection: Uuid) {
         if let Some(session) = self.0.lock().expect("game sessions poisoned").get_mut(&id)
             && session
                 .connection
                 .as_ref()
-                .is_some_and(|(active, _)| *active == connection)
+                .is_some_and(|(active, _, _)| *active == connection)
         {
             session.connection = None;
+            session.disconnected_at = Some(Instant::now());
         }
     }
     fn receipt(&self, id: Uuid, command: Uuid) -> Option<(Value, Receipt)> {
@@ -144,22 +193,7 @@ impl Sessions {
         let mut sessions = self.0.lock().expect("game sessions poisoned");
         let session = sessions.get_mut(&id).ok_or("session not found")?;
         if session.receipts.len() >= max {
-            if let Some(old) =
-                session
-                    .receipts
-                    .iter()
-                    .find_map(|(id, (_, receipt))| match receipt {
-                        Receipt::Published(_) => Some(*id),
-                        Receipt::Request(handle) if handle.snapshot().state.is_terminal() => {
-                            Some(*id)
-                        }
-                        _ => None,
-                    })
-            {
-                session.receipts.remove(&old);
-            } else {
-                return Err("session request capacity reached");
-            }
+            return Err("session receipt capacity reached");
         }
         session.receipts.insert(command, (fingerprint, result));
         Ok(())
@@ -170,11 +204,61 @@ impl Sessions {
             .lock()
             .expect("game sessions poisoned")
             .get(&id)
-            .and_then(|session| session.connection.as_ref().map(|(_, tx)| tx.clone()));
+            .and_then(|session| session.connection.as_ref().map(|(_, tx, _)| tx.clone()));
         if let Some(output) = output {
-            let _ = output.send(frame).await;
+            if output.try_send(frame).is_err() {
+                let disconnect = self
+                    .0
+                    .lock()
+                    .expect("game sessions poisoned")
+                    .get(&id)
+                    .and_then(|session| {
+                        session.connection.as_ref().map(|(_, _, stop)| stop.clone())
+                    });
+                if let Some(disconnect) = disconnect {
+                    disconnect.cancel();
+                }
+            }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GameEventKind {
+    UnityEvent,
+    GameStarted,
+    GameAction,
+    GameEnded,
+    CharacterJoined,
+    CharacterLeft,
+    PlayerInactive,
+    ProactiveOpportunity,
+}
+impl From<GameEventKind> for EventKind {
+    fn from(kind: GameEventKind) -> Self {
+        match kind {
+            GameEventKind::UnityEvent => Self::UnityEvent,
+            GameEventKind::GameStarted => Self::GameStarted,
+            GameEventKind::GameAction => Self::GameAction,
+            GameEventKind::GameEnded => Self::GameEnded,
+            GameEventKind::CharacterJoined => Self::CharacterJoined,
+            GameEventKind::CharacterLeft => Self::CharacterLeft,
+            GameEventKind::PlayerInactive => Self::PlayerInactive,
+            GameEventKind::ProactiveOpportunity => Self::ProactiveOpportunity,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GameWorldEvent {
+    event_id: Uuid,
+    kind: GameEventKind,
+    occurred_at_unix_ms: u64,
+    #[serde(default)]
+    actor: Option<String>,
+    observers: Vec<CharacterId>,
+    payload: serde_json::Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -191,6 +275,9 @@ enum GameCommand {
         occurred_at_unix_ms: u64,
         content: Value,
         character: CharacterId,
+    },
+    PublishEvents {
+        events: Vec<GameWorldEvent>,
     },
     Reply {
         character: CharacterId,
@@ -291,6 +378,7 @@ async fn client(
     let connection = Uuid::new_v4();
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Value>(config.outbound_capacity.max(1));
+    let connection_stop = stop.child_token();
     let writer_stop = stop.clone();
     let writer = tokio::spawn(async move {
         loop {
@@ -301,12 +389,24 @@ async fn client(
         }
         Ok::<(), io::Error>(())
     });
-    let mut lines = BufReader::new(read).lines();
+    let mut reader = BufReader::new(read);
     let mut session_id = None;
     let result = async {
         loop {
-            let line = tokio::select! { biased; _ = stop.cancelled()=>break, incoming=lines.next_line()=>match incoming?{Some(line)=>line,None=>break} };
-            if line.len() > config.max_command_bytes { tx.send(error(None,"command_too_large","command exceeds configured limit")).await.map_err(io::Error::other)?; break; }
+            let line = tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                _ = connection_stop.cancelled() => break,
+                incoming = read_bounded_line(&mut reader, config.max_command_bytes) => match incoming {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) if e.kind() == io::ErrorKind::InvalidData && e.to_string().contains("exceeds configured limit") => {
+                        tx.send(error(None,"command_too_large",e)).await.map_err(io::Error::other)?;
+                        break;
+                    },
+                    Err(e) => return Err(e),
+                },
+            };
             let frame: Frame = match serde_json::from_str(&line) {
                 Ok(frame) => frame,
                 Err(e) => { tx.send(error(None,"invalid_command",e)).await.map_err(io::Error::other)?; continue; }
@@ -315,14 +415,14 @@ async fn client(
             match frame.command {
                 GameCommand::Hello {} => {
                     if session_id.is_some() { tx.send(error(Some(id),"already_connected","session already established")).await.map_err(io::Error::other)?; continue; }
-                    match sessions.create(connection,tx.clone(),config.max_sessions) {
+                    match sessions.create(connection,tx.clone(),connection_stop.clone(),config.max_sessions,config.disconnected_session_ttl) {
                         Ok((session,token)) => { session_id=Some(session); tx.send(json!({"type":"hello_ack","command_id":id,"session_id":session,"session_token":token})).await.map_err(io::Error::other)?; },
                         Err(e)=>tx.send(error(Some(id),"capacity",e)).await.map_err(io::Error::other)?,
                     }
                 }
                 GameCommand::Resume {session_id: target, session_token} => {
                     if session_id.is_some() { tx.send(error(Some(id),"already_connected","session already established")).await.map_err(io::Error::other)?; continue; }
-                    match sessions.resume(target,session_token,connection,tx.clone()) {
+                    match sessions.resume(target,session_token,connection,tx.clone(),connection_stop.clone()) {
                         Err(e) => tx.send(error(Some(id),"session_denied",e)).await.map_err(io::Error::other)?,
                         Ok(handles) => {
                             session_id=Some(target);
@@ -334,17 +434,26 @@ async fn client(
                 GameCommand::Ping {} => { tx.send(json!({"type":"pong","command_id":id})).await.map_err(io::Error::other)?; }
                 command => {
                     let Some(session) = session_id else { tx.send(error(Some(id),"hello_required","establish or resume game session first")).await.map_err(io::Error::other)?; continue; };
+                    if !sessions.is_active(session, connection) {
+                        tx.send(error(Some(id),"session_replaced","another connection owns this session")).await.map_err(io::Error::other)?;
+                        break;
+                    }
                     let fingerprint = serde_json::to_value(&command).map_err(io::Error::other)?;
                     if let Some((previous,receipt)) = sessions.receipt(session,id) {
                         if previous != fingerprint { tx.send(error(Some(id),"command_id_conflict","command ID has different payload")).await.map_err(io::Error::other)?; }
                         else { match receipt {
                             Receipt::Published(event)=> tx.send(json!({"type":"published","command_id":id,"event_id":event.0,"replayed":true})).await.map_err(io::Error::other)?,
+                            Receipt::Events(events)=> tx.send(json!({"type":"events_published","command_id":id,"event_ids":events.iter().map(|e|e.0).collect::<Vec<_>>(),"replayed":true})).await.map_err(io::Error::other)?,
                             Receipt::Request(handle)=> { tx.send(json!({"type":"request_accepted","command_id":id,"request_id":handle.id().0,"replayed":true})).await.map_err(io::Error::other)?; tx.send(request_frame(&handle.snapshot(),session)).await.map_err(io::Error::other)?; }
                         }}
                         continue;
                     }
                     match command {
                         GameCommand::PublishMessage {event_id,occurred_at_unix_ms,content,character} => {
+                            if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
                             let mut message = ConversationMessage::new(event_id.to_string(),ConversationSpeaker::Player,content,[character]);
                             message.id=EventId(event_id);
                             message.occurred_at_unix_ms=occurred_at_unix_ms;
@@ -357,7 +466,45 @@ async fn client(
                                 }
                             }
                         }
+                        GameCommand::PublishEvents {events} => {
+                            if events.is_empty() || events.len() > config.max_events_per_batch {
+                                tx.send(error(Some(id),"invalid_events","invalid event batch size")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            if events.iter().any(|e| e.observers.is_empty() || e.observers.len()>9 || e.actor.as_deref().is_some_and(|a|a.len()>256)) {
+                                tx.send(error(Some(id),"invalid_events","invalid event observers or actor")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let batch = SemanticBatch::new(format!("game:{session}:{id}"), events.into_iter().map(|e| {
+                                SemanticEvent {
+                                    id: EventId(e.event_id), kind: e.kind.into(), actor: e.actor,
+                                    observers: e.observers.into_iter().collect(), payload: e.payload,
+                                    occurred_at_unix_ms: e.occurred_at_unix_ms,
+                                }
+                            }).collect());
+                            let result = api.timeline.lock().map_err(|_| io::Error::other("timeline poisoned"))
+                                .and_then(|mut timeline| {
+                                    let selected = timeline.selection();
+                                    timeline.ingest_semantic_events(selected,batch).map_err(io::Error::other)
+                                });
+                            match result {
+                                Err(e)=> tx.send(error(Some(id),"publish_failed",e)).await.map_err(io::Error::other)?,
+                                Ok(facts)=> {
+                                    let ids = facts.into_iter().map(|f| f.draft.id).collect::<Vec<_>>();
+                                    sessions.record(session,id,fingerprint,Receipt::Events(ids.clone()),config.max_requests_per_session).map_err(io::Error::other)?;
+                                    tx.send(json!({"type":"events_published","command_id":id,"event_ids":ids.iter().map(|e|e.0).collect::<Vec<_>>(),"replayed":false})).await.map_err(io::Error::other)?;
+                                }
+                            }
+                        }
                         GameCommand::Reply {character,message_id} | GameCommand::React {character,event_id:message_id,instruction:_} => {
+                            if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
                             let source = RequestSource::Game(session);
                             let result = match command {
                                 GameCommand::Reply {..} => api.chat.send(ReplyRequest::new(character,EventId(message_id),source)),
@@ -367,6 +514,10 @@ async fn client(
                             accept_request(result,session,id,fingerprint,config.max_requests_per_session,&sessions,&tx).await?;
                         }
                         GameCommand::Initiate {character,instruction} => {
+                            if let Err(reason) = sessions.can_record(session,config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
                             accept_request(api.chat.send(InitiateRequest::new(character,instruction,RequestSource::Game(session))),session,id,fingerprint,config.max_requests_per_session,&sessions,&tx).await?;
                         }
                         GameCommand::Cancel {request_id} => {
@@ -386,7 +537,6 @@ async fn client(
     if let Some(session) = session_id {
         sessions.clear(session, connection);
     }
-    stop.cancel();
     drop(tx);
     let _ = writer.await;
     result
@@ -434,4 +584,44 @@ async fn accept_request(
         }
     });
     Ok(())
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete command frame",
+            ));
+        }
+        let count = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |i| i + 1);
+        if line.len().saturating_add(count) > limit.saturating_add(1) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "command exceeds configured limit",
+            ));
+        }
+        line.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return String::from_utf8(line)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+    }
 }
