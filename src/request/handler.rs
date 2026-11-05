@@ -521,6 +521,10 @@ impl GenerationObserver for RecordObserver<'_> {
         self.record.provider_requested(request);
     }
 
+    fn stream_delta(&mut self, delta: &str) {
+        self.record.stream_delta(delta);
+    }
+
     fn response_received(&mut self, response: ProviderReply) {
         if let Some(capture) = &mut self.capture {
             capture.response_received(response.clone());

@@ -116,6 +116,7 @@ impl RequestRecord {
             },
             revision: 0,
             state: RequestState::Pending,
+            streamed_json: None,
             dataset: DatasetCapture::default(),
             cancel_reason: None,
         });
@@ -164,6 +165,7 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state,
+            streamed_json: None,
             dataset: inner.dataset.clone(),
             cancel_reason: inner.cancel_reason,
         });
@@ -351,6 +353,7 @@ impl RequestRecord {
             metadata: inner.snapshot.metadata.clone(),
             revision: inner.snapshot.revision + 1,
             state: inner.snapshot.state.clone(),
+            streamed_json: inner.snapshot.streamed_json.clone(),
             cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
         });
@@ -439,6 +442,31 @@ impl RequestRecord {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.provider_requested(request);
         }
+    }
+
+    pub(crate) fn stream_delta(&self, delta: &str) {
+        const LIMIT: usize = 64 * 1024;
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled()
+            || !matches!(
+                inner.snapshot.state,
+                RequestState::Processing(ProcessingStage::GeneratingText)
+            )
+        {
+            return;
+        }
+        let previous = inner.snapshot.streamed_json.as_deref().unwrap_or("");
+        if delta.is_empty() || previous.len().saturating_add(delta.len()) > LIMIT {
+            return;
+        }
+        let mut combined = String::with_capacity(previous.len() + delta.len());
+        combined.push_str(previous);
+        combined.push_str(delta);
+        let mut snapshot = (*inner.snapshot).clone();
+        snapshot.revision += 1;
+        snapshot.streamed_json = Some(Arc::from(combined));
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
     }
 
     pub(crate) fn provider_replied(&self, reply: crate::generation::ProviderReply) {

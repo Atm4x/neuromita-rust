@@ -696,6 +696,9 @@ pub(crate) fn status_with_audio(snapshot: &RequestSnapshot, include_audio: bool)
                 message["text"] = json!(text);
                 message["provisional"] = json!(true);
             }
+            if let Some(partial) = &snapshot.streamed_json {
+                message["streamed_bytes"] = json!(partial.len());
+            }
         }
         RequestState::Cancelled => message["state"] = json!("cancelled"),
         RequestState::Finished(outcome) => {

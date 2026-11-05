@@ -254,6 +254,60 @@ struct PromptFeedback {
     block_reason: Option<String>,
 }
 
+pub(super) fn stream_event(
+    data: &str,
+) -> Result<crate::generation::http::StreamUpdate, GenerationError> {
+    let value: Value = serde_json::from_str(data)
+        .map_err(|_| GenerationError::Response("invalid Gemini SSE JSON".into()))?;
+    if value["error"].is_object() || value["promptFeedback"]["blockReason"].is_string() {
+        return Err(GenerationError::Response(
+            "Gemini stream rejected the request".into(),
+        ));
+    }
+    let candidates = value["candidates"]
+        .as_array()
+        .ok_or_else(|| GenerationError::Response("Gemini SSE event has no candidates".into()))?;
+    if candidates.len() != 1 {
+        return Err(GenerationError::Response(
+            "Gemini stream requires one candidate".into(),
+        ));
+    }
+    let candidate = &candidates[0];
+    let delta = candidate["content"]["parts"]
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part["thought"] != true)
+                .filter_map(|part| part["text"].as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    let reason = candidate["finishReason"].as_str();
+    if reason.is_some_and(|reason| reason != "STOP") {
+        return Err(GenerationError::Response(
+            "Gemini stream did not finish successfully".into(),
+        ));
+    }
+    let usage = value
+        .get("usageMetadata")
+        .and_then(|value| value.as_object())
+        .map(|_| {
+            let counts = &value["usageMetadata"];
+            ProviderUsage {
+                input_tokens: counts["promptTokenCount"].as_u64(),
+                output_tokens: counts["candidatesTokenCount"].as_u64(),
+                total_tokens: counts["totalTokenCount"].as_u64(),
+            }
+        });
+    Ok(crate::generation::http::StreamUpdate {
+        delta,
+        finish_reason: reason.map(str::to_owned),
+        usage,
+        terminal: reason == Some("STOP"),
+    })
+}
+
 pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError> {
     let response: GenerateResponse = serde_json::from_slice(bytes)
         .map_err(|_| GenerationError::Response("invalid Gemini JSON".into()))?;
@@ -835,6 +889,8 @@ mod tests {
                     include_thoughts: None,
                 }),
                 structured_output: true,
+                stream: false,
+                max_retries: 2,
             })
             .unwrap();
         let encoded = encode_prompt(

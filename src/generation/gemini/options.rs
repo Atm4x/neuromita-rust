@@ -10,6 +10,14 @@ pub struct GeminiRequestOptions {
     pub top_k: Option<u32>,
     pub thinking: Option<GeminiThinking>,
     pub structured_output: bool,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default = "default_retries")]
+    pub max_retries: u8,
+}
+
+fn default_retries() -> u8 {
+    2
 }
 
 impl Default for GeminiRequestOptions {
@@ -22,6 +30,8 @@ impl Default for GeminiRequestOptions {
             top_k: None,
             thinking: None,
             structured_output: true,
+            stream: false,
+            max_retries: default_retries(),
         }
     }
 }
@@ -57,6 +67,9 @@ pub enum ThinkingLevel {
 
 impl GeminiRequestOptions {
     pub(crate) fn validate(&self) -> Result<(), super::PresetError> {
+        if self.max_retries > 4 {
+            return Err(super::PresetError::Options);
+        }
         if self
             .top_p
             .is_some_and(|p| !p.is_finite() || !(0.0..=1.0).contains(&p))

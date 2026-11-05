@@ -297,6 +297,8 @@ impl RequestState {
 #[derive(Debug, Clone)]
 pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
+    /// Unvalidated streamed provider JSON, for progress and diagnostics only.
+    pub streamed_json: Option<Arc<str>>,
     pub revision: u64,
     pub state: RequestState,
     pub dataset: DatasetCapture,

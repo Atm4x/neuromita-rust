@@ -3,7 +3,7 @@ use super::{
     MessageTransform, PreparedRequest, PromptMessage, PromptRole, ProviderFuture, ProviderKind,
     ProviderTemplate, StructuredResponse, apply_message_transforms,
     conversation::{LlmConversation, LlmRole},
-    http::{ResponseMetadata, send_json},
+    http::{ResponseMetadata, StreamUpdate, send_json, send_sse},
     structured::gemini_message_schema,
 };
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,14 @@ pub struct OpenAiOptions {
     pub frequency_penalty: Option<f32>,
     pub output: JsonOutput,
     pub reasoning_enabled: Option<bool>,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default = "default_retries")]
+    pub max_retries: u8,
+}
+
+fn default_retries() -> u8 {
+    2
 }
 
 impl OpenAiProtocol {
@@ -87,6 +95,8 @@ impl OpenAiProtocol {
                 _ => JsonOutput::Schema,
             },
             reasoning_enabled: None,
+            stream: false,
+            max_retries: default_retries(),
         }
     }
     pub fn transforms(self) -> Vec<MessageTransform> {
@@ -195,6 +205,9 @@ impl OpenAiTemplate {
         {
             return Err(invalid("invalid sampling options"));
         }
+        if options.max_retries > 4 {
+            return Err(invalid("max_retries must be between 0 and 4"));
+        }
         if options.reasoning_enabled.is_some() && definition.protocol != OpenAiProtocol::OpenRouter
         {
             return Err(invalid("reasoning_enabled belongs to OpenRouter"));
@@ -290,12 +303,50 @@ impl OpenAiProvider {
                 .header("HTTP-Referer", "https://github.com/Atm4x/NeuroMita")
                 .header("X-Title", "NeuroMita");
         }
-        let bytes = send_json(request, observer, |bytes| observe(bytes, config.protocol)).await?;
-        let result = decode(&bytes, config.protocol);
-        if let Err(error) = &result {
-            observer.failed(error);
+        match tokio::time::timeout(Duration::from_millis(config.timeout_ms), async {
+            let result = if config.options.stream {
+                let result = send_sse(
+                    request,
+                    config.options.max_retries,
+                    observer,
+                    |event| stream_event(event, config.protocol),
+                    config.protocol != OpenAiProtocol::Responses,
+                )
+                .await?;
+                if result.finish_reason.as_deref()
+                    != Some(if config.protocol == OpenAiProtocol::Responses {
+                        "completed"
+                    } else {
+                        "stop"
+                    })
+                {
+                    Err(GenerationError::Response(
+                        "provider did not finish stream successfully".into(),
+                    ))
+                } else {
+                    StructuredResponse::parse(&result.text)
+                }
+            } else {
+                let bytes = send_json(request, config.options.max_retries, observer, |bytes| {
+                    observe(bytes, config.protocol)
+                })
+                .await?;
+                decode(&bytes, config.protocol)
+            };
+            if let Err(error) = &result {
+                observer.failed(error);
+            }
+            result
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let error = GenerationError::Transport("LLM request deadline exceeded".into());
+                observer.failed(&error);
+                Err(error)
+            }
         }
-        result
     }
 }
 
@@ -358,7 +409,7 @@ fn encode(
     let prompt = apply_message_transforms(prompt, &config.transforms);
     let responses = config.protocol == OpenAiProtocol::Responses;
     let messages = prompt.iter().map(|m| if responses { json!({"role":role(m.role),"content":[{"type": if m.role == PromptRole::Assistant {"output_text"} else {"input_text"},"text":m.text}]}) } else { json!({"role":role(m.role),"content":m.text}) }).collect::<Vec<_>>();
-    let mut body = json!({"model":config.model,"stream":false});
+    let mut body = json!({"model":config.model,"stream":config.options.stream});
     body[if responses { "input" } else { "messages" }] = messages.into();
     let options = &config.options;
     if options.send_temperature {
@@ -400,6 +451,111 @@ fn encode(
         }
     }
     (prompt, body)
+}
+
+fn stream_event(data: &str, protocol: OpenAiProtocol) -> Result<StreamUpdate, GenerationError> {
+    let value: Value = serde_json::from_str(data)
+        .map_err(|_| GenerationError::Response("invalid OpenAI SSE JSON".into()))?;
+    let mut update = StreamUpdate::progress("");
+    if protocol == OpenAiProtocol::Responses {
+        match value["type"].as_str() {
+            Some("response.output_text.delta") => {
+                update.delta = value["delta"]
+                    .as_str()
+                    .ok_or_else(|| GenerationError::Response("missing output text delta".into()))?
+                    .into();
+            }
+            Some("response.completed") => {
+                if value["response"]["status"] != "completed" {
+                    return Err(GenerationError::Response(
+                        "Responses stream not completed".into(),
+                    ));
+                }
+                update.terminal = true;
+                update.finish_reason = Some("completed".into());
+                update.usage = value["response"]
+                    .get("usage")
+                    .map(|usage| super::ProviderUsage {
+                        input_tokens: usage["input_tokens"].as_u64(),
+                        output_tokens: usage["output_tokens"].as_u64(),
+                        total_tokens: usage["total_tokens"].as_u64(),
+                    });
+            }
+            Some(
+                "response.failed"
+                | "response.incomplete"
+                | "error"
+                | "response.refusal.delta"
+                | "response.function_call_arguments.delta"
+                | "response.function_call_arguments.done",
+            ) => {
+                return Err(GenerationError::Response(
+                    "Responses stream failed or proposed unsupported output".into(),
+                ));
+            }
+            Some("response.output_item.added") if value["item"]["type"] != "message" => {
+                return Err(GenerationError::Response(
+                    "unsupported Responses output item".into(),
+                ));
+            }
+            Some("response.content_part.added") if value["part"]["type"] != "output_text" => {
+                return Err(GenerationError::Response(
+                    "unsupported Responses content part".into(),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                return Err(GenerationError::Response(
+                    "Responses event lacks type".into(),
+                ));
+            }
+        }
+    } else {
+        if value["error"].is_object() {
+            return Err(GenerationError::Response("provider stream error".into()));
+        }
+        let choices = value["choices"]
+            .as_array()
+            .ok_or_else(|| GenerationError::Response("Chat SSE event lacks choices".into()))?;
+        if choices.len() > 1 || choices.first().is_some_and(|choice| choice["index"] != 0) {
+            return Err(GenerationError::Response(
+                "unexpected chat stream choice".into(),
+            ));
+        }
+        if let Some(choice) = choices.first() {
+            if choice["delta"]["refusal"].is_string()
+                || choice["delta"]["tool_calls"].is_array()
+                || choice["delta"]["function_call"].is_object()
+            {
+                return Err(GenerationError::Response(
+                    "unsupported chat stream action".into(),
+                ));
+            }
+            update.delta = choice["delta"]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .into();
+            if let Some(reason) = choice["finish_reason"].as_str() {
+                if reason != "stop" {
+                    return Err(GenerationError::Response(format!(
+                        "chat stream finished: {reason}"
+                    )));
+                }
+                update.finish_reason = Some(reason.into());
+                update.terminal = true;
+            }
+        }
+        update.usage =
+            value
+                .get("usage")
+                .filter(|v| v.is_object())
+                .map(|usage| super::ProviderUsage {
+                    input_tokens: usage["prompt_tokens"].as_u64(),
+                    output_tokens: usage["completion_tokens"].as_u64(),
+                    total_tokens: usage["total_tokens"].as_u64(),
+                });
+    }
+    Ok(update)
 }
 
 fn observe(bytes: &[u8], protocol: OpenAiProtocol) -> ResponseMetadata {
