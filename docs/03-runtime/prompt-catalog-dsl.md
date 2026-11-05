@@ -16,21 +16,43 @@ root, and cycle/depth/file-size checked.
 
 ## Ownership and lifecycle
 
-`PromptCatalog` owns file discovery and a **new Interpreter per request**.
+`PromptCatalog` owns file discovery and immutable, request-scoped `PromptSetSnapshot`
+objects. The interpreter remains a **new instance per execution**, consuming
+captured in-memory sources only.
 `SettingsOwner` persists optional `prompt_set` per character; the Characters
 Presenter provides a typed binding and GUI options come from the Core catalog.
-The request handler captures the Settings snapshot and delegates prompt work
-into a single `request::PromptPreparation` operation. The operation asks the
+`ChatApiState::send` captures settings, the resolved generation preset and the
+selected prompt-set snapshot **before registering a request**. A missing selected
+set, invalid `config.json`, malformed PostDSL, or missing React entrypoint
+rejects admission without inserting anything into the request registry. The request handler delegates
+rendering into a single `request::PromptPreparation` operation. The operation asks the
 `CharacterHandle` for a read-only `CharacterContext`, whose typed JSON variables
 are computed in `CharacterHandler` at the same Timeline anchor as state/history.
 Neither `CharacterHandler` nor `CharacterContext` loads prompt files, interprets
 DSL, or knows an LLM protocol. Prompt-set assignment stays in external
 character settings; a character's built-in `prompt` is a legacy fallback only.
 
-`PromptPreparation` resolves the selected set (or `Default`), runs a pure DSL
-render on Tokio's blocking pool, and builds a `generation::PreparedPrompt`
-containing the selected set ID, stable segments and dynamic segments. The
-result is frozen for that request. A failed render prevents both seed mutation
+`PromptPreparation` receives the **admitted immutable snapshot**, runs the
+context-dependent DSL on Tokio's blocking pool, and builds a
+`generation::PreparedPrompt` containing stable and dynamic segments.
+`config.json`, `.txt`, `.script`, `.system`, shared includes, tagged loads,
+and the compiled PostDSL come from the admitted snapshot. No prompt filesystem
+read happens during execution. `CharacterContext` is captured at execution,
+subject to the original Timeline admission and visibility rules.
+
+A bounded resource walk (2,048 files, 16 MiB total, 1 MiB per file) captures
+the character's prompt folder and the two common include folders. Symlink
+entries are rejected. Equivalent snapshots are shared via a weak `Arc` cache
+while requests reference that version. New admissions rescan resources and
+receive updated versions when files change. The PostDSL rules are parsed at
+admission; the context-dependent main DSL is interpreted at execution, rather
+than materializing a final prompt or a full expression AST at admission. This
+is an intentional distinction: it preserves current character state while
+freezing input code. The synchronous admission read is bounded but can still
+block the calling thread while loading large sets; a future cache refresh
+service could move that work out of the ingress path if profiling warrants it.
+
+The result is frozen for that request. A failed render prevents both seed mutation
 and provider invocation. Explicitly missing selections fail; an empty catalog
 without a selection preserves the legacy behavior.
 
@@ -87,8 +109,9 @@ There is **no independently writable graph database**.
 Six `SEED_*` feature flags default to `false` only if absent. Explicit values
 from a prompt-set `config.json` are preserved. Variables captured by `CharacterHandler` override config defaults. `SET LOCAL` currently keeps a single first binding during an
 interpreter invocation; this does not imply full Python lexical scoping.
-Full Python PostDSL and unrestricted Python expression semantics are **not**
-implemented. Unknown expressions still fail explicitly.
+PostDSL supports the implemented text/regex/field operations, custom parameters
+and Timeline acceptance semantics, but unrestricted Python expression semantics
+remain outside the supported DSL. Unknown expressions still fail explicitly.
 
 The original Python reference is not copied into this repository. Audit
 results are local verification, not a substitute for a comprehensive parity

@@ -7,7 +7,7 @@ use crate::{
     generation::PreparedPrompt,
     identity::RequestId,
     interaction::TurnIntent,
-    prompts::{PostDslProgram, PromptCatalog, PromptError, RenderedPrompt},
+    prompts::{PostDslProgram, PromptError, PromptSetSnapshot, RenderedPrompt},
     timeline::{ContextPosition, selection::TimelineAdmission},
 };
 
@@ -29,14 +29,12 @@ pub(crate) struct PreparedCharacterTurn {
     pub post_dsl: Option<PostDslProgram>,
 }
 
-#[derive(Clone)]
-pub(crate) struct PromptPreparation {
-    catalog: Option<Arc<PromptCatalog>>,
-}
+#[derive(Clone, Default)]
+pub(crate) struct PromptPreparation;
 
 impl PromptPreparation {
-    pub(crate) fn new(catalog: Option<Arc<PromptCatalog>>) -> Self {
-        Self { catalog }
+    pub(crate) fn new() -> Self {
+        Self
     }
 
     /// Builds a character-owned context, applies declarative seed commands via
@@ -50,45 +48,30 @@ impl PromptPreparation {
         intent: TurnIntent,
         at: ContextPosition,
         admission: TimelineAdmission,
-        selected: Option<&str>,
+        captured: Option<Arc<PromptSetSnapshot>>,
     ) -> Result<PreparedCharacterTurn, PromptPreparationError> {
         let mut context = character
             .prepare(request, Arc::clone(&guidance), intent, at, admission)
             .await?;
-        let Some(catalog) = self.catalog.as_ref().map(Arc::clone) else {
+        // The selected program was captured at admission. Execution never
+        // observes later changes to config, templates, or PostDSL files.
+        let Some(captured) = captured else {
             return Ok(PreparedCharacterTurn {
                 context,
                 prompt: None,
                 post_dsl: None,
             });
         };
-        let character_id = context.character_id;
         let variables = context.variables.clone();
-        let selected = selected.map(str::to_owned);
         let template = if matches!(intent, TurnIntent::React(_)) {
             "react_template.txt"
         } else {
             "main_template.txt"
         };
-        let rendered = tokio::task::spawn_blocking(move || {
-            if selected.is_none() && catalog.list(character_id)?.is_empty() {
-                Ok::<_, PromptError>(None)
-            } else {
-                let rendered =
-                    catalog.render(character_id, selected.as_deref(), variables, template)?;
-                let rules = catalog.load_post_rules(character_id, &rendered.set_name)?;
-                Ok(Some((rendered, rules)))
-            }
-        })
-        .await
-        .map_err(|error| PromptPreparationError::FileTask(error.to_string()))??;
-        let Some((rendered, post_dsl)) = rendered else {
-            return Ok(PreparedCharacterTurn {
-                context,
-                prompt: None,
-                post_dsl: None,
-            });
-        };
+        let post_dsl = captured.post_dsl();
+        let rendered = tokio::task::spawn_blocking(move || captured.render(variables, template))
+            .await
+            .map_err(|error| PromptPreparationError::FileTask(error.to_string()))??;
         if !rendered.initialization.is_empty() {
             if !matches!(at, ContextPosition::Latest) {
                 return Err(PromptPreparationError::Initialization(
@@ -120,6 +103,7 @@ mod tests {
     use crate::{
         character::{CharacterId, CharacterRegistry},
         identity::RequestId,
+        prompts::PromptCatalog,
         timeline::SessionTimeline,
     };
     use std::{fs, sync::Mutex};
@@ -156,7 +140,7 @@ mod tests {
         let stop = CancellationToken::new();
         let (registry, tasks) = CharacterRegistry::spawn(Arc::clone(&timeline), stop.clone(), 8);
         let character = registry.get(CharacterId::Crazy).unwrap();
-        let operation = PromptPreparation::new(Some(Arc::new(PromptCatalog::new(&root))));
+        let operation = PromptPreparation::new();
         let guidance: Arc<str> = "message from player".into();
         let admission = {
             let timeline = timeline.lock().unwrap();
@@ -172,7 +156,9 @@ mod tests {
                 TurnIntent::Initiate,
                 ContextPosition::Latest,
                 admission,
-                None,
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, None)
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -228,7 +214,9 @@ mod tests {
                 TurnIntent::Initiate,
                 ContextPosition::Latest,
                 admission,
-                Some("Default"),
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, Some("Default"))
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -265,7 +253,7 @@ mod tests {
                 ContextPosition::At(timeline.anchor()),
             )
         };
-        let result = PromptPreparation::new(Some(Arc::new(PromptCatalog::new(&root))))
+        let result = PromptPreparation::new()
             .prepare(
                 &character,
                 RequestId::new(),
@@ -273,7 +261,9 @@ mod tests {
                 TurnIntent::Initiate,
                 at,
                 admission,
-                None,
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, None)
+                    .unwrap(),
             )
             .await;
         assert!(matches!(
@@ -313,7 +303,7 @@ mod tests {
                 .admission(CharacterId::Crazy, timeline.selection())
                 .unwrap()
         };
-        let result = PromptPreparation::new(Some(Arc::new(PromptCatalog::new(&root))))
+        let result = PromptPreparation::new()
             .prepare(
                 &character,
                 RequestId::new(),
@@ -321,7 +311,9 @@ mod tests {
                 TurnIntent::Initiate,
                 ContextPosition::Latest,
                 admission,
-                None,
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, None)
+                    .unwrap(),
             )
             .await;
         assert!(matches!(result, Err(PromptPreparationError::Catalog(_))));

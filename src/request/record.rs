@@ -16,6 +16,7 @@ pub(crate) struct RequestRecord {
     admission: TimelineAdmission,
     settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
     admitted_preset: Option<crate::generation::GenerationPreset>,
+    admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
 }
 
 struct Execution {
@@ -103,6 +104,7 @@ impl RequestRecord {
         admission: TimelineAdmission,
         settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
         admitted_preset: Option<crate::generation::GenerationPreset>,
+        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
         registry: Weak<RegistryInner>,
     ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
@@ -144,6 +146,7 @@ impl RequestRecord {
             admission,
             settings_snapshot,
             admitted_preset,
+            admitted_prompt,
         })
     }
 
@@ -195,6 +198,10 @@ impl RequestRecord {
     }
     pub(crate) fn admitted_preset(&self) -> Option<crate::generation::GenerationPreset> {
         self.admitted_preset.clone()
+    }
+
+    pub(crate) fn admitted_prompt(&self) -> Option<Arc<crate::prompts::PromptSetSnapshot>> {
+        self.admitted_prompt.clone()
     }
 
     pub(crate) fn admission(&self) -> TimelineAdmission {

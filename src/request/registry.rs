@@ -195,7 +195,7 @@ impl RequestRegistry {
         id: RequestId,
         admission: TimelineAdmission,
     ) -> RequestHandle {
-        self.register_with_configuration(message, id, admission, None, None)
+        self.register_with_configuration(message, id, admission, None, None, None)
     }
 
     pub(crate) fn register_with_configuration(
@@ -205,6 +205,7 @@ impl RequestRegistry {
         admission: TimelineAdmission,
         settings: Option<Arc<crate::settings::SettingsSnapshot>>,
         preset: Option<crate::generation::GenerationPreset>,
+        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
     ) -> RequestHandle {
         let record = RequestRecord::new(
             message,
@@ -212,6 +213,7 @@ impl RequestRegistry {
             admission,
             settings,
             preset,
+            prompt,
             Arc::downgrade(&self.inner),
         );
         let handle = record.handle();
@@ -329,6 +331,7 @@ mod tests {
             },
             None,
             None,
+            None,
             std::sync::Weak::new(),
         );
         registry
@@ -397,6 +400,7 @@ mod tests {
             },
             Some(settings.clone()),
             Some(preset),
+            None,
         );
         let mut changed = settings.values.clone();
         changed.voice.voice = "voice-after".into();

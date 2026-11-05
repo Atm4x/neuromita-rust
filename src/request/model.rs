@@ -328,6 +328,8 @@ pub enum SubmitError {
     TimelineUnavailable,
     #[error("assigned generation preset is unavailable")]
     PresetUnavailable,
+    #[error("prompt set unavailable: {0}")]
+    PromptUnavailable(String),
     #[error("target event is not observable or not a message when replying")]
     InvalidTargetEvent,
 }

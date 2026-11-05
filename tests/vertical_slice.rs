@@ -2578,6 +2578,155 @@ async fn selected_prompt_post_dsl_persists_only_accepted_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_prompt_snapshot_survives_hot_reload_and_freezes_post_dsl() {
+    use neuromita::{
+        prompts::PromptCatalog,
+        settings::{CharactersSettings, SettingsApi},
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let root = std::env::temp_dir().join(format!("neuromita-snapshot-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(set.join("PostScripts")).unwrap();
+    std::fs::create_dir_all(set.join("Main")).unwrap();
+    std::fs::write(
+        set.join("config.json"),
+        r#"{"variables":{"player_name":"Old"}}"#,
+    )
+    .unwrap();
+    std::fs::write(set.join("main_template.txt"), "[<Main/identity.txt>]").unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Name [{player_name}]").unwrap();
+    std::fs::write(set.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"cached\"\n END_ACTIONS\nEND_RULE").unwrap();
+    let alternate = root.join("Crazy/Alternative");
+    std::fs::create_dir_all(alternate.join("PostScripts")).unwrap();
+    std::fs::write(
+        alternate.join("config.json"),
+        r#"{"variables":{"player_name":"New"}}"#,
+    )
+    .unwrap();
+    std::fs::write(alternate.join("main_template.txt"), "[<identity.txt>]").unwrap();
+    std::fs::write(alternate.join("identity.txt"), "Alternate [{player_name}]").unwrap();
+    std::fs::write(alternate.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"fresh\"\n END_ACTIONS\nEND_RULE").unwrap();
+    let app = ApplicationLifecycle::start(
+        ApplicationConfig::minimal(
+            preset(&server.endpoint),
+            ResponseGenerator::new([
+                Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+            ])
+            .unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .with_prompt_catalog(PromptCatalog::new(&root)),
+    )
+    .await
+    .unwrap();
+    let first = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "first".into())
+        .unwrap();
+    let first_call = server.next().await;
+    assert!(first_call.body.to_string().contains("Name Old"));
+    let queued = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "queued".into())
+        .unwrap();
+    std::fs::write(
+        set.join("config.json"),
+        r#"{"variables":{"player_name":"New"}}"#,
+    )
+    .unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Changed [{player_name}]").unwrap();
+    std::fs::write(set.join("PostScripts/main_rules.postscript"),
+        "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"fresh\"\n END_ACTIONS\nEND_RULE").unwrap();
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.crazy.prompt_set = Some("Alternative".into());
+    })
+    .unwrap();
+    first_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let queued_call = server.next().await;
+    assert!(
+        queued_call.body.to_string().contains("Name Old"),
+        "queued prompt must retain old resources"
+    );
+    assert!(!queued_call.body.to_string().contains("Changed New"));
+    queued_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&queued).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let next = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "new".into())
+        .unwrap();
+    let new_call = server.next().await;
+    assert!(new_call.body.to_string().contains("Alternate New"));
+    new_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&next).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    SettingsApi::edit::<CharactersSettings>(|settings| {
+        settings.crazy.prompt_set = Some("Default".into());
+    })
+    .unwrap();
+    let changed = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "changed".into())
+        .unwrap();
+    let changed_call = server.next().await;
+    assert!(changed_call.body.to_string().contains("Changed New"));
+    changed_call.respond.send(Reply::Text("hello")).unwrap();
+    assert!(matches!(
+        finished(&changed).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    std::fs::write(
+        set.join("PostScripts/main_rules.postscript"),
+        "unexpected invalid rule",
+    )
+    .unwrap();
+    assert!(matches!(
+        app.presenter()
+            .conversation
+            .reply(CharacterId::Crazy, "invalid".into()),
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PromptUnavailable(_)
+        ))
+    ));
+    assert!(server.calls.try_recv().is_err());
+
+    let history = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    let contents: Vec<_> = history
+        .view
+        .messages()
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert!(contents.iter().filter(|m| m.as_str() == "cached").count() >= 2);
+    assert!(contents.iter().any(|m| m.as_str() == "fresh"));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preset_is_frozen_at_admission_and_missing_preset_is_rejected_before_queue() {
     use std::collections::BTreeMap;
 

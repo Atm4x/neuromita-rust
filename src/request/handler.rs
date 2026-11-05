@@ -123,12 +123,6 @@ impl MessageHandler {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
-        let prompt_selection = settings
-            .values
-            .characters
-            .for_character(message.character_id())
-            .prompt_set
-            .as_deref();
         let prepared = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
@@ -144,7 +138,7 @@ impl MessageHandler {
                 message.intent(),
                 message.at(),
                 record.admission(),
-                prompt_selection,
+                record.admitted_prompt(),
             ) => result,
         };
         let (context, prompt, post_dsl) = match prepared {

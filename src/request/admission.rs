@@ -13,6 +13,7 @@ use crate::{
     generation::PresetCatalog,
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
+    prompts::PromptCatalog,
     settings::SettingsOwner,
     timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
 };
@@ -42,6 +43,7 @@ pub(crate) struct ChatApiState {
     ingress: Arc<dyn RequestIngress>,
     settings: Arc<SettingsOwner>,
     presets: Arc<PresetCatalog>,
+    prompts: Option<Arc<PromptCatalog>>,
 }
 
 impl ChatApiState {
@@ -51,6 +53,7 @@ impl ChatApiState {
         ingress: Arc<dyn RequestIngress>,
         settings: Arc<SettingsOwner>,
         presets: Arc<PresetCatalog>,
+        prompts: Option<Arc<PromptCatalog>>,
     ) -> Self {
         Self {
             accepting: Mutex::new(true),
@@ -59,6 +62,7 @@ impl ChatApiState {
             ingress,
             settings,
             presets,
+            prompts,
         }
     }
 
@@ -70,8 +74,7 @@ impl ChatApiState {
         &self,
         request: impl GenerationCommand + 'static,
     ) -> Result<RequestHandle, SubmitError> {
-        let accepting = self.accepting.lock().expect("admission mutex poisoned");
-        if !*accepting {
+        if !*self.accepting.lock().expect("admission mutex poisoned") {
             return Err(SubmitError::Stopped);
         }
         let handler = self
@@ -94,6 +97,33 @@ impl ChatApiState {
             .get(preset_id)
             .map_err(|_| SubmitError::PresetUnavailable)?
             .ok_or(SubmitError::PresetUnavailable)?;
+        let selected = settings
+            .values
+            .characters
+            .for_character(request.character_id())
+            .prompt_set
+            .as_deref();
+        let prompt = self
+            .prompts
+            .as_ref()
+            .map(|catalog| catalog.capture(request.character_id(), selected))
+            .transpose()
+            .map_err(|error| SubmitError::PromptUnavailable(error.to_string()))?
+            .flatten();
+        // Resource I/O happens before the admission mutex is acquired.
+        if matches!(request.intent(), TurnIntent::React(_))
+            && let Some(snapshot) = &prompt
+            && !snapshot.has_template("react_template.txt")
+        {
+            return Err(SubmitError::PromptUnavailable(format!(
+                "{}/react_template.txt",
+                snapshot.name()
+            )));
+        }
+        let accepting = self.accepting.lock().expect("admission mutex poisoned");
+        if !*accepting {
+            return Err(SubmitError::Stopped);
+        }
         let admission = self
             .ingress
             .admit(request.character_id(), request.intent())?;
@@ -104,6 +134,7 @@ impl ChatApiState {
             admission,
             Some(settings),
             Some(preset),
+            prompt,
         );
         permit.send(id);
         Ok(handle)
