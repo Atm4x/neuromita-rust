@@ -284,6 +284,8 @@ impl PromptCatalog {
         // character, or the shared directories, so those are captured together.
         for directory in [
             root.join(character.to_string()),
+            root.join("Common"),
+            root.join("Structural"),
             root.join("_CommonPrompts"),
             root.join("_CommonScripts"),
         ] {
@@ -491,7 +493,11 @@ fn capture_directory(
                 "prompt snapshot size limit exceeded".into(),
             ));
         }
-        let data = fs::read_to_string(entry.path())?;
+        let data = fs::read_to_string(entry.path())?
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim_end()
+            .to_owned();
         *total += data.len();
         if *total > MAX_SNAPSHOT_BYTES {
             return Err(PromptError::Dsl(

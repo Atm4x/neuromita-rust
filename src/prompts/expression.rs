@@ -422,13 +422,21 @@ fn call(name: &str, args: Vec<Value>) -> Result<Value, PromptError> {
                 i32::try_from(digits)
                     .map_err(|_| PromptError::Dsl("round() digits out of range".into()))?,
             );
-            number(
-                (v.as_f64()
-                    .ok_or_else(|| PromptError::Dsl("round() expects number".into()))?
-                    * factor)
-                    .round()
-                    / factor,
-            )
+            let rounded = (v
+                .as_f64()
+                .ok_or_else(|| PromptError::Dsl("round() expects number".into()))?
+                * factor)
+                .round()
+                / factor;
+            if v.is_i64()
+                && rounded.is_finite()
+                && rounded >= i64::MIN as f64
+                && rounded < i64::MAX as f64
+            {
+                Ok(Value::from(rounded as i64))
+            } else {
+                number(rounded)
+            }
         }
         ("random", []) => number(uuid::Uuid::new_v4().as_u128() as f64 / u128::MAX as f64),
         ("random", [a, b]) => {

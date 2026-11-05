@@ -26,7 +26,7 @@
 - Structured custom fields are consumed before persisted response creation; accepted character variables are private Timeline events.
 - Custom variable updates are not applied on a cancelled, rejected, or otherwise unaccepted response. This is intentionally stricter than some Python imperative paths.
 - Capture defaults and supported arithmetic match the shipped Python templates tested here, but this is not a blanket promise of arbitrary Python expression-language equivalence.
-- Configuration snapshot happens at **admission**; a later edit to the underlying prompt files can affect a request if it has not entered `PromptPreparation` yet. The PostDSL program becomes immutable once preparation completes. Pinning an entire on-disk PromptSet version at admission is a separate capability.
+- Configuration, selected PromptSet, its included source files and the parsed PostDSL program are frozen at **admission** as one immutable `PromptSetSnapshot`. Later edits affect newly admitted requests only; main DSL interprets the frozen source using the execution-time `CharacterContext`. See `prompt-catalog-dsl.md` and `prompt-real-corpus-parity.md`.
 
 ## Validation
 

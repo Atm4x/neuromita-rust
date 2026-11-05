@@ -19,6 +19,7 @@ pub(super) struct Interpreter {
     root: PathBuf,
     base: PathBuf,
     vars: BTreeMap<String, Value>,
+    local_vars: BTreeMap<String, Value>,
     declared_local_vars: BTreeSet<String>,
     static_infos: Vec<String>,
     context_infos: Vec<String>,
@@ -44,6 +45,7 @@ impl Interpreter {
             root: root.canonicalize()?,
             base: base.canonicalize()?,
             vars,
+            local_vars: BTreeMap::new(),
             declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
             context_infos: Vec::new(),
@@ -63,6 +65,7 @@ impl Interpreter {
             root,
             base,
             vars,
+            local_vars: BTreeMap::new(),
             declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
             context_infos: Vec::new(),
@@ -87,7 +90,11 @@ impl Interpreter {
         if fs::metadata(path)?.len() > MAX_FILE_SIZE {
             return Err(PromptError::Dsl("prompt file too large".into()));
         }
-        Ok(fs::read_to_string(path)?)
+        Ok(fs::read_to_string(path)?
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .trim_end()
+            .to_owned())
     }
 
     pub fn declarations(&self) -> Vec<PromptInitializationDeclaration> {
@@ -106,7 +113,7 @@ impl Interpreter {
             &self.base
         };
         let source = base.join(file);
-        let result = if self.files.is_some() {
+        let mut result = if self.files.is_some() {
             let mut result = PathBuf::new();
             for component in source.components() {
                 match component {
@@ -123,11 +130,34 @@ impl Interpreter {
                 PromptError::Dsl(format!("could not resolve {}: {error}", source.display()))
             })?
         };
+        if !result.starts_with(&self.root) {
+            return Err(PromptError::Dsl(format!(
+                "template escaped prompt root: {file}"
+            )));
+        }
+        if let Some(files) = &self.files
+            && !files.contains_key(&result)
+        {
+            let mut matches = files.keys().filter(|candidate| {
+                candidate
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(result.as_os_str().as_encoded_bytes())
+            });
+            if let Some(candidate) = matches.next() {
+                if matches.next().is_some() {
+                    return Err(PromptError::Dsl(format!(
+                        "ambiguous case-insensitive template path: {file}"
+                    )));
+                }
+                result = candidate.clone();
+            }
+        }
         let exists = self
             .files
             .as_ref()
             .map_or_else(|| result.is_file(), |files| files.contains_key(&result));
-        if !result.starts_with(&self.root) || !exists {
+        if !exists {
             return Err(PromptError::Dsl(format!(
                 "template escaped prompt root: {file}"
             )));
@@ -266,10 +296,20 @@ impl Interpreter {
         while let Some(start_rel) = value[offset..].find("[{") {
             let start = offset + start_rel;
             let Some(end_rel) = value[start + 2..].find("}]") else {
-                return Err(PromptError::Dsl("unclosed variable".into()));
+                offset = start + 2;
+                continue;
             };
             let end = start + 2 + end_rel;
-            let name = value[start + 2..end].trim();
+            let name = &value[start + 2..end];
+            let mut chars = name.chars();
+            let valid_name = chars
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+            if !valid_name {
+                offset = start + 2;
+                continue;
+            }
             let replacement = self
                 .vars
                 .get(name)
@@ -282,7 +322,13 @@ impl Interpreter {
                 break;
             }
         }
-        Ok(value.trim_end().to_owned())
+        Ok(value)
+    }
+
+    fn evaluation_scope(&self) -> BTreeMap<String, Value> {
+        let mut scope = self.vars.clone();
+        scope.extend(self.local_vars.clone());
+        scope
     }
 
     fn evaluate(&mut self, input: &str, parent: &Path) -> Result<Value, PromptError> {
@@ -331,7 +377,7 @@ impl Interpreter {
                 return Err(PromptError::Dsl("too many inline LOAD expressions".into()));
             }
         }
-        evaluate(&source, &self.vars)
+        evaluate(&source, &self.evaluation_scope())
     }
 
     fn argument(&mut self, arg: &str, parent: &Path) -> Result<String, PromptError> {
@@ -369,10 +415,14 @@ impl Interpreter {
             .find(&end)
             .ok_or_else(|| PromptError::Dsl(format!("closing tag {tag} missing")))?
             + begin;
-        self.expand(raw[begin..stop].trim(), path.parent().unwrap(), true)
+        let section = raw[begin..stop].trim_end();
+        let section = section.strip_prefix('\n').unwrap_or(section);
+        self.expand(section, path.parent().unwrap(), true)
     }
 
     fn script(&mut self, input: &str, path: &Path) -> Result<String, PromptError> {
+        self.local_vars.clear();
+        self.declared_local_vars.clear();
         let mut branches: Vec<Branch> = Vec::new();
         let parent = path
             .parent()
@@ -401,7 +451,7 @@ impl Interpreter {
             let result = (|| -> Result<Option<String>, PromptError> {
                 match command.as_str() {
                     "IF" => {
-                        let taken = active && condition(arg, &self.vars)?;
+                        let taken = active && condition(arg, &self.evaluation_scope())?;
                         branches.push(Branch {
                             parent_active: active,
                             taken,
@@ -412,8 +462,9 @@ impl Interpreter {
                         let branch = branches
                             .last_mut()
                             .ok_or_else(|| PromptError::Dsl("ELSEIF without IF".into()))?;
-                        branch.active =
-                            branch.parent_active && !branch.taken && condition(arg, &self.vars)?;
+                        branch.active = branch.parent_active
+                            && !branch.taken
+                            && condition(arg, &self.evaluation_scope())?;
                         branch.taken |= branch.active;
                     }
                     "ELSE" => {
@@ -441,11 +492,15 @@ impl Interpreter {
                         {
                             return Err(PromptError::Dsl("invalid SET name".into()));
                         }
-                        if !local || !self.declared_local_vars.contains(name) {
+                        if !local || !self.local_vars.contains_key(name) {
                             let value = self.evaluate(expr, parent)?;
-                            self.vars.insert(name.into(), value);
-                            if local {
-                                self.declared_local_vars.insert(name.into());
+                            if local || self.declared_local_vars.contains(name) {
+                                self.local_vars.insert(name.into(), value);
+                                if local {
+                                    self.declared_local_vars.insert(name.into());
+                                }
+                            } else {
+                                self.vars.insert(name.into(), value);
                             }
                         }
                     }
