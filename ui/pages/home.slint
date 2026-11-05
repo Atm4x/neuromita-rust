@@ -162,7 +162,7 @@ export component HomePage inherits Rectangle {
             HorizontalLayout {
                 height: 80px; spacing: 12px; padding: 0px;
                 StatusCard { model: root.backend; icon: Icons.rust; icon-color: Theme.rust; icon-size: 34px; checked: root.backend-selected; toggled => { root.toggle-backend(); } }
-                StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; checked: root.client-selected; toggled => { root.toggle-client(); } }
+                StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; icon-size: 34px; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
             PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
         }
