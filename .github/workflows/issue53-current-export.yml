@@ -1,0 +1,29 @@
+name: Export Issue53 latest Git bundle
+on:
+  push:
+    branches: [bridge/issue53-current-audit-export-20261105]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch target and create bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin refs/heads/codex/gamelink-issue53-20261105:refs/heads/issue53-audit
+          git bundle create issue53-latest.bundle refs/heads/issue53-audit
+          git bundle verify issue53-latest.bundle
+          git bundle list-heads issue53-latest.bundle
+          sha256sum issue53-latest.bundle > issue53-latest.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue53-latest-git-bundle
+          path: |
+            issue53-latest.bundle
+            issue53-latest.bundle.sha256
+          retention-days: 1
