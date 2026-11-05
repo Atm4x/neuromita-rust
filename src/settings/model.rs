@@ -163,6 +163,8 @@ pub struct OperationPresets {
 #[serde(deny_unknown_fields)]
 pub struct CharacterSettings {
     pub presets: OperationPresets,
+    #[serde(default)]
+    pub prompt_set: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +306,12 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> Result<(), SettingsError> {
+        for character in crate::character::CharacterId::ALL {
+            if let Some(name) = &self.characters.for_character(character).prompt_set {
+                crate::prompts::PromptCatalog::validate_set_name(name)
+                    .map_err(|error| SettingsError::Validation(error.to_string()))?;
+            }
+        }
         self.speech.validate()?;
         if self.voice.voice.trim().is_empty() {
             return Err(SettingsError::Validation(

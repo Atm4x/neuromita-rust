@@ -47,6 +47,9 @@ pub enum Command {
     ActivePreset(PresetId),
     AssignPreset(CharacterId, PresetSlot, PresetSelection),
     AssignAllPresets(CharacterId, PresetSelection),
+    SelectPromptSet(CharacterId, String),
+    RefreshPromptCatalog,
+    OpenPromptFolder(CharacterId),
     VoiceInLauncher(bool),
     VoiceInGame(bool),
     VoiceName(String),
@@ -280,6 +283,10 @@ async fn start(
             directory.to_path_buf(),
         ),
     );
+    let root = std::env::var_os("NEUROMITA_PROMPTS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| directory.join("Prompts"));
+    let config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
@@ -366,6 +373,16 @@ async fn observe(
                     super::settings::AdministrationSnapshot {
                         settings,
                         presets: administration.presets.snapshot(),
+                        prompt_sets: administration
+                            .prompts
+                            .as_ref()
+                            .map(|catalog| {
+                                CharacterId::ALL
+                                    .into_iter()
+                                    .flat_map(|id| catalog.list(id).unwrap_or_default())
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                 ))),
                 Err(error) => publish(Update::AdminError(error.to_string())),
@@ -390,7 +407,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
@@ -422,6 +439,29 @@ async fn observe(
                         administration.audio_input.stop_test().await
                     };
                     if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
+                },
+                Some(Command::RefreshPromptCatalog) => {},
+                Some(Command::OpenPromptFolder(character)) => {
+                    if let Some(catalog) = &administration.prompts {
+                        let result = (|| -> Result<(), String> {
+                            let settings = administration.settings.snapshot().map_err(|e| e.to_string())?;
+                            let selected = settings.values.characters.for_character(character).prompt_set.as_deref();
+                            let character_root = catalog.root().join(character.to_string());
+                            let folder = match selected {
+                                Some(name) => {
+                                    let name = catalog.resolve_set(character, Some(name)).map_err(|e| e.to_string())?;
+                                    character_root.join(name)
+                                }
+                                None => character_root,
+                            };
+                            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+                            let folder = folder.canonicalize().map_err(|e| e.to_string())?;
+                            let command = if cfg!(windows) { "explorer.exe" } else { "xdg-open" };
+                            std::process::Command::new(command).arg(folder).spawn().map_err(|e| e.to_string())?;
+                            Ok(())
+                        })();
+                        if let Err(error) = result { publish(Update::AdminError(error)); }
+                    }
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
