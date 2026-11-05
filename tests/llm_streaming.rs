@@ -18,15 +18,16 @@ use tokio::{
 
 static APPLICATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const ANSWER: &str = r#"{"segments":[{"text":"stream response"}]}"#;
+const ANSWER: &str = r#"{"reasoning":"private thought","segments":[{"text":"stream response"}]}"#;
 
 fn event(value: Value) -> String {
     format!("data: {value}\r\n\r\n")
 }
 
 fn response_frames(protocol: Option<OpenAiProtocol>) -> Vec<String> {
-    let left = &ANSWER[..16];
-    let right = &ANSWER[16..];
+    let split = ANSWER.find("stream").unwrap() + "stream".len();
+    let left = &ANSWER[..split];
+    let right = &ANSWER[split..];
     match protocol {
         Some(OpenAiProtocol::Responses) => vec![
             event(json!({"type":"response.output_text.delta","delta":left})),
@@ -199,11 +200,22 @@ async fn run_stream(
         .unwrap();
     let mut updates = request.observe();
     let mut observed_partial = false;
+    let mut observed_spoken = false;
     let mut cancelled = false;
     let final_state = timeout(Duration::from_secs(8), async {
         while let Some(snapshot) = updates.next().await.unwrap() {
             if snapshot.streamed_json.is_some() {
                 observed_partial = true;
+                if let Some(preview) = &snapshot.streamed_text {
+                    observed_spoken = true;
+                    assert!(preview.starts_with("stream"), "{preview}");
+                    assert!(!preview.contains("private thought"));
+                    assert!(!preview.contains("reasoning"));
+                    let public = neuromita::server::status(&snapshot);
+                    assert_eq!(public["preview_text"], preview.as_ref());
+                    assert_eq!(public["provisional"], true);
+                    assert!(public.get("streamed_json").is_none());
+                }
                 if cancel && !cancelled {
                     cancelled = true;
                     request.cancel();
@@ -223,6 +235,15 @@ async fn run_stream(
             "streaming must produce provisional request updates"
         );
     }
+    if !truncate && !stall {
+        assert!(
+            observed_spoken,
+            "spoken preview should be visible before acceptance"
+        );
+    }
+    let terminal = neuromita::server::status(&request.snapshot());
+    assert!(terminal.get("preview_text").is_none());
+    assert!(request.snapshot().streamed_text.is_none());
     match final_state {
         RequestState::Cancelled if cancel => {}
         RequestState::Finished(RequestOutcome::Success(response)) if !truncate && !stall => {

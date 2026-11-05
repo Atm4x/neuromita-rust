@@ -299,6 +299,8 @@ pub struct RequestSnapshot {
     pub metadata: RequestMetadata,
     /// Unvalidated streamed provider JSON, for progress and diagnostics only.
     pub streamed_json: Option<Arc<str>>,
+    /// Provisional spoken-only text, extracted from streamed JSON. Never accepted as an effect.
+    pub streamed_text: Option<Arc<str>>,
     pub revision: u64,
     pub state: RequestState,
     pub dataset: DatasetCapture,

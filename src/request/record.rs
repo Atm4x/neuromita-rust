@@ -117,6 +117,7 @@ impl RequestRecord {
             revision: 0,
             state: RequestState::Pending,
             streamed_json: None,
+            streamed_text: None,
             dataset: DatasetCapture::default(),
             cancel_reason: None,
         });
@@ -166,6 +167,7 @@ impl RequestRecord {
             revision: inner.snapshot.revision + 1,
             state,
             streamed_json: None,
+            streamed_text: None,
             dataset: inner.dataset.clone(),
             cancel_reason: inner.cancel_reason,
         });
@@ -354,6 +356,7 @@ impl RequestRecord {
             revision: inner.snapshot.revision + 1,
             state: inner.snapshot.state.clone(),
             streamed_json: inner.snapshot.streamed_json.clone(),
+            streamed_text: inner.snapshot.streamed_text.clone(),
             cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
         });
@@ -464,6 +467,7 @@ impl RequestRecord {
         combined.push_str(delta);
         let mut snapshot = (*inner.snapshot).clone();
         snapshot.revision += 1;
+        snapshot.streamed_text = super::stream_preview::spoken_prefix(&combined).map(Arc::from);
         snapshot.streamed_json = Some(Arc::from(combined));
         inner.snapshot = Arc::new(snapshot);
         self.updates.send_replace(Arc::clone(&inner.snapshot));
