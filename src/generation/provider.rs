@@ -156,6 +156,7 @@ pub struct ProviderReply {
 pub trait GenerationObserver: Send {
     fn request_prepared(&mut self, _request: PreparedRequest) {}
     fn response_received(&mut self, _response: ProviderReply) {}
+    fn stream_delta(&mut self, _delta: &str) {}
     fn failed(&mut self, _error: &GenerationError) {}
 }
 

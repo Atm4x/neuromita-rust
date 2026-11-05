@@ -416,6 +416,7 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         row.text = request
             .snapshot
             .provisional_text()
+            .or(request.snapshot.streamed_text.as_deref())
             .unwrap_or_default()
             .into();
         row.status = match &request.snapshot.state {

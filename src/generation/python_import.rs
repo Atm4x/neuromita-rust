@@ -308,6 +308,8 @@ impl PythonPresetImport {
                 })
                 .transpose()?
                 .unwrap_or(true),
+            stream: false,
+            max_retries: 2,
         };
         let record = PresetRecord {
             name: text(preset, "name")?.into(),
