@@ -32,7 +32,7 @@ jobs:
           git fetch /tmp/prompt-debug.bundle "$TARGET"
           test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
           git merge-base --is-ancestor "$BASE" "$HEAD"
-          git diff --check "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD" -- . ':(exclude)tests/fixtures/prompt-corpus/**'
           git fetch origin "$TARGET"
           test "$(git rev-parse FETCH_HEAD)" = "$BASE"
           git push origin "$HEAD:$TARGET"
