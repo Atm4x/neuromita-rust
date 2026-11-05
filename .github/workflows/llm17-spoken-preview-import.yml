@@ -1,0 +1,33 @@
+name: Import LLM17 Spoken Preview Git Bundle
+on:
+  push:
+    branches:
+      - bridge/llm17-spoken-preview-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Validate source, verify bundle, fast-forward PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=a46f61c2cca13e216a413ad173f5bc7c328150b4
+          HEAD=270bfd29d2374f9c0218dfe6fcfd15437ab37797
+          TARGET=refs/heads/codex/llm-streaming-retry-20261106
+          base64 --decode bridge_payloads/llm17-spoken-preview.bundle.b64 > /tmp/spoken-preview.bundle
+          echo 'b6f3c7a707afd34ab6d2b3dafc02a2a31bdd6fd1c37e0c01399a11edd5946d30  /tmp/spoken-preview.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/spoken-preview.bundle
+          git fetch /tmp/spoken-preview.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
