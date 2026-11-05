@@ -1,0 +1,33 @@
+name: Import Native Rate ASR Monitor
+on:
+  push:
+    branches:
+      - bridge/asr-native-rate-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish native microphone monitoring fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6316dc3eff7e3faaea471165d63315ade08c292e
+          HEAD=e38ee3975cee12d2a3b06535df1f2537fdef05ad
+          TARGET=refs/heads/codex/asr-monitor-native-rate-20261106
+          base64 --decode bridge_payloads/asr-native-rate.bundle.b64 >/tmp/asr-monitor.bundle
+          echo '3eb568822a21d0aa92fa8154254721c32f174e3e41d29569424a1fa57c6643db  /tmp/asr-monitor.bundle' | sha256sum -c
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/asr-monitor.bundle
+          git fetch /tmp/asr-monitor.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD" -- src/audio/native.rs src/audio/monitor.rs
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
