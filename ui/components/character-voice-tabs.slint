@@ -10,7 +10,7 @@ component VoiceTab inherits ActionSurface {
     in property <int> character;
     label: root.all-characters ? I18n.i18n("voice.api.default-voice", "Общий голос") : CharacterCatalog.name(CharacterCatalog.entries[root.character]);
     width: 88px;
-    height: 80px;
+    height: 82px;
     horizontal-stretch: 0;
     border-radius: 16px;
     border-width: root.selected ? 1.5px : 0px;
