@@ -1,5 +1,4 @@
 use crate::{
-    character::CharacterHandle,
     memory::{MemoryCommand, MemoryIsland, MemoryPriority, MemoryRelation},
     prompts::PromptInitializationDeclaration,
 };
@@ -64,8 +63,9 @@ pub(super) fn commands(
         .collect()
 }
 
+#[cfg(test)]
 pub(super) async fn commit(
-    character: &CharacterHandle,
+    character: &crate::character::CharacterHandle,
     declarations: &[PromptInitializationDeclaration],
 ) -> Result<bool, String> {
     if declarations.is_empty() {

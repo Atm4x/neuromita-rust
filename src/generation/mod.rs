@@ -26,8 +26,8 @@ pub use transforms::{MessageTransform, apply_message_transforms};
 
 pub use provider::{
     GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,
-    PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture, ProviderReply,
-    ProviderUsage, ResponseGenerator,
+    PreparedPrompt, PreparedRequest, PromptMessage, PromptRole, ProposedResponse, ProviderFuture,
+    ProviderReply, ProviderUsage, ResponseGenerator,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

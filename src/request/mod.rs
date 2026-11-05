@@ -3,6 +3,7 @@ mod diagnostics;
 mod handler;
 mod model;
 mod prompt_initialization;
+pub(crate) mod prompt_preparation;
 mod record;
 mod registry;
 mod trace;

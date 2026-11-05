@@ -146,6 +146,8 @@ pub struct GenerationFocus {
 #[derive(Debug, Clone)]
 pub struct CharacterContext {
     pub character_id: CharacterId,
+    /// Variables captured by the character owner at the same Timeline anchor.
+    pub variables: std::collections::BTreeMap<String, serde_json::Value>,
     pub description: Arc<str>,
     pub prompt: Arc<str>,
     pub state: CharacterState,

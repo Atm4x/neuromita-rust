@@ -25,8 +25,36 @@ pub enum GenerationError {
     Response(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPrompt {
+    pub set_name: Arc<str>,
+    /// Stable template segments, independent of the request-specific context.
+    pub stable: Arc<[Arc<str>]>,
+    /// Dynamic template segments for this particular character snapshot.
+    pub dynamic: Arc<[Arc<str>]>,
+}
+
+impl PreparedPrompt {
+    pub fn new(set_name: String, stable: Vec<String>, dynamic: Vec<String>) -> Self {
+        let into_segments = |segments: Vec<String>| -> Arc<[Arc<str>]> {
+            segments
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(Arc::from)
+                .collect::<Vec<_>>()
+                .into()
+        };
+        Self {
+            set_name: set_name.into(),
+            stable: into_segments(stable),
+            dynamic: into_segments(dynamic),
+        }
+    }
+}
+
 pub struct GenerationRequest {
     pub context: CharacterContext,
+    pub prompt: Option<PreparedPrompt>,
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
 }
@@ -39,9 +67,15 @@ impl GenerationRequest {
     ) -> Self {
         Self {
             context,
+            prompt: None,
             preset,
             prepared_knowledge,
         }
+    }
+
+    pub fn with_prompt(mut self, prompt: Option<PreparedPrompt>) -> Self {
+        self.prompt = prompt;
+        self
     }
 }
 
@@ -52,6 +86,7 @@ pub use crate::turn::TurnProposal as ProposedResponse;
 #[derive(Clone)]
 pub struct GenerationInput {
     pub context: CharacterContext,
+    pub prompt: Option<PreparedPrompt>,
     pub prepared_knowledge: Option<String>,
 }
 
@@ -195,6 +230,7 @@ impl ResponseGenerator {
             .ok_or(GenerationError::Unavailable(kind))?;
         let input = GenerationInput {
             context: request.context,
+            prompt: request.prompt,
             prepared_knowledge: request.prepared_knowledge,
         };
         let structured = provider

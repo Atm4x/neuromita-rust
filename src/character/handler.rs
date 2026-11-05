@@ -109,6 +109,15 @@ enum Command {
         commands: Vec<MemoryCommand>,
         reply: oneshot::Sender<Result<MemoryEditResult, CharacterError>>,
     },
+    InitializeAndPrepare {
+        request: RequestId,
+        guidance: Arc<str>,
+        intent: TurnIntent,
+        at: ContextPosition,
+        admission: TimelineAdmission,
+        commands: Vec<MemoryCommand>,
+        reply: oneshot::Sender<Result<(CharacterContext, bool), CharacterError>>,
+    },
     View {
         at: ContextAnchor,
         reply: oneshot::Sender<Result<CharacterView, CharacterError>>,
@@ -156,6 +165,34 @@ impl CharacterHandle {
         self.commands
             .send(Command::EditMemory {
                 expected,
+                commands,
+                reply,
+            })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    /// Atomically applies a request's typed character-memory initialization and
+    /// captures the resulting Timeline context with a freshly validated epoch.
+    /// The operation receives no templates or DSL instructions.
+    pub(crate) async fn initialize_and_prepare(
+        &self,
+        request: RequestId,
+        guidance: Arc<str>,
+        intent: TurnIntent,
+        at: ContextPosition,
+        admission: TimelineAdmission,
+        commands: Vec<MemoryCommand>,
+    ) -> Result<(CharacterContext, bool), CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::InitializeAndPrepare {
+                request,
+                guidance,
+                intent,
+                at,
+                admission,
                 commands,
                 reply,
             })
@@ -477,6 +514,20 @@ impl CharacterHandler {
                         });
                     let _ = reply.send(result);
                 }
+                Command::InitializeAndPrepare {
+                    request,
+                    guidance,
+                    intent,
+                    at,
+                    admission,
+                    commands,
+                    reply,
+                } => {
+                    let result = self.initialize_and_prepare(
+                        request, guidance, intent, at, admission, &commands,
+                    );
+                    let _ = reply.send(result);
+                }
                 Command::State(reply) => {
                     let state = self
                         .timeline
@@ -518,6 +569,49 @@ impl CharacterHandler {
                 Command::GamePolicy(policy) => self.policy = policy,
             }
         }
+    }
+
+    fn initialize_and_prepare(
+        &mut self,
+        request: RequestId,
+        guidance: Arc<str>,
+        intent: TurnIntent,
+        at: ContextPosition,
+        admission: TimelineAdmission,
+        commands: &[MemoryCommand],
+    ) -> Result<(CharacterContext, bool), CharacterError> {
+        let (updated_admission, applied) = {
+            let mut timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+            timeline
+                .assert_admission(self.character.id, admission)
+                .map_err(|_| CharacterError::StaleState)?;
+            if !matches!(at, ContextPosition::Latest) {
+                return Err(CharacterError::Internal(
+                    "prompt initialization is not allowed at a historical anchor".into(),
+                ));
+            }
+            let expected = read_memory_snapshot(&timeline, self.character.id)
+                .map_err(|error| CharacterError::Internal(error.to_string()))?;
+            let edit = edit_memory_snapshot(&mut timeline, self.character.id, &expected, commands)
+                .map_err(|error| match error {
+                    crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                        CharacterError::StaleState
+                    }
+                    crate::timeline::domain::TimelineError::Invalid(reason) => {
+                        CharacterError::InvalidMemory(reason)
+                    }
+                    other => CharacterError::Internal(other.to_string()),
+                })?;
+            let updated = timeline
+                .admission(self.character.id, admission.selection)
+                .map_err(|_| CharacterError::StaleState)?;
+            (updated, !edit.applied.is_empty())
+        };
+        let context = self.context_admitted(request, guidance, intent, at, updated_admission)?;
+        Ok((context, applied))
     }
 
     #[cfg(test)]
@@ -620,8 +714,26 @@ impl CharacterHandler {
         timeline
             .assert_turn(turn)
             .map_err(|_| CharacterError::StaleState)?;
+        let variables = std::collections::BTreeMap::from([
+            (
+                "CHARACTER_ID".to_owned(),
+                serde_json::json!(self.character.id.to_string()),
+            ),
+            (
+                "CURRENT_INPUT".to_owned(),
+                serde_json::json!(guidance.as_ref()),
+            ),
+            ("attitude".to_owned(), serde_json::json!(state.attitude)),
+            ("boredom".to_owned(), serde_json::json!(state.boredom)),
+            ("stress".to_owned(), serde_json::json!(state.stress)),
+            (
+                "ACCEPTED_REPLIES".to_owned(),
+                serde_json::json!(state.accepted_replies),
+            ),
+        ]);
         Ok(CharacterContext {
             character_id: self.character.id,
+            variables,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
             state,

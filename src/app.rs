@@ -603,7 +603,9 @@ impl ApplicationLifecycle {
                 voice: Arc::clone(&voice),
                 settings: Arc::clone(&settings_owner),
                 presets: Arc::clone(&presets),
-                prompts: prompts.clone(),
+                prompt_preparation: crate::request::prompt_preparation::PromptPreparation::new(
+                    prompts.clone(),
+                ),
                 finetune: finetune.clone(),
                 selection_updates: selection_updates.clone(),
                 context_updates,

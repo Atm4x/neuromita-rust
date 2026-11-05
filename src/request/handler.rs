@@ -30,7 +30,7 @@ pub(crate) struct MessageHandler {
     pub(crate) voice: Arc<dyn VoiceProvider>,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
-    pub(crate) prompts: Option<Arc<crate::prompts::PromptCatalog>>,
+    pub(crate) prompt_preparation: super::prompt_preparation::PromptPreparation,
     pub(crate) finetune: Option<FineTuneCollector>,
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
@@ -105,31 +105,6 @@ impl MessageHandler {
         stop: CancellationToken,
     ) {
         let id = record.snapshot().metadata.id;
-        let prepared = tokio::select! {
-            biased;
-            _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
-            context = self.character.prepare(
-                id,
-                Arc::from(message.guidance()),
-                message.intent(),
-                message.at(),
-                record.admission(),
-            ) => context,
-        };
-        let mut context = match prepared {
-            Ok(context) => context,
-            Err(CharacterError::StaleState) => {
-                record.cancel_with_reason(CancelReason::ContextChanged);
-                record.finish_cancelled();
-                return;
-            }
-            Err(error) => {
-                record.finish(RequestOutcome::InternalError(
-                    record.failure(error.to_string()),
-                ));
-                return;
-            }
-        };
         let settings = match self.settings.snapshot_all() {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -144,107 +119,46 @@ impl MessageHandler {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
             RequestSource::Client(_) => voice_settings.in_game,
         };
-        if let Some(catalog) = &self.prompts {
-            let selection = settings
-                .values
-                .characters
-                .for_character(message.character_id())
-                .prompt_set
-                .as_deref();
-            let variables = std::collections::BTreeMap::from([
-                (
-                    "attitude".to_owned(),
-                    serde_json::json!(context.state.attitude),
-                ),
-                (
-                    "boredom".to_owned(),
-                    serde_json::json!(context.state.boredom),
-                ),
-                ("stress".to_owned(), serde_json::json!(context.state.stress)),
-                (
-                    "CURRENT_INPUT".to_owned(),
-                    serde_json::json!(context.current_input.as_ref()),
-                ),
-                (
-                    "CHARACTER_ID".to_owned(),
-                    serde_json::json!(context.character_id.to_string()),
-                ),
-            ]);
-            let template = if matches!(message.intent(), crate::interaction::TurnIntent::React(_)) {
-                "react_template.txt"
-            } else {
-                "main_template.txt"
-            };
-            let result = catalog.list(message.character_id()).and_then(|sets| {
-                if sets.is_empty() && selection.is_none() {
-                    Ok(None)
-                } else {
-                    catalog
-                        .render(message.character_id(), selection, variables, template)
-                        .map(Some)
-                }
-            });
-            match result {
-                Ok(Some(rendered)) => {
-                    if !rendered.initialization.is_empty() {
-                        if !matches!(message.at(), crate::timeline::ContextPosition::Latest) {
-                            record.finish(RequestOutcome::InternalError(
-                                record.failure(
-                                    "prompt initialization is not allowed at a historical anchor"
-                                        .into(),
-                                ),
-                            ));
-                            return;
-                        }
-                        if record.cancellation.is_cancelled() || stop.is_cancelled() {
-                            record.finish_cancelled();
-                            return;
-                        }
-                        match super::prompt_initialization::commit(
-                            &self.character,
-                            &rendered.initialization,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                match self
-                                    .character
-                                    .prepare(
-                                        id,
-                                        Arc::from(message.guidance()),
-                                        message.intent(),
-                                        message.at(),
-                                        record.admission(),
-                                    )
-                                    .await
-                                {
-                                    Ok(refreshed) => context = refreshed,
-                                    Err(error) => {
-                                        record.finish(RequestOutcome::InternalError(
-                                            record.failure(error.to_string()),
-                                        ));
-                                        return;
-                                    }
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                record.finish(RequestOutcome::InternalError(record.failure(error)));
-                                return;
-                            }
-                        }
-                    }
-                    context.prompt = Arc::from(rendered.system_text());
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    record.finish(RequestOutcome::InternalError(
-                        record.failure(error.to_string()),
-                    ));
-                    return;
-                }
+        let prompt_selection = settings
+            .values
+            .characters
+            .for_character(message.character_id())
+            .prompt_set
+            .as_deref();
+        let prepared = tokio::select! {
+            biased;
+            _ = record.cancellation.cancelled() => { record.finish_cancelled(); return; }
+            _ = stop.cancelled() => {
+                record.cancel_with_reason(CancelReason::Shutdown);
+                record.finish_cancelled();
+                return;
             }
-        }
+            result = self.prompt_preparation.prepare(
+                &self.character,
+                id,
+                Arc::from(message.guidance()),
+                message.intent(),
+                message.at(),
+                record.admission(),
+                prompt_selection,
+            ) => result,
+        };
+        let (context, prompt) = match prepared {
+            Ok(prepared) => (prepared.context, prepared.prompt),
+            Err(super::prompt_preparation::PromptPreparationError::Character(
+                CharacterError::StaleState,
+            )) => {
+                record.cancel_with_reason(CancelReason::ContextChanged);
+                record.finish_cancelled();
+                return;
+            }
+            Err(error) => {
+                record.finish(RequestOutcome::InternalError(
+                    record.failure(error.to_string()),
+                ));
+                return;
+            }
+        };
         let voice_options = voice_enabled.then_some(VoiceOptions {
             voice: voice_settings.voice,
             volume: voice_settings.volume,
@@ -313,7 +227,8 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")
                     ))?;
-                let request = GenerationRequest::new(context, preset, selected);
+                let request = GenerationRequest::new(context, preset, selected)
+                    .with_prompt(prompt);
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),
