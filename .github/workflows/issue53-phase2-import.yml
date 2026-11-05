@@ -1,0 +1,32 @@
+name: Import Issue53 Phase2 Bundle
+on:
+  push:
+    branches:
+      - bridge/issue53-phase2-import-20261105
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish immutable Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=c649c3f58d769921bea3bdfe3376149882dde35b
+          HEAD=2b2cf32d61a0ef02be193c73e8962be07825fa97
+          TARGET=refs/heads/codex/gamelink-issue53-20261105
+          base64 --decode bridge_payloads/issue53-phase2.bundle.b64 > /tmp/issue53.bundle
+          echo 'b1b21910b61805d6cc6071f215cc0bace55967693586bc452c6f32b2f9a47cf4  /tmp/issue53.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/issue53.bundle
+          git fetch /tmp/issue53.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
