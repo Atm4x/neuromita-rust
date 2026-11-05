@@ -1,0 +1,33 @@
+name: Import Issue53 LocalControl Git Bundle
+on:
+  push:
+    branches:
+      - bridge/issue53-localcontrol-publish-20261105
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish exact Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=9569bafc561398a12f2e43ada1f7233e39b34084
+          HEAD=b3e0ba27c1f25be4bd78e1cce1601055bbb05eb4
+          TARGET=refs/heads/codex/gamelink-issue53-20261105
+          base64 --decode bridge_payloads/issue53-localcontrol.bundle.b64 > /tmp/issue53.bundle
+          echo 'd48de862920edb60ba6afec2845b07dc8690e1c44e443a2ca368fe5f5a96c5d6  /tmp/issue53.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/issue53.bundle
+          git fetch /tmp/issue53.bundle refs/heads/issue53-live
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
