@@ -498,6 +498,7 @@ mod tests {
         let view =
             TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
+            memory_relations: Vec::new(),
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
@@ -613,6 +614,7 @@ mod tests {
         let view =
             TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
+            memory_relations: Vec::new(),
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),

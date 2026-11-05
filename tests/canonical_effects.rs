@@ -69,6 +69,7 @@ fn check(store: &mut dyn TimelineRepository) {
     assert_eq!(store.branch(branch).unwrap().head_sequence, 0);
 
     let record = MemoryRecord {
+        entities: Vec::new(),
         id: MemoryId::new(),
         priority: MemoryPriority::High,
         content: "Player likes tea".into(),
@@ -122,6 +123,7 @@ fn check(store: &mut dyn TimelineRepository) {
     let mut batch = Vec::new();
     for index in 0..257 {
         batch.push(memory(MemoryChange::Upsert(MemoryRecord {
+            entities: Vec::new(),
             id: MemoryId::new(),
             priority: MemoryPriority::Normal,
             content: format!("memory {index}"),
@@ -162,6 +164,7 @@ fn check(store: &mut dyn TimelineRepository) {
     ));
 
     let target = MemoryRecord {
+        entities: Vec::new(),
         id: MemoryId::new(),
         priority: MemoryPriority::Normal,
         content: "merge target".into(),
@@ -171,6 +174,7 @@ fn check(store: &mut dyn TimelineRepository) {
         expires_at_unix_ms: None,
     };
     let source = MemoryRecord {
+        entities: Vec::new(),
         id: MemoryId::new(),
         priority: MemoryPriority::High,
         content: "merge source".into(),

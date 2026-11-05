@@ -571,7 +571,8 @@ impl CharacterHandler {
         let state = captured.state;
         let working_state = captured.working_state;
         let now = CharacterRegistry::now_unix_ms();
-        let memories = captured.memories.list_at(now);
+        let memories = captured.memories.searchable_at(now);
+        let memory_relations = captured.memories.relations();
         let memory_islands = captured.memories.islands_at(now);
         let reminders = match &self.reminders {
             Some(_) => crate::reminders::projection::prompt_reminders_at(
@@ -626,6 +627,7 @@ impl CharacterHandler {
             state,
             working_state,
             memories,
+            memory_relations,
             memory_islands,
             history: captured.history,
             view: captured.view,
@@ -950,6 +952,7 @@ impl CharacterHandler {
             working_state: captured.working_state,
             game: captured.game.projection(GameSide::Mita),
             memories: captured.memories.list(),
+            memory_relations: captured.memories.relations(),
             memory_islands: captured.memories.islands(),
             history: captured.history,
             view: captured.view,

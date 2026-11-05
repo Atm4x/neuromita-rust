@@ -169,15 +169,6 @@ impl MessageHandler {
                     "CHARACTER_ID".to_owned(),
                     serde_json::json!(context.character_id.to_string()),
                 ),
-                ("SEED_INITIAL_MEMORIES".to_owned(), serde_json::json!(false)),
-                (
-                    "SEED_CHARACTER_MEMORIES".to_owned(),
-                    serde_json::json!(false),
-                ),
-                ("SEED_WORLD_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_ROOMS_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_MITAS_LORE".to_owned(), serde_json::json!(false)),
-                ("SEED_ENTITY_LINKS".to_owned(), serde_json::json!(false)),
             ]);
             let template = if matches!(message.intent(), crate::interaction::TurnIntent::React(_)) {
                 "react_template.txt"
@@ -194,7 +185,57 @@ impl MessageHandler {
                 }
             });
             match result {
-                Ok(Some(rendered)) => context.prompt = Arc::from(rendered.system_text()),
+                Ok(Some(rendered)) => {
+                    if !rendered.initialization.is_empty() {
+                        if !matches!(message.at(), crate::timeline::ContextPosition::Latest) {
+                            record.finish(RequestOutcome::InternalError(
+                                record.failure(
+                                    "prompt initialization is not allowed at a historical anchor"
+                                        .into(),
+                                ),
+                            ));
+                            return;
+                        }
+                        if record.cancellation.is_cancelled() || stop.is_cancelled() {
+                            record.finish_cancelled();
+                            return;
+                        }
+                        match super::prompt_initialization::commit(
+                            &self.character,
+                            &rendered.initialization,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                match self
+                                    .character
+                                    .prepare(
+                                        id,
+                                        Arc::from(message.guidance()),
+                                        message.intent(),
+                                        message.at(),
+                                        record.admission(),
+                                    )
+                                    .await
+                                {
+                                    Ok(refreshed) => context = refreshed,
+                                    Err(error) => {
+                                        record.finish(RequestOutcome::InternalError(
+                                            record.failure(error.to_string()),
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                record.finish(RequestOutcome::InternalError(record.failure(error)));
+                                return;
+                            }
+                        }
+                    }
+                    context.prompt = Arc::from(rendered.system_text());
+                }
                 Ok(None) => {}
                 Err(error) => {
                     record.finish(RequestOutcome::InternalError(
@@ -267,7 +308,7 @@ impl MessageHandler {
             response = async {
                 let query = LlmConversation::memory_query(&context);
                 let selected = self.knowledge
-                    .select_with_islands(context.character_id, &context.memories, &context.memory_islands, &query)
+                    .select_with_relations(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query)
                     .await
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")

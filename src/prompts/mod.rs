@@ -216,6 +216,16 @@ impl PromptCatalog {
             }
         }
         vars.extend(context_variables);
+        for feature in [
+            "SEED_INITIAL_MEMORIES",
+            "SEED_CHARACTER_MEMORIES",
+            "SEED_WORLD_LORE",
+            "SEED_ROOMS_LORE",
+            "SEED_MITAS_LORE",
+            "SEED_ENTITY_LINKS",
+        ] {
+            vars.entry(feature.to_owned()).or_insert(Value::Bool(false));
+        }
         vars.insert("PROMPT_SET_NAME".into(), Value::String(set_name.clone()));
         let mut runtime = dsl::Interpreter::new(&self.root, &dir, vars)?;
         let rendered = runtime.render_main(template)?;
@@ -326,5 +336,102 @@ mod tests {
             matches!(&rendered.initialization[1], PromptInitializationDeclaration::Relation { relation, .. } if relation == "knows")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(test)]
+    mod prompt_seed_compatibility_tests {
+        use super::*;
+        use crate::identity::CharacterId;
+
+        fn root() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "neuromita-prompt-seed-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(dir.join("Crazy/Default/Main")).unwrap();
+            dir
+        }
+
+        #[test]
+        fn config_controls_seed_feature() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("main_template.txt"), "[<Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "IF SEED_CHARACTER_MEMORIES != False THEN\nSEED_MEMORY High | seeded from config\nENDIF\n").unwrap();
+            let catalog = PromptCatalog::new(&root);
+            assert!(
+                catalog
+                    .render(
+                        CharacterId::Crazy,
+                        None,
+                        BTreeMap::new(),
+                        "main_template.txt"
+                    )
+                    .unwrap()
+                    .initialization
+                    .is_empty()
+            );
+            fs::write(
+                set.join("config.json"),
+                r#"{"SEED_CHARACTER_MEMORIES":true}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                catalog
+                    .render(
+                        CharacterId::Crazy,
+                        None,
+                        BTreeMap::new(),
+                        "main_template.txt"
+                    )
+                    .unwrap()
+                    .initialization
+                    .len(),
+                1
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn local_assignment_uses_first_local_value() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("main_template.txt"), "[<@ Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "SET LOCAL label = 'first'\nSET LOCAL label = 'second'\nSET label = label + '-updated'\nRETURN label\n").unwrap();
+            let result = PromptCatalog::new(&root)
+                .render(
+                    CharacterId::Crazy,
+                    None,
+                    BTreeMap::new(),
+                    "main_template.txt",
+                )
+                .unwrap();
+            assert_eq!(result.context, vec!["first-updated"]);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        #[test]
+        fn seed_strings_interpolate_config_variables() {
+            let root = root();
+            let set = root.join("Crazy/Default");
+            fs::write(set.join("config.json"), r#"{"player_name":"Игрок"}"#).unwrap();
+            fs::write(set.join("main_template.txt"), "[<Main/seed.script>]").unwrap();
+            fs::write(set.join("Main/seed.script"), "SEED_MEMORY High | Mita knows {player_name}\nSEED_ISLAND relationship | Friend of {player_name}\n").unwrap();
+            let result = PromptCatalog::new(&root)
+                .render(
+                    CharacterId::Crazy,
+                    None,
+                    BTreeMap::new(),
+                    "main_template.txt",
+                )
+                .unwrap();
+            assert!(
+                matches!(&result.initialization[0], PromptInitializationDeclaration::Memory {content, ..} if content == "Mita knows Игрок")
+            );
+            assert!(
+                matches!(&result.initialization[1], PromptInitializationDeclaration::Island {content, ..} if content == "Friend of Игрок")
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

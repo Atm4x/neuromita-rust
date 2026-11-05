@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -18,6 +18,7 @@ pub(super) struct Interpreter {
     root: PathBuf,
     base: PathBuf,
     vars: BTreeMap<String, Value>,
+    declared_local_vars: BTreeSet<String>,
     static_infos: Vec<String>,
     context_infos: Vec<String>,
     recursion: Vec<PathBuf>,
@@ -41,6 +42,7 @@ impl Interpreter {
             root: root.canonicalize()?,
             base: base.canonicalize()?,
             vars,
+            declared_local_vars: BTreeSet::new(),
             static_infos: Vec::new(),
             context_infos: Vec::new(),
             recursion: Vec::new(),
@@ -372,6 +374,7 @@ impl Interpreter {
                     }
                     _ if !active => {}
                     "SET" => {
+                        let local = arg.trim().starts_with("LOCAL ");
                         let arg = arg.trim().strip_prefix("LOCAL ").unwrap_or(arg.trim());
                         let (name, expr) = arg
                             .split_once('=')
@@ -382,8 +385,13 @@ impl Interpreter {
                         {
                             return Err(PromptError::Dsl("invalid SET name".into()));
                         }
-                        let value = self.evaluate(expr, parent)?;
-                        self.vars.insert(name.into(), value);
+                        if !local || !self.declared_local_vars.contains(name) {
+                            let value = self.evaluate(expr, parent)?;
+                            self.vars.insert(name.into(), value);
+                            if local {
+                                self.declared_local_vars.insert(name.into());
+                            }
+                        }
                     }
                     "RETURN" => return Ok(Some(self.argument(arg, parent)?)),
                     "RUN" => {
@@ -419,7 +427,12 @@ impl Interpreter {
                         } else {
                             (remaining, Vec::new())
                         };
-                        let content = content.trim().to_owned();
+                        let content = content.trim();
+                        let content = if content.contains('{') {
+                            text(&self.evaluate(&format!("f\"\"\"{content}\"\"\""), parent)?)
+                        } else {
+                            content.to_owned()
+                        };
                         if !content.is_empty() {
                             self.declarations
                                 .push(PromptInitializationDeclaration::Memory {
@@ -434,11 +447,17 @@ impl Interpreter {
                         let (kind, content) = arg.split_once('|').ok_or_else(|| {
                             PromptError::Dsl("SEED_ISLAND requires type | content".into())
                         })?;
-                        if !content.trim().is_empty() {
+                        let content = content.trim();
+                        let content = if content.contains('{') {
+                            text(&self.evaluate(&format!("f\"\"\"{content}\"\"\""), parent)?)
+                        } else {
+                            content.to_owned()
+                        };
+                        if !content.is_empty() {
                             self.declarations
                                 .push(PromptInitializationDeclaration::Island {
                                     kind: kind.trim().into(),
-                                    content: content.trim().into(),
+                                    content,
                                 });
                         }
                     }

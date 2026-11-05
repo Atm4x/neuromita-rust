@@ -1631,6 +1631,7 @@ mod tests {
             })
             .unwrap();
             let original = MemoryRecord {
+                entities: Vec::new(),
                 id: memory_id,
                 priority: MemoryPriority::High,
                 content: "first fact".into(),
@@ -1657,6 +1658,7 @@ mod tests {
                 .unwrap();
             initial = timeline.anchor();
             let changed = MemoryRecord {
+                entities: Vec::new(),
                 id: memory_id,
                 priority: MemoryPriority::Critical,
                 content: "corrected fact".into(),

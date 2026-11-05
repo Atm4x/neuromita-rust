@@ -41,15 +41,28 @@ case-insensitive Boolean conditions. A batch test against the available Python
 and `react_template.txt` files from all discovered sets.
 
 Initialization directives `SEED_MEMORY`, `SEED_RAG_MEMORY`, `SEED_ISLAND`
-and `LINK_ENTITIES` are parsed into typed `PromptInitializationDeclaration`
-values. **They are not yet persisted to Timeline**: the existing Core has no
-RAG-only memory or graph-relation write contract matching Python. Treating
-them as arbitrary side effects during request preparation would violate
-Timeline ownership. Integrating the declarations into an idempotent, atomic
-character-owned initialization operation remains required. The current DSL
-also does not implement Python PostDSL or guaranteed full Python expression
-semantics. `SET LOCAL` is accepted but does not yet create an isolated
-per-script scope. Unknown untrusted expressions fail explicitly.
+and `LINK_ENTITIES` produce typed `PromptInitializationDeclaration` values.
+The request handler resolves all declarations before generation, validates the
+entire batch, and submits it through the existing `CharacterHandle::edit_memories`
+boundary. Changes are committed to Timeline atomically. Following a committed
+batch, the request captures fresh character context before generation. Repeated
+identical seeds do not append a new event; an invalid later declaration leaves
+the entire batch uncommitted. Historical requests reject initialization instead
+of mutating past state.
+
+`RagOnly` is a distinct `MemoryKind`: it is available to semantic retrieval but
+excluded from the ordinary lexical memory handoff. Seeded entity names are
+retained on the canonical record. `LINK_ENTITIES` creates a typed Timeline
+memory-change event (`UpsertRelation`) and a character-owned projection; link
+ranking is lexical and bounded and is presented only for semantic retrieval.
+There is **no independently writable graph database**.
+
+Six `SEED_*` feature flags default to `false` only if absent. Explicit values
+from a prompt-set `config.json` are preserved. Request-owned variables override
+config defaults. `SET LOCAL` currently keeps a single first binding during an
+interpreter invocation; this does not imply full Python lexical scoping.
+Full Python PostDSL and unrestricted Python expression semantics are **not**
+implemented. Unknown expressions still fail explicitly.
 
 The original Python reference is not copied into this repository. Audit
 results are local verification, not a substitute for a comprehensive parity
