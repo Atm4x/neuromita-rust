@@ -1,0 +1,33 @@
+name: Import Issue53 Unity Protocol Documentation Bundle
+on:
+  push:
+    branches:
+      - bridge/issue53-unity-protocol-publish-20261105
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Validate exact commit and publish by fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=9badd68a0cccec8ee6623c3c141be18daf38a89c
+          HEAD=9569bafc561398a12f2e43ada1f7233e39b34084
+          TARGET=refs/heads/codex/gamelink-issue53-20261105
+          base64 --decode bridge_payloads/issue53-unity-protocol.bundle.b64 > /tmp/issue53-doc.bundle
+          echo '72ac17d4ec047b899aded6bb1f2e1e8342586acdbea6a56501f49fccc742e3af  /tmp/issue53-doc.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/issue53-doc.bundle
+          git fetch /tmp/issue53-doc.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
