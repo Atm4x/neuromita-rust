@@ -1,0 +1,23 @@
+name: Prompt Catalog Git Bridge
+on:
+  push:
+    branches:
+      - codex/prompt-catalog-dsl-20261105
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export repository state
+        run: |
+          git bundle create rust-current.bundle --all
+          git bundle verify rust-current.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prompt-catalog-base-bundle
+          path: rust-current.bundle
+          retention-days: 1
