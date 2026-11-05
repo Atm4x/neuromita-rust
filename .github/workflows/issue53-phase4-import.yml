@@ -1,0 +1,32 @@
+name: Import Issue53 Phase4 Bundle
+on:
+  push:
+    branches:
+      - bridge/issue53-phase4-import-20261105
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish exact Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=091f4acf95aa898b886afa1f0b97bf24f7b32eaf
+          HEAD=d40bddb06d12a0361aac8890b61bb3017ac19a17
+          TARGET=refs/heads/codex/gamelink-issue53-20261105
+          base64 --decode bridge_payloads/issue53-phase4.bundle.b64 > /tmp/issue53.bundle
+          echo 'b620a83c652c3d11d794fb01a73f501eec3e458857580a894fefde9bc0200273  /tmp/issue53.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/issue53.bundle
+          git fetch /tmp/issue53.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
