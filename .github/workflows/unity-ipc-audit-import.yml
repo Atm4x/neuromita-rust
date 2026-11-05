@@ -1,0 +1,33 @@
+name: Publish Unity IPC Audit Git Bundle
+on:
+  push:
+    branches:
+      - bridge/unity-ipc-audit-publish-20261105
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish exact audit commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=b3e0ba27c1f25be4bd78e1cce1601055bbb05eb4
+          HEAD=e566a0e995cab88260835e653e6f586ace3a4149
+          TARGET=refs/heads/codex/unity-ipc-audit-20261105
+          base64 --decode bridge_payloads/unity-ipc-audit.bundle.b64 >/tmp/unity-ipc-audit.bundle
+          echo 'b277128c07e7ba1306a3d9b6222ae8c57cd5f6244e2de0b2aa03ee5bc606f6d9  /tmp/unity-ipc-audit.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/unity-ipc-audit.bundle
+          git fetch /tmp/unity-ipc-audit.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
