@@ -4,7 +4,6 @@ use super::{
     ProviderTemplate, StructuredResponse, apply_message_transforms,
     conversation::{LlmConversation, LlmRole},
     http::{ResponseMetadata, StreamUpdate, send_json, send_sse},
-    structured::gemini_message_schema,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -267,7 +266,17 @@ impl OpenAiProvider {
             },
             text: m.text.into(),
         }));
-        let (prompt, body) = encode(prompt, &template.definition);
+        prompt.extend(input.tool_history.iter().cloned());
+        if let Some(instructions) = super::tools::advertisement(&input.tool_settings) {
+            prompt.insert(
+                0,
+                PromptMessage {
+                    role: PromptRole::System,
+                    text: instructions.into(),
+                },
+            );
+        }
+        let (prompt, body) = encode(prompt, &template.definition, &input.tool_settings);
         let payload = serde_json::to_string(&body)
             .map_err(|_| GenerationError::Response("cannot encode provider request".into()))?;
         let config = &template.definition;
@@ -388,6 +397,7 @@ fn role(role: PromptRole) -> &'static str {
 fn encode(
     mut prompt: Vec<PromptMessage>,
     config: &OpenAiPresetDefinition,
+    tools: &super::ToolSettings,
 ) -> (Vec<PromptMessage>, Value) {
     if config.options.output != JsonOutput::Schema {
         let index = prompt
@@ -400,7 +410,7 @@ fn encode(
                 role: PromptRole::System,
                 text: format!(
                     "Return only JSON conforming to this response schema:\n{}",
-                    gemini_message_schema()
+                    super::tools::response_schema(tools)
                 )
                 .into(),
             },
@@ -436,9 +446,9 @@ fn encode(
     }
     let format = match options.output {
         JsonOutput::Schema => Some(if responses {
-            json!({"type":"json_schema","name":"neuromita_response","schema":gemini_message_schema(),"strict":false})
+            json!({"type":"json_schema","name":"neuromita_response","schema":super::tools::response_schema(tools),"strict":false})
         } else {
-            json!({"type":"json_schema","json_schema":{"name":"neuromita_response","schema":gemini_message_schema(),"strict":false}})
+            json!({"type":"json_schema","json_schema":{"name":"neuromita_response","schema":super::tools::response_schema(tools),"strict":false}})
         }),
         JsonOutput::Object => Some(json!({"type":"json_object"})),
         JsonOutput::Prompt => None,
@@ -677,7 +687,7 @@ mod tests {
                 text: "question".into(),
             },
         ];
-        let (transformed, body) = encode(prompt, &def);
+        let (transformed, body) = encode(prompt, &def, &crate::generation::ToolSettings::default());
         assert_eq!(transformed[0].text.as_ref(), "stable");
         assert_eq!(transformed[1].text.as_ref(), "dynamic");
         assert_eq!(transformed[2].text.as_ref(), "question");

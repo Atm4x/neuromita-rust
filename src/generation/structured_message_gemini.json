@@ -135,12 +135,12 @@
       }
     },
     "tool_call": {
-      "description": "Invoke the reminder tool; other tools are rejected",
+      "description": "Invoke an advertised tool; other tools are rejected",
       "type": "object",
       "properties": {
         "name": {
           "type": "string",
-          "description": "Must be reminder"
+          "description": "Allowed tools are defined by the active request policy"
         },
         "args": {
           "type": "object",
@@ -164,6 +164,9 @@
             "instruction": {
               "type": "string"
             },
+            "expression": {"type":"string", "description":"Calculator arithmetic expression"},
+            "query": {"type":"string", "description":"Memory search query"},
+            "limit": {"type":"integer", "description":"Maximum returned memory facts (1-10)"},
             "repeat": {
               "type": "string",
               "description": "once, daily, weekly, or every N seconds"

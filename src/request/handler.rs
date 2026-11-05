@@ -234,7 +234,8 @@ impl MessageHandler {
                     ))?;
                 let request = GenerationRequest::new(context, preset, selected)
                     .with_prompt(prompt)
-                    .with_post_dsl(post_dsl);
+                    .with_post_dsl(post_dsl)
+                    .with_tools(settings.values.tools.clone());
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),
@@ -523,6 +524,10 @@ impl GenerationObserver for RecordObserver<'_> {
 
     fn stream_delta(&mut self, delta: &str) {
         self.record.stream_delta(delta);
+    }
+
+    fn stream_reset(&mut self) {
+        self.record.stream_reset();
     }
 
     fn response_received(&mut self, response: ProviderReply) {
