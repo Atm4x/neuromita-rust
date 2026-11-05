@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::{SettingsError, SpeechSettings};
-use crate::generation::PresetId;
+use crate::generation::{PresetId, ToolSettings};
 use crate::reminders::{LocalTimePolicy, TimeZoneId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +260,8 @@ pub struct AppSettings {
     pub interface: InterfaceSettings,
     pub reminders: RemindersSettings,
     pub speech: SpeechSettings,
+    #[serde(default)]
+    pub tools: ToolSettings,
 }
 
 impl AppSettings {
@@ -286,6 +288,7 @@ impl AppSettings {
             },
             reminders: RemindersSettings::initial_profile(),
             speech: SpeechSettings::default(),
+            tools: ToolSettings::default(),
         }
     }
     pub fn selected_preset(
@@ -313,6 +316,9 @@ impl AppSettings {
             }
         }
         self.speech.validate()?;
+        self.tools
+            .validate()
+            .map_err(|error| SettingsError::Validation(error.to_string()))?;
         if self.voice.voice.trim().is_empty() {
             return Err(SettingsError::Validation(
                 "voice identifier must not be empty".into(),
@@ -360,6 +366,7 @@ section!(SpeechSettings, speech);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);
+section!(ToolSettings, tools);
 
 #[derive(Debug, Clone)]
 pub struct SectionSnapshot<T> {

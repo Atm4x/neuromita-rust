@@ -10,6 +10,7 @@ pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretK
 mod provider;
 pub mod python_import;
 mod structured;
+mod tools;
 mod transforms;
 pub use effects::ResponseEffect;
 pub use presets::{
@@ -22,6 +23,7 @@ pub use structured::{
     RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
     WorkingState,
 };
+pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
 
 pub use provider::{

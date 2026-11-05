@@ -8,7 +8,7 @@ use crate::{
     generation::{
         GenerationError, PreparedPrompt, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
-        structured::{StructuredResponse, gemini_message_schema},
+        structured::StructuredResponse,
     },
 };
 
@@ -101,7 +101,15 @@ pub(super) fn encode_with_memory(
     template: &GeminiTemplate,
     memory: &Option<String>,
 ) -> GenerateContent {
-    encode_observed(context, template, memory, None).body
+    encode_observed(
+        context,
+        template,
+        memory,
+        None,
+        &[],
+        &super::super::ToolSettings::default(),
+    )
+    .body
 }
 
 pub(super) struct EncodedRequest {
@@ -114,6 +122,8 @@ pub(super) fn encode_observed(
     template: &GeminiTemplate,
     memory: &Option<String>,
     prepared: Option<&PreparedPrompt>,
+    tool_history: &[PromptMessage],
+    tools: &super::super::ToolSettings,
 ) -> EncodedRequest {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
     let mut prompt = conversation
@@ -131,10 +141,24 @@ pub(super) fn encode_observed(
         },
         text: Arc::from(message.text.as_str()),
     }));
-    encode_prompt(prompt, template)
+    prompt.extend_from_slice(tool_history);
+    if let Some(instructions) = super::super::tools::advertisement(tools) {
+        prompt.insert(
+            0,
+            PromptMessage {
+                role: PromptRole::System,
+                text: instructions.into(),
+            },
+        );
+    }
+    encode_prompt(prompt, template, tools)
 }
 
-fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> EncodedRequest {
+fn encode_prompt(
+    mut prompt: Vec<PromptMessage>,
+    template: &GeminiTemplate,
+    tools: &super::super::ToolSettings,
+) -> EncodedRequest {
     if !template.options().structured_output {
         let index = prompt
             .iter()
@@ -146,7 +170,7 @@ fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> E
                 role: PromptRole::System,
                 text: format!(
                     "Return only JSON conforming to this response schema:\n{}",
-                    gemini_message_schema()
+                    super::super::tools::response_schema(tools)
                 )
                 .into(),
             },
@@ -227,7 +251,7 @@ fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> E
             response_schema: template
                 .options()
                 .structured_output
-                .then(gemini_message_schema),
+                .then(|| super::super::tools::response_schema(tools)),
         },
     };
     EncodedRequest { body, prompt }
@@ -273,6 +297,20 @@ pub(super) fn stream_event(
         ));
     }
     let candidate = &candidates[0];
+    if candidate["content"]["parts"]
+        .as_array()
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("functionCall").is_some()
+                    || part.get("executableCode").is_some()
+                    || part.get("codeExecutionResult").is_some()
+            })
+        })
+    {
+        return Err(GenerationError::Response(
+            "native Gemini tool parts are not enabled".into(),
+        ));
+    }
     let delta = candidate["content"]["parts"]
         .as_array()
         .map(|parts| {
@@ -309,7 +347,26 @@ pub(super) fn stream_event(
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError> {
-    let response: GenerateResponse = serde_json::from_slice(bytes)
+    let raw: Value = serde_json::from_slice(bytes)
+        .map_err(|_| GenerationError::Response("invalid Gemini JSON".into()))?;
+    if raw["candidates"].as_array().is_some_and(|candidates| {
+        candidates.iter().any(|candidate| {
+            candidate["content"]["parts"]
+                .as_array()
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("functionCall").is_some()
+                            || part.get("executableCode").is_some()
+                            || part.get("codeExecutionResult").is_some()
+                    })
+                })
+        })
+    }) {
+        return Err(GenerationError::Response(
+            "native Gemini tool parts are not enabled".into(),
+        ));
+    }
+    let response: GenerateResponse = serde_json::from_value(raw)
         .map_err(|_| GenerationError::Response("invalid Gemini JSON".into()))?;
     if response
         .prompt_feedback
@@ -404,6 +461,13 @@ mod tests {
     use super::*;
     use crate::interaction::TurnIntent;
     use serde_json::json;
+
+    #[test]
+    fn native_function_calls_fail_closed_in_stream_and_nonstream_codecs() {
+        let item = json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"functionCall":{"name":"unknown","args":{}}},{"text":"{\"segments\":[{\"text\":\"hello\"}]}"}]}}]});
+        assert!(stream_event(&item.to_string()).is_err());
+        assert!(decode(item.to_string().as_bytes()).is_err());
+    }
 
     #[test]
     fn provider_history_follows_character_visibility_and_message_semantics() {
@@ -846,6 +910,7 @@ mod tests {
                 },
             ],
             &template,
+            &crate::generation::ToolSettings::default(),
         );
         let wire = serde_json::to_value(encoded.body).unwrap();
         assert_eq!(
@@ -909,6 +974,7 @@ mod tests {
                 },
             ],
             &template,
+            &crate::generation::ToolSettings::default(),
         );
         let body = serde_json::to_value(encoded.body).unwrap();
         assert!(body.get("systemInstruction").is_none());

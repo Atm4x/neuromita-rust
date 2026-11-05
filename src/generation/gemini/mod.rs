@@ -37,6 +37,8 @@ impl GeminiProvider {
             &template,
             &context.prepared_knowledge,
             context.prompt.as_ref(),
+            &context.tool_history,
+            &context.tool_settings,
         );
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
             GenerationError::Response(format!("cannot encode provider request: {error}"))

@@ -473,6 +473,19 @@ impl RequestRecord {
         self.updates.send_replace(Arc::clone(&inner.snapshot));
     }
 
+    pub(crate) fn stream_reset(&self) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+            return;
+        }
+        let mut snapshot = (*inner.snapshot).clone();
+        snapshot.revision += 1;
+        snapshot.streamed_json = None;
+        snapshot.streamed_text = None;
+        inner.snapshot = Arc::new(snapshot);
+        self.updates.send_replace(Arc::clone(&inner.snapshot));
+    }
+
     pub(crate) fn provider_replied(&self, reply: crate::generation::ProviderReply) {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.provider_replied(reply);
