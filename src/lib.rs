@@ -5,6 +5,8 @@ pub mod app;
 pub mod audio;
 pub mod character;
 pub mod finetune;
+pub mod game_context;
+pub mod game_link;
 pub mod games;
 pub mod generation;
 mod identity;

@@ -142,7 +142,8 @@ impl MessageHandler {
         let voice_settings = settings.values.voice.clone();
         let voice_enabled = match message.source() {
             RequestSource::Presenter | RequestSource::Scheduler => voice_settings.in_launcher,
-            RequestSource::Client(_) => voice_settings.in_game,
+            RequestSource::Client(_) => voice_settings.in_launcher,
+            RequestSource::Game(_) => voice_settings.in_game,
         };
         if self.prompts.is_none()
             && settings
@@ -217,6 +218,7 @@ impl MessageHandler {
                 }
             }
         }
+        context.runtime_context = message.game_context().cloned().map(Arc::new);
         let voice_options = voice_enabled.then_some(VoiceOptions {
             voice: voice_settings.voice,
             volume: voice_settings.volume,

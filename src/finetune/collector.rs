@@ -239,6 +239,7 @@ fn build_sample(
         RequestSource::Presenter => "presenter".into(),
         RequestSource::Scheduler => "scheduler".into(),
         RequestSource::Client(id) => format!("client:{id}"),
+        RequestSource::Game(id) => format!("game:{id}"),
     });
     sample.usage = response.usage.map(usage_payload);
     sample.usage_source = response

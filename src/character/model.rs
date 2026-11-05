@@ -148,6 +148,7 @@ pub struct CharacterContext {
     pub character_id: CharacterId,
     pub description: Arc<str>,
     pub prompt: Arc<str>,
+    pub runtime_context: Option<Arc<crate::game_context::GameRuntimeContext>>,
     pub state: CharacterState,
     pub working_state: CharacterWorkingState,
     pub memories: Vec<MemoryRecord>,

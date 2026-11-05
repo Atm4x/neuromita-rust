@@ -534,7 +534,15 @@ async fn static_apis_restart_without_crossing_application_lifetimes() {
         .unwrap()
         .unwrap();
     assert!(line.contains("connected"));
-    write.write_all(b"test\n").await.unwrap();
+    let command = serde_json::json!({
+        "command_id": uuid::Uuid::new_v4(),
+        "command": "initiate",
+        "character": "Crazy",
+    });
+    write
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
     let call = next(&mut calls).await;
     assert_eq!(call.model, "after-save-failure");
     assert!(call.context.current_input.is_empty());

@@ -10,7 +10,7 @@
 
 ## Соединение и команды
 
-Адрес выбирается явно в `ServerConfig`; CLI принимает `--listen`. Для локального использования задавайте `127.0.0.1:PORT`. Endpoint не имеет TLS или аутентификации: сетевой доступ даёт доступ к разрешённым командам и общим настройкам. Изоляция отмены привязана к соединению, а не к авторизованному пользователю.
+Адрес выбирается явно в `ServerConfig`; CLI принимает `--listen`. LocalControl принимает только loopback-адреса (`127.0.0.1` или `::1`); запуск на других адресах отклоняется до открытия listener. Endpoint не имеет TLS или аутентификации: локальный доступ даёт доступ к разрешённым командам и общим настройкам. Изоляция отмены привязана к соединению, а не к авторизованному пользователю.
 
 После подключения сервер отправляет `connected` с новым `client_id` и первоначальный `settings` snapshot. Команды и ответы — UTF-8 JSON, один кадр заканчивается `\n`; принимается CRLF. Частичный TCP read не является концом команды. Нельзя полагаться на соответствие одного `write` одному `read`: несколько строк могут прийти вместе, одна строка — несколькими фрагментами.
 
@@ -19,24 +19,26 @@
 | Команда | Поля | Результат |
 | --- | --- | --- |
 | `ping` | без аргументов | `pong` с command_id; подтверждает работу endpoint, не готовность inference |
-| `methods` | без аргументов | каталог одиннадцати поддерживаемых команд |
+| `methods` | без аргументов | каталог тринадцати поддерживаемых команд |
 | `server_status` | без аргументов | диагностика listener, клиентов и настроенных пределов |
-| `test` | только `command_id`, `command` | запрос `test` заданному в ServerConfig персонажу |
 | `publish_message` | event_id, occurred_at_unix_ms, speaker, content и audience | published с event_id, без генерации |
 | `reply` | character, message_id и audience | accepted с request_id; цель — уже опубликованное известное сообщение |
 | `react` | character, event_id, instruction и audience | генерация реакции на известное событие |
 | `initiate` | character, instruction и audience | генерация без целевого события |
 | `cancel` | `request_id` | результат отмены своего запроса либо отказ |
+| `diagnostics` | `character`, `request_id`, optional `section` | диагностическая запись исходного запроса с проверкой источника |
+| `diagnostics_recent` | `character`, optional `limit` | последние запросы, видимые этому клиенту |
+| `diagnostics_errors` | `character`, optional `limit` | последние ошибки, видимые этому клиенту |
 | `settings` | без аргументов | snapshot с revision |
 | `set_volume` | `value`: целое 0..100 | `settings_applied` либо отказ |
 
-Строка `test\n` сохраняется как минимальный ручной smoke test; каждое её повторение создаёт новое намерение.
+Для smoke-тестирования используется типизированный `initiate` с явным `character`; для ответа на сообщение — `publish_message` и `reply`.
 
 `accepted` подтверждает приём Core, не успешную генерацию. Далее приходят `request_status`: pending, processing, finished или cancelled. Snapshot может сразу оказаться terminal; поток не обещает доставку каждой промежуточной revision. Finished различает success, text_error, voice_error и internal_error. Voice error сохраняет принятый текст. Окончание генерации и принятие эффектов принадлежат Core; передача статуса по TCP не означает подтверждение его обработки клиентом.
 
 ## Повторы, ошибки и границы
 
-Квитанции `test`/`reply` живут в ограниченном окне текущего соединения. Одинаковые `command_id` и содержимое возвращают прежний RequestId и текущий статус, включая terminal. Другое содержимое с удерживаемым ID отвергается. После вытеснения квитанции повтор может стать новым запросом. Это не durable exactly-once и не дедупликация между reconnect/restart. Команды settings/cancel не получают квитанций генерации.
+Квитанции `publish_message`/`reply`/`react`/`initiate` живут в ограниченном окне текущего соединения. Одинаковые `command_id` и содержимое возвращают прежний результат публикации либо прежний RequestId и его текущий статус, включая terminal. Другое содержимое с удерживаемым ID отвергается. После вытеснения квитанции повтор может стать новым запросом. Это не durable exactly-once и не дедупликация между reconnect/restart. Команды settings/cancel не получают квитанций генерации.
 
 Отмена возможна лишь через удерживаемую квитанцию данного соединения. Чужой RequestId и RequestId прошлого соединения не дают права отмены. Разрыв соединения завершает его writer/observers, но принятая Core работа продолжает исполняться. При переподключении выдаётся новый client_id; автоматического восстановления подписок нет.
 
@@ -68,7 +70,7 @@
 
 ### Discovery и диагностика
 
-`methods` возвращает `{"type":"methods","command_id":"UUID","methods":["ping","methods","server_status","test","reply","cancel","settings","set_volume"]}`. Каталог и типизированные варианты Command объявлены совместно; dispatch проверяется исчерпывающим match. Это фиксированный контракт endpoint, без reflection и динамического поиска сервисов.
+`methods` возвращает `{"type":"methods","command_id":"UUID","methods":["ping","methods","server_status","publish_message","reply","react","initiate","cancel","diagnostics","diagnostics_recent","diagnostics_errors","settings","set_volume"]}`. Каталог и типизированные варианты Command объявлены совместно; dispatch проверяется исчерпывающим match. Это фиксированный контракт endpoint, без reflection и динамического поиска сервисов.
 
 `server_status` возвращает type/command_id и поля `address` (фактически привязанный адрес, включая назначенный ОС порт), `running`, `connected_clients`, `accepted_connections`, `has_error`, `limits`. Limits содержит max_clients, outbound_capacity, max_command_bytes, receipt_capacity. Connected_clients включает запрашивающее соединение; accepted_connections считает только допущенные соединения за жизнь listener, а не отвергнутые сверх лимита. Has_error означает сохранённую ошибку клиентской задачи; флаг не сбрасывается успешной командой. Raw last_error не передаётся по сети, чтобы не раскрывать внутренние сообщения или credentials. Снимок может измениться сразу после чтения; running описывает listener, не готовность модели, провайдера, GPU или Python-сервисов.
 
@@ -78,7 +80,8 @@
 
 | Контрактный сценарий в `tests/local_control.rs` | Проверяемый результат |
 | --- | --- |
-| Discovery и correlation | все восемь объявленных команд исполняются; pipeline control-ответов отличается от unsolicited settings; accepted предшествует terminal и replay |
+| Discovery и correlation | все объявленные команды исполняются; pipeline control-ответов отличается от unsolicited settings; accepted предшествует terminal и replay |
+| Локальная граница доступа | любые не-loopback адреса отвергаются при bind; тестовые команды отсутствуют в production catalog |
 | Машинные ошибки | стабильные codes, recoverable command_id, strict duplicate fields, отсутствие мутации и восстановление после отказа |
 | Диагностика | фактический порт, допуск/уход клиентов, пределы и sanitised error flag без утверждения inference readiness |
 | Некорректные команды и восстановление соединения | JSON/types/unknown fields/volume bounds отклоняются без изменений, следующая команда работает |

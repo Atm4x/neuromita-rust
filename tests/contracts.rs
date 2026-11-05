@@ -113,6 +113,15 @@ impl Drop for TestFile {
     }
 }
 
+fn sample_network_reply() -> serde_json::Value {
+    let message_id = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("test".to_owned()).unwrap(),
+    )
+    .unwrap();
+    json!({"command_id":Uuid::new_v4(),"command":"reply","character":"Crazy","message_id":message_id.0})
+}
+
 async fn next<T>(receive: &mut mpsc::UnboundedReceiver<T>) -> T {
     timeout(Duration::from_secs(5), receive.recv())
         .await
@@ -624,7 +633,10 @@ async fn complete_minimal_contracts() {
     let mut reader = BufReader::new(read);
     frame(&mut reader, |value| value["type"] == "connected").await;
     frame(&mut reader, |value| value["type"] == "settings").await;
-    write.write_all(b"test\n").await.unwrap();
+    write
+        .write_all(format!("{}\n", sample_network_reply()).as_bytes())
+        .await
+        .unwrap();
     let accepted = frame(&mut reader, |value| value["type"] == "accepted").await;
     let id = RequestId(Uuid::parse_str(accepted["request_id"].as_str().unwrap()).unwrap());
     let call = next(&mut generations).await;
@@ -639,7 +651,11 @@ async fn complete_minimal_contracts() {
     shown(&presenter.chat, id, true).await;
 
     let command_id = Uuid::new_v4();
-    let command = format!("{}\n", json!({"command_id":command_id,"command":"test"}));
+    let command = format!("{}\n", {
+        let mut c = sample_network_reply();
+        c["command_id"] = json!(command_id);
+        c
+    });
     write.write_all(command.as_bytes()).await.unwrap();
     let original = frame(&mut reader, |value| value["type"] == "accepted").await;
     let call = next(&mut generations).await;
@@ -669,10 +685,7 @@ async fn complete_minimal_contracts() {
         55
     );
 
-    let command = format!(
-        "{}\n",
-        json!({"command_id":Uuid::new_v4(),"command":"test"})
-    );
+    let command = format!("{}\n", sample_network_reply());
     let split = command.len() / 2;
     write.write_all(&command.as_bytes()[..split]).await.unwrap();
     presenter
@@ -704,7 +717,10 @@ async fn complete_minimal_contracts() {
         .await
         .unwrap()
         .accepted_replies;
-    write.write_all(b"test\n").await.unwrap();
+    write
+        .write_all(format!("{}\n", sample_network_reply()).as_bytes())
+        .await
+        .unwrap();
     let accepted = frame(&mut reader, |value| value["type"] == "accepted").await;
     let id = RequestId(Uuid::parse_str(accepted["request_id"].as_str().unwrap()).unwrap());
     let network_request = ChatApi::active_request(id).unwrap().unwrap();

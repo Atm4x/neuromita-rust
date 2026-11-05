@@ -242,10 +242,7 @@ async fn occupied_port_stops_startup_before_ai_activation() {
     let root = std::env::temp_dir().join(format!("nm-application-ai-server-{}", Uuid::new_v4()));
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut config = application(runtime_with_python(&root, "mock_tts", "3.12.10").await);
-    config.server = neuromita::server::ServerConfig::test_protocol(
-        socket.local_addr().unwrap(),
-        neuromita::character::CharacterId::Crazy,
-    );
+    config.server = neuromita::server::ServerConfig::local_control(socket.local_addr().unwrap());
     let outcome = ApplicationLifecycle::start(config).await;
     assert!(matches!(
         outcome,

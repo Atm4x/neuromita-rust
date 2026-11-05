@@ -623,6 +623,7 @@ impl CharacterHandler {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
+            runtime_context: None,
             state,
             working_state,
             memories,

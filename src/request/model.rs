@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::{
     character::{AcceptedResponse, CharacterId},
     finetune::SampleId,
+    game_context::GameRuntimeContext,
     generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
@@ -19,6 +20,7 @@ pub enum RequestSource {
     Presenter,
     Scheduler,
     Client(Uuid),
+    Game(Uuid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,9 @@ pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn intent(&self) -> TurnIntent;
     fn at(&self) -> ContextPosition;
     fn audience(&self) -> &ConversationAudience;
+    fn game_context(&self) -> Option<&GameRuntimeContext> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -46,6 +51,7 @@ pub struct ReplyRequest {
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
+    game_context: Option<Arc<GameRuntimeContext>>,
 }
 
 impl ReplyRequest {
@@ -56,6 +62,7 @@ impl ReplyRequest {
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
+            game_context: None,
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
@@ -64,6 +71,10 @@ impl ReplyRequest {
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
         self.audience = audience;
+        self
+    }
+    pub fn with_game_context(mut self, context: Arc<GameRuntimeContext>) -> Self {
+        self.game_context = Some(context);
         self
     }
 }
@@ -87,6 +98,9 @@ impl GenerationCommand for ReplyRequest {
     fn audience(&self) -> &ConversationAudience {
         &self.audience
     }
+    fn game_context(&self) -> Option<&GameRuntimeContext> {
+        self.game_context.as_deref()
+    }
 }
 
 #[derive(Debug)]
@@ -97,6 +111,7 @@ pub struct ReactRequest {
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
+    game_context: Option<Arc<GameRuntimeContext>>,
 }
 impl ReactRequest {
     pub fn new(
@@ -112,6 +127,7 @@ impl ReactRequest {
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character),
+            game_context: None,
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
@@ -120,6 +136,10 @@ impl ReactRequest {
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
         self.audience = audience;
+        self
+    }
+    pub fn with_game_context(mut self, context: Arc<GameRuntimeContext>) -> Self {
+        self.game_context = Some(context);
         self
     }
 }
@@ -142,6 +162,9 @@ impl GenerationCommand for ReactRequest {
     fn audience(&self) -> &ConversationAudience {
         &self.audience
     }
+    fn game_context(&self) -> Option<&GameRuntimeContext> {
+        self.game_context.as_deref()
+    }
 }
 
 #[derive(Debug)]
@@ -151,6 +174,7 @@ pub struct InitiateRequest {
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
+    game_context: Option<Arc<GameRuntimeContext>>,
 }
 impl InitiateRequest {
     pub fn new(
@@ -164,6 +188,7 @@ impl InitiateRequest {
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character),
+            game_context: None,
         }
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
@@ -172,6 +197,10 @@ impl InitiateRequest {
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
         self.audience = audience;
+        self
+    }
+    pub fn with_game_context(mut self, context: Arc<GameRuntimeContext>) -> Self {
+        self.game_context = Some(context);
         self
     }
 }
@@ -193,6 +222,9 @@ impl GenerationCommand for InitiateRequest {
     }
     fn audience(&self) -> &ConversationAudience {
         &self.audience
+    }
+    fn game_context(&self) -> Option<&GameRuntimeContext> {
+        self.game_context.as_deref()
     }
 }
 

@@ -18,6 +18,7 @@ pub enum ApplicationStatus {
 
 pub(crate) struct ApiBindings {
     pub(crate) chat: Arc<ChatApiState>,
+    pub(crate) timeline: Arc<Mutex<crate::timeline::SessionTimeline>>,
     pub(crate) characters: CharacterRegistry,
     pub(crate) settings: Arc<SettingsOwner>,
     pub(crate) presets: Arc<PresetCatalog>,
