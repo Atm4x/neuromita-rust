@@ -24,7 +24,7 @@ jobs:
           echo '520c79f42b8871357fc8ef073a324a6ff8e75a65f7d267c29818a9224c67201d  /tmp/tools30.bundle' | sha256sum --check
           git cat-file -e "$BASE^{commit}"
           git bundle verify /tmp/tools30.bundle
-          git fetch /tmp/tools30.bundle HEAD
+          git fetch /tmp/tools30.bundle refs/heads/codex/llm-streaming-retry-20261106
           test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
           git merge-base --is-ancestor "$BASE" "$HEAD"
           git diff --check "$BASE" "$HEAD"
