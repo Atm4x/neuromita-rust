@@ -2486,7 +2486,99 @@ async fn generated_character_messages_use_shared_conversation_audience() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn preset_is_resolved_only_when_queued_generation_begins() {
+async fn selected_prompt_post_dsl_persists_only_accepted_changes() {
+    use neuromita::prompts::PromptCatalog;
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let root = std::env::temp_dir().join(format!("neuromita-postdsl-{}", Uuid::new_v4()));
+    let set = root.join("Crazy/Default");
+    std::fs::create_dir_all(set.join("PostScripts")).unwrap();
+    std::fs::create_dir_all(set.join("Main")).unwrap();
+    std::fs::write(set.join("main_template.txt"), "[<Main/identity.txt>]").unwrap();
+    std::fs::write(set.join("Main/identity.txt"), "Love is [{Love}]").unwrap();
+    std::fs::write(set.join("config.json"), r#"{"custom_params":[{"name":"Love","change_command":"love_change","initial":10,"op":"add","type":"int"}]}"#).unwrap();
+    std::fs::write(
+        set.join("PostScripts/main_rules.postscript"),
+        "RULE strip\n MATCH REGEX \"\\*\\*\"\n ACTIONS\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+    )
+    .unwrap();
+    let config = ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .with_prompt_catalog(PromptCatalog::new(&root));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+
+    let accepted = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "first".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 10"));
+    call.respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"**hello**"}],"custom_fields":{"love_change":5}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&accepted).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let snapshot = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap();
+    assert!(
+        snapshot
+            .view
+            .messages()
+            .iter()
+            .any(|message| message.content == "hello")
+    );
+
+    let rejected = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "second".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 15"));
+    call.respond
+        .send(Reply::Structured(
+            r#"{"segments":[{"text":"bad"}],"custom_fields":{"unknown_field":999}}"#,
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&rejected).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    let third = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "third".into())
+        .unwrap();
+    let call = server.next().await;
+    assert!(call.body.to_string().contains("Love is 15"));
+    call.respond.send(Reply::Text("third accepted")).unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preset_is_frozen_at_admission_and_missing_preset_is_rejected_before_queue() {
     use std::collections::BTreeMap;
 
     use neuromita::{
@@ -2547,7 +2639,7 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let second_call = server.next().await;
-    assert!(second_call.path.contains("models/beta:generateContent"));
+    assert!(second_call.path.contains("models/alpha:generateContent"));
     second_call
         .respond
         .send(Reply::Text("second reply"))
@@ -2581,14 +2673,13 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
         settings.crazy.presets.reply = PresetSelection::Specific(PresetId(999));
     })
     .unwrap();
-    let missing = app
-        .presenter()
-        .chat
-        .reply(CharacterId::Crazy, "missing".into())
-        .unwrap();
     assert!(matches!(
-        finished(&missing).await.state,
-        RequestState::Finished(RequestOutcome::InternalError(_))
+        app.presenter()
+            .chat
+            .reply(CharacterId::Crazy, "missing".into()),
+        Err(neuromita::presentation::PresenterError::Submit(
+            SubmitError::PresetUnavailable
+        ))
     ));
     assert!(server.calls.try_recv().is_err());
 

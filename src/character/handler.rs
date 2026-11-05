@@ -731,6 +731,8 @@ impl CharacterHandler {
                 serde_json::json!(state.accepted_replies),
             ),
         ]);
+        let mut variables = variables;
+        variables.extend(captured.variables.clone());
         Ok(CharacterContext {
             character_id: self.character.id,
             variables,
@@ -836,6 +838,11 @@ impl CharacterHandler {
                         CharacterError::Internal("invalid character state change".into())
                     })?;
                     effects.push(AppliedEffect::CharacterStateChanged(state));
+                }
+                ResponseEffect::ChangeCharacterVariables(changed) => {
+                    crate::character::projection::validate_character_variables(changed)
+                        .map_err(CharacterError::InvalidMemory)?;
+                    effects.push(AppliedEffect::CharacterVariablesChanged(changed.clone()));
                 }
                 ResponseEffect::ReplaceWorkingState(state) => {
                     effects.push(AppliedEffect::CharacterWorkingStateReplaced(state.clone()));
@@ -1339,6 +1346,142 @@ mod turn_tests {
             None,
             ConversationAudience::private_to(CharacterId::Crazy),
         )
+    }
+
+    #[test]
+    fn post_dsl_variable_changes_are_atomic_and_character_scoped() {
+        let mut handler = handler();
+        let (request, context) = prepare(&mut handler);
+        let mut changes = std::collections::BTreeMap::new();
+        changes.insert("Love".into(), serde_json::json!(22.5));
+        changes.insert("secretTrial".into(), serde_json::json!(true));
+        let rejected = ProposedResponse::from_structured(
+            crate::generation::StructuredResponse::spoken("not accepted"),
+        )
+        .unwrap()
+        .with_character_variables(changes.clone());
+        let before = handler.timeline.lock().unwrap().anchor();
+        let mut invalid = changes.clone();
+        invalid.insert("CURRENT_INPUT".into(), serde_json::json!("forged"));
+        let rejected = rejected.with_character_variables(invalid);
+        let error = handler.accept(
+            request,
+            acceptance(&context),
+            rejected,
+            None,
+            ConversationAudience::private_to(CharacterId::Crazy),
+        );
+        assert!(error.is_err());
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+        assert!(
+            handler
+                .timeline
+                .lock()
+                .unwrap()
+                .inspect_context_at(CharacterId::Crazy, before)
+                .unwrap()
+                .variables
+                .is_empty()
+        );
+        let (request, context) = prepare(&mut handler);
+        let valid = ProposedResponse::from_structured(
+            crate::generation::StructuredResponse::spoken("accepted"),
+        )
+        .unwrap()
+        .with_character_variables(changes);
+        handler
+            .accept(
+                request,
+                acceptance(&context),
+                valid,
+                None,
+                ConversationAudience::private_to(CharacterId::Crazy),
+            )
+            .unwrap();
+        let timeline = handler.timeline.lock().unwrap();
+        let latest = timeline.anchor();
+        let current = timeline
+            .inspect_context_at(CharacterId::Crazy, latest)
+            .unwrap();
+        assert_eq!(current.variables["Love"], 22.5);
+        assert_eq!(current.variables["secretTrial"], true);
+        assert!(
+            timeline
+                .inspect_context_at(CharacterId::Kind, latest)
+                .unwrap()
+                .variables
+                .is_empty()
+        );
+        assert!(
+            timeline
+                .inspect_context_at(CharacterId::Crazy, before)
+                .unwrap()
+                .variables
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn post_dsl_variables_survive_sqlite_reopen() {
+        use crate::timeline::{TimelineConfig, domain::SessionId};
+        let path = std::env::temp_dir().join(format!("neuro-postdsl-{}.db", uuid::Uuid::new_v4()));
+        let root = BranchId::new();
+        let session = SessionId::new();
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let mut owner = CharacterHandler {
+                character: Character::create(CharacterId::Crazy),
+                timeline: Arc::new(Mutex::new(timeline)),
+                policy: GamePolicy::default(),
+                reminders: None,
+            };
+            let (request, context) = prepare(&mut owner);
+            let proposal = ProposedResponse::from_structured(
+                crate::generation::StructuredResponse::spoken("persistent"),
+            )
+            .unwrap()
+            .with_character_variables(std::collections::BTreeMap::from([(
+                "Love".into(),
+                serde_json::json!(101),
+            )]));
+            owner
+                .accept(
+                    request,
+                    acceptance(&context),
+                    proposal,
+                    None,
+                    ConversationAudience::private_to(CharacterId::Crazy),
+                )
+                .unwrap();
+        }
+        {
+            let timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let current = timeline
+                .inspect_context_at(CharacterId::Crazy, timeline.anchor())
+                .unwrap();
+            assert_eq!(current.variables["Love"], 101);
+            assert!(
+                timeline
+                    .inspect_context_at(CharacterId::Kind, timeline.anchor())
+                    .unwrap()
+                    .variables
+                    .is_empty()
+            );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

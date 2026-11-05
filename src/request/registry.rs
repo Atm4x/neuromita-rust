@@ -188,13 +188,32 @@ impl RequestRegistry {
         DiagnosticsAccess::new(Arc::downgrade(&self.inner), scope)
     }
 
+    #[cfg(test)]
     pub(crate) fn register(
         &self,
         message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
     ) -> RequestHandle {
-        let record = RequestRecord::new(message, id, admission, Arc::downgrade(&self.inner));
+        self.register_with_configuration(message, id, admission, None, None)
+    }
+
+    pub(crate) fn register_with_configuration(
+        &self,
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+        preset: Option<crate::generation::GenerationPreset>,
+    ) -> RequestHandle {
+        let record = RequestRecord::new(
+            message,
+            id,
+            admission,
+            settings,
+            preset,
+            Arc::downgrade(&self.inner),
+        );
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");
         records.insert(handle.id(), record);
@@ -308,6 +327,8 @@ mod tests {
                 },
                 context_epoch: 0,
             },
+            None,
+            None,
             std::sync::Weak::new(),
         );
         registry
@@ -330,6 +351,62 @@ mod tests {
                 .inner
                 .diagnostic_errors(DiagnosticScope::character(CharacterId::Kind), 8)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn admitted_request_retains_settings_and_resolved_provider_preset() {
+        use crate::{
+            generation::{
+                GenerationPreset, ProviderTemplate,
+                gemini::{GeminiTemplate, GenerationSettings},
+            },
+            settings::{AppSettings, PersistenceState, SettingsSnapshot},
+        };
+        use std::time::Duration;
+        let registry = RequestRegistry::new(8);
+        let settings = Arc::new(SettingsSnapshot {
+            closed: false,
+            revision: 17,
+            values: AppSettings::initial_profile(),
+            persisted_revision: None,
+            persistence: PersistenceState::Pending,
+        });
+        let template = GeminiTemplate::new(
+            "http://127.0.0.1:56789/",
+            "model-before",
+            "test-key",
+            GenerationSettings::new(0.5, 100, Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+        let preset = GenerationPreset::new(ProviderTemplate::Gemini(template));
+        let handle = registry.register_with_configuration(
+            Box::new(ReactRequest::new(
+                CharacterId::Crazy,
+                EventId::new(),
+                "snapshot",
+                RequestSource::Presenter,
+            )),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: TimelineSelection {
+                    branch_id: crate::timeline::domain::BranchId::new(),
+                    generation: 1,
+                },
+                context_epoch: 0,
+            },
+            Some(settings.clone()),
+            Some(preset),
+        );
+        let mut changed = settings.values.clone();
+        changed.voice.voice = "voice-after".into();
+        let record = registry.get(handle.id()).unwrap();
+        let admitted = record.admitted_settings().unwrap();
+        assert_eq!(admitted.revision, 17);
+        assert_ne!(admitted.values.voice.voice, changed.voice.voice);
+        assert_eq!(
+            record.admitted_preset().unwrap().template().model(),
+            "model-before"
         );
     }
 

@@ -7,7 +7,7 @@ use crate::{
     generation::PreparedPrompt,
     identity::RequestId,
     interaction::TurnIntent,
-    prompts::{PromptCatalog, PromptError, RenderedPrompt},
+    prompts::{PostDslProgram, PromptCatalog, PromptError, RenderedPrompt},
     timeline::{ContextPosition, selection::TimelineAdmission},
 };
 
@@ -26,6 +26,7 @@ pub(crate) enum PromptPreparationError {
 pub(crate) struct PreparedCharacterTurn {
     pub context: CharacterContext,
     pub prompt: Option<PreparedPrompt>,
+    pub post_dsl: Option<PostDslProgram>,
 }
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ impl PromptPreparation {
             return Ok(PreparedCharacterTurn {
                 context,
                 prompt: None,
+                post_dsl: None,
             });
         };
         let character_id = context.character_id;
@@ -70,19 +72,21 @@ impl PromptPreparation {
         };
         let rendered = tokio::task::spawn_blocking(move || {
             if selected.is_none() && catalog.list(character_id)?.is_empty() {
-                Ok(None)
+                Ok::<_, PromptError>(None)
             } else {
-                catalog
-                    .render(character_id, selected.as_deref(), variables, template)
-                    .map(Some)
+                let rendered =
+                    catalog.render(character_id, selected.as_deref(), variables, template)?;
+                let rules = catalog.load_post_rules(character_id, &rendered.set_name)?;
+                Ok(Some((rendered, rules)))
             }
         })
         .await
         .map_err(|error| PromptPreparationError::FileTask(error.to_string()))??;
-        let Some(rendered) = rendered else {
+        let Some((rendered, post_dsl)) = rendered else {
             return Ok(PreparedCharacterTurn {
                 context,
                 prompt: None,
+                post_dsl: None,
             });
         };
         if !rendered.initialization.is_empty() {
@@ -101,6 +105,7 @@ impl PromptPreparation {
         Ok(PreparedCharacterTurn {
             context,
             prompt: Some(convert(rendered)),
+            post_dsl,
         })
     }
 }

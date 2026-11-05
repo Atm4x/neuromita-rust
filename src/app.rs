@@ -618,7 +618,13 @@ impl ApplicationLifecycle {
         let ingress: Arc<dyn RequestIngress> = Arc::new(TimelineRequestIngress {
             timeline: Arc::clone(&timeline),
         });
-        let api = Arc::new(ChatApiState::new(registry, handlers, ingress));
+        let api = Arc::new(ChatApiState::new(
+            registry,
+            handlers,
+            ingress,
+            Arc::clone(&settings_owner),
+            Arc::clone(&presets),
+        ));
         let reminders_stop = CancellationToken::new();
         let (reminders, reminders_task) = ReminderService::start(
             Arc::clone(&timeline),

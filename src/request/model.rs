@@ -326,6 +326,8 @@ pub enum SubmitError {
     CharacterUnavailable,
     #[error("timeline could not accept the request input")]
     TimelineUnavailable,
+    #[error("assigned generation preset is unavailable")]
+    PresetUnavailable,
     #[error("target event is not observable or not a message when replying")]
     InvalidTargetEvent,
 }

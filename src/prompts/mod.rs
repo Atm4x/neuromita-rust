@@ -1,5 +1,7 @@
 mod dsl;
 mod expression;
+mod post_dsl;
+pub use post_dsl::{PostDslProgram, PostDslResult};
 
 use std::{
     collections::BTreeMap,
@@ -187,15 +189,41 @@ impl PromptCatalog {
         Ok(name)
     }
 
-    pub fn render(
+    pub fn load_post_rules(
         &self,
         character: CharacterId,
-        selected: Option<&str>,
-        context_variables: BTreeMap<String, Value>,
-        template: &str,
-    ) -> Result<RenderedPrompt, PromptError> {
-        let set_name = self.resolve_set(character, selected)?;
-        let dir = self.root.join(character.to_string()).join(&set_name);
+        set_name: &str,
+    ) -> Result<Option<PostDslProgram>, PromptError> {
+        Self::validate_set_name(set_name)?;
+        let dir = self.root.join(character.to_string()).join(set_name);
+        let path = dir.join("PostScripts/main_rules.postscript");
+        let script = match fs::read_to_string(path) {
+            Ok(script) => Some(script),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let config = dir.join("config.json");
+        let config: Option<Value> = if config.is_file() {
+            Some(serde_json::from_slice(&fs::read(config)?)?)
+        } else {
+            None
+        };
+        let params = config
+            .as_ref()
+            .and_then(|data| data.get("custom_params"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if script.is_none() && params.is_empty() {
+            return Ok(None);
+        }
+        let defaults = self.read_defaults(&dir)?;
+        let parsed = PostDslProgram::parse(script.as_deref().unwrap_or(""), defaults)?
+            .with_custom_params(&params)?;
+        Ok(Some(parsed))
+    }
+
+    fn read_defaults(&self, dir: &Path) -> Result<BTreeMap<String, Value>, PromptError> {
         let config_path = dir.join("config.json");
         let mut vars = BTreeMap::new();
         if config_path.is_file() {
@@ -209,12 +237,36 @@ impl PromptCatalog {
                 .unwrap_or(config);
             for (key, value) in defaults {
                 if key != "metadata"
+                    && key != "custom_params"
                     && !matches!(key.as_str(), "author" | "version" | "description")
                 {
                     vars.insert(key.clone(), value.clone());
                 }
             }
+            if let Some(params) = config.get("custom_params").and_then(Value::as_array) {
+                for param in params {
+                    if let (Some(name), Some(initial)) = (
+                        param.get("name").and_then(Value::as_str),
+                        param.get("initial"),
+                    ) {
+                        vars.entry(name.to_string()).or_insert(initial.clone());
+                    }
+                }
+            }
         }
+        Ok(vars)
+    }
+
+    pub fn render(
+        &self,
+        character: CharacterId,
+        selected: Option<&str>,
+        context_variables: BTreeMap<String, Value>,
+        template: &str,
+    ) -> Result<RenderedPrompt, PromptError> {
+        let set_name = self.resolve_set(character, selected)?;
+        let dir = self.root.join(character.to_string()).join(&set_name);
+        let mut vars = self.read_defaults(&dir)?;
         vars.extend(context_variables);
         for feature in [
             "SEED_INITIAL_MEMORIES",
@@ -305,6 +357,59 @@ mod tests {
                 .is_err()
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn post_rules_use_selected_character_set_and_capture_config() {
+        let root = root();
+        let default_dir = root.join("Crazy/Default");
+        fs::create_dir_all(default_dir.join("PostScripts")).unwrap();
+        fs::write(
+            default_dir.join("config.json"),
+            r#"{"custom_params":[{"name":"Love","change_command":"love_change","initial":10,"op":"add","type":"int","change_min":-2,"change_max":2}]}"#,
+        ).unwrap();
+        fs::write(
+            default_dir.join("PostScripts/main_rules.postscript"),
+            "RULE stars\n MATCH REGEX \"\\*\\*\"\n ACTIONS\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+        ).unwrap();
+        let other_dir = root.join("Crazy/Other");
+        fs::create_dir_all(other_dir.join("PostScripts")).unwrap();
+        fs::write(other_dir.join("main_template.txt"), "Other template").unwrap();
+        fs::write(other_dir.join("PostScripts/main_rules.postscript"),
+            "RULE rewrite\n MATCH TEXT \"hello\"\n ACTIONS\n REPLACE_MATCH WITH \"world\"\n END_ACTIONS\nEND_RULE\n").unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let defaults = catalog
+            .load_post_rules(CharacterId::Crazy, "Default")
+            .unwrap()
+            .unwrap();
+        let other = catalog
+            .load_post_rules(CharacterId::Crazy, "Other")
+            .unwrap()
+            .unwrap();
+        let mut text = crate::generation::StructuredResponse::spoken("**hello**");
+        text.custom_fields = Some(serde_json::Map::from_iter([(
+            "love_change".into(),
+            Value::from(100),
+        )]));
+        let first = defaults.apply(text.clone(), &BTreeMap::new()).unwrap();
+        assert_eq!(first.response.full_text().as_ref(), "hello");
+        assert_eq!(first.variables["Love"], 12.0);
+        let second = other
+            .apply(
+                crate::generation::StructuredResponse::spoken("hello"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(second.response.full_text().as_ref(), "world");
+        fs::write(default_dir.join("config.json"), "{broken JSON").unwrap();
+        let captured = defaults.apply(text, &BTreeMap::new()).unwrap();
+        assert_eq!(captured.variables["Love"], 12.0);
+        assert!(
+            catalog
+                .load_post_rules(CharacterId::Crazy, "Default")
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

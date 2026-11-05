@@ -105,7 +105,11 @@ impl MessageHandler {
         stop: CancellationToken,
     ) {
         let id = record.snapshot().metadata.id;
-        let settings = match self.settings.snapshot_all() {
+        let settings = match record
+            .admitted_settings()
+            .map(Ok)
+            .unwrap_or_else(|| self.settings.snapshot_all())
+        {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 record.finish(RequestOutcome::InternalError(
@@ -143,8 +147,8 @@ impl MessageHandler {
                 prompt_selection,
             ) => result,
         };
-        let (context, prompt) = match prepared {
-            Ok(prepared) => (prepared.context, prepared.prompt),
+        let (context, prompt, post_dsl) = match prepared {
+            Ok(prepared) => (prepared.context, prepared.prompt, prepared.post_dsl),
             Err(super::prompt_preparation::PromptPreparationError::Character(
                 CharacterError::StaleState,
             )) => {
@@ -175,7 +179,12 @@ impl MessageHandler {
         let preset_id = settings
             .values
             .selected_preset(message.character_id(), message.intent());
-        let preset = match self.presets.get(preset_id) {
+        let preset = match record
+            .admitted_preset()
+            .map(Some)
+            .map(Ok)
+            .unwrap_or_else(|| self.presets.get(preset_id))
+        {
             Ok(Some(preset)) => preset,
             Ok(None) => {
                 record.finish(RequestOutcome::InternalError(
@@ -228,7 +237,8 @@ impl MessageHandler {
                         format!("knowledge retrieval failed: {error}")
                     ))?;
                 let request = GenerationRequest::new(context, preset, selected)
-                    .with_prompt(prompt);
+                    .with_prompt(prompt)
+                    .with_post_dsl(post_dsl);
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),

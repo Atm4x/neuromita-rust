@@ -10,8 +10,10 @@ use super::{
     RequestRegistry, SubmitError,
 };
 use crate::{
+    generation::PresetCatalog,
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
+    settings::SettingsOwner,
     timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
 };
 
@@ -38,6 +40,8 @@ pub(crate) struct ChatApiState {
     pub(crate) registry: Arc<RequestRegistry>,
     handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
     ingress: Arc<dyn RequestIngress>,
+    settings: Arc<SettingsOwner>,
+    presets: Arc<PresetCatalog>,
 }
 
 impl ChatApiState {
@@ -45,12 +49,16 @@ impl ChatApiState {
         registry: Arc<RequestRegistry>,
         handlers: HashMap<CharacterId, mpsc::Sender<RequestId>>,
         ingress: Arc<dyn RequestIngress>,
+        settings: Arc<SettingsOwner>,
+        presets: Arc<PresetCatalog>,
     ) -> Self {
         Self {
             accepting: Mutex::new(true),
             registry,
             handlers,
             ingress,
+            settings,
+            presets,
         }
     }
 
@@ -74,11 +82,29 @@ impl ChatApiState {
             mpsc::error::TrySendError::Full(_) => SubmitError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => SubmitError::QueueClosed,
         })?;
+        let settings = self
+            .settings
+            .snapshot_all()
+            .map_err(|_| SubmitError::Stopped)?;
+        let preset_id = settings
+            .values
+            .selected_preset(request.character_id(), request.intent());
+        let preset = self
+            .presets
+            .get(preset_id)
+            .map_err(|_| SubmitError::PresetUnavailable)?
+            .ok_or(SubmitError::PresetUnavailable)?;
         let admission = self
             .ingress
             .admit(request.character_id(), request.intent())?;
         let id = RequestId::new();
-        let handle = self.registry.register(Box::new(request), id, admission);
+        let handle = self.registry.register_with_configuration(
+            Box::new(request),
+            id,
+            admission,
+            Some(settings),
+            Some(preset),
+        );
         permit.send(id);
         Ok(handle)
     }

@@ -14,6 +14,8 @@ pub(crate) struct RequestRecord {
     pub(crate) cancellation: CancellationToken,
     registry: Weak<RegistryInner>,
     admission: TimelineAdmission,
+    settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+    admitted_preset: Option<crate::generation::GenerationPreset>,
 }
 
 struct Execution {
@@ -99,6 +101,8 @@ impl RequestRecord {
         message: Box<dyn GenerationCommand>,
         id: RequestId,
         admission: TimelineAdmission,
+        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+        admitted_preset: Option<crate::generation::GenerationPreset>,
         registry: Weak<RegistryInner>,
     ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
@@ -138,6 +142,8 @@ impl RequestRecord {
             cancellation: CancellationToken::new(),
             registry,
             admission,
+            settings_snapshot,
+            admitted_preset,
         })
     }
 
@@ -182,6 +188,13 @@ impl RequestRecord {
         if let Some(trace) = &mut self.inner.lock().expect("request mutex poisoned").trace {
             trace.configure_redaction(values);
         }
+    }
+
+    pub(crate) fn admitted_settings(&self) -> Option<Arc<crate::settings::SettingsSnapshot>> {
+        self.settings_snapshot.clone()
+    }
+    pub(crate) fn admitted_preset(&self) -> Option<crate::generation::GenerationPreset> {
+        self.admitted_preset.clone()
     }
 
     pub(crate) fn admission(&self) -> TimelineAdmission {

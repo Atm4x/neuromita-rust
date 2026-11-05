@@ -349,7 +349,9 @@ fn diagnostic_code(error: &DiagnosticLookupError) -> ErrorCode {
 fn submit_code(error: &SubmitError) -> ErrorCode {
     match error {
         SubmitError::InvalidTargetEvent => ErrorCode::InvalidValue,
-        SubmitError::TimelineUnavailable => ErrorCode::CoreUnavailable,
+        SubmitError::TimelineUnavailable | SubmitError::PresetUnavailable => {
+            ErrorCode::CoreUnavailable
+        }
         SubmitError::QueueFull => ErrorCode::QueueFull,
         SubmitError::Uninitialized
         | SubmitError::Stopped
