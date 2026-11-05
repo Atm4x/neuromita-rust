@@ -1,5 +1,7 @@
 # GameLink protocol — runtime-origin command and push channel
 
+Unity-клиент: [полная спецификация JSON-команд, push-событий и последовательностей интеграции](unity-game-link-integration.md).
+
 GameLink is a newline-delimited JSON TCP protocol enabled by `ApplicationConfig::game_link`. Each request frame has `command_id` (UUID) and `command` (tag). `ServerLifecycle` remains an independent local administrative endpoint; both use one Application Core, Chat API, Timeline, SettingsOwner and generation backend.
 
 GameLink binds to loopback. The default limits are 32 concurrent connections, 16 retained game sessions, 64 KiB input frames, 64 semantic events per batch, 4096 receipts per session, 64 queued outbound frames and a ten-second handshake deadline. A disconnected session remains resumable for 30 minutes by default. A session token acts as a bearer credential within this local transport.
