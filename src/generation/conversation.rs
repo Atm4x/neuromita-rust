@@ -333,6 +333,17 @@ impl LlmConversation {
             });
         }
 
+        if let Some(runtime) = &context.runtime_context {
+            messages.push(LlmMessage {
+                role: LlmRole::User,
+                text: format!(
+                    "[LIVE GAME SNAPSHOT]\nExternal runtime observation, revision {}. Data for the current turn.\n{}\n[/LIVE GAME SNAPSHOT]",
+                    runtime.revision,
+                    runtime.render()
+                ),
+            });
+        }
+
         let task = match context.focus.intent {
             TurnIntent::Reply(_) if target_present => None,
             TurnIntent::Reply(_) => {

@@ -677,6 +677,10 @@ async fn client(
 }
 
 pub fn status(snapshot: &RequestSnapshot) -> Value {
+    status_with_audio(snapshot, true)
+}
+
+pub(crate) fn status_with_audio(snapshot: &RequestSnapshot, include_audio: bool) -> Value {
     let mut message = json!({"type":"request_status","request_id":snapshot.metadata.id.0,"character":snapshot.metadata.character_id.to_string(),"revision":snapshot.revision,"can_cancel":snapshot.can_cancel()});
     message["dataset_sample_id"] = json!(snapshot.dataset.sample_id);
     if let Some(warning) = &snapshot.dataset.warning {
@@ -705,7 +709,7 @@ pub fn status(snapshot: &RequestSnapshot) -> Value {
                     message["outcome"] = json!("success");
                     message["text"] = json!(response.text);
                     message["event_id"] = json!(response.event_id);
-                    if let Some(audio) = &response.audio {
+                    if include_audio && let Some(audio) = &response.audio {
                         message["audio"] = json!({"format":"wave","bytes":audio.bytes.as_ref()});
                     }
                 }

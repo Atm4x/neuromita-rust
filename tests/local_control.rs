@@ -14,6 +14,7 @@ use neuromita::{
     request::{RequestHandle, RequestId, RequestOutcome, RequestSource, RequestState},
     server::{ServerConfig, ServerHandle, ServerSnapshot},
     settings::{SettingsApi, VoiceSettings, Volume},
+    voice::{AudioArtifact, AudioFormat, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -73,6 +74,18 @@ impl GenerationProvider for ControlledGeneration {
     }
 }
 
+struct FixtureVoice;
+impl VoiceProvider for FixtureVoice {
+    fn synthesize(&self, _text: Arc<str>, _options: VoiceOptions) -> VoiceFuture<'_> {
+        Box::pin(async {
+            Ok(AudioArtifact {
+                format: AudioFormat::Wave,
+                bytes: Arc::from(b"RIFF-fixture-wave".as_slice()),
+            })
+        })
+    }
+}
+
 struct Fixture {
     app: ApplicationLifecycle,
     calls: mpsc::UnboundedReceiver<GenerationCall>,
@@ -85,6 +98,14 @@ impl Fixture {
     }
 
     async fn with_queue(queue: usize, configure: impl FnOnce(&mut ServerConfig)) -> Self {
+        Self::with_voice(queue, configure, false).await
+    }
+
+    async fn with_voice(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+    ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
             GeminiTemplate::google(
@@ -109,9 +130,15 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if enabled {
+            config.voice = Arc::new(FixtureVoice);
+        }
         config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
         bounded(SettingsApi::flush()).await.unwrap();
+        if enabled {
+            SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+        }
         Self {
             app,
             calls,
@@ -1273,12 +1300,18 @@ async fn game_link_resume_replaces_old_tcp_connection() {
         .write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"ping"})))
         .await
         .unwrap();
-    buffer.clear();
-    bounded(new_reader.read_line(&mut buffer)).await.unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&buffer).unwrap()["type"],
-        "pong"
-    );
+    let response = bounded(async {
+        loop {
+            buffer.clear();
+            new_reader.read_line(&mut buffer).await.unwrap();
+            let event: Value = serde_json::from_str(&buffer).unwrap();
+            if event["type"] == "pong" {
+                break event;
+            }
+        }
+    })
+    .await;
+    assert_eq!(response["type"], "pong");
     fixture.shutdown().await;
 }
 
@@ -1298,5 +1331,244 @@ async fn game_link_enforces_frame_size_while_receiving() {
     assert_eq!(response["code"], "command_too_large");
     buffer.clear();
     assert_eq!(bounded(reader.read_line(&mut buffer)).await.unwrap(), 0);
+    fixture.shutdown().await;
+}
+
+struct GameClient {
+    read: BufReader<OwnedReadHalf>,
+    write: OwnedWriteHalf,
+}
+impl GameClient {
+    async fn connect(address: SocketAddr) -> Self {
+        let (read, write) = bounded(TcpStream::connect(address))
+            .await
+            .unwrap()
+            .into_split();
+        Self {
+            read: BufReader::new(read),
+            write,
+        }
+    }
+    async fn send(&mut self, command: Value) {
+        bounded(self.write.write_all(&line(command))).await.unwrap();
+    }
+    async fn next(&mut self) -> Value {
+        let mut frame = String::new();
+        assert_ne!(bounded(self.read.read_line(&mut frame)).await.unwrap(), 0);
+        serde_json::from_str(&frame).unwrap()
+    }
+    async fn until(&mut self, expected: &str) -> Value {
+        bounded(async {
+            loop {
+                let frame = self.next().await;
+                if frame["type"] == expected {
+                    return frame;
+                }
+            }
+        })
+        .await
+    }
+    async fn hello(&mut self) -> (Uuid, Uuid) {
+        self.send(json!({"command":"hello","command_id":Uuid::new_v4()}))
+            .await;
+        let answer = self.until("hello_ack").await;
+        (uuid(&answer["session_id"]), uuid(&answer["session_token"]))
+    }
+}
+
+#[tokio::test]
+async fn game_link_captures_world_context_at_admission_and_restores_revision() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    let (session, token) = game.hello().await;
+    let first = Uuid::new_v4();
+    let context = json!({"revision":1,"scene":"Kitchen","world":{"room":"Kitchen","actors":["Crazy","Player"]},"capabilities":["look","walk"]});
+    game.send(json!({"command_id":first,"command":"update_context","context":context}))
+        .await;
+    let ack = game.until("context_applied").await;
+    assert_eq!(ack["revision"], 1);
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy","instruction":"look around"})).await;
+    let accepted = game.until("request_accepted").await;
+    let first_id = uuid(&accepted["request_id"]);
+    let call = fixture.call().await;
+    assert_eq!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Kitchen")
+    );
+    assert_eq!(call.context.runtime_context.as_ref().unwrap().revision, 1);
+    assert_eq!(
+        call.context.runtime_context.as_ref().unwrap().capabilities,
+        vec!["look", "walk"]
+    );
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"update_context","context":{"revision":2,"scene":"Garden","world":{},"capabilities":[]}})).await;
+    assert_eq!(game.until("context_applied").await["revision"], 2);
+    assert_eq!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Kitchen")
+    );
+    call.finish("first game response");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let second = fixture.call().await;
+    assert_eq!(
+        second
+            .context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Garden")
+    );
+    second.finish("second game response");
+    let cmd = Uuid::new_v4();
+    game.send(json!({"command_id":cmd,"command":"update_context","context":{"revision":2,"scene":"Kitchen","world":{},"capabilities":[]}})).await;
+    assert_eq!(game.until("error").await["code"], "context_rejected");
+    game.send(json!({"command_id":first,"command":"update_context","context":context}))
+        .await;
+    assert_eq!(
+        game.until("context_applied").await["command_id"],
+        first.to_string()
+    );
+    drop(game);
+    let mut resumed = GameClient::connect(address).await;
+    resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
+    assert_eq!(
+        resumed.until("session_resumed").await["session_id"],
+        session.to_string()
+    );
+    let state = resumed.until("session_state").await;
+    assert_eq!(state["context_revision"], 2);
+    assert_ne!(first_id, Uuid::nil());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
+    let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    let (session, token) = game.hello().await;
+    let capture = Uuid::new_v4();
+    let ptt_cmd = Uuid::new_v4();
+    game.send(json!({"command_id":ptt_cmd,"command":"report_ptt","capture_id":capture,"generation":4,"active":true})).await;
+    assert_eq!(game.until("ptt_accepted").await["generation"], 4);
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_ptt","capture_id":capture,"generation":3,"active":false})).await;
+    assert_eq!(game.until("error").await["code"], "ptt_rejected");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let request = uuid(&game.until("request_accepted").await["request_id"]);
+    fixture.call().await.finish("audio output");
+    let completed = game.until("request_completed").await;
+    assert_eq!(completed["request_id"], request.to_string());
+    assert_eq!(completed["audio_asset"]["format"], "wave");
+    assert_eq!(completed["audio_asset"]["size_bytes"], 17);
+    assert!(completed["audio"].is_null());
+    let event = uuid(&completed["event_id"]);
+    let read_id = Uuid::new_v4();
+    game.send(json!({"command_id":read_id,"command":"read_audio_chunk","request_id":request,"offset":0,"length":128})).await;
+    let chunk = game.until("audio_chunk").await;
+    assert_eq!(chunk["base64"], "UklGRi1maXh0dXJlLXdhdmU=");
+    let playback = Uuid::new_v4();
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":playback,"phase":"started"})).await;
+    assert_eq!(game.until("playback_accepted").await["phase"], "started");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":playback,"phase":"completed"})).await;
+    assert_eq!(game.until("playback_accepted").await["phase"], "completed");
+    let ack_id = Uuid::new_v4();
+    game.send(json!({"command_id":ack_id,"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
+    assert_eq!(game.until("result_acknowledged").await["applied"], true);
+    drop(game);
+    let mut resumed = GameClient::connect(address).await;
+    resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
+    resumed.until("session_resumed").await;
+    let state = resumed.until("session_state").await;
+    assert_eq!(state["ptt"]["capture_id"], capture.to_string());
+    assert_eq!(state["deliveries"][0]["ack"]["applied"], true);
+    assert_eq!(state["playback"][0]["report"]["phase"], "completed");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_restricts_audio_and_result_ack_to_session() {
+    let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut first = GameClient::connect(address).await;
+    first.hello().await;
+    let mut second = GameClient::connect(address).await;
+    second.hello().await;
+    first
+        .send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let request = uuid(&first.until("request_accepted").await["request_id"]);
+    fixture.call().await.finish("secret");
+    let frame = first.until("request_completed").await;
+    let event = uuid(&frame["event_id"]);
+    second.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":1024})).await;
+    assert_eq!(second.until("error").await["code"], "ownership_denied");
+    second.send(json!({"command_id":Uuid::new_v4(),"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
+    assert_eq!(second.until("error").await["code"], "ownership_denied");
+    first.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":20_000})).await;
+    assert_eq!(first.until("error").await["code"], "invalid_chunk");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_pushes_scoped_game_settings_without_polling() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    game.hello().await;
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"get_game_settings"}))
+        .await;
+    let initial = game.until("game_settings").await;
+    assert!(initial["voice"]["enabled"].is_boolean());
+    let revision = initial["revision"].as_u64().unwrap();
+    SettingsApi::edit::<VoiceSettings>(|voice| {
+        voice.in_game = !voice.in_game;
+    })
+    .unwrap();
+    let pushed = game.until("game_settings_updated").await;
+    assert!(pushed["revision"].as_u64().unwrap() > revision);
+    assert_ne!(pushed["voice"]["enabled"], initial["voice"]["enabled"]);
+    assert!(pushed.get("api").is_none());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_never_mixes_runtime_contexts_between_game_sessions() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut first = GameClient::connect(address).await;
+    first.hello().await;
+    let mut second = GameClient::connect(address).await;
+    second.hello().await;
+    first.send(json!({"command_id":Uuid::new_v4(),"command":"update_context","context":{"revision":1,"scene":"PrivateKitchen","world":{},"capabilities":[]}})).await;
+    first.until("context_applied").await;
+    second
+        .send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    second.until("request_accepted").await;
+    let call = fixture.call().await;
+    assert!(call.context.runtime_context.is_some());
+    assert!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .is_none()
+    );
+    call.finish("no shared runtime scene");
     fixture.shutdown().await;
 }

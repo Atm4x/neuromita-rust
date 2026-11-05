@@ -501,6 +501,7 @@ mod tests {
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
+            runtime_context: None,
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
@@ -616,6 +617,7 @@ mod tests {
             character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
+            runtime_context: None,
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
