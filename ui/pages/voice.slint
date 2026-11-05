@@ -38,7 +38,7 @@ export global VoiceUi {
     in-out property <int> avatar-offset: 0;
     in-out property <string> voice-id;
     in-out property <[string]> character-voice-ids;
-    in-out property <string> sample-text;
+    in-out property <string> sample-text: I18n.i18n("voice.api.sample", "Привет! Я Мита. Давай проверим, как звучит мой голос.");
     in-out property <bool> preview-available: false;
     callback toggle-enabled(bool);
     callback persist();
@@ -55,9 +55,9 @@ export global VoiceUi {
 }
 
 component VoiceCard inherits Rectangle {
-    background: SettingsTheme.canvas;
+    background: SettingsTheme.panel;
     border-width: 1px; border-color: SettingsTheme.border;
-    border-radius: 15px;
+    border-radius: 14px;
     @children
 }
 

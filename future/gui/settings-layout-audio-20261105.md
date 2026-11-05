@@ -50,6 +50,14 @@ clips the avatar viewport and vertically centers the arrow row through layout.
 The raster regression checks the inactive-tab gap above the editor and the
 enabled arrow's vertical position using the Core character catalog.
 
+Voice-card colors follow `styles/pages/settings.py` QFrame#VoiceCard:
+settings_panel_bg (#0e101f), panel_border (rgba(37,34,54,0.9)), radius 14 px.
+The shared VoiceCard applies these tokens to the toolbar, provider, preview,
+status and playback cards across Telegram, Local and API tabs. Profile labels
+show the Core template name (Fish Audio), while settings retain its stable ID.
+The voice-preview editor starts with the localized Python sample sentence;
+it is editable UI state and is not reset by settings snapshot rendering.
+
 Follow-up: the Language page also sizes its content against visible-width with
 the same 2 px outer padding as General. Its locale popup has a bounded, clipped
 background and a SettingsScrollView; all locale rows remain inside the popup.
