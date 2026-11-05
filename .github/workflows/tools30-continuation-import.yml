@@ -1,0 +1,33 @@
+name: Import Rust Tools30 Continuation Git Bundle
+on:
+  push:
+    branches:
+      - bridge/rust-tools30-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify source objects and fast-forward tools branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=270bfd29d2374f9c0218dfe6fcfd15437ab37797
+          HEAD=e19097dfa5066c869681df862a6cb904982eeb39
+          TARGET=refs/heads/codex/rust-tools-continuation-20261106
+          base64 --decode bridge_payloads/tools30-continuation.bundle.b64 > /tmp/tools30.bundle
+          echo '520c79f42b8871357fc8ef073a324a6ff8e75a65f7d267c29818a9224c67201d  /tmp/tools30.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/tools30.bundle
+          git fetch /tmp/tools30.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
