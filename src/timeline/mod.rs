@@ -614,6 +614,24 @@ impl SessionTimeline {
         Ok(draft)
     }
 
+    pub(crate) fn character_debug_variables(
+        &self,
+        character: CharacterId,
+    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, domain::TimelineError> {
+        let facts = self.read_prefix(self.anchor())?;
+        let state = crate::character::projection::character_state(&facts, character)?;
+        let mut variables = std::collections::BTreeMap::from([
+            ("attitude".into(), json!(state.attitude)),
+            ("boredom".into(), json!(state.boredom)),
+            ("stress".into(), json!(state.stress)),
+            ("ACCEPTED_REPLIES".into(), json!(state.accepted_replies)),
+        ]);
+        variables.extend(crate::character::projection::character_variables_at(
+            &facts, character,
+        )?);
+        Ok(variables)
+    }
+
     pub(crate) fn character_state_at(
         &self,
         character: CharacterId,

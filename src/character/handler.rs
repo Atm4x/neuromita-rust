@@ -103,6 +103,11 @@ enum Command {
         reply: oneshot::Sender<Result<AcceptedResponse, CharacterError>>,
     },
     State(oneshot::Sender<Result<CharacterState, CharacterError>>),
+    DebugVariables(
+        oneshot::Sender<
+            Result<std::collections::BTreeMap<String, serde_json::Value>, CharacterError>,
+        >,
+    ),
     MemorySnapshot(oneshot::Sender<Result<CharacterMemorySnapshot, CharacterError>>),
     EditMemory {
         expected: CharacterMemorySnapshot,
@@ -196,6 +201,17 @@ impl CharacterHandle {
                 commands,
                 reply,
             })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn debug_variables(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::DebugVariables(reply))
             .await
             .map_err(|_| CharacterError::Unavailable)?;
         receive.await.map_err(|_| CharacterError::Unavailable)?
@@ -526,6 +542,18 @@ impl CharacterHandler {
                     let result = self.initialize_and_prepare(
                         request, guidance, intent, at, admission, &commands,
                     );
+                    let _ = reply.send(result);
+                }
+                Command::DebugVariables(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            timeline
+                                .character_debug_variables(self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
                     let _ = reply.send(result);
                 }
                 Command::State(reply) => {
@@ -1405,6 +1433,16 @@ mod turn_tests {
             .unwrap();
         assert_eq!(current.variables["Love"], 22.5);
         assert_eq!(current.variables["secretTrial"], true);
+        let debug = timeline
+            .character_debug_variables(CharacterId::Crazy)
+            .unwrap();
+        assert_eq!(debug["Love"], 22.5);
+        assert_eq!(debug["secretTrial"], true);
+        assert_eq!(debug["attitude"], serde_json::json!(current.state.attitude));
+        let other_debug = timeline
+            .character_debug_variables(CharacterId::Kind)
+            .unwrap();
+        assert!(!other_debug.contains_key("Love"));
         assert!(
             timeline
                 .inspect_context_at(CharacterId::Kind, latest)

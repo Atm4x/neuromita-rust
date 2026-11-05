@@ -6,6 +6,7 @@ use crate::{
         CharacterRegistry, CharacterState, CharacterView, MemoryEditResult,
     },
     memory::{MemoryCapacityPlan, MemoryCommand, MemoryKind, MemoryRecord, MemoryState},
+    prompts::PostDslProgram,
     request::{InputError, UserInput},
     timeline::{ContextAnchor, EventId},
 };
@@ -204,6 +205,58 @@ impl MemoryObserver {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterDebugField {
+    pub label: String,
+    pub value: String,
+}
+
+pub(crate) fn project_debug_values(
+    character: CharacterId,
+    variables: &std::collections::BTreeMap<String, serde_json::Value>,
+    program: Option<&PostDslProgram>,
+) -> Vec<CharacterDebugField> {
+    let values = if let Some(program) = program.filter(|script| !script.debug_display().is_empty())
+    {
+        program.debug_values(variables)
+    } else {
+        let mut names = std::collections::BTreeMap::from([
+            ("Attitude".to_owned(), "attitude".to_owned()),
+            ("Boredom".to_owned(), "boredom".to_owned()),
+            ("Stress".to_owned(), "stress".to_owned()),
+        ]);
+        if character == CharacterId::Crazy {
+            names.insert("Secret Exposed".into(), "secretExposed".into());
+            names.insert("FSM State".into(), "current_fsm_state".into());
+        }
+        names
+            .into_iter()
+            .map(|(label, name)| {
+                (
+                    label,
+                    variables
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::String("N/A".into())),
+                )
+            })
+            .collect()
+    };
+    values
+        .into_iter()
+        .map(|(label, value)| CharacterDebugField {
+            label,
+            value: match value {
+                serde_json::Value::String(value) => value,
+                serde_json::Value::Bool(true) => "True".into(),
+                serde_json::Value::Bool(false) => "False".into(),
+                serde_json::Value::Null => "None".into(),
+                other => other.to_string(),
+            },
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct CharactersPresenter {
     registry: CharacterRegistry,
@@ -228,6 +281,15 @@ impl CharactersPresenter {
             query,
             first: true,
         })
+    }
+
+    pub async fn debug_display(
+        &self,
+        id: CharacterId,
+        program: Option<&PostDslProgram>,
+    ) -> Result<Vec<CharacterDebugField>, CharacterError> {
+        let vars = self.get(id)?.debug_variables().await?;
+        Ok(project_debug_values(id, &vars, program))
     }
 
     pub async fn memories(
@@ -309,5 +371,53 @@ impl CharactersPresenter {
     }
     pub fn input(&self, text: String) -> Result<UserInput, InputError> {
         UserInput::new(text)
+    }
+}
+
+#[cfg(test)]
+mod debug_display_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn projects_current_values_from_post_dsl_without_rewriting_character_state() {
+        let program = PostDslProgram::parse(
+            "DEBUG_DISPLAY\n  \"Привязанность\": Love\n  \"Доверие\": Trust\nEND_DEBUG_DISPLAY\n",
+            std::collections::BTreeMap::from([("Trust".into(), json!(30))]),
+        )
+        .unwrap();
+        let saved = std::collections::BTreeMap::from([("Love".into(), json!(79))]);
+        let fields = project_debug_values(CharacterId::Kind, &saved, Some(&program));
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains(&CharacterDebugField {
+            label: "Привязанность".into(),
+            value: "79".into()
+        }));
+        assert!(fields.contains(&CharacterDebugField {
+            label: "Доверие".into(),
+            value: "30".into()
+        }));
+    }
+
+    #[test]
+    fn falls_back_to_python_default_debug_fields() {
+        let saved = std::collections::BTreeMap::from([
+            ("attitude".into(), json!(50.5)),
+            ("stress".into(), json!(3)),
+            ("boredom".into(), json!(12)),
+            ("secretExposed".into(), json!(true)),
+        ]);
+        let normal = project_debug_values(CharacterId::Kind, &saved, None);
+        assert_eq!(normal.len(), 3);
+        let crazy = project_debug_values(CharacterId::Crazy, &saved, None);
+        assert_eq!(crazy.len(), 5);
+        assert!(crazy.contains(&CharacterDebugField {
+            label: "Secret Exposed".into(),
+            value: "True".into()
+        }));
+        assert!(crazy.contains(&CharacterDebugField {
+            label: "FSM State".into(),
+            value: "N/A".into()
+        }));
     }
 }
