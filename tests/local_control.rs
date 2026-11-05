@@ -4,6 +4,7 @@ use neuromita::{
     api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     character::CharacterId,
+    game_link::GameLinkConfig,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator, StructuredResponse,
@@ -108,6 +109,7 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
         bounded(SettingsApi::flush()).await.unwrap();
         Self {
@@ -1027,4 +1029,138 @@ async fn invalid_frames_close_connections_and_shutdown_interrupts_partial_reads(
     idle.closed().await;
     partial.closed().await;
     assert!(TcpStream::connect(server.address()).await.is_err());
+}
+
+#[tokio::test]
+async fn game_link_push_resume_idempotency_and_session_ownership() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut receive = String::new();
+    let hello = Uuid::new_v4();
+    write
+        .write_all(&line(json!({"command_id":hello,"command":"hello"})))
+        .await
+        .unwrap();
+    reader.read_line(&mut receive).await.unwrap();
+    let response: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(response["type"], "hello_ack");
+    let session_id = uuid(&response["session_id"]);
+    let token = uuid(&response["session_token"]);
+    let issued = Uuid::new_v4();
+    let command = json!({"command_id":issued,"command":"initiate","character":"Crazy","instruction":"from game"});
+    write.write_all(&line(command.clone())).await.unwrap();
+    receive.clear();
+    reader.read_line(&mut receive).await.unwrap();
+    let ack: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(ack["type"], "request_accepted");
+    let request_id = uuid(&ack["request_id"]);
+    assert_eq!(
+        active(request_id).snapshot().metadata.source,
+        RequestSource::Game(session_id)
+    );
+    let call = fixture.call().await;
+    drop(reader);
+    drop(write);
+
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    write.write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session_id,"session_token":token}))).await.unwrap();
+    receive.clear();
+    reader.read_line(&mut receive).await.unwrap();
+    let resumed: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(resumed["type"], "session_resumed");
+    assert_eq!(resumed["requests"], 1);
+    write.write_all(&line(command)).await.unwrap();
+    let mut replay = None;
+    for _ in 0..5 {
+        receive.clear();
+        bounded(reader.read_line(&mut receive)).await.unwrap();
+        let event: Value = serde_json::from_str(&receive).unwrap();
+        if event["type"] == "request_accepted" {
+            replay = Some(event);
+            break;
+        }
+    }
+    let replay = replay.expect("command must replay after reconnect");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(uuid(&replay["request_id"]), request_id);
+    assert!(fixture.calls.try_recv().is_err());
+    call.finish("game result");
+    let mut finished = false;
+    for _ in 0..8 {
+        receive.clear();
+        bounded(reader.read_line(&mut receive)).await.unwrap();
+        let event: Value = serde_json::from_str(&receive).unwrap();
+        if event["type"] == "request_completed" {
+            assert_eq!(event["request_id"], request_id.to_string());
+            assert_eq!(event["text"], "game result");
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_rejects_unidentified_and_cross_session_requests() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut buffer = String::new();
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}),
+        ))
+        .await
+        .unwrap();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "hello_required");
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"hello"}),
+        ))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["type"], "hello_ack");
+    let session_id = uuid(&response["session_id"]);
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"cancel","request_id":Uuid::new_v4()}),
+        ))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "ownership_denied");
+    drop(reader);
+    drop(write);
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    write.write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session_id,"session_token":Uuid::new_v4()}))).await.unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "session_denied");
+    fixture.shutdown().await;
 }

@@ -25,6 +25,7 @@ use crate::{
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
+    game_link::{GameLinkConfig, GameLinkHandle, GameLinkLifecycle},
     games::GamePolicy,
     generation::{
         GenerationPreset, JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetId,
@@ -106,6 +107,7 @@ pub struct ApplicationConfig {
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
+    pub game_link: Option<GameLinkConfig>,
     pub finetune: Option<FineTuneSettings>,
     /// Explicit gates for the character-owned mini-games.
     pub games: GamePolicy,
@@ -132,6 +134,7 @@ impl ApplicationConfig {
             releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
             server: ServerConfig::test_protocol(bind, CharacterId::Crazy),
+            game_link: None,
             timeline: TimelineConfig::Transient,
             presets,
             prompts: None,
@@ -291,6 +294,7 @@ pub struct ApplicationLifecycle {
     timeline: Arc<Mutex<SessionTimeline>>,
     presenter: GuiPresenter,
     server: ServerHandle,
+    game_link: Option<GameLinkHandle>,
     finetune: Option<FineTuneCollector>,
     speech: Option<Arc<dyn crate::audio::session::SpeechTranscriber>>,
     audio_input: Arc<crate::audio::input_owner::AudioInputOwner>,
@@ -380,6 +384,7 @@ struct ApplicationOwner {
     settings_task: Option<JoinHandle<Result<(), SettingsError>>>,
     server_stop: CancellationToken,
     server_task: Option<JoinHandle<std::io::Result<()>>>,
+    game_link_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
     ai_runtime: Option<RunningAiApplication>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
@@ -411,6 +416,7 @@ impl ApplicationLifecycle {
             settings,
             timeline,
             server,
+            game_link,
             finetune,
             games,
             reminders: reminders_config,
@@ -462,6 +468,10 @@ impl ApplicationLifecycle {
             .into()),
         };
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
+        let game_link = match game_link {
+            Some(config) => Some(GameLinkLifecycle::bind(config).await?),
+            None => None,
+        };
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
         let mut ai_runtime = match (ai_runtime, ai_hardware) {
             (Some(configuration), Some(path)) if auto_speech => {
@@ -691,6 +701,7 @@ impl ApplicationLifecycle {
                 owners_stop.child_token(),
             ))
         });
+        let game_link_handle = game_link.as_ref().map(|(_, handle)| handle.clone());
         let mut owner = ApplicationOwner {
             finetune: finetune.clone(),
             releases_task: Some(releases_task),
@@ -707,12 +718,18 @@ impl ApplicationLifecycle {
             settings_task,
             server_stop,
             server_task: None,
+            game_link_task: None,
             lease,
             ai_runtime,
             live_speech,
             speech_watch_task,
         };
         owner.lease.publish(Arc::clone(&bindings));
+        if let Some((lifecycle, _handle)) = game_link {
+            owner.game_link_task = Some(tokio::spawn(
+                lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
+            ));
+        }
         owner.server_task = Some(tokio::spawn(
             server_lifecycle.run_with_api(owner.server_stop.clone(), Arc::clone(&bindings)),
         ));
@@ -749,6 +766,7 @@ impl ApplicationLifecycle {
             bindings,
             timeline,
             server,
+            game_link: game_link_handle,
             finetune,
             speech,
             audio_input,
@@ -854,6 +872,10 @@ impl ApplicationLifecycle {
     pub fn presenter(&self) -> &GuiPresenter {
         &self.presenter
     }
+    pub fn game_link(&self) -> Option<&GameLinkHandle> {
+        self.game_link.as_ref()
+    }
+
     pub fn server(&self) -> &ServerHandle {
         &self.server
     }
@@ -1042,6 +1064,13 @@ impl ApplicationOwner {
     async fn shutdown(mut self) -> Result<(), ApplicationError> {
         let mut failure = None;
         self.server_stop.cancel();
+        if let Some(task) = self.game_link_task.take() {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failure = Some(ApplicationError::Server(error)),
+                Err(error) => failure = Some(ApplicationError::Task(error.to_string())),
+            }
+        }
         if let Some(task) = self.server_task.take() {
             match task.await {
                 Ok(Ok(())) => {}
@@ -1151,6 +1180,9 @@ impl Drop for ApplicationOwner {
             .chain(self.owners.iter())
             .chain(self.presenter_task.iter())
         {
+            task.abort();
+        }
+        if let Some(task) = &self.game_link_task {
             task.abort();
         }
         if let Some(task) = &self.server_task {

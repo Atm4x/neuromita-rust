@@ -19,6 +19,7 @@ pub enum RequestSource {
     Presenter,
     Scheduler,
     Client(Uuid),
+    Game(Uuid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
