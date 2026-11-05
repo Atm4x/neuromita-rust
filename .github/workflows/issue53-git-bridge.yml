@@ -1,0 +1,27 @@
+name: Issue 53 Git Bridge
+on:
+  push:
+    branches:
+      - codex/gamelink-issue53-20261105
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export pinned source
+        run: |
+          git fetch --all --prune
+          git bundle create issue53-current.bundle --all
+          git bundle verify issue53-current.bundle
+          sha256sum issue53-current.bundle > issue53-current.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue53-rust-source
+          path: |
+            issue53-current.bundle
+            issue53-current.bundle.sha256
+          retention-days: 2
