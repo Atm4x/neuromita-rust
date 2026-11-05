@@ -205,19 +205,17 @@ impl Sessions {
             .expect("game sessions poisoned")
             .get(&id)
             .and_then(|session| session.connection.as_ref().map(|(_, tx, _)| tx.clone()));
-        if let Some(output) = output {
-            if output.try_send(frame).is_err() {
-                let disconnect = self
-                    .0
-                    .lock()
-                    .expect("game sessions poisoned")
-                    .get(&id)
-                    .and_then(|session| {
-                        session.connection.as_ref().map(|(_, _, stop)| stop.clone())
-                    });
-                if let Some(disconnect) = disconnect {
-                    disconnect.cancel();
-                }
+        if let Some(output) = output
+            && output.try_send(frame).is_err()
+        {
+            let disconnect = self
+                .0
+                .lock()
+                .expect("game sessions poisoned")
+                .get(&id)
+                .and_then(|session| session.connection.as_ref().map(|(_, _, stop)| stop.clone()));
+            if let Some(disconnect) = disconnect {
+                disconnect.cancel();
             }
         }
     }
