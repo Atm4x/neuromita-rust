@@ -133,7 +133,7 @@ impl ApplicationConfig {
         Self {
             releases: Arc::new(crate::releases::GithubReleaseFeed::default()),
             migrations: StartupMigrations::new(),
-            server: ServerConfig::test_protocol(bind, CharacterId::Crazy),
+            server: ServerConfig::local_control(bind),
             game_link: None,
             timeline: TimelineConfig::Transient,
             presets,

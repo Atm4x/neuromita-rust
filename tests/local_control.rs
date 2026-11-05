@@ -12,7 +12,7 @@ use neuromita::{
     },
     request::UserInput,
     request::{RequestHandle, RequestId, RequestOutcome, RequestSource, RequestState},
-    server::{ServerConfig, ServerHandle, ServerSnapshot},
+    server::{ServerConfig, ServerHandle, ServerLifecycle, ServerSnapshot},
     settings::{SettingsApi, VoiceSettings, Volume},
     voice::{AudioArtifact, AudioFormat, VoiceFuture, VoiceOptions, VoiceProvider},
 };
@@ -372,7 +372,6 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
-        "test",
         "publish_message",
         "reply",
         "react",
@@ -407,7 +406,8 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 }
             }
             "cancel" => {
-                let start = command("test");
+                let mut start = command("initiate");
+                start["character"] = json!("Crazy");
                 client.send(start.clone()).await;
                 let accepted = client.accepted(uuid(&start["command_id"])).await;
                 let call = fixture.call().await;
@@ -439,13 +439,13 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
         let response_type = match name {
             "ping" => "pong",
-            "test" | "reply" | "react" | "initiate" => "accepted",
+            "reply" | "react" | "initiate" => "accepted",
             "publish_message" => "published",
             "set_volume" => "settings_applied",
             other => other,
         };
         assert_eq!(response["type"], response_type, "{name}: {response}");
-        if matches!(name, "test" | "reply" | "react" | "initiate") {
+        if matches!(name, "reply" | "react" | "initiate") {
             let id = uuid(&response["request_id"]);
             fixture.call().await.finish("catalog result");
             assert_eq!(client.terminal(id).await["text"], "catalog result");
@@ -478,7 +478,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
     assert_eq!(responses[1]["type"], "settings_applied");
     assert_eq!(responses[2]["command_id"], last["command_id"]);
     assert_eq!(responses[2]["settings"]["voice"]["volume"], 43);
-    let instant = command("test");
+    let instant = json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"});
     client.send(instant.clone()).await;
     fixture.call().await.finish("immediate result");
     let accepted = client.until(|v| v["type"] != "settings").await;
@@ -549,7 +549,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
     let error = client.error("different intent").await;
     assert_eq!(error["code"], "command_id_conflict");
     assert_eq!(error["command_id"], id.to_string());
-    let full = command("test");
+    let full = json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"});
     client.send(full.clone()).await;
     let error = client.error("too many tracked").await;
     assert_eq!(error["code"], "receipt_capacity");
@@ -616,18 +616,19 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
     let mut client = fixture.connect().await;
     let mut invalid = vec![
         b"{\n".to_vec(),
+        b"test\n".to_vec(),
+        line(command("test")),
         b"[]\n".to_vec(),
         b"null\n".to_vec(),
         b"\n".to_vec(),
         line(json!({"command":"settings"})),
-        line(json!({"command_id":"invalid", "command":"test"})),
+        line(json!({"command_id":"invalid", "command":"initiate"})),
         line(command("unknown")),
     ];
     for name in [
         "ping",
         "methods",
         "server_status",
-        "test",
         "settings",
         "reply",
         "cancel",
@@ -734,7 +735,7 @@ async fn fragmented_utf8_and_coalesced_lines_preserve_commands() {
     let mut rest = bytes[split..bytes.len() - 1].to_vec();
     rest.extend_from_slice(b"\r\n");
     rest.extend_from_slice(&line(command("settings")));
-    rest.extend_from_slice(b"test\n");
+    rest.extend_from_slice(&line(reply(Uuid::new_v4(), "Crazy", "test")));
     client.bytes(&rest).await;
     let accepted = client.accepted(id).await;
     let request = uuid(&accepted["request_id"]);
@@ -1571,4 +1572,23 @@ async fn game_link_never_mixes_runtime_contexts_between_game_sessions() {
     );
     call.finish("no shared runtime scene");
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_control_accepts_only_loopback_bind_addresses() {
+    for address in ["0.0.0.0:0", "192.0.2.1:0", "[::]:0"] {
+        let config = ServerConfig::local_control(address.parse().unwrap());
+        let result = ServerLifecycle::bind(config).await;
+        assert!(
+            matches!(result, Err(error) if error.kind() == std::io::ErrorKind::InvalidInput),
+            "LocalControl allowed {address}"
+        );
+    }
+
+    let (lifecycle, handle) =
+        ServerLifecycle::bind(ServerConfig::local_control("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+    assert!(handle.address().ip().is_loopback());
+    drop(lifecycle);
 }
