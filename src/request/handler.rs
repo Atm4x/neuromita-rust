@@ -233,6 +233,7 @@ impl MessageHandler {
                         format!("knowledge retrieval failed: {error}")
                     ))?;
                 let request = GenerationRequest::new(context, preset, selected)
+                    .with_model_memory_policy(settings.values.memory.model_add_policy())
                     .with_prompt(prompt)
                     .with_post_dsl(post_dsl)
                     .with_tools(settings.values.tools.clone());

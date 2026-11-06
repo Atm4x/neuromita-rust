@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::{SettingsError, SpeechSettings};
-use crate::generation::{PresetId, ToolSettings};
+use crate::generation::{ModelMemoryAddPolicy, PresetId, ToolSettings};
 use crate::reminders::{LocalTimePolicy, TimeZoneId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +240,45 @@ pub struct PresetSettings {
     pub active: PresetId,
 }
 
+/// Model-proposed facts only; manual edits use their explicit MemoryCommand.
+/// Disabled by default to preserve existing Rust memory-write behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemorySettings {
+    pub model_add_dedup_enabled: bool,
+    pub threshold_per_mille: u16,
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            model_add_dedup_enabled: false,
+            threshold_per_mille: 800,
+        }
+    }
+}
+
+impl MemorySettings {
+    pub fn validate(self) -> Result<(), SettingsError> {
+        if !(500..=1000).contains(&self.threshold_per_mille) {
+            return Err(SettingsError::Validation(
+                "model memory dedup threshold must be 500..1000 per mille".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn model_add_policy(self) -> ModelMemoryAddPolicy {
+        if self.model_add_dedup_enabled {
+            ModelMemoryAddPolicy::Lexical {
+                threshold_per_mille: self.threshold_per_mille,
+            }
+        } else {
+            ModelMemoryAddPolicy::Ordinary
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemindersSettings {
@@ -272,6 +311,8 @@ pub struct AppSettings {
     pub reminders: RemindersSettings,
     pub speech: SpeechSettings,
     #[serde(default)]
+    pub memory: MemorySettings,
+    #[serde(default)]
     pub tools: ToolSettings,
 }
 
@@ -300,6 +341,7 @@ impl AppSettings {
             },
             reminders: RemindersSettings::initial_profile(),
             speech: SpeechSettings::default(),
+            memory: MemorySettings::default(),
             tools: ToolSettings::default(),
         }
     }
@@ -328,6 +370,7 @@ impl AppSettings {
             }
         }
         self.speech.validate()?;
+        self.memory.validate()?;
         self.tools
             .validate()
             .map_err(|error| SettingsError::Validation(error.to_string()))?;
@@ -375,6 +418,7 @@ section!(PresetSettings, presets);
 section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(SpeechSettings, speech);
+section!(MemorySettings, memory);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);

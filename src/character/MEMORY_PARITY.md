@@ -139,3 +139,32 @@ reference enables lexical similarity by default under `MEMORY_DEDUP_ENABLED`,
 while the existing Rust production conversion keeps its pre-existing behavior
 until its owner provides a resolved policy. Choosing a global default here
 would silently change manual editor semantics and is intentionally avoided.
+
+## Application setting to generation request (2026-11-07)
+
+`settings::MemorySettings` adds an explicit, validated application setting for
+**model-originated** `StructuredResponse.memory_add`. The existing `SettingsApi`
+`SettingsSection` read/edit/replace and JSON storage paths operate on the same
+canonical `AppSettings.memory` field; no separate settings owner or versioned
+schema was introduced. A stored Rust settings document without the `memory`
+field loads the current default. Invalid `threshold_per_mille` values outside
+`500..=1000` fail settings validation rather than being clamped.
+
+`request::MessageHandler` reads the already captured `SettingsSnapshot` and
+passes `settings.values.memory.model_add_policy()` into the generated request.
+The resolved value remains immutable while provider inference runs and does
+not affect manual memory commands, user-facing editor writes, or other proposed
+model effects. The initial Rust setting is deliberately **disabled** with a
+stored threshold of `800`: this preserves the previously accepted Rust
+`Ordinary` behavior and avoids merging unrelated but highly similar entries.
+Enabling the setting explicitly obtains the Python-style lexical behavior;
+this is not a claim of identical Python defaults. The existing direct
+`GenerationRequest::new` constructor still uses `Ordinary` unless the caller
+supplies the policy.
+
+Verification: `settings_transfer` covers serialization, absent-field defaults,
+invalid values and reconstruction; the `vertical_slice` model-memory scenario
+runs live generated responses through the fake Gemini endpoint and verifies
+both the enabled dedup mode and disabled ordinary Add behavior. This setting
+is Core/API configurable but does not constitute a Slint settings control;
+UI binding remains outstanding.
