@@ -70,6 +70,16 @@ struct PluginManifest {
     permissions: Option<Vec<String>>,
 }
 
+pub(super) fn executable_plugin_root(data_directory: &Path) -> PathBuf {
+    for path in ["AIData/plugins", "AIData/Scripts"] {
+        let candidate = data_directory.join(path);
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/plugins/builtin")
+}
+
 fn plugin_candidates(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -180,15 +190,46 @@ fn inspect_manifest(path: &Path, community: bool) -> Result<PluginManifest, Stri
     Ok(manifest)
 }
 
+pub(super) fn verify_executable_plugin(
+    root: &Path,
+    plugin_id: &str,
+    service: &str,
+) -> Result<(), String> {
+    if !valid_segment(plugin_id) || !matches!(service, "tts" | "asr") {
+        return Err("unsupported selected speech plugin".into());
+    }
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("plugin root unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.is_symlink() {
+        return Err("plugin root must be a real directory".into());
+    }
+    let matches = plugin_candidates(root)
+        .into_iter()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == plugin_id))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!(
+            "selected plugin {plugin_id} is missing or ambiguous in executable plugin root"
+        ));
+    }
+    let directory = &matches[0];
+    let community = directory
+        .parent()
+        .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "community"));
+    let manifest = inspect_manifest(directory, community)?;
+    if manifest.kind != service {
+        return Err(format!(
+            "selected plugin {plugin_id} does not provide {service}"
+        ));
+    }
+    Ok(())
+}
+
 impl SpeechModelCatalog {
     pub fn for_desktop(data_directory: PathBuf) -> Self {
-        let roots = vec![
-            data_directory.join("AIData/Scripts"),
-            data_directory.join("AIData/plugins"),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python/plugins/builtin"),
-        ];
+        let plugin_roots = vec![executable_plugin_root(&data_directory)];
         Self {
-            plugin_roots: roots,
+            plugin_roots,
             data_directory,
         }
     }
@@ -368,6 +409,50 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("plugin.py"), "class Plugin: pass").unwrap();
+    }
+
+    #[test]
+    fn executable_root_and_selected_plugin_use_the_same_resolver() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-root-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("AIData/Scripts");
+        let plugins = root.join("AIData/plugins");
+        fixture(&legacy, "", "legacy_tts", "tts", &[]);
+        assert_eq!(executable_plugin_root(&root), legacy);
+        fixture(&plugins, "community", "active_asr", "asr", &[]);
+        assert_eq!(executable_plugin_root(&root), plugins);
+        assert!(verify_executable_plugin(&plugins, "active_asr", "asr").is_ok());
+        assert!(verify_executable_plugin(&plugins, "legacy_tts", "tts").is_err());
+        assert!(verify_executable_plugin(&plugins, "active_asr", "tts").is_err());
+        fixture(&plugins, "builtin", "active_asr", "asr", &[]);
+        assert!(
+            verify_executable_plugin(&plugins, "active_asr", "asr")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activation_refuses_permissioned_plugins_and_symlinked_roots() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-perms-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "community", "denied_tts", "tts", &["network"]);
+        assert!(
+            verify_executable_plugin(&plugins, "denied_tts", "tts")
+                .unwrap_err()
+                .contains("permission approval")
+        );
+        #[cfg(unix)]
+        {
+            let link = root.join("linked_plugins");
+            std::os::unix::fs::symlink(&plugins, &link).unwrap();
+            assert!(
+                verify_executable_plugin(&link, "denied_tts", "tts")
+                    .unwrap_err()
+                    .contains("real directory")
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

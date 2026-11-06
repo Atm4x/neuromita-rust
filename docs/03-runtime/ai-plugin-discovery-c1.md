@@ -47,3 +47,18 @@ plugin root (`AIData/Scripts` or bundled plugins), so community plugins found
 only in `AIData/plugins` are not launchable until the root-selection boundary
 is unified. That requires a subsequent coordinated integration change rather
 than a second implicit plugin path resolver or a fake "ready" state.
+
+## C1 activation-root alignment
+
+The Rust speech inventory and `InstalledSpeechEnvironment` now use the same
+executable plugin directory selected from the injected application data root:
+`AIData/plugins` when it exists, otherwise pre-existing `AIData/Scripts`,
+otherwise the bundled development plugin source. This is a single active root,
+not cross-directory fallback when one installed plugin is missing. A malformed
+or symlinked selected root fails activation. Nested `builtin` and `community`
+plugins are checked with the same unique-ID and static-manifest restrictions
+before worker startup; duplicate IDs, wrong service kinds and plugins requiring
+unapproved permissions are rejected. The Python host remains the final runtime
+validator. This change does not introduce its own portable data root; it uses
+the existing injected `data_directory`. An explicitly installed plugin package
+is still not equivalent to a ready inference model.

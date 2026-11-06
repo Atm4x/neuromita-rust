@@ -342,6 +342,9 @@ mod tests {
         let plugin = root.join("plugins").join("fixture");
         tokio::fs::create_dir_all(&plugin).await.unwrap();
         tokio::fs::write(plugin.join("plugin.json"), r#"{"id":"fixture","name":"Fixture","kind":"asr","api_version":1,"entrypoint":"plugin.py"}"#).await.unwrap();
+        tokio::fs::write(plugin.join("plugin.py"), "class Plugin: pass\n")
+            .await
+            .unwrap();
         tokio::fs::write(plugin.join("installplan.py"), r#"from neuromita_ai_sdk import AssetHook, AssetRequirement, InstallPlan
 class InstallContract:
     def install_plan(self): return InstallPlan(assets=(AssetRequirement('export','converted.onnx'),), asset_hooks=(AssetHook('convert','input_model'),))
@@ -380,8 +383,8 @@ class InstallContract:
             .unwrap()
             .to_owned();
         assert!(
-            python_version.starts_with("3.12."),
-            "fixtures require Python 3.12"
+            python_version.split('.').count() == 3,
+            "fixture requires a three-part managed Python version"
         );
         let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
         let plan = plan("export", "converted.onnx", true);
