@@ -216,6 +216,89 @@ async fn provider_failure_does_not_silently_fallback() {
     assert!(matches!(err, EmbeddingError::Transport(_)));
 }
 
+struct InvalidEmbeddingFixture {
+    space: EmbeddingSpace,
+    document_batch_size: std::sync::Mutex<Vec<usize>>,
+    invalid_query: bool,
+}
+
+impl InvalidEmbeddingFixture {
+    fn new(invalid_query: bool) -> Self {
+        Self {
+            space: EmbeddingSpace::new("fixture", "bad-batch", "v1", 3).unwrap(),
+            document_batch_size: std::sync::Mutex::new(Vec::new()),
+            invalid_query,
+        }
+    }
+}
+
+impl EmbeddingProvider for InvalidEmbeddingFixture {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(&self, purpose: EmbeddingPurpose, _: String) -> EmbeddingFuture<'_, Embedding> {
+        Box::pin(async move {
+            let dimensions = if self.invalid_query && purpose == EmbeddingPurpose::Query {
+                2
+            } else {
+                3
+            };
+            let space = EmbeddingSpace::new("fixture", "wrong", "v1", dimensions).unwrap();
+            Embedding::new(vec![1.0; dimensions], &space)
+        })
+    }
+
+    fn embed_documents(&self, texts: Vec<String>) -> EmbeddingFuture<'_, Vec<Embedding>> {
+        Box::pin(async move {
+            self.document_batch_size.lock().unwrap().push(texts.len());
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let dimensions = if index + 1 == texts.len() { 2 } else { 3 };
+                    let space = EmbeddingSpace::new("fixture", "wrong", "v1", dimensions).unwrap();
+                    Embedding::new(vec![1.0; dimensions], &space).unwrap()
+                })
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn invalid_document_batch_is_rejected_before_any_cache_entry_is_published() {
+    let provider = Arc::new(InvalidEmbeddingFixture::new(false));
+    let retriever = SemanticMemoryRetriever::new(provider.clone(), 16).unwrap();
+    let records = vec![
+        memory(1, MemoryPriority::Normal, "first"),
+        memory(2, MemoryPriority::Normal, "second"),
+    ];
+    for _ in 0..2 {
+        assert!(matches!(
+            retriever
+                .retrieve(CharacterId::Crazy, &records, "search")
+                .await,
+            Err(EmbeddingError::Response(_))
+        ));
+    }
+    assert_eq!(*provider.document_batch_size.lock().unwrap(), vec![2, 2]);
+}
+
+#[tokio::test]
+async fn invalid_query_vector_must_not_start_document_indexing() {
+    let provider = Arc::new(InvalidEmbeddingFixture::new(true));
+    let retriever = SemanticMemoryRetriever::new(provider.clone(), 16).unwrap();
+    let result = retriever
+        .retrieve(
+            CharacterId::Crazy,
+            &[memory(1, MemoryPriority::Normal, "first")],
+            "search",
+        )
+        .await;
+    assert!(matches!(result, Err(EmbeddingError::Response(_))));
+    assert!(provider.document_batch_size.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn gemini_http_fixture_verifies_query_and_document_protocol() {
     verify_gemini_http(GeminiEmbeddingProtocol::Embedding001).await;

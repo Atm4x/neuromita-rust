@@ -260,6 +260,11 @@ impl SemanticMemoryRetriever {
         cost.embedded_characters += query.chars().count();
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
+        if query_vector.values.len() != space.dimensions
+            || query_vector.values.iter().any(|v| !v.is_finite())
+        {
+            return Err(EmbeddingError::Response("invalid query embedding".into()));
+        }
         if !missing.is_empty() {
             let texts = missing
                 .iter()
@@ -275,26 +280,22 @@ impl SemanticMemoryRetriever {
                     "document embedding count mismatch".into(),
                 ));
             }
-            for (&index, vector) in missing.iter().zip(fresh) {
-                if vector.values.len() != space.dimensions
+            if fresh.iter().any(|vector| {
+                vector.values.len() != space.dimensions
                     || vector.values.iter().any(|v| !v.is_finite())
-                {
-                    return Err(EmbeddingError::Response(
-                        "invalid document embedding".into(),
-                    ));
-                }
+            }) {
+                return Err(EmbeddingError::Response(
+                    "invalid document embedding".into(),
+                ));
+            }
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            for (&index, vector) in missing.iter().zip(fresh) {
                 vectors[index] = Some(vector.clone());
-                let mut cache = self
-                    .cache
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
                 cache.insert(keys[index].clone(), vector, self.max_entries);
             }
-        }
-        if query_vector.values.len() != space.dimensions
-            || query_vector.values.iter().any(|v| !v.is_finite())
-        {
-            return Err(EmbeddingError::Response("invalid query embedding".into()));
         }
         let mut ranked = memories
             .iter()
