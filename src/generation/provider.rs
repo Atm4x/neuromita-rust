@@ -176,6 +176,14 @@ pub trait GenerationObserver: Send {
     fn response_received(&mut self, _response: ProviderReply) {}
     fn stream_delta(&mut self, _delta: &str) {}
     fn stream_reset(&mut self) {}
+    fn tool_started(
+        &mut self,
+        _name: &str,
+        _args: &serde_json::Map<String, serde_json::Value>,
+        _spoken: &str,
+    ) {
+    }
+    fn tool_finished(&mut self) {}
     fn failed(&mut self, _error: &GenerationError) {}
 }
 
@@ -305,9 +313,23 @@ impl ResponseGenerator {
                     "intermediate tool response must not include segment actions".into(),
                 ));
             }
+            if !tools.supports(&tool_call.name) {
+                return Err(GenerationError::Response(format!(
+                    "tool {}: disabled or unknown tool",
+                    tool_call.name
+                )));
+            }
+            let spoken = if tool_call.native_origin.is_some() {
+                String::new()
+            } else {
+                output.full_text().to_string()
+            };
+            observer.tool_started(&tool_call.name, &tool_call.args, &spoken);
             let result =
                 super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)
-                    .await?;
+                    .await;
+            observer.tool_finished();
+            let result = result?;
             if let Some(origin) = tool_call.native_origin {
                 if !input.tool_history.is_empty() {
                     return Err(GenerationError::Response(

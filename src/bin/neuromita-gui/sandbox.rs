@@ -413,6 +413,12 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
             can_cancel: request.snapshot.can_cancel(),
             ..Default::default()
         };
+        if let Some(tool) = &request.snapshot.tool_activity {
+            row.tool_name = tool.name.as_ref().into();
+            row.tool_args = tool.args.as_ref().into();
+            row.tool_json = tool.json.as_ref().into();
+            row.tool_executing = tool.executing;
+        }
         row.text = request
             .snapshot
             .provisional_text()

@@ -58,6 +58,15 @@ pub enum Language {
     English,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredDisplayMode {
+    #[default]
+    Off,
+    Brief,
+    Json,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InterfaceSettings {
@@ -65,6 +74,8 @@ pub struct InterfaceSettings {
     pub font_size: u16,
     pub visibility: SettingsVisibility,
     pub hide_private: bool,
+    #[serde(default)]
+    pub structured_display: StructuredDisplayMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -285,6 +296,7 @@ impl AppSettings {
                 font_size: 14,
                 visibility: SettingsVisibility::all_visible(),
                 hide_private: true,
+                structured_display: StructuredDisplayMode::Off,
             },
             reminders: RemindersSettings::initial_profile(),
             speech: SpeechSettings::default(),
@@ -372,4 +384,30 @@ section!(ToolSettings, tools);
 pub struct SectionSnapshot<T> {
     pub revision: u64,
     pub value: T,
+}
+
+#[cfg(test)]
+mod structured_display_tests {
+    use super::*;
+
+    #[test]
+    fn historical_settings_without_structured_display_default_to_off() {
+        let mut value = serde_json::to_value(AppSettings::initial_profile()).unwrap();
+        value["interface"]
+            .as_object_mut()
+            .unwrap()
+            .remove("structured_display");
+        let decoded: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            decoded.interface.structured_display,
+            StructuredDisplayMode::Off
+        );
+        for mode in [StructuredDisplayMode::Brief, StructuredDisplayMode::Json] {
+            let mut updated = decoded.clone();
+            updated.interface.structured_display = mode;
+            let again: AppSettings =
+                serde_json::from_value(serde_json::to_value(updated).unwrap()).unwrap();
+            assert_eq!(again.interface.structured_display, mode);
+        }
+    }
 }

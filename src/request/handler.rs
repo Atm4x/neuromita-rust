@@ -530,6 +530,19 @@ impl GenerationObserver for RecordObserver<'_> {
         self.record.stream_reset();
     }
 
+    fn tool_started(
+        &mut self,
+        name: &str,
+        args: &serde_json::Map<String, serde_json::Value>,
+        spoken: &str,
+    ) {
+        self.record.tool_started(name, args, spoken);
+    }
+
+    fn tool_finished(&mut self) {
+        self.record.tool_finished();
+    }
+
     fn response_received(&mut self, response: ProviderReply) {
         if let Some(capture) = &mut self.capture {
             capture.response_received(response.clone());

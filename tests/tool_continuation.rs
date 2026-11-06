@@ -132,6 +132,16 @@ async fn calculator_continuation_only_accepts_final_response() {
         ))
         .unwrap();
     let second = receive(&mut rx).await;
+    let activity = request.snapshot();
+    let tool = activity
+        .tool_activity
+        .as_ref()
+        .expect("tool block shown during continuation");
+    assert_eq!(tool.name.as_ref(), "calculator");
+    assert!(tool.args.contains("2**3+1"));
+    assert_eq!(activity.streamed_text.as_deref(), Some("Проверю данные"));
+    assert!(!tool.executing);
+    assert!(!activity.state.is_terminal());
     assert_eq!(second.input.tool_history.len(), 2);
     assert!(second.input.tool_history.last().unwrap().text.contains("9"));
     let after_intermediate = CharacterApi::get(CharacterId::Crazy)
@@ -153,6 +163,7 @@ async fn calculator_continuation_only_accepts_final_response() {
         "{:?}",
         snapshot.state
     );
+    assert!(snapshot.tool_activity.is_none());
     assert_eq!(
         CharacterApi::get(CharacterId::Crazy)
             .unwrap()
