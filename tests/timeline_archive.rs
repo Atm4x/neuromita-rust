@@ -1,0 +1,386 @@
+use std::{
+    fs,
+    io::Cursor,
+    path::{Path, PathBuf},
+};
+
+#[cfg(feature = "sqlite-system")]
+use neuromita::timeline::storage::{
+    SqliteTimelineRepository,
+    archive::{export_sqlite, import_sqlite},
+};
+use neuromita::{
+    character::CharacterId,
+    timeline::{
+        domain::{BranchId, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore},
+        storage::{
+            archive::{SessionArchiveError, export_memory, import_memory},
+            assets::{TimelineAssetRef, TimelineAssetStore},
+        },
+        view::TimelineMessageQueries,
+    },
+};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+struct TestDir(PathBuf);
+impl TestDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("nm-session-archive-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+fn build_session(
+    repo: &mut dyn TimelineRepository,
+    assets: &TimelineAssetStore,
+) -> (
+    SessionId,
+    BranchId,
+    BranchId,
+    TimelineAssetRef,
+    EventDraft,
+    Vec<neuromita::timeline::domain::TimelineFact>,
+) {
+    let session = SessionId::new();
+    let root = BranchId::new();
+    repo.create_session(session, root).unwrap();
+    let binary = assets
+        .import("image/png", Cursor::new(b"hello image payload"))
+        .unwrap();
+    let mut first = EventDraft::new(EventKind::PlayerMessage);
+    first.actor = Some("player".into());
+    first.external_message_id = Some("python-msg:abc/α".into());
+    first.observers.insert(CharacterId::Crazy);
+    first.payload.insert(
+        "content".into(),
+        json!([{"type":"text","text":"start"},{"type":"image","asset":binary}]),
+    );
+    let original = first.clone();
+    let initial = repo
+        .append(
+            root,
+            0,
+            "message:1",
+            json!({"command":"write"}),
+            vec![first],
+        )
+        .unwrap();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    repo.append(root, 1, "checkpoint:1", json!({}), vec![checkpoint])
+        .unwrap();
+    let fork = BranchId::new();
+    repo.fork(root, checkpoint_id, fork).unwrap();
+    let mut continuation = EventDraft::new(EventKind::PlayerMessage);
+    continuation.actor = Some("player".into());
+    continuation.observers.insert(CharacterId::Crazy);
+    continuation.payload.insert(
+        "content".into(),
+        json!([{"type":"text","text":"branch only"}]),
+    );
+    continuation
+        .links
+        .push(neuromita::timeline::domain::CausalLink {
+            relation: neuromita::timeline::domain::CausalRelation::CausedBy,
+            event_id: original.id,
+        });
+    repo.append(fork, 3, "message:fork", json!({}), vec![continuation])
+        .unwrap();
+    (session, root, fork, binary, original, initial)
+}
+
+fn bytes_with_change(bytes: &[u8], change: impl FnOnce(&mut Value)) -> Vec<u8> {
+    let mut value: Value = serde_json::from_slice(bytes).unwrap();
+    change(&mut value);
+    serde_json::to_vec(&value).unwrap()
+}
+
+#[test]
+fn memory_roundtrip_retains_branch_graph_receipt_external_id_and_assets() {
+    let temp = TestDir::new();
+    let first_assets = TimelineAssetStore::new(temp.path().join("origin-assets"), 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, root, fork, asset, original, receipt) = build_session(&mut origin, &first_assets);
+    let archive = export_memory(&origin, session, &first_assets).unwrap();
+    let mut target = TimelineStore::new();
+    let target_assets = TimelineAssetStore::new(temp.path().join("dest-assets"), 1024).unwrap();
+    assert_eq!(
+        import_memory(&mut target, &archive, &target_assets).unwrap(),
+        session
+    );
+    assert_eq!(origin.world(root).unwrap(), target.world(root).unwrap());
+    assert_eq!(origin.world(fork).unwrap(), target.world(fork).unwrap());
+    assert_eq!(target.branch(fork).unwrap().parent, Some(root));
+    assert_eq!(
+        target
+            .event(fork, original.id)
+            .unwrap()
+            .draft
+            .external_message_id
+            .as_deref(),
+        Some("python-msg:abc/α")
+    );
+    let selected =
+        TimelineMessageQueries::capture(&target, fork, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        target_assets
+            .read_visible(&selected, original.id, &asset)
+            .unwrap(),
+        b"hello image payload"
+    );
+    let again = target
+        .append(
+            root,
+            0,
+            "message:1",
+            json!({"command":"write"}),
+            vec![original],
+        )
+        .unwrap();
+    assert_eq!(again, receipt);
+    assert_eq!(
+        export_memory(&target, session, &target_assets).unwrap(),
+        archive
+    );
+    assert!(matches!(
+        import_memory(&mut target, &archive, &target_assets),
+        Err(SessionArchiveError::Conflict)
+    ));
+}
+
+#[test]
+fn invalid_archive_is_rejected_before_session_publication() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("origin"), 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, root, fork, _, _, _) = build_session(&mut origin, &assets);
+    let archive = export_memory(&origin, session, &assets).unwrap();
+    let destination_assets = TimelineAssetStore::new(temp.path().join("target"), 1024).unwrap();
+    let cases: [Box<dyn FnOnce(&mut Value)>; 8] = [
+        Box::new(|x| x["version"] = json!(99)),
+        Box::new(|x| x["unrecognized"] = json!(true)),
+        Box::new(|x| x["created_at_utc"] = json!("2026-01-01T00:00:00+04:00")),
+        Box::new(|x| x["assets"][0]["data_base64"] = json!("eHZj")),
+        Box::new(|x| x["assets"] = json!([])),
+        Box::new(|x| x["branches"][0]["events"][0]["draft"]["id"] = json!(Uuid::new_v4())),
+        Box::new(|x| {
+            let first = x["branches"][0]["events"][0].clone();
+            x["branches"][0]["events"]
+                .as_array_mut()
+                .unwrap()
+                .push(first);
+        }),
+        Box::new(|x| x["branches"][1]["info"]["checkpoint"] = json!(Uuid::new_v4())),
+    ];
+    for (number, case) in cases.into_iter().enumerate() {
+        let corrupted = bytes_with_change(&archive, case);
+        let mut target = TimelineStore::new();
+        assert!(
+            import_memory(&mut target, &corrupted, &destination_assets).is_err(),
+            "case {number}"
+        );
+        assert!(target.branch(root).is_err(), "case {number} published root");
+        assert!(target.branch(fork).is_err(), "case {number} published fork");
+    }
+}
+
+#[test]
+fn broken_causal_link_and_forged_receipt_are_rejected() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("origin"), 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, root, _, _, _, _) = build_session(&mut origin, &assets);
+    let archive = export_memory(&origin, session, &assets).unwrap();
+    let target_assets = TimelineAssetStore::new(temp.path().join("dest"), 1024).unwrap();
+    let bad_link = bytes_with_change(&archive, |x| {
+        let fork_branch = x["branches"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|b| b["info"]["parent"] == json!(root))
+            .unwrap();
+        fork_branch["events"][1]["draft"]["links"][0]["event_id"] = json!(Uuid::new_v4());
+    });
+    assert!(import_memory(&mut TimelineStore::new(), &bad_link, &target_assets).is_err());
+    let bad_receipt = bytes_with_change(&archive, |x| {
+        x["branches"][0]["receipts"][0]["command"] = json!([])
+    });
+    assert!(import_memory(&mut TimelineStore::new(), &bad_receipt, &target_assets).is_err());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_restore_reopen_and_reexport_match_byte_for_byte() {
+    let temp = TestDir::new();
+    let asset1 = TimelineAssetStore::new(temp.path().join("assets1"), 1024).unwrap();
+    let session;
+    let root;
+    let branch;
+    let archive;
+    {
+        let mut origin =
+            SqliteTimelineRepository::open(&temp.path().join("origin.sqlite")).unwrap();
+        (session, root, branch, _, _, _) = build_session(&mut origin, &asset1);
+        archive = export_sqlite(&origin, session, &asset1).unwrap();
+    }
+    let asset2 = TimelineAssetStore::new(temp.path().join("assets2"), 1024).unwrap();
+    {
+        let mut restored =
+            SqliteTimelineRepository::open(&temp.path().join("restored.sqlite")).unwrap();
+        assert_eq!(
+            import_sqlite(&mut restored, &archive, &asset2).unwrap(),
+            session
+        );
+        assert_eq!(restored.branch(root).unwrap().head_sequence, 2);
+        assert_eq!(restored.branch(branch).unwrap().head_sequence, 4);
+    }
+    let reopened = SqliteTimelineRepository::open(&temp.path().join("restored.sqlite")).unwrap();
+    assert_eq!(export_sqlite(&reopened, session, &asset2).unwrap(), archive);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_invalid_archive_rolls_back_without_partial_session() {
+    let temp = TestDir::new();
+    let first = TimelineAssetStore::new(temp.path().join("a"), 1024).unwrap();
+    let mut source = TimelineStore::new();
+    let (session, root, _, _, _, _) = build_session(&mut source, &first);
+    let bytes = export_memory(&source, session, &first).unwrap();
+    let corrupt = bytes_with_change(&bytes, |x| {
+        x["branches"][1]["events"][0]["sequence"] = json!(999)
+    });
+    let target_assets = TimelineAssetStore::new(temp.path().join("b"), 1024).unwrap();
+    let path = temp.path().join("db.sqlite");
+    {
+        let mut target = SqliteTimelineRepository::open(&path).unwrap();
+        assert!(import_sqlite(&mut target, &corrupt, &target_assets).is_err());
+        assert!(target.branch(root).is_err());
+    }
+    let mut reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert!(reopened.branch(root).is_err());
+    import_sqlite(&mut reopened, &bytes, &target_assets).unwrap();
+    assert_eq!(reopened.branch(root).unwrap().session_id, session);
+}
+
+#[test]
+fn unknown_nested_fields_and_foreign_event_ids_are_refused() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("source-assets"), 1024).unwrap();
+    let mut source = TimelineStore::new();
+    let (session, root, _, _, _, _) = build_session(&mut source, &assets);
+    let archive = export_memory(&source, session, &assets).unwrap();
+    let destination_assets =
+        TimelineAssetStore::new(temp.path().join("destination-assets"), 1024).unwrap();
+    for corrupt in [
+        bytes_with_change(&archive, |x| {
+            x["branches"][0]["info"]["unknown"] = json!(false)
+        }),
+        bytes_with_change(&archive, |x| {
+            x["branches"][0]["events"][0]["draft"]["unexpected"] = json!(false)
+        }),
+        bytes_with_change(&archive, |x| {
+            x["branches"][0]["receipts"][0]["unrecognized"] = json!(false)
+        }),
+    ] {
+        assert!(import_memory(&mut TimelineStore::new(), &corrupt, &destination_assets).is_err());
+    }
+    let mut other = TimelineStore::new();
+    let foreign_session = SessionId::new();
+    let foreign_root = BranchId::new();
+    other.create_session(foreign_session, foreign_root).unwrap();
+    let existing_id = source
+        .event(root, source.world(root).unwrap()[0].draft.id)
+        .unwrap()
+        .draft
+        .id;
+    let mut foreign = EventDraft::new(EventKind::PlayerMessage);
+    foreign.id = existing_id;
+    foreign.actor = Some("player".into());
+    foreign.observers.insert(CharacterId::Kind);
+    foreign
+        .payload
+        .insert("content".into(), json!("different session"));
+    other
+        .append(foreign_root, 0, "foreign", json!({}), vec![foreign])
+        .unwrap();
+    assert!(import_memory(&mut other, &archive, &destination_assets).is_err());
+    assert!(other.branch(root).is_err());
+    assert_eq!(other.branch(foreign_root).unwrap().head_sequence, 1);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_sql_failure_in_middle_of_import_rolls_back_every_branch() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("original"), 1024).unwrap();
+    let mut source = TimelineStore::new();
+    let (session, root, child, _, _, _) = build_session(&mut source, &assets);
+    let archive = export_memory(&source, session, &assets).unwrap();
+    let db_path = temp.path().join("injected-failure.sqlite");
+    let mut destination = SqliteTimelineRepository::open(&db_path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_import BEFORE INSERT ON timeline_events WHEN CAST(NEW.sequence AS INTEGER)=4 BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+    }
+    let target_assets = TimelineAssetStore::new(temp.path().join("target"), 1024).unwrap();
+    assert!(import_sqlite(&mut destination, &archive, &target_assets).is_err());
+    assert!(destination.branch(root).is_err());
+    assert!(destination.branch(child).is_err());
+    drop(destination);
+    let reopened = SqliteTimelineRepository::open(&db_path).unwrap();
+    assert!(reopened.branch(root).is_err());
+    assert!(reopened.branch(child).is_err());
+}
+
+#[test]
+fn export_is_scoped_to_selected_session_not_adjacent_timeline() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("all-assets"), 1024).unwrap();
+    let mut timeline = TimelineStore::new();
+    let (selected, root, _, reference, _, _) = build_session(&mut timeline, &assets);
+    let (other, other_root, _, other_reference, _, _) = build_session(&mut timeline, &assets);
+    let archive = export_memory(&timeline, selected, &assets).unwrap();
+    let envelope: Value = serde_json::from_slice(&archive).unwrap();
+    assert_eq!(envelope["session_id"], json!(selected));
+    assert_ne!(selected, other);
+    assert_eq!(envelope["assets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        envelope["assets"][0]["reference"]["digest"],
+        json!(reference.digest)
+    );
+    assert_eq!(reference, other_reference);
+    let mut target = TimelineStore::new();
+    let target_assets = TimelineAssetStore::new(temp.path().join("target"), 1024).unwrap();
+    import_memory(&mut target, &archive, &target_assets).unwrap();
+    assert_eq!(target.branch(root).unwrap().session_id, selected);
+    assert!(target.branch(other_root).is_err());
+}
+
+#[test]
+fn export_aborts_when_referenced_binary_was_tampered() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut timeline = TimelineStore::new();
+    let (session, _, _, reference, _, _) = build_session(&mut timeline, &assets);
+    let file = temp
+        .path()
+        .join("assets/objects")
+        .join(&reference.digest[..2])
+        .join(&reference.digest);
+    fs::write(file, b"not the image").unwrap();
+    assert!(matches!(
+        export_memory(&timeline, session, &assets),
+        Err(SessionArchiveError::Asset(_))
+    ));
+}

@@ -254,6 +254,15 @@ impl TimelineAssetStore {
         self.read_checked(reference)
     }
 
+    /// Privileged transfer boundary. The caller must first prove the reference
+    /// belongs to the explicitly selected canonical session being exported.
+    pub(crate) fn read_for_archive(
+        &self,
+        reference: &TimelineAssetRef,
+    ) -> Result<Vec<u8>, TimelineAssetError> {
+        self.read_checked(reference)
+    }
+
     fn path_for(&self, reference: &TimelineAssetRef) -> Result<PathBuf, TimelineAssetError> {
         reference.validate()?;
         if reference.size > self.max_bytes {
