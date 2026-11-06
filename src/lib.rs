@@ -20,6 +20,7 @@ pub mod prompts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod maintenance;
 pub mod migration;
+pub mod onboarding;
 pub mod portable;
 pub mod presentation;
 pub mod reminders;

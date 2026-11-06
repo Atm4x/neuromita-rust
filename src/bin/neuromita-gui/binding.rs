@@ -28,11 +28,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .renderer_name("femtovg".into())
         .select()?;
     let window = AppWindow::new()?;
-    let requires_consent = super::onboarding::pending(&options.data_directory)?;
+    let requires_consent = neuromita::onboarding::pending(&options.data_directory)?;
     window.set_onboarding_required(requires_consent);
     let initial_code = options.locale.as_str();
     window.set_onboarding_language(initial_code.into());
-    window.set_onboarding_eula_text(super::onboarding::eula_text(initial_code).into());
+    window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
     let desktop = Rc::new(RefCell::new(None));
     if !requires_consent {
         *desktop.borrow_mut() = Some(super::sandbox::attach(
@@ -120,7 +120,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     window.on_onboarding_language_selected(move |code| {
         if let Some(window) = language_window.upgrade() {
             window.set_onboarding_language(code.clone());
-            window.set_onboarding_eula_text(super::onboarding::eula_text(&code).into());
+            window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
         }
     });
     let accept_window = window.as_weak();
@@ -133,7 +133,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             return;
         };
         let code = window.get_onboarding_language();
-        if let Err(error) = super::onboarding::accept(&accept_directory, &code) {
+        if let Err(error) = neuromita::onboarding::accept(&accept_directory, &code) {
             window.set_notice(format!("Не удалось сохранить согласие: {error}").into());
             return;
         }

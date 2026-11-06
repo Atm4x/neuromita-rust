@@ -5,7 +5,6 @@ mod asr;
 mod binding;
 mod launcher_ui;
 mod memory;
-mod onboarding;
 mod presenter;
 mod releases;
 mod runtime;

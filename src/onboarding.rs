@@ -1,11 +1,9 @@
 use std::{io, path::Path};
 
-use neuromita::settings::{
-    AppSettings, JsonSettingsRepository, SettingsRepository, StoredSettings,
-};
+use crate::settings::{AppSettings, JsonSettingsRepository, SettingsRepository, StoredSettings};
 
-const RU: &str = include_str!("../../../assets/onboarding/eula_ru.txt");
-const EN: &str = include_str!("../../../assets/onboarding/eula_en.txt");
+const RU: &str = include_str!("../assets/onboarding/eula_ru.txt");
+const EN: &str = include_str!("../assets/onboarding/eula_en.txt");
 
 pub fn eula_text(code: &str) -> &'static str {
     match code.to_ascii_lowercase().as_str() {
@@ -26,7 +24,7 @@ pub fn pending(data_dir: &Path) -> Result<bool, io::Error> {
 }
 
 pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
-    use neuromita::settings::Language;
+    use crate::settings::Language;
 
     let selected = match language.to_ascii_lowercase().as_str() {
         "ru" => Language::Russian,
@@ -63,7 +61,7 @@ pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neuromita::settings::Language;
+    use crate::settings::Language;
 
     struct Directory(std::path::PathBuf);
     impl Directory {
