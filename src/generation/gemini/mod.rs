@@ -38,6 +38,7 @@ impl GeminiProvider {
             &context.prepared_knowledge,
             context.prompt.as_ref(),
             &context.tool_history,
+            &context.native_tool_history,
             &context.tool_settings,
         );
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
@@ -66,6 +67,7 @@ impl GeminiProvider {
         });
         match tokio::time::timeout(template.settings().timeout(), async {
             let result = if template.options().stream {
+                let mut parser = wire::StreamParser::default();
                 let streamed = super::http::send_sse(
                     self.client
                         .post(template.stream_url())
@@ -74,7 +76,7 @@ impl GeminiProvider {
                         .body(payload_json),
                     template.options().max_retries,
                     observer,
-                    wire::stream_event,
+                    |event| parser.event(event),
                     false,
                 )
                 .await?;
@@ -82,6 +84,8 @@ impl GeminiProvider {
                     Err(GenerationError::Response(
                         "Gemini stream did not complete".into(),
                     ))
+                } else if let Some(call) = streamed.native_call {
+                    wire::native_structured(call)
                 } else {
                     super::StructuredResponse::parse(&streamed.text)
                 }
