@@ -1046,36 +1046,38 @@ impl AiSupervisor {
         operation: &str,
         args: Value,
     ) -> Result<Value, AiRuntimeError> {
+        self.call_tracked(service, operation, args)
+            .await
+            .map(|(_, response)| response)
+    }
+
+    async fn call_tracked(
+        &self,
+        service: AiService,
+        operation: &str,
+        args: Value,
+    ) -> Result<(Uuid, Value), AiRuntimeError> {
+        let key = self.topology.key(service);
         let worker = self
             .workers
             .lock()
             .await
-            .get(&self.topology.key(service))
+            .get(&key)
             .cloned()
             .ok_or(AiRuntimeError::NotRunning)?;
-        let guard = worker.lock().await;
+        let mut guard = worker.lock().await;
         let generation = guard.generation;
+        let result = guard.request(operation, &args).await;
+        let fatal = guard.failed;
         drop(guard);
-        let result = worker.lock().await.request(operation, &args).await;
-        let current = self
-            .workers
-            .lock()
-            .await
-            .get(&self.topology.key(service))
-            .cloned();
-        let current_generation = if let Some(current) = current {
-            Some(current.lock().await.generation)
-        } else {
-            None
-        };
-        if current_generation != Some(generation) {
+        let current = self.workers.lock().await.get(&key).cloned();
+        if !current.is_some_and(|current| Arc::ptr_eq(&worker, &current)) {
             return Err(AiRuntimeError::StaleGeneration);
         }
         if let Err(error) = &result {
-            let fatal = worker.lock().await.failed;
             self.request_failed(service, generation, error, fatal);
         }
-        result
+        result.map(|value| (generation, value))
     }
 
     pub async fn synthesize_streamed_wav(&self, input: Value) -> Result<Vec<u8>, AiRuntimeError> {
@@ -1122,46 +1124,61 @@ impl AiSupervisor {
         plugin_id: &str,
         settings: Value,
     ) -> Result<Value, AiRuntimeError> {
-        let result = self
-            .call(
+        let (generation, result) = self
+            .call_tracked(
                 service,
                 "initialize",
                 json!({"plugin_id": plugin_id, "settings": settings}),
             )
             .await?;
         if result["model_ready"] == true {
-            let worker = self
-                .workers
-                .lock()
-                .await
-                .get(&self.topology.key(service))
-                .cloned();
-            if let Some(worker) = worker {
-                let mut guard = worker.lock().await;
-                let revision = guard
-                    .selections
-                    .get(&service)
-                    .filter(|(selected, _)| selected == plugin_id)
-                    .and_then(|(_, revision)| revision.clone());
-                guard
-                    .selections
-                    .insert(service, (plugin_id.into(), revision.clone()));
-                let generation = guard.generation;
-                drop(guard);
-                self.status.send_modify(|snapshot| {
-                    let state = snapshot.services.entry(service).or_default();
-                    if state.generation == Some(generation) {
-                        state.active_model = Some(LoadedModel {
-                            plugin_id: plugin_id.into(),
-                            asset_revision: revision,
-                        });
-                        state.phase = RuntimePhase::ModelReady;
-                        state.last_error = None;
-                    }
-                });
-            }
+            self.publish_initialized_model(service, plugin_id, generation)
+                .await?;
         }
         Ok(result)
+    }
+
+    async fn publish_initialized_model(
+        &self,
+        service: AiService,
+        plugin_id: &str,
+        generation: Uuid,
+    ) -> Result<(), AiRuntimeError> {
+        let key = self.topology.key(service);
+        let slot = self.activation_lock(key).await;
+        let _transition = slot.lock().await;
+        let worker = self
+            .workers
+            .lock()
+            .await
+            .get(&key)
+            .cloned()
+            .ok_or(AiRuntimeError::StaleGeneration)?;
+        let mut guard = worker.lock().await;
+        if guard.generation != generation {
+            return Err(AiRuntimeError::StaleGeneration);
+        }
+        let revision = guard
+            .selections
+            .get(&service)
+            .filter(|(selected, _)| selected == plugin_id)
+            .and_then(|(_, revision)| revision.clone());
+        guard
+            .selections
+            .insert(service, (plugin_id.into(), revision.clone()));
+        drop(guard);
+        self.status.send_modify(|snapshot| {
+            let state = snapshot.services.entry(service).or_default();
+            if state.generation == Some(generation) {
+                state.active_model = Some(LoadedModel {
+                    plugin_id: plugin_id.into(),
+                    asset_revision: revision,
+                });
+                state.phase = RuntimePhase::ModelReady;
+                state.last_error = None;
+            }
+        });
+        Ok(())
     }
 
     pub async fn selected_model(&self, service: AiService) -> Option<(String, Option<String>)> {
@@ -1737,6 +1754,37 @@ class Plugin:
         drop(_busy);
         supervisor.stop(AiService::Tts).await.unwrap();
         supervisor.stop(AiService::Asr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_initialized_model_cannot_mark_restarted_worker_ready() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let previous = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor.stop(AiService::Tts).await.unwrap();
+        let current = supervisor.start(AiService::Tts).await.unwrap();
+        assert_ne!(previous, current);
+        assert!(matches!(
+            supervisor
+                .publish_initialized_model(AiService::Tts, "mock_tts", previous)
+                .await,
+            Err(AiRuntimeError::StaleGeneration)
+        ));
+        let status = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(status.generation, Some(current));
+        assert_eq!(status.phase, RuntimePhase::WorkerRunning);
+        assert!(status.active_model.is_none());
+        assert!(supervisor.selected_model(AiService::Tts).await.is_none());
+        supervisor.stop(AiService::Tts).await.unwrap();
     }
 
     #[tokio::test]
