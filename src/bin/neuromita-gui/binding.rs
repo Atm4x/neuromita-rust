@@ -29,7 +29,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
 fn run_inner() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
-    let diagnostics = neuromita::diagnostics::init()?;
+    let diagnostics = neuromita::diagnostics::init().map_err(std::io::Error::other)?;
     let root = neuromita::portable::PortableDataRoot::explicit(options.data_directory.clone())?;
     diagnostics.attach(&root)?;
     neuromita::diagnostics::boundary(
