@@ -1,0 +1,31 @@
+name: Import Agent A Memory Git Bundle
+on:
+  push:
+    branches:
+      - bridge/import-agent-a-memory-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish real local Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=66e603d7ae3916c6f1f74089ecff3a8b40db2049
+          TARGET=4202f085de50d1b79653311df3df08c0d2568d2d
+          BRANCH=codex/knowledge-memory-autonomous-20261106
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify .bridge/agent-a-memory-aba.bundle
+          git fetch --no-tags .bridge/agent-a-memory-aba.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
+          git merge-base --is-ancestor "$BASE" "$TARGET"
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
+            echo "The target branch already exists; refusing to rewrite it."
+            exit 1
+          fi
+          git push origin "$TARGET:refs/heads/$BRANCH"
