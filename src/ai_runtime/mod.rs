@@ -629,15 +629,20 @@ impl AiSupervisor {
         error: &AiRuntimeError,
         fatal: bool,
     ) {
-        self.status.send_modify(|snapshot| {
+        self.status.send_if_modified(|snapshot| {
             if snapshot.service(service).generation != Some(generation) {
-                return;
+                return false;
             }
             let reason = error.to_string();
             if fatal {
+                let mut changed = false;
                 for (tracked, state) in &mut snapshot.services {
                     if state.generation != Some(generation)
                         || (self.topology == ProcessTopology::Split && *tracked != service)
+                        || (state.phase == RuntimePhase::Failed
+                            && state.active_model.is_none()
+                            && state.pending_model.is_none()
+                            && state.last_error.is_some())
                     {
                         continue;
                     }
@@ -645,9 +650,17 @@ impl AiSupervisor {
                     state.active_model = None;
                     state.pending_model = None;
                     state.last_error = Some(reason.clone());
+                    changed = true;
                 }
+                changed
             } else {
-                snapshot.services.entry(service).or_default().last_error = Some(reason);
+                let state = snapshot.services.entry(service).or_default();
+                if state.last_error.as_deref() == Some(reason.as_str()) {
+                    false
+                } else {
+                    state.last_error = Some(reason);
+                    true
+                }
             }
         });
     }
@@ -1837,6 +1850,23 @@ class Plugin:
             assert!(state.active_model.is_none());
             assert!(state.pending_model.is_none());
             assert_eq!(state.last_error.as_deref(), Some(expected_reason.as_str()));
+        }
+        let mut observed = supervisor.observe_status();
+        observed.borrow_and_update();
+        assert!(matches!(
+            supervisor.call(AiService::Tts, "status", json!({})).await,
+            Err(AiRuntimeError::Protocol(message)) if message == "worker requires restart"
+        ));
+        assert!(!observed.has_changed().unwrap());
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor
+                    .status_snapshot()
+                    .service(service)
+                    .last_error
+                    .as_deref(),
+                Some(expected_reason.as_str())
+            );
         }
         supervisor.stop(AiService::Asr).await.unwrap();
         for service in [AiService::Tts, AiService::Asr] {
