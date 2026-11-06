@@ -12,19 +12,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and fast-forward original Agent A branch
+      - name: Verify and publish Agent A graph fusion commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=c2f526c66df196ee2e957498581ebac19b461070
-          TARGET=c6776962859cda922b33421de39529c6eb2e9be1
-          BRANCH=codex/knowledge-inline-structured-20261106
+          BASE=c6776962859cda922b33421de39529c6eb2e9be1
+          TARGET=1f9b6059c61bf6a0349cb27b5b020122e89f31bc
+          BRANCH=codex/knowledge-graph-fusion-20261106
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-inline-clippy-followup.bundle.sha256
-          git bundle verify .bridge/agent-a-inline-clippy-followup.bundle
-          git fetch --no-tags .bridge/agent-a-inline-clippy-followup.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-graph-fusion.bundle.sha256
+          git bundle verify .bridge/agent-a-graph-fusion.bundle
+          git fetch --no-tags .bridge/agent-a-graph-fusion.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
-          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
-          test "$CURRENT" = "$BASE"
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
+            echo "Target branch exists; refusing overwrite."
+            exit 1
+          fi
           git push origin "$TARGET:refs/heads/$BRANCH"
