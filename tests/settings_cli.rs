@@ -177,3 +177,82 @@ fn help_documents_offline_commands_without_api_key() {
     assert!(text.contains("neuromita settings import --source"));
     assert!(text.contains("no GEMINI_API_KEY"));
 }
+
+#[test]
+fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import_is_noop() {
+    let directory = TempDir::new();
+    let source = directory.path("python-source.json");
+    let target = directory.path("rust-settings.json");
+    let starting = stored(22, 90);
+    JsonSettingsRepository::new(target.clone())
+        .save(&starting)
+        .unwrap();
+    let original = fs::read(&target).unwrap();
+    let python_source = br#"{"LANGUAGE":"EN","HIDE_PRIVATE":false,"VOICEOVER_LOCAL_VOLUME":45,"LAST_API_PRESET_ID":87,"API_KEY":"test-secret-value"}"#;
+    fs::write(&source, python_source).unwrap();
+
+    let execute = |extra: &[&str]| {
+        Command::new(BINARY)
+            .args(["settings", "import", "--format", "python", "--source"])
+            .arg(&source)
+            .arg("--destination")
+            .arg(&target)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let dry_run = execute(&["--dry-run"]);
+    assert!(dry_run.status.success(), "{}", stderr(&dry_run));
+    assert!(stdout(&dry_run).contains("no destination or backup files were written"));
+    assert!(stdout(&dry_run).contains("LAST_API_PRESET_ID"));
+    assert!(!stdout(&dry_run).contains("test-secret-value"));
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let applied = execute(&[]);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert!(stdout(&applied).contains("Previous Rust settings backup:"));
+    assert_eq!(fs::read(&source).unwrap(), python_source);
+    let imported = JsonSettingsRepository::new(target.clone()).load().unwrap();
+    assert_eq!(imported.revision, starting.revision + 1);
+    assert_eq!(imported.settings.voice.volume, Volume::new(45).unwrap());
+    assert_eq!(imported.settings.presets, starting.settings.presets);
+    assert_eq!(
+        fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-python-import"))
+            .count(),
+        1
+    );
+    let second = execute(&[]);
+    assert!(second.status.success());
+    assert!(stdout(&second).contains("changed=false"));
+    assert_eq!(
+        JsonSettingsRepository::new(target).load().unwrap(),
+        imported
+    );
+}
+
+#[test]
+fn python_cli_never_overwrites_the_python_source_even_via_alias() {
+    let directory = TempDir::new();
+    let source = directory.path("python.json");
+    let original = br#"{"LANGUAGE":"EN"}"#;
+    fs::write(&source, original).unwrap();
+    let output = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        source.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("must be different files"));
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
