@@ -1,4 +1,4 @@
-name: Import Agent A Memory Git Bundle
+name: Import Agent A Memory Reset Epoch Git Bundle
 on:
   push:
     branches:
@@ -12,17 +12,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish Agent A graph fusion commit
+      - name: Verify and publish independent Agent A memory reset commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=c6776962859cda922b33421de39529c6eb2e9be1
-          TARGET=1f9b6059c61bf6a0349cb27b5b020122e89f31bc
-          BRANCH=codex/knowledge-graph-fusion-20261106
+          BASE=1f9b6059c61bf6a0349cb27b5b020122e89f31bc
+          TARGET=9b941ef8c74452c40ed7b807c1ead2146eefb703
+          BRANCH=codex/knowledge-memory-reset-epoch-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-graph-fusion.bundle.sha256
-          git bundle verify .bridge/agent-a-graph-fusion.bundle
-          git fetch --no-tags .bridge/agent-a-graph-fusion.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-memory-reset-epoch.bundle.sha256
+          git bundle verify .bridge/agent-a-memory-reset-epoch.bundle
+          git fetch --no-tags .bridge/agent-a-memory-reset-epoch.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
