@@ -1,0 +1,72 @@
+name: Agent C failure diagnostics incremental bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-failure-diagnostics-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-stream-generation-20261106
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=c4a1b2ad5fe9863f7fffaf32b4ffe7eae53f84e0
+          HEAD=ed2d85c38f27922c54d9bad962794abae2d4bdf3
+          TARGET=codex/ai-platform-hub-failure-diagnostics-20261106
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-failure.bundle
+          IyB2MiBnaXQgYnVuZGxlCi1jNGExYjJhZDVmZTk4NjNmN2ZmZmFmMzJiNGZmZTdlYWU1M2Y4NGUw
+          IGZpeChhaSk6IHJlamVjdCBzdGFsZSBzdHJlYW1lZCBhdWRpbyBhbmQgZmFuIG91dCBzaGFyZWQg
+          d29ya2VyIGZhaWx1cmVzCmVkMmQ4NWMzOGYyNzkyMmM1NGQ5YmFkOTYyNzk0YWJhZTJkNGJkZjMg
+          cmVmcy9oZWFkcy9jb2RleC9haS1wbGF0Zm9ybS1odWItZmFpbHVyZS1kaWFnbm9zdGljcy0yMDI2
+          MTEwNgoKUEFDSwAAAAIAAAAIkRR4nK2NS07EMBBE9zlFL0GIyHESJ0YIgVjDHTpO9YxhZhy1HT63
+          x3MHavVU0qsqCpAdVnjTd9bY1TuGc9atoxHBuE4IELhuMW5uNlZcCoWBu8XyOgr87HqZRISlt8tQ
+          lQmMsZd5gGl4L8ek9I5d01ssTC+Hq/9Kj3yF+/C8Z2huL0mxnX7bQyzHfWlDOj9RN/ne+9nPE92Z
+          mqa251gK/muvkfhzw/H2gTZF1b5AEjUX+k76WV+E42lXUOA6Shw05UyKD4SCtULRiNz8ASylaRP5
+          A1BMa+SOdwhO1JAcH66+1dzjTGJEeJwBOQDG//8F/wWwoAEUeXLXbSdhP6C3JGDxjfNpe+iOrWuT
+          tAG5FMoRjoL8Kvvnfr52m1VuODF1etcAk4ECfjVwG/3+AUdzED6wQkij+PryBFeJgb6/A/bkeJz7
+          wPSBaUK9yIVivWofrYUHM9TE54oWzq+/Hu/0YOLkuwDNUA4L+QOBjToTGZz10Db/xC256mIlZD+z
+          YXicATkAxv/bGJ4ZkJ0uZmFpbHVyZS1kaWFnbm9zdGljcy1jMi5tZADja9iwtrhJ2G8NZSp+n9wt
+          qnsST7GI0wu1lRinvkN4nHVTO25bMRDsdYoFUqSRFcBIlVSGgQBpAsNSb61ISm/j90iGu5TsLofI
+          CXOSDPkk2U06kvubnRl+oPtb+vv7D62Nd2OgPRuP9P3hnrzwISY1cUopUgk5sAWPw68a1HSxWLuU
+          wxfKXExQJKo10Ifbz0tSY/eMXNTZEEgHLsHfnFJ5DoU4eiSUwBPeDiGGwibI3MvLarG421vP6Ris
+          cNScigGXjLUEGlhp4tKaM50bvuuB6PYbUoPfLmlfC6aXK2KyBDhspBiNVxOgujRxGJni+Nrea5lx
+          98biaHvOaY1Qozhgw2JbCqWksqLHcCpiEg+9LBU5SAQjF9DYVQFO5q5pp6EcO9voYlUBoY6eBvGh
+          Jziuiuree0mT6BjY90hF5bIT2HJwjzG4oMrllU5sbqCaPVTSFW0a7zVjkmgqFNOJMmDjDvzcoWH5
+          N+o+KgQoagDrUvGIzVbog1b0I8X5nseK5WZwjYiJcWttxYUbbY7wM8KrYbBWhItQGy9NztVwBfGo
+          CQGjXHej6NCEVdJciyRQc2bIDRwPl7XmTTVED02ADpq3y5Psn6bkZS9Qv2nNxySefM0jpltoUxB0
+          fV2F1TZXa9JV4AM40uakWSX07gaOnHUASO7ufJZxbGJzU3akh1cbUOEGgYpt9SNcAxRKu2QDbTbr
+          /nq3fmzmany9UfIfr+h5EkNDAIF/Y1PmZ3DvvuCSToLJ1dpX6JzMNDWWRMknIGjMypTha66WJuzu
+          Lu79SuGlUSP4EJbyp/54lo6dyXH+UleJ8c8bi1C4XCj8B+OxkJr/ATaXvAPKtVP/nE4FoVt3jW0Z
+          KbK0eJwBHwDg/9EK0QqQNBRe6AIuMfvLXpTuUsiy6yrTA6yaF7FICQXkQg338QKywbIPEBK9B1Z/
+          xIMMgN7oSZK1bXicO8txlmODNZPIxWMdwRl7UyYkKckeq2ZZInCUZW7fZn+mf4wA7cwNyPMWTmAP
+          NSxmgG8UFSnz9q0Z1LqGh4Z4nB2Ov0sCcQDF+aKnp6WdWaiIx4UmavYLIiJQDCXKKIiUSyHishOK
+          SrizxrChhoio3vClsRbHLKGCcGiO5oaQ+gOiCIqoqdO3fHjw3uNdPzJ7T0yFF3E40Y2omDIIeWlN
+          lbHTL+BKjONuIohvsY5Spx7KZALb1ETLrYRDR9LbMNAlh5pMJEMwha3V13mONNOVKeGk1K7BiM+M
+          HwcpH17KXgg+I13niNslRCLCXGFdDiiypBY2+iR1US0qgWAQ9+MOnfYCl/12vKU9iE0bUMs4sZBt
+          0+r6xrq+qGzKsDlDuJixVnezI9c4utXj/H0Ix79+Wo8Qlj4wRKCrC8RBc1Zipxt5EkChy4Rs3QXL
+          cy8ev1jE/3roaQuJUr6VtNCojbjpwBKxgHew9IcnXsRmGVaVla2VnByARD2GvjVJLS7ieNTNao+X
+          ZUXO07NB0kH3OcIzZkETxj7sCA+bb2oc+U3/A55Jfa9OdtBRKaksf1a98he/PZH6BG2OLQ==
+          BUNDLE
+          echo '1b102d625e4e0bf2175ecc26d6641da12778dbd991a4890282a97f1bc6557f16  /tmp/agent-c-failure.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-failure.bundle
+          git fetch --no-tags /tmp/agent-c-failure.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
