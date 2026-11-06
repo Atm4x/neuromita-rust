@@ -1,3 +1,4 @@
+mod content;
 mod index;
 pub(crate) use knowledge::knowledge_change;
 mod knowledge;
@@ -15,6 +16,9 @@ mod world;
 
 pub use crate::memory::{
     CharacterMemories, MemoryChange, MemoryCommand, MemoryId, MemoryPriority, MemoryRecord,
+};
+pub use content::{
+    TimelineAssetRef, TimelineContentError, TimelineMessagePart, parse_message_content,
 };
 pub use messages::{CharacterMessageProjection, MessageRole, ProjectedMessage, character_messages};
 pub use model::{

@@ -4,6 +4,7 @@ mod credentials;
 mod effects;
 pub mod gemini;
 mod http;
+pub mod multimodal;
 pub mod openai;
 mod presets;
 pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretKey};
