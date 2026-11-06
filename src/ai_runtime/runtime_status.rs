@@ -22,12 +22,21 @@ pub struct LoadedModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryAttempts {
+    pub generation: Uuid,
+    pub attempted: u8,
+    pub maximum: u8,
+    pub exhausted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRuntimeStatus {
     pub phase: RuntimePhase,
     pub generation: Option<Uuid>,
     pub active_model: Option<LoadedModel>,
     pub pending_model: Option<String>,
     pub last_error: Option<String>,
+    pub recovery: Option<RecoveryAttempts>,
 }
 
 impl Default for ServiceRuntimeStatus {
@@ -38,11 +47,12 @@ impl Default for ServiceRuntimeStatus {
             active_model: None,
             pending_model: None,
             last_error: None,
+            recovery: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeSnapshot {
     pub services: HashMap<AiService, ServiceRuntimeStatus>,
 }
