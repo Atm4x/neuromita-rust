@@ -110,7 +110,7 @@ pub struct GenerationInput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NativeToolExchange {
-    pub call_id: String,
+    pub origin: super::structured::NativeToolOrigin,
     pub name: String,
     pub args: serde_json::Map<String, serde_json::Value>,
     pub result: String,
@@ -277,7 +277,7 @@ impl ResponseGenerator {
                 break output;
             };
             if tool_call.name == "reminder" {
-                if tool_call.native_call_id.is_some() {
+                if tool_call.native_origin.is_some() {
                     return Err(GenerationError::Response(
                         "native reminder tool is not registered".into(),
                     ));
@@ -307,14 +307,14 @@ impl ResponseGenerator {
             }
             let result =
                 super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)?;
-            if let Some(call_id) = tool_call.native_call_id {
+            if let Some(origin) = tool_call.native_origin {
                 if !input.tool_history.is_empty() {
                     return Err(GenerationError::Response(
                         "cannot mix structured and native tool continuations".into(),
                     ));
                 }
                 input.native_tool_history.push(NativeToolExchange {
-                    call_id,
+                    origin,
                     name: tool_call.name,
                     args: tool_call.args,
                     result,

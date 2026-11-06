@@ -17,6 +17,7 @@ pub(crate) struct NativeCall {
     pub id: String,
     pub name: String,
     pub args: String,
+    pub metadata: Option<serde_json::Value>,
 }
 
 pub(crate) enum NativeEvent {
@@ -24,6 +25,7 @@ pub(crate) enum NativeEvent {
         id: String,
         name: String,
         arguments: String,
+        metadata: Option<serde_json::Value>,
     },
     Arguments(String),
     Complete(String),
@@ -296,6 +298,7 @@ pub(crate) async fn send_sse(
                                         id,
                                         name,
                                         arguments,
+                                        metadata,
                                     } => {
                                         if native_call.is_some()
                                             || !text.is_empty()
@@ -309,6 +312,7 @@ pub(crate) async fn send_sse(
                                                 id,
                                                 name,
                                                 args: arguments,
+                                                metadata,
                                             });
                                             Ok(())
                                         }

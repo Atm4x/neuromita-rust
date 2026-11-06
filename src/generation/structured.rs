@@ -21,7 +21,13 @@ pub struct ToolCall {
     #[serde(default, deserialize_with = "object_or_json_string")]
     pub args: Map<String, Value>,
     #[serde(skip)]
-    pub native_call_id: Option<String>,
+    pub native_origin: Option<NativeToolOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeToolOrigin {
+    OpenAi { id: String },
+    Gemini { model_content: Value },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
