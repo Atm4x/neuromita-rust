@@ -234,7 +234,7 @@ mod tests {
                 Err(GraphError::InvalidRelations)
             ));
         }
-        assert!(matches!(
+        assert!(
             registry
                 .get(CharacterId::Kind)
                 .unwrap()
@@ -247,9 +247,9 @@ mod tests {
                         .unwrap(),
                     vec![proposed.clone()]
                 )
-                .await,
-            Err(_)
-        ));
+                .await
+                .is_err()
+        );
         let updated = mita
             .edit_memories(
                 repeated.snapshot,
