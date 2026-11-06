@@ -1,0 +1,33 @@
+name: Import Network Web Tools Git Bundle
+on:
+  push:
+    branches:
+      - bridge/network-web-tools-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify source and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=3a0a9323e8632bfdc392ff34771dac8a18b1a7dd
+          HEAD=235afacb9cf023cb1d32d114b21f6ced1a2da035
+          TARGET=refs/heads/codex/network-web-tools-20261106
+          base64 --decode bridge_payloads/network-web-tools.bundle.b64 >/tmp/network-web-tools.bundle
+          echo 'b46bf74bea77bc08e0a4baa9ce849c9451c66818e197d079c9d67452e9f60fb4  /tmp/network-web-tools.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/network-web-tools.bundle
+          git fetch /tmp/network-web-tools.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
