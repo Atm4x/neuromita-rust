@@ -1236,6 +1236,109 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_memory_settings_capture_policy_through_live_generation() {
+    use neuromita::settings::{MemorySettings, SettingsApi};
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let provider: Arc<dyn GenerationProvider> = Arc::new(GeminiProvider::new().unwrap());
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([provider]).unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let settings = SettingsApi::snapshot::<MemorySettings>().unwrap().value;
+    assert!(!settings.model_add_dedup_enabled);
+    assert_eq!(settings.threshold_per_mille, 800);
+    SettingsApi::edit::<MemorySettings>(|value| value.model_add_dedup_enabled = true).unwrap();
+
+    let first = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Remember tea".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"saved"}],"memory_add":["normal|The player prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&first).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let before = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(before.len(), 1);
+
+    let second = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Again".into())
+        .unwrap();
+    let pending_provider_call = server.next().await;
+    SettingsApi::edit::<MemorySettings>(|value| value.model_add_dedup_enabled = false).unwrap();
+    pending_provider_call.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"updated"}],"memory_add":["high|The player really prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after_lexical = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(
+        after_lexical.len(),
+        1,
+        "model memory must dedup when enabled"
+    );
+    assert_eq!(after_lexical[0].id, before[0].id);
+    assert_eq!(
+        after_lexical[0].content,
+        "The player really prefers jasmine tea"
+    );
+
+    let third = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "Ordinary add".into())
+        .unwrap();
+    server.next().await.respond.send(Reply::Structured(
+        r#"{"segments":[{"text":"another"}],"memory_add":["normal|The player always really prefers jasmine tea"]}"#,
+    )).unwrap();
+    assert!(matches!(
+        finished(&third).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let after_ordinary = app
+        .character(CharacterId::Crazy)
+        .unwrap()
+        .get_context(app.at())
+        .await
+        .unwrap()
+        .memories;
+    assert_eq!(
+        after_ordinary.len(),
+        2,
+        "disabled dedup must retain ordinary insert"
+    );
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
     use neuromita::timeline::domain::MemoryPriority;
 
