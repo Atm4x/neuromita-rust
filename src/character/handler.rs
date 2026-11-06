@@ -694,7 +694,7 @@ impl CharacterHandler {
         let working_state = captured.working_state;
         let now = CharacterRegistry::now_unix_ms();
         let memories = captured.memories.searchable_at(now);
-        let memory_relations = captured.memories.relations();
+        let memory_relations = captured.memories.relations_at(now);
         let memory_islands = captured.memories.islands_at(now);
         let reminders = match &self.reminders {
             Some(_) => crate::reminders::projection::prompt_reminders_at(

@@ -3,6 +3,7 @@
 
 pub mod embedding;
 pub mod forgotten_recall;
+pub mod graph;
 pub mod memory_context;
 pub mod reranking;
 pub mod retrieval_fusion;
