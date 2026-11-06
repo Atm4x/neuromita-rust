@@ -1,0 +1,42 @@
+name: Publish Agent B4 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b4-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 888752d9b3f3be2bfb2330ac3a3de269275981f3
+          fetch-depth: 0
+      - name: Import verified incremental Git bundle and push agent branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=888752d9b3f3be2bfb2330ac3a3de269275981f3
+          EXPECTED=94e1e9830593a25f33b671d65d1d525a7d0896df
+          SHA256=e44b4c7a259046ef1918616767674441ee967f33255f0329531ad254354773a8
+          TARGET=refs/heads/codex/timeline-chat-file-attachments-20261107
+          git fetch origin refs/heads/bridge/agent-b4-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b4-20261107.bundle.b64 | base64 --decode > /tmp/agent-b4.bundle
+          echo "$SHA256  /tmp/agent-b4.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b4.bundle
+          git fetch /tmp/agent-b4.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch already exists at unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
