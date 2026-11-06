@@ -12,8 +12,26 @@ pub(crate) struct ResponseMetadata {
     pub usage: Option<ProviderUsage>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeCall {
+    pub id: String,
+    pub name: String,
+    pub args: String,
+}
+
+pub(crate) enum NativeEvent {
+    Start {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    Arguments(String),
+    Complete(String),
+}
+
 pub(crate) struct StreamUpdate {
     pub delta: String,
+    pub native: Option<NativeEvent>,
     pub finish_reason: Option<String>,
     pub usage: Option<ProviderUsage>,
     pub terminal: bool,
@@ -23,6 +41,7 @@ impl StreamUpdate {
     pub fn progress(delta: impl Into<String>) -> Self {
         Self {
             delta: delta.into(),
+            native: None,
             finish_reason: None,
             usage: None,
             terminal: false,
@@ -32,6 +51,7 @@ impl StreamUpdate {
 
 pub(crate) struct StreamResult {
     pub text: String,
+    pub native_call: Option<NativeCall>,
     pub finish_reason: Option<String>,
 }
 
@@ -218,6 +238,7 @@ pub(crate) async fn send_sse(
     let mut raw = Vec::new();
     let mut decoder = SseDecoder::default();
     let mut text = String::new();
+    let mut native_call: Option<NativeCall> = None;
     let mut finish_reason = None;
     let mut usage = None;
     let mut terminal = false;
@@ -260,6 +281,7 @@ pub(crate) async fn send_sse(
                         Ok(update) => {
                             if terminal
                                 && (!update.delta.is_empty()
+                                    || update.native.is_some()
                                     || update.terminal
                                     || update.finish_reason.is_some())
                             {
@@ -268,7 +290,69 @@ pub(crate) async fn send_sse(
                                 ));
                                 break;
                             }
+                            if let Some(native) = update.native {
+                                let next = match native {
+                                    NativeEvent::Start {
+                                        id,
+                                        name,
+                                        arguments,
+                                    } => {
+                                        if native_call.is_some()
+                                            || !text.is_empty()
+                                            || arguments.len() > 16_384
+                                        {
+                                            Err(GenerationError::Response(
+                                                "multiple or mixed native tool calls".into(),
+                                            ))
+                                        } else {
+                                            native_call = Some(NativeCall {
+                                                id,
+                                                name,
+                                                args: arguments,
+                                            });
+                                            Ok(())
+                                        }
+                                    }
+                                    NativeEvent::Arguments(part) => match native_call.as_mut() {
+                                        Some(call)
+                                            if call.args.len().saturating_add(part.len())
+                                                <= 16_384 =>
+                                        {
+                                            call.args.push_str(&part);
+                                            Ok(())
+                                        }
+                                        _ => Err(GenerationError::Response(
+                                            "tool arguments without a bounded call".into(),
+                                        )),
+                                    },
+                                    NativeEvent::Complete(arguments) => {
+                                        match native_call.as_mut() {
+                                            Some(call)
+                                                if arguments.len() <= 16_384
+                                                    && (call.args.is_empty()
+                                                        || call.args == arguments) =>
+                                            {
+                                                call.args = arguments;
+                                                Ok(())
+                                            }
+                                            _ => Err(GenerationError::Response(
+                                                "tool call arguments mismatch".into(),
+                                            )),
+                                        }
+                                    }
+                                };
+                                if let Err(error) = next {
+                                    failure = Some(error);
+                                    break;
+                                }
+                            }
                             if !update.delta.is_empty() {
+                                if native_call.is_some() {
+                                    failure = Some(GenerationError::Response(
+                                        "native tool call mixed with assistant text".into(),
+                                    ));
+                                    break;
+                                }
                                 if text.len().saturating_add(update.delta.len())
                                     > MAX_RESPONSE_BYTES
                                 {
@@ -329,6 +413,7 @@ pub(crate) async fn send_sse(
     }
     Ok(StreamResult {
         text,
+        native_call,
         finish_reason,
     })
 }

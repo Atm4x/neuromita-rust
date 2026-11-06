@@ -32,4 +32,8 @@ The user-visible/request status may display an unaccepted spoken preview while a
 
 `tests/tool_continuation.rs` checks calculator continuation, disabled tool, rejected intermediate effects, depth exhaustion, cancellation and character-scoped memory search. Unit tests check arithmetic limits and the dynamically advertised schema. `tests/llm_streaming.rs` verifies the existing SSE/preview lifecycle. Full real-provider/API E2E remains outstanding.
 
-**Not yet implemented:** native OpenAI Chat/Responses function-call negotiation, native Gemini function-call/result round trips, `web_search`, `google_search`, `web_reader`, typed tool UI status, web permission/URL policy, per-tool network deadlines, and explicit user approval for externally mutating actions. Incoming native Gemini function-call/executable-code parts fail closed rather than silently dropping the proposed action; existing native OpenAI calls remain rejected. These scenarios belong to #30 and #17 and must not be marked complete based on the calculator and memory-search slice.
+**Not yet implemented:** native Gemini function-call/result round trips, `web_search`, `google_search`, `web_reader`, typed tool UI status, web permission/URL policy, per-tool network deadlines, and explicit user approval for externally mutating actions. Incoming native Gemini function-call/executable-code parts fail closed. Native OpenAI Chat/Responses support was added in a subsequent iteration (below). These remaining scenarios belong to #30 and #17.
+
+## Native OpenAI tool calls
+
+The existing `calculator` and `memory_search` executor is now available through the native OpenAI Chat Completions / Responses tool-call protocols (JSON and SSE), with stable call-ID pairing and result continuation. See [rust-native-openai-tools.md](rust-native-openai-tools.md). Network tools and Gemini-native calls remain outside this slice.

@@ -20,6 +20,8 @@ pub struct ToolCall {
     pub name: String,
     #[serde(default, deserialize_with = "object_or_json_string")]
     pub args: Map<String, Value>,
+    #[serde(skip)]
+    pub native_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

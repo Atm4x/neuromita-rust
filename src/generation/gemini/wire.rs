@@ -340,6 +340,7 @@ pub(super) fn stream_event(
         });
     Ok(crate::generation::http::StreamUpdate {
         delta,
+        native: None,
         finish_reason: reason.map(str::to_owned),
         usage,
         terminal: reason == Some("STOP"),
