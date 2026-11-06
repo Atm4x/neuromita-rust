@@ -326,3 +326,78 @@ fn sqlite_and_asset_store_reopen_retains_visible_message() {
         b"persisted"
     );
 }
+
+#[test]
+fn append_checked_validates_assets_in_revisions_and_session_notes() {
+    let temp = TempDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let original = assets
+        .import("image/png", Cursor::new(b"original"))
+        .unwrap();
+    let unavailable = assets
+        .import("image/png", Cursor::new(b"unavailable"))
+        .unwrap();
+    let missing_path = temp
+        .path()
+        .join("assets/objects")
+        .join(&unavailable.digest[..2])
+        .join(&unavailable.digest);
+    fs::remove_file(missing_path).unwrap();
+    let branch = BranchId::new();
+    let mut timeline = TimelineStore::new();
+    timeline.create_session(SessionId::new(), branch).unwrap();
+    let message = attachment(&original, &[CharacterId::Crazy]);
+    let id = message.id;
+    assets
+        .append_checked(
+            &mut timeline,
+            branch,
+            0,
+            "original",
+            json!({}),
+            vec![message],
+        )
+        .unwrap();
+
+    let mut revision = EventDraft::new(EventKind::MessageRevised);
+    revision.observers.insert(CharacterId::Crazy);
+    revision
+        .payload
+        .insert("event_id".into(), json!(id.0.to_string()));
+    revision.payload.insert(
+        "message".into(),
+        json!({"content":[{"type":"image","asset":unavailable}]}),
+    );
+    assert!(
+        assets
+            .append_checked(
+                &mut timeline,
+                branch,
+                1,
+                "bad-revision",
+                json!({}),
+                vec![revision]
+            )
+            .is_err()
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
+    let view =
+        TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        assets.read_visible(&view, id, &original).unwrap(),
+        b"original"
+    );
+
+    let mut note = EventDraft::new(EventKind::SessionNote);
+    note.observers.insert(CharacterId::Crazy);
+    note.payload.insert(
+        "content".into(),
+        json!([{"type":"image","asset":unavailable}]),
+    );
+    assert!(
+        assets
+            .append_checked(&mut timeline, branch, 1, "bad-note", json!({}), vec![note])
+            .is_err()
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
+}
