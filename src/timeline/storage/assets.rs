@@ -9,7 +9,6 @@ use std::{
 };
 
 use ring::digest::{Context, SHA256};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
@@ -17,20 +16,16 @@ use uuid::Uuid;
 use crate::identity::EventId;
 
 use super::super::{
-    domain::{BranchId, EventDraft, EventKind, TimelineError, TimelineFact, TimelineRepository},
+    domain::{
+        BranchId, EventDraft, EventKind, TimelineError, TimelineFact, TimelineRepository,
+        parse_message_content,
+    },
     view::MitaView,
 };
 
 const CHUNK: usize = 64 * 1024;
 
-/// SHA-256 of `media_type || 0x00 || bytes`, binding the declared type to content.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineAssetRef {
-    pub digest: String,
-    pub size: u64,
-    pub media_type: String,
-}
+pub use super::super::domain::TimelineAssetRef;
 
 #[derive(Debug, Error)]
 pub enum TimelineAssetError {
@@ -219,31 +214,14 @@ impl TimelineAssetStore {
                     .get("message")
                     .and_then(|message| message.get("content"))
             });
-            match content {
-                None | Some(Value::String(_)) => {}
-                Some(Value::Array(parts)) if parts.len() <= 32 => {
-                    for part in parts {
-                        let kind = part
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .ok_or(TimelineAssetError::InvalidReference)?;
-                        match kind {
-                            "text" if part.get("text").is_some_and(Value::is_string) => {}
-                            "image" | "audio" | "file" => {
-                                let reference = part
-                                    .get("asset")
-                                    .ok_or(TimelineAssetError::InvalidReference)
-                                    .and_then(|value| {
-                                        serde_json::from_value::<TimelineAssetRef>(value.clone())
-                                            .map_err(|_| TimelineAssetError::InvalidReference)
-                                    })?;
-                                self.verify(&reference)?;
-                            }
-                            _ => return Err(TimelineAssetError::InvalidReference.into()),
-                        }
+            if let Some(content) = content {
+                let parts = parse_message_content(content)
+                    .map_err(|_| TimelineAssetError::InvalidReference)?;
+                for part in parts {
+                    if let Some(reference) = part.asset() {
+                        self.verify(reference)?;
                     }
                 }
-                _ => return Err(TimelineAssetError::InvalidReference.into()),
             }
         }
         Ok(timeline.append(branch, expected_head, operation_key, command, drafts)?)
@@ -267,21 +245,8 @@ impl TimelineAssetStore {
                 && message
                     .fields
                     .get("content")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|parts| {
-                        parts.iter().any(|part| {
-                            matches!(
-                                part.get("type").and_then(|ty| ty.as_str()),
-                                Some("image" | "audio" | "file")
-                            ) && part
-                                .get("asset")
-                                .and_then(|value| {
-                                    serde_json::from_value::<TimelineAssetRef>(value.clone()).ok()
-                                })
-                                .as_ref()
-                                == Some(reference)
-                        })
-                    })
+                    .and_then(|content| parse_message_content(content).ok())
+                    .is_some_and(|parts| parts.iter().any(|part| part.asset() == Some(reference)))
         });
         if !visible {
             return Err(TimelineAssetError::NotVisible);
