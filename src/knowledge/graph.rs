@@ -53,8 +53,45 @@ pub async fn propose_extraction(
     extractor: &dyn GraphExtractor,
     source: &GraphExtractionSource,
 ) -> Result<MemoryCommand, GraphError> {
-    let relations = extractor.extract(&source.record).await?;
-    if relations.len() > MAX_SOURCE_RELATIONS
+    propose_relations(source, extractor.extract(&source.record).await?)
+}
+
+/// Decode Python structured-response triples from the same generation turn.
+/// The caller supplies the captured memory source; no unrelated event or
+/// unsourced graph relation is invented when the response lacks one.
+pub fn propose_inline_relations(
+    source: &GraphExtractionSource,
+    triples: &[String],
+) -> Result<MemoryCommand, GraphError> {
+    if triples.len() > MAX_SOURCE_RELATIONS {
+        return Err(GraphError::InvalidRelations);
+    }
+    let mut relations = Vec::with_capacity(triples.len());
+    for triple in triples {
+        let mut fields = triple.split('|');
+        let (Some(subject), Some(predicate), Some(object), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(GraphError::InvalidRelations);
+        };
+        relations.push(MemoryRelation {
+            subject: subject.trim().to_owned(),
+            predicate: predicate.trim().to_owned(),
+            object: object.trim().to_owned(),
+        });
+    }
+    propose_relations(source, relations)
+}
+
+fn propose_relations(
+    source: &GraphExtractionSource,
+    relations: Vec<MemoryRelation>,
+) -> Result<MemoryCommand, GraphError> {
+    if source.revision == 0
+        || source.record.state != MemoryState::Active
+        || !matches!(source.record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+        || !source.record.is_valid()
+        || relations.len() > MAX_SOURCE_RELATIONS
         || relations.iter().any(|relation| !relation.is_valid())
         || relations.iter().collect::<BTreeSet<_>>().len() != relations.len()
     {
@@ -134,6 +171,104 @@ mod tests {
             subject: "Mita".into(),
             predicate: "likes".into(),
             object: object.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_structured_triples_are_validated_and_committed_with_source_provenance() {
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(
+            Arc::new(Mutex::new(SessionTimeline::new())),
+            stop.clone(),
+            16,
+        );
+        let mita = registry.get(CharacterId::Crazy).unwrap();
+        let added = mita
+            .edit_memories(
+                mita.memories().await.unwrap(),
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Mita likes tea".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let record = added.snapshot.records()[0].clone();
+        let source = GraphExtractionSource::new(
+            record.clone(),
+            added.snapshot.source_revision(record.id).unwrap(),
+        )
+        .unwrap();
+
+        let correct = [" Mita | likes | tea ".to_owned()];
+        let proposed = propose_inline_relations(&source, &correct).unwrap();
+        let accepted = mita
+            .edit_memories(added.snapshot, vec![proposed.clone()])
+            .await
+            .unwrap();
+        assert_eq!(accepted.snapshot.extracted_relations().len(), 1);
+        assert_eq!(accepted.snapshot.extracted_relations()[0].source, record.id);
+        assert_eq!(
+            accepted.snapshot.extracted_relations()[0].source_revision,
+            source.revision
+        );
+        assert_eq!(
+            accepted.snapshot.extracted_relations()[0].relation,
+            relation("tea")
+        );
+        let repeated = mita
+            .edit_memories(accepted.snapshot, vec![proposed.clone()])
+            .await
+            .unwrap();
+        assert!(repeated.applied.is_empty());
+        for malformed in [
+            vec!["Mita|likes|tea".into(), "missing|value".into()],
+            vec!["Mita|likes|tea".into(), "Mita | likes | tea".into()],
+            vec!["Mita|likes|tea|extra".into()],
+            vec!["Mita||tea".into()],
+            vec!["Mita|likes|".into()],
+            vec!["Mita|likes|tea".into(); MAX_SOURCE_RELATIONS + 1],
+        ] {
+            assert!(matches!(
+                propose_inline_relations(&source, &malformed),
+                Err(GraphError::InvalidRelations)
+            ));
+        }
+        assert!(matches!(
+            registry
+                .get(CharacterId::Kind)
+                .unwrap()
+                .edit_memories(
+                    registry
+                        .get(CharacterId::Kind)
+                        .unwrap()
+                        .memories()
+                        .await
+                        .unwrap(),
+                    vec![proposed.clone()]
+                )
+                .await,
+            Err(_)
+        ));
+        let updated = mita
+            .edit_memories(
+                repeated.snapshot,
+                vec![MemoryCommand::Update {
+                    id: record.id,
+                    priority: None,
+                    content: "Mita likes coffee".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert!(
+            mita.edit_memories(updated.snapshot, vec![proposed])
+                .await
+                .is_err()
+        );
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
         }
     }
 
