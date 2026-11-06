@@ -1,3 +1,4 @@
+pub mod assets;
 #[cfg(feature = "sqlite-system")]
 mod sqlite;
 
