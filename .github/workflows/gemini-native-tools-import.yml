@@ -1,0 +1,33 @@
+name: Import Gemini Native Tools Git Bundle
+on:
+  push:
+    branches:
+      - bridge/gemini-native-tools-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify exact source and fast-forward Gemini tools branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6cb8c622bc23f47f06f3057879f3720934afe38b
+          HEAD=3a0a9323e8632bfdc392ff34771dac8a18b1a7dd
+          TARGET=refs/heads/codex/gemini-native-tools-20261106
+          base64 --decode bridge_payloads/gemini-native-tools.bundle.b64 >/tmp/gemini-native.bundle
+          echo '18ce3b89562dd5bff24c245984c73e86e34c8b77ff5359b61618cafb5111aaec  /tmp/gemini-native.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/gemini-native.bundle
+          git fetch /tmp/gemini-native.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
