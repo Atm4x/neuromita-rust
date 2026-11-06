@@ -1,0 +1,81 @@
+name: Agent C layer path guard incremental bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-layer-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-inflight-recovery-cancel-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=09c34f9c2dc950cccc80888a056d0c42b7dd59b5
+          HEAD=d9e4db0778bdf83ac690fcbf1d30d87a98c725a4
+          TARGET=codex/ai-platform-hub-layer-path-safety-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-layer-guard.bundle
+          IyB2MiBnaXQgYnVuZGxlCi0wOWMzNGY5YzJkYzk1MGNjY2M4MDg4OGEwNTZkMGM0MmI3ZGQ1OWI1
+          IGZpeChhaSk6IHJldGFpbiBmYWlsZWQgd29ya2VyIHN0YXR1cyB3aGlsZSByZWNvdmVyeSBpbml0
+          aWFsaXplIGlzIGNhbmNlbGxhYmxlCmQ5ZTRkYjA3NzhiZGY4M2FjNjkwZmNiZjFkMzBkODdhOThj
+          NzI1YTQgcmVmcy9oZWFkcy9jb2RleC9haS1wbGF0Zm9ybS1odWItbGF5ZXItcGF0aC1zYWZldHkt
+          MjAyNjExMDcKClBBQ0sAAAACAAAACZoTeJytUEFOxDAQu/cVcwQhqqRN2gQhBOIMf5hMprtZ2mSV
+          pIj+nqz4Aj5YliXbkmtmBiPRztPknBq1RClwUW6UeqFxQqlnokGimZ3vrpg5VhCWRrVYGjxZLajB
+          CGMMCj15QWpws/faOt3hXs8pwyfvOX2EivB2uuXf4Rlv4pFe98K59DFlvq5Hfwr1vLue0vYCcrZK
+          iEYaHkRD19wt1Mr/1dct4ecOw/0TZL4wVSjHtob4xR42jK3Qw4pHm8v8HUpIsQBGD38flO4X0ENk
+          pvkD2g/6GiKXwzY55jZG8eEZRXSjcrl4nAE5AMb//wX/BbCgARS4B2aW+k/qGMv3lra7Q3Uy9OSi
+          k5O0AbkU9GZjQs4QSCIZOXEivDTKVupBg4OTgQJ+PIobSv4B+5Qxf7IlT9Y0bGQtM87yevVdOBJ4
+          nAEeAOH/8ALwApB/FBdsBXKm0s/Xau90xEJg5VHbIdV0kZPd4r0Pz/wDZYBNPBGfLs0yXlvV3goV
+          kQqUe9B4nHskNU96gqVhXnFJYk5OYlJOarFuQWJJhm56aWJRim6ysV5uCkOaqUin6FWGnFWMHFfW
+          7vkWUSLS9n+jngkvALZJFxqyVXicbVRLb9swDL7nVxDoNU2Bbafu1G2XAjv0sJ1rWmZtLbJkiFLa
+          /Pt99CPpigEJIiMUvxfpG/r++Z6y/BFXSM9j8PEoHfmohUPA6elchhQp8FkyTVwG3e2+sTtK7Ijx
+          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
+          BUNDLE
+          echo '88503e448fe59ef689511491249ba6e7327ba863b3790922021f41f54c7a00e8  /tmp/agent-c-layer-guard.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-layer-guard.bundle
+          git fetch --no-tags /tmp/agent-c-layer-guard.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
