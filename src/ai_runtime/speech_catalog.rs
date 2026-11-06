@@ -81,25 +81,30 @@ pub(super) fn executable_plugin_root(data_directory: &Path) -> PathBuf {
 }
 
 fn plugin_candidates(root: &Path) -> Vec<PathBuf> {
+    if !std::fs::symlink_metadata(root)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.is_symlink())
+    {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut candidates = Vec::new();
     for entry in entries.flatten().take(256) {
-        if !entry
-            .file_type()
-            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
-        {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() && !kind.is_symlink() {
             continue;
         }
         let path = entry.path();
-        if entry.file_name() == "builtin" || entry.file_name() == "community" {
+        if kind.is_dir() && (entry.file_name() == "builtin" || entry.file_name() == "community") {
             if let Ok(children) = std::fs::read_dir(&path) {
                 candidates.extend(children.flatten().take(256).filter_map(|child| {
                     child
                         .file_type()
                         .ok()
-                        .filter(|kind| kind.is_dir() && !kind.is_symlink())
+                        .filter(|kind| kind.is_dir() || kind.is_symlink())
                         .map(|_| child.path())
                 }));
             }
@@ -125,6 +130,11 @@ fn valid_plugin_version(version: &str) -> bool {
 }
 
 fn inspect_manifest(path: &Path, community: bool) -> Result<PluginManifest, String> {
+    if !std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.is_symlink())
+    {
+        return Err("plugin directory must be a real directory".into());
+    }
     let manifest_path = path.join("plugin.json");
     let metadata = std::fs::symlink_metadata(&manifest_path)
         .map_err(|error| format!("manifest not readable: {error}"))?;
@@ -255,7 +265,9 @@ impl SpeechModelCatalog {
                         .push(format!("ambiguous speech plugin id: {id}"));
                     continue;
                 }
-                if !directory.join("plugin.json").exists() {
+                let symlinked = std::fs::symlink_metadata(&directory)
+                    .is_ok_and(|metadata| metadata.is_symlink());
+                if !symlinked && !directory.join("plugin.json").exists() {
                     continue;
                 }
                 let community = directory.parent().is_some_and(|parent| {
@@ -452,6 +464,46 @@ mod tests {
                     .contains("real directory")
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_plugin_cannot_hide_an_ambiguous_id_or_appear_selectable() {
+        let root = std::env::temp_dir().join(format!("nm-plugin-link-{}", uuid::Uuid::new_v4()));
+        let plugins = root.join("AIData/plugins");
+        fixture(&plugins, "builtin", "valid_tts", "tts", &[]);
+        std::fs::create_dir_all(plugins.join("community")).unwrap();
+        let link = plugins.join("community/valid_tts");
+        std::os::unix::fs::symlink(plugins.join("builtin/valid_tts"), &link).unwrap();
+        let catalog = SpeechModelCatalog {
+            plugin_roots: vec![plugins.clone()],
+            data_directory: root.clone(),
+        };
+        let ambiguous = catalog.snapshot().await;
+        assert!(!ambiguous.tts.iter().any(|model| model.id == "valid_tts"));
+        assert!(
+            ambiguous
+                .errors
+                .iter()
+                .any(|error| error.contains("ambiguous"))
+        );
+        assert!(
+            verify_executable_plugin(&plugins, "valid_tts", "tts")
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+
+        std::fs::remove_dir_all(plugins.join("builtin/valid_tts")).unwrap();
+        let linked_only = catalog.snapshot().await;
+        assert!(!linked_only.tts.iter().any(|model| model.id == "valid_tts"));
+        assert!(
+            linked_only
+                .errors
+                .iter()
+                .any(|error| error.contains("real directory"))
+        );
+        assert!(verify_executable_plugin(&plugins, "valid_tts", "tts").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 
