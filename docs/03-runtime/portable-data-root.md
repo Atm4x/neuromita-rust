@@ -1,0 +1,7 @@
+# Portable data root (pre-release contract)
+
+The GUI and terminal resolve the same `neuromita::portable::PortableDataRoot` at the composition boundary. With no override the root is `<executable-directory>/UserData`, never the process working directory, AppData or XDG. An explicit absolute `--data-dir` overrides `NEUROMITA_DATA_DIR`; a missing override falls back to the executable's location. Empty or relative overrides fail. `ensure_writable()` is called before opening the Core application or persistent GUI settings, so a read-only install is a visible error, not a silent profile fallback.
+
+Inject `PortableDataRoot::path()` into owners that already accept specific paths, e.g. `ApplicationConfig::persistent`/`persistent_unconfigured`, `InstalledSpeechEnvironment::for_desktop`, `SpeechModelCatalog::for_desktop` and `UvInstaller::data_directory`. This is not a global singleton. These owners do not choose their own application root and the pre-release code does not maintain a versioned storage layout. The existing AIData layout stays within the provided root; this boundary does not change model installers or Timeline semantics.
+
+A portable install must be writable by the user. A system protected installation (e.g. Program Files) will produce an error; users should install to a writable directory or explicitly supply a writable *absolute* root. Moving the installation to a different directory moves its application-controlled UserData with it; external absolute paths configured by the user do not magically relocate.
