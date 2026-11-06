@@ -10,7 +10,9 @@ use neuromita::{
     generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
     presentation::CharacterDebugField,
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
-    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
+    settings::{
+        PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot, StructuredDisplayMode,
+    },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
@@ -175,6 +177,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .interface
             .hide_private
             .set(value)
+            .map_err(|e| e.to_string())?,
+        Command::StructuredDisplay(mode) => api
+            .settings
+            .interface
+            .structured_display
+            .set(mode)
             .map_err(|e| e.to_string())?,
         Command::SetToolOption(option, enabled) => {
             let mut settings = api.settings.tools.state.get();
@@ -565,6 +573,18 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let send = dispatch.clone();
     let weak = window.as_weak();
+    settings.on_structured_mode_change({
+        let send = dispatch.clone();
+        move |value| {
+            let mode = match value {
+                0 => StructuredDisplayMode::Off,
+                1 => StructuredDisplayMode::Brief,
+                2 => StructuredDisplayMode::Json,
+                _ => return,
+            };
+            send(Command::StructuredDisplay(mode));
+        }
+    });
     settings.on_tool_option(move |name, enabled| {
         let option = match name.as_str() {
             "enabled" => Some(ToolOption::Enabled),
@@ -649,6 +669,11 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
             .collect::<Vec<_>>(),
     )));
     window.set_hide_private(settings.values.interface.hide_private);
+    window.set_structured_mode(match settings.values.interface.structured_display {
+        StructuredDisplayMode::Off => 0,
+        StructuredDisplayMode::Brief => 1,
+        StructuredDisplayMode::Json => 2,
+    });
     window.set_settings_persistence(match settings.persistence {
         PersistenceState::Pending => 0,
         PersistenceState::Saved(_) => 1,

@@ -71,6 +71,7 @@ pub enum Command {
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
+    StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
     Select(CharacterId),
@@ -426,7 +427,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
