@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::{
     identity::{CharacterId, EventId},
-    memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord, MemoryRelation},
+    memory::{
+        MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord, MemoryRelation,
+        ProvenancedRelation,
+    },
     timeline::{
         ContextAnchor, SessionTimeline, domain::TimelineError, selection::TimelineSelection,
     },
@@ -16,6 +19,7 @@ pub struct CharacterMemorySnapshot {
     pub(crate) anchor: ContextAnchor,
     pub(crate) records: Vec<MemoryRecord>,
     pub(crate) relations: Vec<MemoryRelation>,
+    pub(crate) extracted_relations: Vec<ProvenancedRelation>,
     pub(crate) memory_revision: Option<EventId>,
     pub(crate) source_revisions: BTreeMap<crate::memory::MemoryId, u64>,
     pub(crate) selection: TimelineSelection,
@@ -42,6 +46,10 @@ impl CharacterMemorySnapshot {
         self.source_revisions.get(&source).copied()
     }
 
+    pub fn extracted_relations(&self) -> &[ProvenancedRelation] {
+        &self.extracted_relations
+    }
+
     /// Opaque branch selection plus character-memory identity, without
     /// treating unrelated Timeline appends as memory-edit conflicts.
     pub(crate) fn matches_version(&self, other: &Self) -> bool {
@@ -50,6 +58,7 @@ impl CharacterMemorySnapshot {
             && self.anchor.branch_id == other.anchor.branch_id
             && self.records == other.records
             && self.relations == other.relations
+            && self.extracted_relations == other.extracted_relations
             && self.memory_revision == other.memory_revision
             && self.source_revisions == other.source_revisions
     }
@@ -71,6 +80,7 @@ pub(crate) fn read_memory_snapshot(
     let projection = super::projection::character_memories_at(&world, character)?;
     let records = projection.all();
     let relations = projection.relations();
+    let extracted_relations = projection.extracted_relations_at(0);
     let memory_revision = super::projection::character_memory_revision_at(&world, character);
     let source_revisions = projection.source_revisions();
     Ok(CharacterMemorySnapshot {
@@ -78,6 +88,7 @@ pub(crate) fn read_memory_snapshot(
         anchor,
         records,
         relations,
+        extracted_relations,
         memory_revision,
         source_revisions,
         selection,
@@ -113,6 +124,7 @@ pub(crate) fn edit_memory_snapshot(
     let memories = super::projection::character_memories_at(&world, character)?;
     if memories.all() != expected.records
         || memories.relations() != expected.relations
+        || memories.extracted_relations_at(0) != expected.extracted_relations
         || super::projection::character_memory_revision_at(&world, character)
             != expected.memory_revision
         || memories.source_revisions() != expected.source_revisions
