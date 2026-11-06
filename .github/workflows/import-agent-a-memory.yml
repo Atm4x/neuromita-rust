@@ -12,21 +12,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish Agent A scoped model memory policy
+      - name: Verify and fast-forward Agent A model memory PR
         shell: bash
         run: |
           set -euo pipefail
-          BASE=ce35826f6bc0b8925973946a4271b8d66c6cdf29
-          TARGET=4b6a58884c7c63d481fd8fc2b7e31fcfc1db86fb
+          BASE=4b6a58884c7c63d481fd8fc2b7e31fcfc1db86fb
+          TARGET=0e804d161700be0d17673864333f319e51d860f8
           BRANCH=codex/knowledge-model-memory-dedup-policy-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-model-memory-policy.bundle.sha256
-          git bundle verify .bridge/agent-a-model-memory-policy.bundle
-          git fetch --no-tags .bridge/agent-a-model-memory-policy.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-model-memory-policy-preflight.bundle.sha256
+          git bundle verify .bridge/agent-a-model-memory-policy-preflight.bundle
+          git fetch --no-tags .bridge/agent-a-model-memory-policy-preflight.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Branch exists; refuse overwrite."
-            exit 1
-          fi
+          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+          test "$CURRENT" = "$BASE"
           git push origin "$TARGET:refs/heads/$BRANCH"
