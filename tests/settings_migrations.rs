@@ -73,12 +73,22 @@ fn strict_current_format_and_import_have_the_same_contract() {
 }
 
 #[test]
-fn python_is_an_explicit_unimplemented_migration() {
+fn python_settings_only_import_is_strict_and_validated() {
+    let data = br#"{"LANGUAGE":"EN","HIDE_PRIVATE":false}"#;
     assert!(matches!(
-        PythonSettingsMigration.migrate(b"{}".as_slice()),
-        Err(SettingsTransferError::NotImplemented {
-            format: SettingsImportFormat::Python
-        })
+        SettingsTransfer::prepare(SettingsImportFormat::Python, data),
+        Err(SettingsTransferError::PythonMergeRequired)
+    ));
+    let stored = PythonSettingsMigration.migrate(data.as_slice()).unwrap();
+    assert_eq!(
+        stored.settings.interface.language,
+        neuromita::settings::Language::English
+    );
+    assert!(!stored.settings.interface.hide_private);
+    let lossy = br#"{"LANGUAGE":"EN","USER_UNSUPPORTED":123}"#;
+    assert!(matches!(
+        PythonSettingsMigration.migrate(lossy.as_slice()),
+        Err(SettingsTransferError::UnmappedPythonFields(_))
     ));
 }
 
@@ -279,7 +289,7 @@ fn a_locked_destination_keeps_the_previous_file_and_allows_retry() {
 }
 
 #[test]
-fn offline_cli_runs_without_a_key_and_exposes_the_python_stub() {
+fn offline_cli_rejects_rust_payload_as_python_without_changes() {
     let directory = Directory::new();
     let source = directory.path("source.json");
     let target = directory.path("target.json");
@@ -307,7 +317,7 @@ fn offline_cli_runs_without_a_key_and_exposes_the_python_stub() {
     assert!(!python.status.success());
     assert!(
         String::from_utf8_lossy(&python.stderr)
-            .contains("Python settings migration is not implemented")
+            .contains("Python settings have no supported fields")
     );
     assert_eq!(fs::read(target).unwrap(), before);
 }

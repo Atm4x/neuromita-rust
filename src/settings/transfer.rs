@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::migration::Migration;
 
-use super::{PythonSettingsMigration, RustSettingsMigration, SettingsError, StoredSettings};
+use super::{RustSettingsMigration, SettingsError, StoredSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsImportFormat {
@@ -20,8 +20,12 @@ pub enum SettingsTransferError {
     InvalidEnvelope(String),
     #[error("invalid settings values: {0}")]
     InvalidValue(String),
-    #[error("{format:?} settings migration is not implemented")]
-    NotImplemented { format: SettingsImportFormat },
+    #[error("Python settings contain unmapped fields (explicit approval required): {0:?}")]
+    UnmappedPythonFields(Vec<String>),
+    #[error(
+        "Python settings are a partial import; preview and merge into existing settings before saving"
+    )]
+    PythonMergeRequired,
 }
 
 impl From<SettingsTransferError> for SettingsError {
@@ -55,7 +59,9 @@ impl SettingsTransfer {
     ) -> Result<Self, SettingsTransferError> {
         let stored = match format {
             SettingsImportFormat::Rust => RustSettingsMigration.migrate(bytes)?,
-            SettingsImportFormat::Python => PythonSettingsMigration.migrate(bytes)?,
+            SettingsImportFormat::Python => {
+                return Err(SettingsTransferError::PythonMergeRequired);
+            }
         };
         Self::new(stored)
     }

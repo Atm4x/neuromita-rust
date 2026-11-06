@@ -6,7 +6,7 @@ mod transfer;
 
 pub use crate::generation::PresetId;
 pub(crate) use migration::SettingsStartupMigration;
-pub use migration::{PythonSettingsMigration, RustSettingsMigration};
+pub use migration::{PythonSettingsMigration, PythonSettingsPreview, RustSettingsMigration};
 pub use model::*;
 pub use speech::*;
 pub use storage::*;
