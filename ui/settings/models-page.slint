@@ -29,7 +29,6 @@ export component ModelsSettingsPage inherits SettingsScrollView {
     in-out property <bool> react-l2: true;
     in-out property <bool> working-state;
     in-out property <bool> action-memory;
-    in-out property <bool> deduplication: true;
     in-out property <bool> maintenance: true;
     in-out property <bool> memory-ttl: true;
     in-out property <bool> history-ttl;
@@ -45,7 +44,6 @@ export component ModelsSettingsPage inherits SettingsScrollView {
     in-out property <string> rag-max-results: "10";
     in-out property <string> working-state-limit: "2000";
     in-out property <string> action-tail: "4";
-    in-out property <string> dedup-threshold: "0.8";
     in-out property <string> low-priority-ttl: "15";
     in-out property <string> normal-priority-ttl: "30";
     in-out property <string> memory-maintenance-interval: "20";
@@ -153,8 +151,18 @@ export component ModelsSettingsPage inherits SettingsScrollView {
             InnerSettingsSection {
                 title: I18n.i18n("settings.models.hygiene", "Гигиена памяти");
                 expanded <=> root.hygiene-open;
-                SettingsToggleRow { title: I18n.i18n("settings.models.dedup", "Дедуп при добавлении"); checked: root.deduplication; changed(value) => { root.deduplication = value; } }
-                SettingsEntryRow { title: I18n.i18n("settings.models.dedup-threshold", "Порог дедупа (0.5–1.0)"); value <=> root.dedup-threshold; active: root.deduplication; }
+                SettingsToggleRow {
+                    title: I18n.i18n("settings.models.dedup", "Дедуп при добавлении");
+                    description: I18n.i18n("settings.models.dedup-note", "Только воспоминания, предложенные моделью; ручной редактор не затрагивается.");
+                    checked: SettingsUi.memory-dedup-enabled;
+                    changed(value) => { SettingsUi.memory-dedup-toggle(value); }
+                }
+                SettingsEntryRow {
+                    title: I18n.i18n("settings.models.dedup-threshold", "Порог дедупа (0.5–1.0)");
+                    value: SettingsUi.memory-dedup-threshold;
+                    active: SettingsUi.memory-dedup-enabled;
+                    committed(value) => { SettingsUi.memory-dedup-threshold-change(value); }
+                }
                 SettingsToggleRow { title: I18n.i18n("settings.models.maintenance", "Фоновая ревизия памяти"); checked: root.maintenance; changed(value) => { root.maintenance = value; } }
                 SettingsEntryRow { title: I18n.i18n("settings.models.maintenance-interval", "Интервал ревизии (сообщений)"); value <=> root.memory-maintenance-interval; active: root.maintenance; }
             }

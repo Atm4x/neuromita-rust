@@ -133,12 +133,12 @@ and post-DSL phases into `ProposedResponse::from_structured_with_memory_policy`.
 policy is rejected before provider invocation, not after inference.
 Intermediate tool responses do not execute memory writes. Neither conversion writes memory or opens a second database.
 
-This defines the precise adapter point for Python's settings-gated dedup path;
-**production settings-to-request binding is still not wired**. The active Python
-reference enables lexical similarity by default under `MEMORY_DEDUP_ENABLED`,
-while the existing Rust production conversion keeps its pre-existing behavior
-until its owner provides a resolved policy. Choosing a global default here
-would silently change manual editor semantics and is intentionally avoided.
+This defines the precise adapter point for Python's settings-gated dedup path.
+The active Python reference enables lexical similarity by default under
+`MEMORY_DEDUP_ENABLED`; Rust now captures its own validated, explicitly
+selected policy through `AppSettings.memory` and `MessageHandler` before
+inference. The application default deliberately remains `Ordinary` so
+pre-existing saved fact semantics do not change silently.
 
 ## Application setting to generation request (2026-11-07)
 
@@ -165,6 +165,12 @@ supplies the policy.
 Verification: `settings_transfer` covers serialization, absent-field defaults,
 invalid values and reconstruction; the `vertical_slice` model-memory scenario
 runs live generated responses through the fake Gemini endpoint and verifies
-both the enabled dedup mode and disabled ordinary Add behavior. This setting
-is Core/API configurable but does not constitute a Slint settings control;
-UI binding remains outstanding.
+both the enabled dedup mode and disabled ordinary Add behavior. This setting is also exposed in the existing Slint `ModelsSettingsPage`
+under **Memory → Memory hygiene**. The toggle and fixed-point threshold field
+are read from the canonical SettingsSnapshot via `SettingsUi`, and changes
+pass through the existing `settings::execute` GUI administration path and
+`SettingsPresenter.memory.state` binding. The input accepts exact `0.500`
+through `1.000` values with three fractional digits, maps them to per-mille
+without floating-point rounding, and rejects malformed values. The manual
+memory editor and unrelated placeholder controls on the Models page remain
+unaffected; the UI does not introduce another settings owner or store.
