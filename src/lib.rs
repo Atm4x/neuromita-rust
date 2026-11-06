@@ -34,5 +34,6 @@ pub mod voice;
 pub use character::memory;
 pub use interaction::UserInput;
 pub mod turn;
+pub mod updater;
 
 pub mod releases;
