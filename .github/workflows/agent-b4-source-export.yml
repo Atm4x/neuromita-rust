@@ -1,0 +1,36 @@
+name: Export Agent B4 source bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b4-source-export-20261107
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-session-archive-20261106
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned B3 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="refs/heads/codex/timeline-session-archive-20261106"
+          HEAD="$(git rev-parse HEAD)"
+          git update-ref "$TARGET" "$HEAD"
+          git bundle create neuromita-agent-b3.bundle "$TARGET"
+          git bundle verify neuromita-agent-b3.bundle
+          sha256sum neuromita-agent-b3.bundle > neuromita-agent-b3.bundle.sha256
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/timeline-session-archive-20261106\nhead=%s\n' "$HEAD" > neuromita-agent-b3.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-agent-b3-full-source
+          path: |
+            neuromita-agent-b3.bundle
+            neuromita-agent-b3.bundle.sha256
+            neuromita-agent-b3.manifest
+          retention-days: 7
+          if-no-files-found: error
