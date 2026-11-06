@@ -14,14 +14,16 @@ use super::{
     projection::{character_view, present_characters},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Receipt {
-    command: Value,
-    drafts: Vec<EventDraft>,
-    result: Vec<TimelineFact>,
+    pub(crate) command: Value,
+    pub(crate) drafts: Vec<EventDraft>,
+    pub(crate) result: Vec<TimelineFact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Branch {
     pub(crate) info: BranchInfo,
     pub(crate) events: Vec<TimelineFact>,
@@ -64,14 +66,12 @@ impl TimelineStore {
         Self::default()
     }
 
-    #[cfg(feature = "sqlite-system")]
     pub(crate) fn persisted_branches(&self) -> Vec<Branch> {
         let mut branches: Vec<_> = self.branches.values().cloned().collect();
         branches.sort_by_key(|branch| branch.info.id.0);
         branches
     }
 
-    #[cfg(feature = "sqlite-system")]
     pub(crate) fn load_persisted(branches: Vec<Branch>) -> Result<Self, TimelineError> {
         let mut map = HashMap::new();
         let mut roots = HashMap::new();
@@ -135,6 +135,94 @@ impl TimelineStore {
             }
         }
         Ok(store)
+    }
+
+    /// Replay imported receipts through the same domain append validator used
+    /// by live writes. Fork markers are canonical synthetic facts, not user
+    /// append operations; their shape is checked by the archive boundary.
+    pub(crate) fn validate_archive_receipts(branches: &[Branch]) -> Result<(), TimelineError> {
+        let world = Self::load_persisted(branches.to_vec())?;
+        for branch in branches {
+            let prefix = if let Some(parent) = branch.info.parent {
+                world
+                    .world(parent)?
+                    .into_iter()
+                    .take_while(|fact| fact.sequence <= branch.info.fork_sequence)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let mut index = WorldIndex::from_facts(&prefix)?;
+            let mut head = branch.info.fork_sequence;
+            if branch.info.parent.is_some() {
+                let marker = branch
+                    .events
+                    .first()
+                    .ok_or(TimelineError::Invalid("missing fork marker"))?;
+                index.extend(std::slice::from_ref(marker))?;
+                head += 1;
+            }
+            let mut receipts = branch.receipts.values().collect::<Vec<_>>();
+            receipts.sort_by_key(|receipt| {
+                receipt
+                    .result
+                    .first()
+                    .map(|fact| fact.sequence)
+                    .unwrap_or(u64::MAX)
+            });
+            for receipt in receipts {
+                let mut state = branch.info;
+                state.head_sequence = head;
+                let expected = Self::validate_batch(state, head, &receipt.drafts, &index)?;
+                if expected != receipt.result {
+                    return Err(TimelineError::Invalid(
+                        "imported receipt violates canonical append",
+                    ));
+                }
+                index.extend(&expected)?;
+                head += expected.len() as u64;
+            }
+            if head != branch.info.head_sequence {
+                return Err(TimelineError::Invalid("imported branch sequence mismatch"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Install a fully validated detached session without partially mutating the
+    /// existing store. The caller owns archive-specific semantic validation.
+    pub(crate) fn install_archive_branches(
+        &mut self,
+        incoming: Vec<Branch>,
+    ) -> Result<(), TimelineError> {
+        if incoming.is_empty() {
+            return Err(TimelineError::Invalid("archive has no branches"));
+        }
+        let imported_session = incoming[0].info.session_id;
+        if self
+            .branches
+            .values()
+            .any(|branch| branch.info.session_id == imported_session)
+        {
+            return Err(TimelineError::Conflict);
+        }
+        let existing_ids = self
+            .branches
+            .values()
+            .flat_map(|branch| branch.events.iter().map(|fact| fact.draft.id))
+            .collect::<HashSet<_>>();
+        if incoming
+            .iter()
+            .flat_map(|branch| branch.events.iter())
+            .any(|fact| existing_ids.contains(&fact.draft.id))
+        {
+            return Err(TimelineError::Conflict);
+        }
+        let mut candidate = self.persisted_branches();
+        candidate.extend(incoming);
+        let validated = Self::load_persisted(candidate)?;
+        *self = validated;
+        Ok(())
     }
 
     pub fn create_session(

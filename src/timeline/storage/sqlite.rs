@@ -174,6 +174,26 @@ impl SqliteTimelineRepository {
         Ok(repo)
     }
 
+    pub(crate) fn archive_snapshot(&self) -> Result<TimelineStore, TimelineError> {
+        self.read_snapshot(load)
+    }
+
+    /// Publish every new branch in the same SQLite transaction; a failed
+    /// validation or storage write leaves no partially restored session.
+    pub(crate) fn archive_install(&mut self, branches: Vec<Branch>) -> Result<(), TimelineError> {
+        let ids = branches
+            .iter()
+            .map(|branch| branch.info.id)
+            .collect::<Vec<_>>();
+        self.with_write(move |connection, store| {
+            store.install_archive_branches(branches)?;
+            for id in ids {
+                save_branch(connection, store, id)?;
+            }
+            Ok(())
+        })
+    }
+
     fn connection(&self) -> Result<Connection, TimelineError> {
         Connection::open(&self.path)
     }
