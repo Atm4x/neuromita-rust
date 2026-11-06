@@ -237,6 +237,70 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn symlinked_overlay_revision_and_parent_cannot_escape_portable_install_root() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("nm-overlay-symlink-{}", Uuid::new_v4()));
+        let outside = root.join("external");
+        let overlay_root = root.join("overlays");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        tokio::fs::create_dir_all(&overlay_root).await.unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        tokio::fs::write(&uv, "fake").await.unwrap();
+        tokio::fs::write(&python, "fake").await.unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            overlays_directory: overlay_root.clone(),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(5),
+        };
+        let spec = plan();
+        let plugin_parent = overlay_root.join("mock_tts");
+        symlink(&outside, &plugin_parent).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join("rev1").exists());
+
+        tokio::fs::remove_file(&plugin_parent).await.unwrap();
+        tokio::fs::create_dir(&plugin_parent).await.unwrap();
+        let revision = plugin_parent.join("rev1");
+        symlink(&outside, &revision).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join(".neuromita-overlay.json").exists());
+
+        tokio::fs::remove_file(&revision).await.unwrap();
+        tokio::fs::remove_dir(&plugin_parent).await.unwrap();
+        tokio::fs::remove_dir(&overlay_root).await.unwrap();
+        symlink(&outside, &overlay_root).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Invalid(_))
+        ));
+        assert!(!outside.join("mock_tts").exists());
+        tokio::fs::remove_file(&overlay_root).await.unwrap();
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn explicitly_approved_install_action_runs_only_in_staging_and_is_verified() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("nm-overlay-action-{}", Uuid::new_v4()));
