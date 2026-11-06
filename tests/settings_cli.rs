@@ -208,7 +208,12 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
     assert!(!stdout(&dry_run).contains("test-secret-value"));
     assert_eq!(fs::read(&target).unwrap(), original);
 
-    let applied = execute(&[]);
+    let rejected = execute(&[]);
+    assert!(!rejected.status.success());
+    assert!(stderr(&rejected).contains("--allow-unmapped"));
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let applied = execute(&["--allow-unmapped"]);
     assert!(applied.status.success(), "{}", stderr(&applied));
     assert!(stdout(&applied).contains("Previous Rust settings backup:"));
     assert_eq!(fs::read(&source).unwrap(), python_source);
@@ -225,9 +230,9 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
                 .to_string_lossy()
                 .contains("pre-python-import"))
             .count(),
-        1
+        2
     );
-    let second = execute(&[]);
+    let second = execute(&["--allow-unmapped"]);
     assert!(second.status.success());
     assert!(stdout(&second).contains("changed=false"));
     assert_eq!(
@@ -255,4 +260,97 @@ fn python_cli_never_overwrites_the_python_source_even_via_alias() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("must be different files"));
     assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn python_preview_alias_and_source_backup_stay_with_portable_rust_target() {
+    let directory = TempDir::new();
+    let python_dir = directory.path("python");
+    let rust_dir = directory.path("rust");
+    fs::create_dir_all(&python_dir).unwrap();
+    fs::create_dir_all(&rust_dir).unwrap();
+    let source = python_dir.join("settings.json");
+    let target = rust_dir.join("settings.json");
+    let input = br#"{"LANGUAGE":"EN","REMINDERS_ENABLED":false}"#;
+    fs::write(&source, input).unwrap();
+    let preview = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+        "--preview",
+    ]);
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(&python_dir).unwrap().count(), 1);
+    let applied = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+    ]);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert_eq!(fs::read_dir(&python_dir).unwrap().count(), 1);
+    let source_backup = fs::read_dir(&rust_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("python-source-settings.json.pre-python-import")
+        })
+        .unwrap()
+        .path();
+    assert_eq!(fs::read(&source_backup).unwrap(), input);
+    assert!(
+        !JsonSettingsRepository::new(target.clone())
+            .load()
+            .unwrap()
+            .settings
+            .reminders
+            .enabled
+    );
+    let again = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+    ]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(
+        fs::read_dir(&rust_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-python-import"))
+            .count(),
+        1
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&source_backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }
