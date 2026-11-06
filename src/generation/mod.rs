@@ -4,6 +4,7 @@ mod credentials;
 mod effects;
 pub mod gemini;
 mod http;
+mod live_multimodal;
 pub mod multimodal;
 pub mod openai;
 mod presets;
