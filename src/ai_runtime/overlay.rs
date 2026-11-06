@@ -4,7 +4,9 @@ use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::layer::{LayerError, LayerInstaller, valid_segment, validate_lock};
+use super::layer::{
+    LayerError, LayerInstaller, reject_symlinked_layer_components, valid_segment, validate_lock,
+};
 
 pub type OverlayError = LayerError;
 
@@ -103,6 +105,7 @@ pub fn load_installed_overlay(
         ));
     }
     let path = overlays_directory.join(plugin_id).join(revision);
+    reject_symlinked_layer_components(&path)?;
     let marker = path.join(".neuromita-overlay.json");
     if path.is_symlink() || marker.is_symlink() {
         return Err(LayerError::Conflict);
@@ -205,6 +208,39 @@ mod tests {
             packages: vec![],
             actions: vec![],
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_loader_rejects_symlinked_plugin_parent_and_overlay_root() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("nm-overlay-receipt-link-{}", Uuid::new_v4()));
+        let outside = root.join("outside");
+        let overlay_root = root.join("overlays");
+        std::fs::create_dir_all(outside.join("rev1")).unwrap();
+        std::fs::create_dir_all(&overlay_root).unwrap();
+        let spec = plan();
+        std::fs::write(
+            outside.join("rev1/.neuromita-overlay.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        symlink(&outside, overlay_root.join("mock_tts")).unwrap();
+        assert!(load_installed_overlay(&overlay_root, "mock_tts", "rev1").is_err());
+
+        std::fs::remove_file(overlay_root.join("mock_tts")).unwrap();
+        std::fs::remove_dir(&overlay_root).unwrap();
+        let nested = outside.join("mock_tts/rev1");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join(".neuromita-overlay.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        symlink(&outside, &overlay_root).unwrap();
+        assert!(load_installed_overlay(&overlay_root, "mock_tts", "rev1").is_err());
+        std::fs::remove_file(&overlay_root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]
