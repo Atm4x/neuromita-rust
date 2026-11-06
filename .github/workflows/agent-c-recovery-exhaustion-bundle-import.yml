@@ -172,7 +172,7 @@ jobs:
           BUNDLE
           echo 'a22931fddb252adb51a7c9ec2a246270634d49ba68d438ca134f0918485dd2b8  /tmp/agent-c-exhaustion.bundle' | sha256sum -c -
           git bundle verify /tmp/agent-c-exhaustion.bundle
-          git fetch --no-tags /tmp/agent-c-exhaustion.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          git fetch --no-tags /tmp/agent-c-exhaustion.bundle "refs/heads/codex/ai-platform-hub-bounded-recovery-20261107:refs/heads/agent-c-candidate"
           test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
           git merge-base --is-ancestor "$BASE" "$HEAD"
           git fsck --full
