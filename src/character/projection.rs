@@ -88,6 +88,20 @@ pub(crate) fn character_working_state_at(
     Ok(current)
 }
 
+/// Revision of this character's memory stream, independent of unrelated Timeline events.
+/// The last committed event identity prevents an A -> B -> A edit from accepting
+/// a stale snapshot whose visible records happen to match again.
+pub(crate) fn character_memory_revision_at(
+    facts: &[TimelineFact],
+    character: CharacterId,
+) -> Option<crate::identity::EventId> {
+    facts.iter().rev().find_map(|fact| {
+        (fact.draft.kind == EventKind::CharacterMemoryChanged
+            && fact.draft.actor.as_deref().and_then(CharacterId::parse) == Some(character))
+        .then_some(fact.draft.id)
+    })
+}
+
 pub(crate) fn character_memories_at(
     facts: &[TimelineFact],
     character: CharacterId,

@@ -1,5 +1,5 @@
 use crate::{
-    identity::CharacterId,
+    identity::{CharacterId, EventId},
     memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord, MemoryRelation},
     timeline::{
         ContextAnchor, SessionTimeline, domain::TimelineError, selection::TimelineSelection,
@@ -14,6 +14,7 @@ pub struct CharacterMemorySnapshot {
     pub(crate) anchor: ContextAnchor,
     pub(crate) records: Vec<MemoryRecord>,
     pub(crate) relations: Vec<MemoryRelation>,
+    pub(crate) memory_revision: Option<EventId>,
     pub(crate) selection: TimelineSelection,
 }
 
@@ -42,6 +43,7 @@ impl CharacterMemorySnapshot {
             && self.anchor.branch_id == other.anchor.branch_id
             && self.records == other.records
             && self.relations == other.relations
+            && self.memory_revision == other.memory_revision
     }
 }
 
@@ -61,11 +63,13 @@ pub(crate) fn read_memory_snapshot(
     let projection = super::projection::character_memories_at(&world, character)?;
     let records = projection.all();
     let relations = projection.relations();
+    let memory_revision = super::projection::character_memory_revision_at(&world, character);
     Ok(CharacterMemorySnapshot {
         character,
         anchor,
         records,
         relations,
+        memory_revision,
         selection,
     })
 }
@@ -97,7 +101,11 @@ pub(crate) fn edit_memory_snapshot(
         return Err(TimelineError::ConcurrentWrite);
     }
     let memories = super::projection::character_memories_at(&world, character)?;
-    if memories.all() != expected.records || memories.relations() != expected.relations {
+    if memories.all() != expected.records
+        || memories.relations() != expected.relations
+        || super::projection::character_memory_revision_at(&world, character)
+            != expected.memory_revision
+    {
         return Err(TimelineError::ConcurrentWrite);
     }
     let changes = memories.resolve(commands).map_err(TimelineError::Invalid)?;
@@ -209,6 +217,65 @@ mod tests {
             )
             .await;
         assert!(invalid.is_err());
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn replayed_values_cannot_resurrect_a_stale_memory_editor() {
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(
+            Arc::new(Mutex::new(SessionTimeline::new())),
+            stop.clone(),
+            16,
+        );
+        let mita = registry.get(CharacterId::Crazy).unwrap();
+        let initial = mita
+            .edit_memories(
+                mita.memories().await.unwrap(),
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Original".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let old = initial.snapshot.clone();
+        let id = old.records()[0].id;
+        let changed = mita
+            .edit_memories(
+                initial.snapshot,
+                vec![MemoryCommand::Update {
+                    id,
+                    priority: None,
+                    content: "Changed".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let restored = mita
+            .edit_memories(
+                changed.snapshot,
+                vec![MemoryCommand::Update {
+                    id,
+                    priority: None,
+                    content: "Original".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(old.records(), restored.snapshot.records());
+        assert!(matches!(
+            mita.edit_memories(old, vec![MemoryCommand::Forget { id }])
+                .await,
+            Err(CharacterError::StaleState)
+        ));
+        assert_eq!(
+            mita.memories().await.unwrap().records()[0].state,
+            MemoryState::Active
+        );
         stop.cancel();
         for task in tasks {
             task.await.unwrap();
