@@ -88,6 +88,7 @@ fn call(name: &str, args: serde_json::Value) -> StructuredResponse {
     response.tool_call = Some(neuromita::generation::ToolCall {
         name: name.into(),
         args: args.as_object().unwrap().clone(),
+        native_call_id: None,
     });
     response
 }

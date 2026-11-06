@@ -71,6 +71,36 @@ pub(crate) fn response_schema(settings: &ToolSettings) -> Value {
     schema
 }
 
+pub(crate) fn native_definitions(settings: &ToolSettings) -> Vec<Value> {
+    settings.available_names().into_iter().map(|name| {
+        let (description, properties, required) = match name {
+            "calculator" => (
+                "Evaluate a bounded arithmetic expression (read-only)",
+                serde_json::json!({"expression":{"type":"string","maxLength":256}}),
+                vec!["expression"],
+            ),
+            "memory_search" => (
+                "Search memories visible to the current character (read-only)",
+                serde_json::json!({"query":{"type":"string","maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":10}}),
+                vec!["query"],
+            ),
+            _ => unreachable!("available_names only returns registered tools"),
+        };
+        serde_json::json!({
+            "type":"function",
+            "name":name,
+            "description":description,
+            "parameters":{
+                "type":"object",
+                "properties":properties,
+                "required":required,
+                "additionalProperties":false
+            },
+            "strict":false
+        })
+    }).collect()
+}
+
 pub(crate) fn advertisement(settings: &ToolSettings) -> Option<String> {
     let available = settings.available_names();
     if available.is_empty() {
