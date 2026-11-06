@@ -1,0 +1,36 @@
+name: Export NeuroMita Rust latest source bundle
+on:
+  push:
+    branches:
+      - bridge/agent-latest-source-export-20261106
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/pyqt-tool-activity-20261106
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export latest branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD="$(git rev-parse HEAD)"
+          TARGET="refs/heads/codex/pyqt-tool-activity-20261106"
+          git update-ref "$TARGET" "$HEAD"
+          git bundle create neuromita-rust-latest.bundle "$TARGET"
+          git bundle verify neuromita-rust-latest.bundle
+          sha256sum neuromita-rust-latest.bundle > neuromita-rust-latest.bundle.sha256
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/pyqt-tool-activity-20261106\nhead=%s\n' "$HEAD" > neuromita-rust-latest.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-rust-latest-source
+          path: |
+            neuromita-rust-latest.bundle
+            neuromita-rust-latest.bundle.sha256
+            neuromita-rust-latest.manifest
+          retention-days: 7
+          if-no-files-found: error
