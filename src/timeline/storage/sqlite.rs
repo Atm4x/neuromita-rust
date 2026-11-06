@@ -921,6 +921,140 @@ mod tests {
         }
     }
 
+    fn memory_draft(content: &str) -> EventDraft {
+        use crate::memory::{MemoryChange, MemoryId, MemoryPriority, MemoryRecord};
+
+        let mut draft = EventDraft::new(EventKind::CharacterMemoryChanged);
+        draft.actor = Some(CharacterId::Crazy.to_string());
+        draft.observers.insert(CharacterId::Crazy);
+        draft.payload.insert(
+            "change".into(),
+            json!(MemoryChange::Upsert(MemoryRecord::fact(
+                MemoryId::new(),
+                MemoryPriority::High,
+                content,
+            ))),
+        );
+        draft
+    }
+
+    #[test]
+    fn malformed_persisted_memory_blocks_new_memory_writes_until_repaired() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let original = repo
+            .append(
+                branch,
+                0,
+                "original-memory",
+                json!({}),
+                vec![memory_draft("Original fact")],
+            )
+            .unwrap();
+        let original_json = encode(&original[0]).unwrap();
+        let mut malformed = serde_json::to_value(&original[0]).unwrap();
+        malformed["draft"]["payload"]["change"]["value"]["content"] = json!(" ");
+        let malformed_json = encode(&malformed).unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&malformed_json, &branch.0.to_string()],
+        )
+        .unwrap();
+
+        drop(repo);
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let proposed = memory_draft("Second fact");
+        let before_revision = revision(&conn).unwrap();
+        assert_eq!(
+            repo.append(
+                branch,
+                1,
+                "second-memory",
+                json!({}),
+                vec![proposed.clone()],
+            ),
+            Err(TimelineError::Invalid("invalid memory record"))
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert_eq!(
+            conn.query(
+                "SELECT 1 FROM timeline_receipts WHERE branch_id=? AND operation_key=?",
+                &[&branch.0.to_string(), "second-memory"],
+            )
+            .unwrap()
+            .len(),
+            0
+        );
+
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&original_json, &branch.0.to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            repo.append(branch, 1, "second-memory", json!({}), vec![proposed],)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(repo.world(branch).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn invalid_second_memory_change_rolls_back_entire_batch_and_allows_retry() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let valid = memory_draft("Valid fact");
+        let invalid = memory_draft(" ");
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        assert_eq!(
+            repo.append(
+                branch,
+                0,
+                "batched-memory",
+                json!({}),
+                vec![valid.clone(), invalid],
+            ),
+            Err(TimelineError::Invalid("invalid memory record"))
+        );
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        let committed = repo
+            .append(
+                branch,
+                0,
+                "batched-memory",
+                json!({}),
+                vec![valid, memory_draft("Another valid fact")],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
+        drop(repo);
+        assert_eq!(
+            SqliteTimelineRepository::open(&db.0)
+                .unwrap()
+                .world(branch)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn reopen_existing_session_does_not_change_timeline_revision() {
         let db = TestDb::new();
