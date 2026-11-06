@@ -9,6 +9,7 @@ use crate::{
         GenerationError, PreparedPrompt, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
         structured::StructuredResponse,
+        transforms::{TrackedPrompt, apply_tracked_transforms},
     },
 };
 
@@ -156,6 +157,8 @@ pub(super) fn encode_observed(
             text: Arc::from(text),
         })
         .collect::<Vec<_>>();
+    let mut origins = vec![None; prompt.len()];
+    origins.extend(conversation.messages.iter().map(|message| message.source));
     prompt.extend(conversation.messages.iter().map(|message| PromptMessage {
         role: match message.role {
             LlmRole::User => PromptRole::User,
@@ -164,7 +167,9 @@ pub(super) fn encode_observed(
         text: Arc::from(message.text.as_str()),
     }));
     prompt.extend_from_slice(tools.history);
+    origins.extend(std::iter::repeat_n(None, tools.history.len()));
     if let Some(instructions) = super::super::tools::advertisement(tools.settings) {
+        origins.insert(0, None);
         prompt.insert(
             0,
             PromptMessage {
@@ -175,6 +180,7 @@ pub(super) fn encode_observed(
     }
     encode_prompt_with_media(
         prompt,
+        origins,
         template,
         tools.native_history,
         tools.settings,
@@ -189,12 +195,20 @@ fn encode_prompt(
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
 ) -> EncodedRequest {
-    encode_prompt_with_media(prompt, template, native_history, tools, None)
-        .expect("text-only Gemini serialization cannot fail")
+    encode_prompt_with_media(
+        prompt.clone(),
+        vec![None; prompt.len()],
+        template,
+        native_history,
+        tools,
+        None,
+    )
+    .expect("text-only Gemini serialization cannot fail")
 }
 
 fn encode_prompt_with_media(
     mut prompt: Vec<PromptMessage>,
+    mut origins: Vec<Option<crate::identity::EventId>>,
     template: &GeminiTemplate,
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
@@ -207,6 +221,7 @@ fn encode_prompt_with_media(
             .iter()
             .take_while(|m| m.role == PromptRole::System)
             .count();
+        origins.insert(index, None);
         prompt.insert(
             index,
             PromptMessage {
@@ -219,37 +234,56 @@ fn encode_prompt_with_media(
             },
         );
     }
-    let prompt = crate::generation::apply_message_transforms(prompt, template.transforms());
-    let mut prompt = crate::generation::apply_message_transforms(
-        prompt,
+    assert_eq!(
+        prompt.len(),
+        origins.len(),
+        "prompt lineage must cover every input"
+    );
+    let mut tracked = apply_tracked_transforms(
+        prompt
+            .into_iter()
+            .zip(origins)
+            .map(|(m, source)| TrackedPrompt::new(m, source))
+            .collect(),
+        template.transforms(),
+    );
+    tracked = apply_tracked_transforms(
+        tracked,
         &[crate::generation::MessageTransform::SystemMessagesToUser {
             tag: "[SYSTEM INFO]".into(),
         }],
     );
     if let super::SystemInstructionMode::UserPrefix { tag } = &template.options().system_instruction
     {
-        let instructions = prompt
+        let instructions = tracked
             .iter()
             .filter(|m| m.role == PromptRole::System)
-            .map(|m| m.text.as_ref())
+            .map(TrackedPrompt::text)
             .collect::<Vec<_>>()
             .join("\n");
-        prompt.retain(|m| m.role != PromptRole::System);
+        tracked.retain(|m| m.role != PromptRole::System);
         if !instructions.trim().is_empty() {
             let prefix = format!("{tag}\n{}\n\n", instructions.trim());
-            if let Some(message) = prompt.iter_mut().find(|m| m.role == PromptRole::User) {
-                message.text = format!("{prefix}{}", message.text).into();
+            if let Some(message) = tracked.iter_mut().find(|m| m.role == PromptRole::User) {
+                message.prepend(prefix);
             } else {
-                prompt.insert(
+                tracked.insert(
                     0,
-                    PromptMessage {
-                        role: PromptRole::User,
-                        text: prefix.into(),
-                    },
+                    TrackedPrompt::new(
+                        PromptMessage {
+                            role: PromptRole::User,
+                            text: prefix.into(),
+                        },
+                        None,
+                    ),
                 );
             }
         }
     }
+    let prompt = tracked
+        .iter()
+        .map(TrackedPrompt::message)
+        .collect::<Vec<_>>();
     let instructions = prompt
         .iter()
         .filter(|m| m.role == PromptRole::System && !m.text.trim().is_empty())
@@ -322,8 +356,8 @@ fn encode_prompt_with_media(
         tool_config: native_tools.then(|| json!({"functionCallingConfig":{"mode":"AUTO"}})),
     };
     if let Some(media) = media {
-        media.attach(
-            &prompt,
+        media.attach_tracked(
+            &tracked,
             &mut body.contents,
             super::super::live_multimodal::LiveDialect::Gemini,
         )?;

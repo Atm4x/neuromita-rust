@@ -1,9 +1,10 @@
 use super::{
     CredentialReference, GenerationError, GenerationInput, GenerationObserver, GenerationProvider,
     MessageTransform, PreparedRequest, PromptMessage, PromptRole, ProviderFuture, ProviderKind,
-    ProviderTemplate, StructuredResponse, apply_message_transforms,
+    ProviderTemplate, StructuredResponse,
     conversation::{LlmConversation, LlmRole},
     http::{NativeCall, NativeEvent, ResponseMetadata, StreamUpdate, send_json, send_sse},
+    transforms::{TrackedPrompt, apply_tracked_transforms},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -270,6 +271,8 @@ impl OpenAiProvider {
                 text: text.into(),
             })
             .collect::<Vec<_>>();
+        let mut origins = vec![None; prompt.len()];
+        origins.extend(conversation.messages.iter().map(|m| m.source));
         prompt.extend(conversation.messages.into_iter().map(|m| PromptMessage {
             role: match m.role {
                 LlmRole::User => PromptRole::User,
@@ -278,7 +281,9 @@ impl OpenAiProvider {
             text: m.text.into(),
         }));
         prompt.extend(input.tool_history.iter().cloned());
+        origins.extend(std::iter::repeat_n(None, input.tool_history.len()));
         if let Some(instructions) = super::tools::advertisement(&input.tool_settings) {
+            origins.insert(0, None);
             prompt.insert(
                 0,
                 PromptMessage {
@@ -289,6 +294,7 @@ impl OpenAiProvider {
         }
         let (prompt, mut body) = encode(
             prompt,
+            origins,
             &template.definition,
             &input.tool_settings,
             &input.native_tool_history,
@@ -302,7 +308,7 @@ impl OpenAiProvider {
             let contents = body[key].as_array_mut().ok_or_else(|| {
                 GenerationError::Response("invalid OpenAI prompt container".into())
             })?;
-            media.attach(&prompt, contents, dialect)?;
+            media.attach_tracked(&prompt, contents, dialect)?;
         }
         let payload = serde_json::to_string(&body)
             .map_err(|_| GenerationError::Response("cannot encode provider request".into()))?;
@@ -321,7 +327,11 @@ impl OpenAiProvider {
                 .options
                 .send_max_output_tokens
                 .then_some(config.max_output_tokens),
-            prompt: prompt.into(),
+            prompt: prompt
+                .iter()
+                .map(TrackedPrompt::message)
+                .collect::<Vec<_>>()
+                .into(),
             payload_json: if media.is_some() {
                 "[REDACTED MULTIMODAL ATTACHMENTS]".into()
             } else {
@@ -439,15 +449,17 @@ fn role(role: PromptRole) -> &'static str {
 
 fn encode(
     mut prompt: Vec<PromptMessage>,
+    mut origins: Vec<Option<crate::identity::EventId>>,
     config: &OpenAiPresetDefinition,
     tools: &super::ToolSettings,
     native_history: &[super::provider::NativeToolExchange],
-) -> (Vec<PromptMessage>, Value) {
+) -> (Vec<TrackedPrompt>, Value) {
     if config.options.output != JsonOutput::Schema {
         let index = prompt
             .iter()
             .take_while(|m| m.role == PromptRole::System)
             .count();
+        origins.insert(index, None);
         prompt.insert(
             index,
             PromptMessage {
@@ -460,9 +472,21 @@ fn encode(
             },
         );
     }
-    let prompt = apply_message_transforms(prompt, &config.transforms);
+    assert_eq!(
+        prompt.len(),
+        origins.len(),
+        "prompt lineage must cover every input"
+    );
+    let prompt = apply_tracked_transforms(
+        prompt
+            .into_iter()
+            .zip(origins)
+            .map(|(m, source)| TrackedPrompt::new(m, source))
+            .collect(),
+        &config.transforms,
+    );
     let responses = config.protocol == OpenAiProtocol::Responses;
-    let messages = prompt.iter().map(|m| if responses { json!({"role":role(m.role),"content":[{"type": if m.role == PromptRole::Assistant {"output_text"} else {"input_text"},"text":m.text}]}) } else { json!({"role":role(m.role),"content":m.text}) }).collect::<Vec<_>>();
+    let messages = prompt.iter().map(|m| if responses { json!({"role":role(m.role),"content":[{"type": if m.role == PromptRole::Assistant {"output_text"} else {"input_text"},"text":m.text()}]}) } else { json!({"role":role(m.role),"content":m.text()}) }).collect::<Vec<_>>();
     let mut body = json!({"model":config.model,"stream":config.options.stream});
     let mut messages = messages;
     for exchange in native_history {
@@ -922,13 +946,14 @@ mod tests {
         ];
         let (transformed, body) = encode(
             prompt,
+            vec![None; 3],
             &def,
             &crate::generation::ToolSettings::default(),
             &[],
         );
-        assert_eq!(transformed[0].text.as_ref(), "stable");
-        assert_eq!(transformed[1].text.as_ref(), "dynamic");
-        assert_eq!(transformed[2].text.as_ref(), "question");
+        assert_eq!(transformed[0].text(), "stable");
+        assert_eq!(transformed[1].text(), "dynamic");
+        assert_eq!(transformed[2].text(), "question");
         assert_eq!(body["messages"][0]["content"], "stable");
         assert_eq!(body["messages"][1]["content"], "dynamic");
         assert_eq!(body["messages"][2]["content"], "question");

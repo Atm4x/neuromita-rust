@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use super::{
-    GenerationError, PromptMessage, PromptRole,
+    GenerationError, PromptRole,
     conversation::{LlmConversation, LlmRole},
 };
 use crate::{
@@ -23,10 +23,13 @@ pub(crate) enum LiveDialect {
 }
 
 pub(crate) struct LiveMedia {
-    /// All projected history entries (including noncanonical context) are
-    /// required to match contiguously after the provider transforms.
-    history: Vec<(PromptRole, String)>,
-    entries: Vec<(usize, EventId, Vec<Value>)>,
+    entries: HashMap<EventId, MediaEntry>,
+}
+
+struct MediaEntry {
+    role: PromptRole,
+    projected_text: String,
+    parts: Vec<Value>,
 }
 
 impl LiveMedia {
@@ -45,7 +48,7 @@ impl LiveMedia {
             .map(|(i, message)| (message.event_id, i))
             .collect::<HashMap<_, _>>();
         let mut affected = Vec::new();
-        for (position, projected) in conversation.messages.iter().enumerate() {
+        for projected in &conversation.messages {
             let Some(id) = projected.source else { continue };
             let Some(&index) = known.get(&id) else {
                 return Err(GenerationError::Response(
@@ -68,7 +71,7 @@ impl LiveMedia {
                         "multimodal history prefix does not match canonical content".into(),
                     )
                 })?;
-                affected.push((position, id, index, prefix.to_owned()));
+                affected.push((id, index, prefix.to_owned(), projected));
             }
         }
         if affected.is_empty() {
@@ -95,8 +98,8 @@ impl LiveMedia {
         .map_err(|error| {
             GenerationError::Response(format!("multimodal provider input rejected: {error}"))
         })?;
-        let mut entries = Vec::new();
-        for (position, id, index, prefix) in affected {
+        let mut entries = HashMap::new();
+        for (id, index, prefix, projected) in affected {
             let mut parts = encoded[index][if matches!(dialect, LiveDialect::Gemini) {
                 "parts"
             } else {
@@ -113,82 +116,68 @@ impl LiveMedia {
                 };
                 parts.insert(0, initial);
             }
-            entries.push((position, id, parts));
+            let role = match projected.role {
+                LlmRole::User => PromptRole::User,
+                LlmRole::Assistant => PromptRole::Assistant,
+            };
+            if entries
+                .insert(
+                    id,
+                    MediaEntry {
+                        role,
+                        projected_text: projected.text.clone(),
+                        parts,
+                    },
+                )
+                .is_some()
+            {
+                return Err(GenerationError::Response(
+                    "duplicate Timeline media event in prompt".into(),
+                ));
+            }
         }
-        Ok(Some(Self {
-            history: conversation
-                .messages
-                .iter()
-                .map(|message| {
-                    (
-                        match message.role {
-                            LlmRole::User => PromptRole::User,
-                            LlmRole::Assistant => PromptRole::Assistant,
-                        },
-                        message.text.clone(),
-                    )
-                })
-                .collect(),
-            entries,
-        }))
+        Ok(Some(Self { entries }))
     }
 
-    pub(crate) fn attach(
+    /// Bind media by source EventId, never by a coincidentally equal text window.
+    /// All targets are validated before a single wire message is mutated.
+    pub(crate) fn attach_tracked(
         &self,
-        prompt: &[PromptMessage],
+        prompt: &[super::transforms::TrackedPrompt],
         contents: &mut [Value],
         dialect: LiveDialect,
     ) -> Result<(), GenerationError> {
-        let non_system = prompt
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| message.role != PromptRole::System)
-            .collect::<Vec<_>>();
-        let serialized_prompt_size = match dialect {
-            LiveDialect::Gemini => non_system.len(),
+        use std::collections::HashSet;
+
+        let invalid = || {
+            GenerationError::Response(
+                "multimodal event provenance no longer matches the provider prompt".into(),
+            )
+        };
+        let expected_len = match dialect {
+            LiveDialect::Gemini => prompt
+                .iter()
+                .filter(|m| m.role != PromptRole::System)
+                .count(),
             LiveDialect::OpenAiChat | LiveDialect::OpenAiResponses => prompt.len(),
         };
-        if contents.len() < serialized_prompt_size || self.history.is_empty() {
-            return Err(GenerationError::Response(
-                "transformed prompt has invalid multimodal shape".into(),
-            ));
+        if contents.len() < expected_len {
+            return Err(invalid());
         }
-        let candidates = non_system
-            .windows(self.history.len())
-            .enumerate()
-            .filter_map(|(index, window)| {
-                window
-                    .iter()
-                    .zip(&self.history)
-                    .all(|((_, message), (role, text))| {
-                        message.role == *role && message.text.as_ref() == text
-                    })
-                    .then_some(index)
-            })
-            .collect::<Vec<_>>();
-        let [start] = candidates.as_slice() else {
-            return Err(GenerationError::Response(
-                "provider transform changed or ambiguously positioned multimodal context".into(),
-            ));
-        };
-        let mut replacements = Vec::with_capacity(self.entries.len());
-        for (position, _id, parts) in &self.entries {
-            let (prompt_index, message) = non_system[start + position];
-            let wire_index = match dialect {
-                LiveDialect::Gemini => start + position,
-                LiveDialect::OpenAiChat | LiveDialect::OpenAiResponses => prompt_index,
-            };
+        let mut replacements = Vec::new();
+        let mut seen = HashSet::new();
+        let mut wire_index = 0;
+        for message in prompt {
+            if matches!(dialect, LiveDialect::Gemini) && message.role == PromptRole::System {
+                continue;
+            }
             let wire = &contents[wire_index];
             let expected_role = match (dialect, message.role) {
                 (LiveDialect::Gemini, PromptRole::Assistant) => "model",
                 (LiveDialect::Gemini, _) => "user",
                 (_, PromptRole::Assistant) => "assistant",
                 (_, PromptRole::User) => "user",
-                (_, PromptRole::System) => {
-                    return Err(GenerationError::Response(
-                        "multimodal media cannot be assigned to a system role".into(),
-                    ));
-                }
+                (_, PromptRole::System) => "system",
             };
             let wire_text = match dialect {
                 LiveDialect::Gemini | LiveDialect::OpenAiResponses => {
@@ -205,21 +194,51 @@ impl LiveMedia {
                 LiveDialect::OpenAiChat => wire["content"].as_str(),
             };
             if wire["role"].as_str() != Some(expected_role)
-                || wire_text != Some(message.text.as_ref())
+                || wire_text != Some(message.text().as_str())
             {
-                return Err(GenerationError::Response(
-                    "serialized multimodal target does not match its source role and text".into(),
-                ));
+                return Err(invalid());
             }
-            replacements.push((wire_index, parts));
-        }
-        for (wire_index, parts) in replacements {
-            match dialect {
-                LiveDialect::Gemini => contents[wire_index]["parts"] = Value::Array(parts.clone()),
-                LiveDialect::OpenAiChat | LiveDialect::OpenAiResponses => {
-                    contents[wire_index]["content"] = Value::Array(parts.clone());
+            let mut parts = Vec::new();
+            let mut has_media = false;
+            for fragment in &message.fragments {
+                if let Some((id, entry)) = fragment
+                    .source
+                    .and_then(|id| self.entries.get(&id).map(|entry| (id, entry)))
+                {
+                    if !seen.insert(id)
+                        || message.role != entry.role
+                        || fragment.text != entry.projected_text
+                        || message.role == PromptRole::System
+                    {
+                        return Err(invalid());
+                    }
+                    has_media = true;
+                    parts.extend_from_slice(&entry.parts);
+                } else if !fragment.text.is_empty() {
+                    parts.push(match dialect {
+                        LiveDialect::Gemini => json!({"text":fragment.text}),
+                        LiveDialect::OpenAiChat => json!({"type":"text","text":fragment.text}),
+                        LiveDialect::OpenAiResponses => {
+                            json!({"type":"input_text","text":fragment.text})
+                        }
+                    });
                 }
             }
+            if has_media {
+                replacements.push((wire_index, parts));
+            }
+            wire_index += 1;
+        }
+        if seen.len() != self.entries.len() {
+            return Err(invalid());
+        }
+        for (index, parts) in replacements {
+            let key = if matches!(dialect, LiveDialect::Gemini) {
+                "parts"
+            } else {
+                "content"
+            };
+            contents[index][key] = Value::Array(parts);
         }
         Ok(())
     }
@@ -227,6 +246,7 @@ impl LiveMedia {
 
 #[cfg(test)]
 mod tests {
+    use super::super::PromptMessage;
     use super::*;
     use crate::{
         identity::CharacterId,
@@ -266,17 +286,29 @@ mod tests {
         }
     }
 
-    fn prompt(conversation: &LlmConversation, leading: &str) -> Vec<PromptMessage> {
-        std::iter::once(PromptMessage {
-            role: PromptRole::System,
-            text: leading.into(),
-        })
-        .chain(conversation.messages.iter().map(|message| PromptMessage {
-            role: match message.role {
-                LlmRole::User => PromptRole::User,
-                LlmRole::Assistant => PromptRole::Assistant,
+    fn prompt(
+        conversation: &LlmConversation,
+        leading: &str,
+    ) -> Vec<super::super::transforms::TrackedPrompt> {
+        use super::super::transforms::TrackedPrompt;
+        std::iter::once(TrackedPrompt::new(
+            PromptMessage {
+                role: PromptRole::System,
+                text: leading.into(),
             },
-            text: message.text.as_str().into(),
+            None,
+        ))
+        .chain(conversation.messages.iter().map(|message| {
+            TrackedPrompt::new(
+                PromptMessage {
+                    role: match message.role {
+                        LlmRole::User => PromptRole::User,
+                        LlmRole::Assistant => PromptRole::Assistant,
+                    },
+                    text: message.text.as_str().into(),
+                },
+                message.source,
+            )
         }))
         .collect()
     }
@@ -301,7 +333,7 @@ mod tests {
         let p = prompt(&c, "system");
         let mut contents = vec![json!({"role":"user","parts":[{"text":c.messages[0].text}]})];
         media
-            .attach(&p, &mut contents, LiveDialect::Gemini)
+            .attach_tracked(&p, &mut contents, LiveDialect::Gemini)
             .unwrap();
         assert_eq!(contents[0]["parts"][0]["text"], "Event focus: ");
         assert_eq!(contents[0]["parts"][1]["text"], "alpha");
@@ -333,7 +365,7 @@ mod tests {
             json!({"role":"user","content":[{"type":"input_text","text":""}]}),
         ];
         media
-            .attach(&p, &mut contents, LiveDialect::OpenAiResponses)
+            .attach_tracked(&p, &mut contents, LiveDialect::OpenAiResponses)
             .unwrap();
         assert_eq!(contents[0]["role"], "system");
         assert_eq!(contents[0]["content"][0]["text"], "system");
@@ -360,29 +392,34 @@ mod tests {
             .unwrap()
             .unwrap();
         let mut contents = vec![json!({"role":"user","content":"changed"})];
-        let changed = vec![PromptMessage {
-            role: PromptRole::User,
-            text: "changed".into(),
-        }];
+        let changed = vec![super::super::transforms::TrackedPrompt::new(
+            PromptMessage {
+                role: PromptRole::User,
+                text: "changed".into(),
+            },
+            None,
+        )];
         assert!(
             media
-                .attach(&changed, &mut contents, LiveDialect::OpenAiChat)
+                .attach_tracked(&changed, &mut contents, LiveDialect::OpenAiChat)
                 .is_err()
         );
-        let matching = vec![
-            PromptMessage {
-                role: PromptRole::User,
-                text: c.messages[0].text.clone().into(),
-            },
-            PromptMessage {
-                role: PromptRole::User,
-                text: c.messages[0].text.clone().into(),
-            },
-        ];
+        let event_id = c.messages[0].source.unwrap();
+        let matching = (0..2)
+            .map(|_| {
+                super::super::transforms::TrackedPrompt::new(
+                    PromptMessage {
+                        role: PromptRole::User,
+                        text: c.messages[0].text.clone().into(),
+                    },
+                    Some(event_id),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut contents = vec![json!({"content":"repeat"}), json!({"content":"repeat"})];
         assert!(
             media
-                .attach(&matching, &mut contents, LiveDialect::OpenAiChat)
+                .attach_tracked(&matching, &mut contents, LiveDialect::OpenAiChat)
                 .is_err()
         );
         fs::remove_dir_all(path).ok();
@@ -416,7 +453,7 @@ mod tests {
             json!({"role":"user","content":"another"}),
         ];
         media
-            .attach(&prompt, &mut wire, LiveDialect::OpenAiChat)
+            .attach_tracked(&prompt, &mut wire, LiveDialect::OpenAiChat)
             .unwrap();
         assert_eq!(
             wire[0],
@@ -435,7 +472,7 @@ mod tests {
         let before = malformed.clone();
         assert!(
             media
-                .attach(&prompt, &mut malformed, LiveDialect::OpenAiChat)
+                .attach_tracked(&prompt, &mut malformed, LiveDialect::OpenAiChat)
                 .is_err()
         );
         assert_eq!(malformed, before);
@@ -445,30 +482,44 @@ mod tests {
 
     #[test]
     fn serializing_two_media_messages_never_partially_mutates_invalid_wire_payload() {
+        let first = EventId::new();
+        let second = EventId::new();
         let media = LiveMedia {
-            history: vec![
-                (PromptRole::User, "first".into()),
-                (PromptRole::Assistant, "second".into()),
-            ],
-            entries: vec![
-                (0, EventId::new(), vec![json!({"text":"first"})]),
-                (1, EventId::new(), vec![json!({"text":"second"})]),
-            ],
+            entries: HashMap::from([
+                (
+                    first,
+                    MediaEntry {
+                        role: PromptRole::User,
+                        projected_text: "first".into(),
+                        parts: vec![json!({"text":"first"})],
+                    },
+                ),
+                (
+                    second,
+                    MediaEntry {
+                        role: PromptRole::Assistant,
+                        projected_text: "second".into(),
+                        parts: vec![json!({"text":"second"})],
+                    },
+                ),
+            ]),
         };
-        let prompt = vec![
-            PromptMessage {
-                role: PromptRole::System,
-                text: "instruction".into(),
-            },
-            PromptMessage {
-                role: PromptRole::User,
-                text: "first".into(),
-            },
-            PromptMessage {
-                role: PromptRole::Assistant,
-                text: "second".into(),
-            },
-        ];
+        let prompt = [
+            (PromptRole::System, "instruction", None),
+            (PromptRole::User, "first", Some(first)),
+            (PromptRole::Assistant, "second", Some(second)),
+        ]
+        .into_iter()
+        .map(|(role, text, source)| {
+            super::super::transforms::TrackedPrompt::new(
+                PromptMessage {
+                    role,
+                    text: text.into(),
+                },
+                source,
+            )
+        })
+        .collect::<Vec<_>>();
         let mut wire = vec![
             json!({"role":"system","content":"instruction"}),
             json!({"role":"user","content":"first"}),
@@ -477,7 +528,7 @@ mod tests {
         let initial = wire.clone();
         assert!(
             media
-                .attach(&prompt, &mut wire, LiveDialect::OpenAiChat)
+                .attach_tracked(&prompt, &mut wire, LiveDialect::OpenAiChat)
                 .is_err()
         );
         assert_eq!(wire, initial);
@@ -956,21 +1007,26 @@ mod live_http_tests {
         }
     }
     #[tokio::test]
-    async fn merging_user_history_with_media_is_rejected_before_http_dispatch() {
+    async fn merging_two_user_events_preserves_both_media_and_event_order() {
         let directory = std::env::temp_dir().join(format!("nm-media-merge-{}", Uuid::new_v4()));
         let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
-        let image = assets.import("image/png", Cursor::new(b"image")).unwrap();
+        let first_image = assets
+            .import("image/png", Cursor::new(b"first-binary"))
+            .unwrap();
+        let second_image = assets
+            .import("image/png", Cursor::new(b"second-binary"))
+            .unwrap();
         let mut repository = TimelineStore::new();
         let branch = BranchId::new();
         repository.create_session(SessionId::new(), branch).unwrap();
         let mut drafts = Vec::new();
-        for text in ["first", "second"] {
+        for (text, asset) in [("repeat", first_image), ("repeat", second_image)] {
             let mut draft = EventDraft::new(EventKind::PlayerMessage);
             draft.actor = Some("player".into());
             draft.observers.insert(CharacterId::Crazy);
             draft.payload.insert(
                 "content".into(),
-                json!([{"type":"text","text":text},{"type":"image","asset":image}]),
+                json!([{"type":"text","text":text},{"type":"image","asset":asset}]),
             );
             drafts.push(draft);
         }
@@ -982,24 +1038,71 @@ mod live_http_tests {
             TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(raw) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = raw.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut data = vec![0; length];
+            reader.read_exact(&mut data).await.unwrap();
+            let body: Value = serde_json::from_slice(&data).unwrap();
+            let response = json!({"choices":[{"finish_reason":"stop","message":{
+                "role":"assistant","content":"{\"segments\":[{\"text\":\"ack\"}]}"
+            }}]})
+            .to_string();
+            reader.get_mut().write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()
+            ).as_bytes()).await.unwrap();
+            body
+        });
         let (adapter, preset) = provider("mistral", &endpoint);
         let generator = ResponseGenerator::new([adapter]).unwrap();
         let mut observation = Observe::default();
         let result = tokio::time::timeout(
-            Duration::from_secs(1),
+            Duration::from_secs(3),
             generator.generate_observed(
                 GenerationRequest::new(context(view, branch, target), preset, None)
                     .with_assets(Some(Arc::clone(&assets))),
                 &mut observation,
             ),
         )
-        .await;
-        assert!(
-            matches!(result, Ok(Err(GenerationError::Response(_)))),
-            "{result:?}"
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.text().as_ref(), "ack");
+        let body = server.await.unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let media = messages
+            .iter()
+            .filter(|message| {
+                message.to_string().contains("Zmlyc3QtYmluYXJ5")
+                    || message.to_string().contains("c2Vjb25kLWJpbmFyeQ==")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            media.len(),
+            1,
+            "both source events must stay in one user turn"
         );
-        assert!(observation.0.is_empty());
-        drop(listener);
+        assert_eq!(media[0]["role"], "user");
+        let serialized = media[0]["content"].to_string();
+        assert_eq!(serialized.matches("Zmlyc3QtYmluYXJ5").count(), 1);
+        assert_eq!(serialized.matches("c2Vjb25kLWJpbmFyeQ==").count(), 1);
+        assert!(serialized.find("Zmlyc3QtYmluYXJ5") < serialized.find("c2Vjb25kLWJpbmFyeQ=="));
+        assert_eq!(observation.0.len(), 1);
+        assert_eq!(
+            observation.0[0].payload_json.as_ref(),
+            "[REDACTED MULTIMODAL ATTACHMENTS]"
+        );
         std::fs::remove_dir_all(directory).ok();
     }
 }
