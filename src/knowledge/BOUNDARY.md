@@ -15,3 +15,10 @@ Failures from semantic retrieval are explicit errors; the selected mode cannot s
 - A changed, forgotten, deleted, expired or subsequently restored source cannot resurrect an earlier extraction. Stale extractor results are rejected at the character edit boundary. Reprocessing replaces the prior relations for the same source; an empty extraction explicitly clears them.
 - `query_extracted_graph` provides bounded, deterministic lexical retrieval of extracted relations with source identity and source revision. Historic manual `LinkEntities` events remain replay-compatible but cannot claim modern source provenance.
 - Further work is needed for live extraction adapter wiring, non-memory event sources, richer identity resolution, user-facing inspection/reindex/clear workflows and Python behavior parity. This is deliberately **not** full #23 acceptance.
+
+## Graph maintenance (partial #50)
+
+- `preview_graph_maintenance` takes an immutable character memory snapshot, exact unique source IDs and an injected clock value. It exposes each source revision and existing sourced relations without writing anything.
+- `apply_graph_maintenance` requires explicit confirmation. `Clear` removes only the selected sources' derived relations; `Reindex` awaits an explicitly supplied extractor. No extractor means an explicit unavailable-backend error, not a fake lexical replacement.
+- Extractor failure, cancellation before commit and stale memory snapshots reject the **entire** proposed batch. The character owner validates the original Timeline revision and commits all resulting source updates in a single append. Cancellation is intentionally not promised after the write is dispatched.
+- This is not a generic backup/restore or settings migration feature. Graph UI controls, embedding cache inspection, other maintenance domains, archive validation and full Python parity remain open.

@@ -533,7 +533,11 @@ impl CharacterMemories {
                 if retained + batch.relations.len() > MAX_EXTRACTED_RELATIONS {
                     return Err("extracted relation capacity exceeded");
                 }
-                self.extracted.insert(batch.source, batch.clone());
+                if batch.relations.is_empty() {
+                    self.extracted.remove(&batch.source);
+                } else {
+                    self.extracted.insert(batch.source, batch.clone());
+                }
             }
             MemoryChange::UpsertRelation(relation) => {
                 if !relation.is_valid() {
@@ -801,7 +805,9 @@ impl CharacterMemories {
                         source_revision: *expected_revision,
                         relations: relations.clone(),
                     };
-                    if next.extracted.get(source) == Some(&batch) {
+                    if next.extracted.get(source) == Some(&batch)
+                        || (batch.relations.is_empty() && !next.extracted.contains_key(source))
+                    {
                         continue;
                     }
                     let change = MemoryChange::ReplaceExtractedRelations(batch);
