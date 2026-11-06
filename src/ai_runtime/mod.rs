@@ -468,6 +468,7 @@ struct Activation<'a> {
     models: &'a [ModelActivation],
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+    expected_failed_generation: Option<Uuid>,
 }
 
 impl AiService {
@@ -605,17 +606,26 @@ impl AiSupervisor {
         });
     }
 
-    fn activation_failed(&self, services: &[AiService], error: &AiRuntimeError) {
+    fn activation_failed(
+        &self,
+        services: &[AiService],
+        error: &AiRuntimeError,
+        failed_generation: Option<Uuid>,
+    ) {
         self.status.send_modify(|snapshot| {
             for service in services {
                 let state = snapshot.services.entry(*service).or_default();
                 state.pending_model = None;
                 state.last_error = Some(error.to_string());
                 if state.active_model.is_none() {
-                    state.phase = if state.generation.is_some() {
-                        RuntimePhase::WorkerRunning
-                    } else {
+                    state.phase = if (failed_generation.is_some()
+                        && state.generation == failed_generation)
+                        || state.phase == RuntimePhase::Failed
+                        || state.generation.is_none()
+                    {
                         RuntimePhase::Failed
+                    } else {
+                        RuntimePhase::WorkerRunning
                     };
                 }
             }
@@ -685,7 +695,7 @@ impl AiSupervisor {
         let worker = match WorkerProcess::launch(&self.config, &[], &[]).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(&[service], &error);
+                self.activation_failed(&[service], &error, None);
                 return Err(error);
             }
         };
@@ -723,7 +733,7 @@ impl AiSupervisor {
         let worker = match WorkerProcess::launch(&self.config, composition.paths(), &[]).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(composition.services(), &error);
+                self.activation_failed(composition.services(), &error, None);
                 return Err(error);
             }
         };
@@ -755,6 +765,39 @@ impl AiSupervisor {
             .await
     }
 
+    /// Replace only an observed failed worker generation with a freshly verified
+    /// model composition provided by the application. A successful handshake alone
+    /// is insufficient: every model must initialize before publication.
+    ///
+    /// No automatic retry is scheduled here. The application owns the retry
+    /// budget and must prepare the current selection before each attempt.
+    pub async fn recover_failed_composed(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.refresh_status().await;
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: None,
+            verify: None,
+            expected_failed_generation: Some(expected_generation),
+        })
+        .await
+    }
+
     /// Prepare a candidate worker for an explicit device profile. The candidate
     /// must prove device execution and loaded-model readiness, and `verify` runs
     /// immediately before publication so a superseded selection cannot replace
@@ -781,6 +824,7 @@ impl AiSupervisor {
             models,
             profile: Some(profile),
             verify: Some(verify),
+            expected_failed_generation: None,
         })
         .await
     }
@@ -848,6 +892,7 @@ impl AiSupervisor {
             models,
             profile: None,
             verify: None,
+            expected_failed_generation: None,
         })
         .await
     }
@@ -860,6 +905,7 @@ impl AiSupervisor {
             models,
             profile,
             verify,
+            expected_failed_generation,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -877,6 +923,26 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        if let Some(expected) = expected_failed_generation {
+            let status = self.status_snapshot();
+            let previous = self.workers.lock().await.get(&key).cloned();
+            if !services.iter().all(|service| {
+                let state = status.service(*service);
+                state.generation == Some(expected) && state.phase == RuntimePhase::Failed
+            }) {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+            let previous = previous.ok_or(AiRuntimeError::ActivationSuperseded)?;
+            let process = previous.lock().await;
+            if process.generation != expected {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+            if !process.runtime_profiles.is_empty() && (profile.is_none() || verify.is_none()) {
+                return Err(AiRuntimeError::ActivationGuard(
+                    "device-profiled recovery requires hardware revalidation".into(),
+                ));
+            }
+        }
         let mut runtime_profiles = HashMap::new();
         if let Some(profile) = profile {
             let previous = self.workers.lock().await.get(&key).cloned();
@@ -890,7 +956,7 @@ impl AiSupervisor {
         let mut candidate = match WorkerProcess::launch(&self.config, layers, models).await {
             Ok(worker) => worker,
             Err(error) => {
-                self.activation_failed(services, &error);
+                self.activation_failed(services, &error, expected_failed_generation);
                 return Err(error);
             }
         };
@@ -997,7 +1063,7 @@ impl AiSupervisor {
         if let Err(error) = prepare {
             let _ = candidate.child.start_kill();
             let _ = candidate.child.wait().await;
-            self.activation_failed(services, &error);
+            self.activation_failed(services, &error, expected_failed_generation);
             return Err(error);
         }
         let _selection_guard = match verify {
@@ -1006,7 +1072,7 @@ impl AiSupervisor {
                 Err(error) => {
                     let _ = candidate.child.start_kill();
                     let _ = candidate.child.wait().await;
-                    self.activation_failed(services, &error);
+                    self.activation_failed(services, &error, expected_failed_generation);
                     return Err(error);
                 }
             },
@@ -1764,6 +1830,68 @@ class Plugin:
         drop(_busy);
         supervisor.stop(AiService::Tts).await.unwrap();
         supervisor.stop(AiService::Asr).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unverified_recovery_cannot_downgrade_a_hardware_profile() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor.start(AiService::Tts).await.unwrap();
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.runtime_profiles.insert(
+                AiService::Tts,
+                RuntimeProfile {
+                    backend: backend::BackendKind::RemoteApi,
+                    device: "remote".into(),
+                    precision: hardware::Precision::Fp32,
+                },
+            );
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        supervisor.refresh_status().await;
+        let services = [AiService::Tts];
+        let models = [ModelActivation {
+            service: AiService::Tts,
+            plugin_id: "mock_tts".into(),
+            settings: json!({}),
+            asset_revision: None,
+        }];
+        assert!(matches!(
+            supervisor
+                .activate(Activation {
+                    service: AiService::Tts,
+                    services: &services,
+                    layers: &[],
+                    models: &models,
+                    profile: None,
+                    verify: None,
+                    expected_failed_generation: Some(generation),
+                })
+                .await,
+            Err(AiRuntimeError::ActivationGuard(_))
+        ));
+        let state = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(state.phase, RuntimePhase::Failed);
+        assert_eq!(state.generation, Some(generation));
+        supervisor.stop(AiService::Tts).await.unwrap();
     }
 
     #[tokio::test]
