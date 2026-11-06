@@ -1,0 +1,110 @@
+name: Agent C staging cancellation bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-staging-cancel-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-layer-path-safety-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=d9e4db0778bdf83ac690fcbf1d30d87a98c725a4
+          HEAD=5df15165c2cc81208833d05f292f11808f30fefd
+          TARGET=codex/ai-platform-hub-c3-staging-cancel-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-staging-cancel.bundle
+          IyB2MiBnaXQgYnVuZGxlCi1kOWU0ZGIwNzc4YmRmODNhYzY5MGZjYmYxZDMwZDg3YTk4YzcyNWE0
+          IGZpeChhaSk6IHJlamVjdCBzeW1saW5rZWQgbWFuYWdlZCBsYXllciByZXZpc2lvbnMgYW5kIHBh
+          cmVudHMKNWRmMTUxNjVjMmNjODEyMDg4MzNkMDVmMjkyZjExODA4ZjMwZmVmZCByZWZzL2hlYWRz
+          L2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1jMy1zdGFnaW5nLWNhbmNlbC0yMDI2MTEwNwoKUEFDSwAA
+          AAIAAAAKnBR4nK2MS07EMBBE9zlFL0GIkSdO0vEIIRBruEPbbk8seezInwFuj3MHalX1pHo1M4NG
+          iQYXs6CcFY7W6ZkWJnTTqJTT6yJxVCTNsFPmWMEqnqwWiKu2bpVkFiWc0e5spbArkloNjjNNA7W6
+          pQxf3HL69JXg/Xr8P+CFjvJs3lrhXE4xZd7D7+nq69b0yaTbK5xRTUIoMSE8iZ6h05uvlf/LNzj/
+          80D+8QImMEUotUsstDv42HsIBVIEQ9FwCFR9H9/dl1qFPhky33056N508GUb/gCSOGva+QOBqXZr
+          tDUaEK9LMV/DahV8whqHvXicATkAxv//Bf8FsKABFBUkHdM+SyV2+I++LcfDnTu2/oc1k7QBuRSt
+          1c8XvDT5DQzRhz701Ck5jqNkbJOBAn794xrT/gG4B2aW+k/qGMv3lra7Q3Uy9OSik3ic+8D0gWlC
+          vcgzs/Y2qU3HJzh4beyLCmytyunhNZ44+S4A2UwOAPoEF2wFcqbSz9dq73TEQmDlUdsh1XR4nAFK
+          ALX/nhvcG5BFJ2NhbmNlbGxhdGlvbi1jMy5tZADOjjM3WThkACcp+uBOMWhSZETTIJEuKBRBXUrR
+          XaG99yf3D2b53/kLtvOKsbFqNA0ynh8qsJQBeJxtVs2O2zYQvu9TDJBLUtg+tD1tiwJFeglQIAE2
+          RY8xRY0kwhSpDkl7detD9An7JP2Gkm056WWxtqiZ+X7mo9/Q+x/o37//IWuCZe9NdjHsk+mYPs15
+          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
+          BUNDLE
+          echo 'cbb660e8c9daf300f867b2f198e04c5ffc9c377e7826ce2391213a28f50d0d19  /tmp/agent-c-staging-cancel.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-staging-cancel.bundle
+          git fetch --no-tags /tmp/agent-c-staging-cancel.bundle "refs/heads/codex/ai-platform-hub-c3-staging-cancel-20261107:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
