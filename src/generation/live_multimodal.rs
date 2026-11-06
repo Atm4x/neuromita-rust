@@ -735,6 +735,53 @@ mod live_http_tests {
         }
     }
 
+    fn provider(
+        provider_name: &str,
+        endpoint: &str,
+    ) -> (Arc<dyn super::super::GenerationProvider>, GenerationPreset) {
+        match provider_name {
+            "gemini" => {
+                let template = GeminiTemplate::new(
+                    endpoint,
+                    "fixture-model",
+                    "test-key",
+                    GenerationSettings::new(0.5, 128, Duration::from_secs(3)).unwrap(),
+                )
+                .unwrap();
+                (
+                    Arc::new(GeminiProvider::new().unwrap()),
+                    GenerationPreset::new(ProviderTemplate::Gemini(template)),
+                )
+            }
+            _ => {
+                let protocol = match provider_name {
+                    "responses" => OpenAiProtocol::Responses,
+                    "mistral" => OpenAiProtocol::Mistral,
+                    _ => OpenAiProtocol::Compatible,
+                };
+                let template = OpenAiTemplate::new(
+                    OpenAiPresetDefinition {
+                        protocol,
+                        endpoint: endpoint.into(),
+                        model: "fixture-model".into(),
+                        credential: None,
+                        temperature: 0.5,
+                        max_output_tokens: 128,
+                        timeout_ms: 3000,
+                        options: protocol.options(),
+                        transforms: protocol.transforms(),
+                    },
+                    None,
+                )
+                .unwrap();
+                (
+                    Arc::new(OpenAiProvider::new().unwrap()),
+                    GenerationPreset::new(ProviderTemplate::OpenAi(template)),
+                )
+            }
+        }
+    }
+
     #[tokio::test]
     async fn live_provider_payloads_contain_image_once_and_observer_never_sees_binary() {
         for provider_name in ["gemini", "chat", "responses"] {
@@ -788,48 +835,7 @@ mod live_http_tests {
                 reader.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).as_bytes()).await.unwrap();
                 payload
             });
-            let (provider, preset): (Arc<dyn super::super::GenerationProvider>, GenerationPreset) =
-                match provider_name {
-                    "gemini" => {
-                        let template = GeminiTemplate::new(
-                            &endpoint,
-                            "fixture-model",
-                            "test-key",
-                            GenerationSettings::new(0.5, 128, Duration::from_secs(3)).unwrap(),
-                        )
-                        .unwrap();
-                        (
-                            Arc::new(GeminiProvider::new().unwrap()),
-                            GenerationPreset::new(ProviderTemplate::Gemini(template)),
-                        )
-                    }
-                    _ => {
-                        let protocol = if provider_name == "responses" {
-                            OpenAiProtocol::Responses
-                        } else {
-                            OpenAiProtocol::Compatible
-                        };
-                        let template = OpenAiTemplate::new(
-                            OpenAiPresetDefinition {
-                                protocol,
-                                endpoint,
-                                model: "fixture-model".into(),
-                                credential: None,
-                                temperature: 0.5,
-                                max_output_tokens: 128,
-                                timeout_ms: 3000,
-                                options: protocol.options(),
-                                transforms: protocol.transforms(),
-                            },
-                            None,
-                        )
-                        .unwrap();
-                        (
-                            Arc::new(OpenAiProvider::new().unwrap()),
-                            GenerationPreset::new(ProviderTemplate::OpenAi(template)),
-                        )
-                    }
-                };
+            let (provider, preset) = provider(provider_name, &endpoint);
             let generator = ResponseGenerator::new([provider]).unwrap();
             let mut observation = Observe::default();
             let mut request_context = context(view, branch, target);
@@ -886,5 +892,114 @@ mod live_http_tests {
             );
             std::fs::remove_dir_all(directory).ok();
         }
+    }
+    #[tokio::test]
+    async fn missing_or_corrupt_binary_never_reaches_provider_or_observer() {
+        for provider_name in ["gemini", "chat", "responses"] {
+            for corrupt in [true, false] {
+                let directory =
+                    std::env::temp_dir().join(format!("nm-media-reject-{}", Uuid::new_v4()));
+                let assets =
+                    Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+                let image = assets
+                    .import("image/png", Cursor::new(b"sensitive"))
+                    .unwrap();
+                let object = directory
+                    .join("assets/objects")
+                    .join(&image.digest[..2])
+                    .join(&image.digest);
+                let mut store = TimelineStore::new();
+                let branch = BranchId::new();
+                store.create_session(SessionId::new(), branch).unwrap();
+                let mut draft = EventDraft::new(EventKind::PlayerMessage);
+                draft.actor = Some("player".into());
+                draft.observers.insert(CharacterId::Crazy);
+                draft.payload.insert(
+                    "content".into(),
+                    json!([{"type":"text","text":"inspect"},{"type":"image","asset":image}]),
+                );
+                let target = draft.id;
+                store
+                    .append(branch, 0, "fixture", json!({}), vec![draft])
+                    .unwrap();
+                let view =
+                    TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None)
+                        .unwrap();
+
+                if corrupt {
+                    std::fs::write(&object, b"tampered!").unwrap();
+                } else {
+                    std::fs::remove_file(&object).unwrap();
+                }
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+                let (adapter, preset) = provider(provider_name, &endpoint);
+                let generator = ResponseGenerator::new([adapter]).unwrap();
+                let mut observation = Observe::default();
+                let result = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    generator.generate_observed(
+                        GenerationRequest::new(context(view, branch, target), preset, None)
+                            .with_assets(Some(Arc::clone(&assets))),
+                        &mut observation,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(result, Ok(Err(GenerationError::Response(_)))),
+                    "{provider_name} corrupt={corrupt}: {result:?}"
+                );
+                assert!(observation.0.is_empty(), "{provider_name}");
+                drop(listener);
+                std::fs::remove_dir_all(directory).ok();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn merging_user_history_with_media_is_rejected_before_http_dispatch() {
+        let directory = std::env::temp_dir().join(format!("nm-media-merge-{}", Uuid::new_v4()));
+        let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+        let image = assets.import("image/png", Cursor::new(b"image")).unwrap();
+        let mut repository = TimelineStore::new();
+        let branch = BranchId::new();
+        repository.create_session(SessionId::new(), branch).unwrap();
+        let mut drafts = Vec::new();
+        for text in ["first", "second"] {
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft.payload.insert(
+                "content".into(),
+                json!([{"type":"text","text":text},{"type":"image","asset":image}]),
+            );
+            drafts.push(draft);
+        }
+        let target = drafts[1].id;
+        repository
+            .append(branch, 0, "fixture", json!({}), drafts)
+            .unwrap();
+        let view =
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let (adapter, preset) = provider("mistral", &endpoint);
+        let generator = ResponseGenerator::new([adapter]).unwrap();
+        let mut observation = Observe::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            generator.generate_observed(
+                GenerationRequest::new(context(view, branch, target), preset, None)
+                    .with_assets(Some(Arc::clone(&assets))),
+                &mut observation,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(GenerationError::Response(_)))),
+            "{result:?}"
+        );
+        assert!(observation.0.is_empty());
+        drop(listener);
+        std::fs::remove_dir_all(directory).ok();
     }
 }
