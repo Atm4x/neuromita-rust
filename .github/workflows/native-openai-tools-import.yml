@@ -1,0 +1,33 @@
+name: Import Native OpenAI Tools Git Bundle
+on:
+  push:
+    branches:
+      - bridge/native-openai-tools-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e19097dfa5066c869681df862a6cb904982eeb39
+          HEAD=6cb8c622bc23f47f06f3057879f3720934afe38b
+          TARGET=refs/heads/codex/native-openai-tools-20261106
+          base64 --decode bridge_payloads/native-openai-tools.bundle.b64 >/tmp/native-tools.bundle
+          echo 'b24894235eb0c85b91ed8d0b6b2aba742815d268786d05182f8a5344774c2fc1  /tmp/native-tools.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/native-tools.bundle
+          git fetch /tmp/native-tools.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
