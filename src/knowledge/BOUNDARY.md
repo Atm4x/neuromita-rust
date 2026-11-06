@@ -22,3 +22,9 @@ Failures from semantic retrieval are explicit errors; the selected mode cannot s
 - `apply_graph_maintenance` requires explicit confirmation. `Clear` removes only the selected sources' derived relations; `Reindex` awaits an explicitly supplied extractor. No extractor means an explicit unavailable-backend error, not a fake lexical replacement.
 - Extractor failure, cancellation before commit and stale memory snapshots reject the **entire** proposed batch. The character owner validates the original Timeline revision and commits all resulting source updates in a single append. Cancellation is intentionally not promised after the write is dispatched.
 - This is not a generic backup/restore or settings migration feature. Graph UI controls, embedding cache inspection, other maintenance domains, archive validation and full Python parity remain open.
+
+## Derived embedding-cache maintenance (partial #50)
+
+- `SemanticMemoryRetriever::preview_cache_clear` reads only counts, character scopes, model-space identity and an opaque instance revision; it never exposes memory text or vector contents. `clear_cache_confirmed` requires explicit confirmation and the exact current preview, rejecting stale and foreign previews.
+- The clear invalidation epoch prevents in-flight document embedding batches started before a clear from repopulating the cache. Their original retrieval result may still complete for their captured read-only source snapshot; no canonical Timeline state changes. Cache reindex remains lazy on subsequent retrieval.
+- The direct `clear_cache` method remains an internal invalidation mechanism for non-UI callers; presentation adapters must use the confirmed API. This is only the derived in-memory cache, not a persistent vector index or universal data maintenance UI.
