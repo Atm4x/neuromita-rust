@@ -9,6 +9,17 @@ export struct PresetParameterItem { id: string, wire-key: string, title: string,
 export global SettingsUi {
     in-out property <[bool]> section-visible: [true, true, true, true, true, true, true, true, true, true, true, true];
     in-out property <bool> hide-private: true;
+    in-out property <bool> tool-enabled: false;
+    in-out property <bool> tool-calculator: false;
+    in-out property <bool> tool-memory-search: true;
+    in-out property <bool> tool-reminder-enabled: true;
+    in-out property <bool> tool-web-search: false;
+    in-out property <bool> tool-web-reader: false;
+    in-out property <bool> tool-search-configured: false;
+    in-out property <bool> tool-reader-configured: false;
+    in-out property <string> tool-max-depth: "2";
+    callback tool-option(string, bool);
+    callback tool-depth-change(string);
     callback section-visibility(int, bool);
     callback set-hide-private(bool);
     in-out property <int> section;

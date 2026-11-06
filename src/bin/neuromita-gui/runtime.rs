@@ -29,6 +29,15 @@ use neuromita::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOption {
+    Enabled,
+    Calculator,
+    MemorySearch,
+    WebSearch,
+    WebReader,
+}
+
 pub enum Command {
     RefreshReleases,
     MemorySelect(CharacterId),
@@ -62,6 +71,8 @@ pub enum Command {
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
+    SetToolOption(ToolOption, bool),
+    SetToolDepth(u8),
     Select(CharacterId),
     Send(String),
     Cancel(RequestId),
@@ -415,7 +426,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
