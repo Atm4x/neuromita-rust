@@ -2,7 +2,7 @@ import { CharacterCatalog } from "../characters/catalog.slint";
 import { ConversationUi } from "admin.slint";
 import { ScrollView } from "std-widgets.slint";
 import { SandboxTheme, Fa } from "theme.slint";
-import { Caption, Glyph, GhostButton, Centered } from "controls.slint";
+import { Caption, Glyph, GhostButton, Centered, Field } from "controls.slint";
 import { MessageRow } from "message.slint";
 import { ChatRow } from "models.slint";
 import { ActionSurface } from "../components/controls.slint";
@@ -29,19 +29,24 @@ component ConversationStrip inherits Rectangle {
 component ChatComposer inherits VerticalLayout {
     in-out property <string> draft;
     in property <bool> connected;
+    in property <bool> storage-connected;
     in property <bool> sending;
     in property <int> character;
+    in-out property <string> attachment-path;
+    private property <bool> attachment-open;
     callback send(string);
-    height: 84px; spacing: 4px; padding: 0px;
+    callback attach(string, string);
+    height: root.attachment-open ? 171px : 84px; spacing: 4px; padding: 0px;
     Rectangle {
         height: 58px; border-radius: 20px; border-width: 1px;
         border-color: SandboxTheme.border; background: SandboxTheme.input;
         HorizontalLayout {
             padding-left: 12px; padding-top: 6px; padding-bottom: 6px; padding-right: 6px; spacing: 4px;
             Centered { width: 32px; ActionSurface {
-                width: 32px; height: 32px; label: I18n.i18n("sandbox.attach", "Прикрепить изображения");
-                enabled: false; border-radius: 9px;
-                Glyph { text: Fa.attach; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
+                width: 32px; height: 32px; label: I18n.i18n("sandbox.attach", "Добавить локальный файл в историю");
+                enabled: root.storage-connected && !root.sending; border-radius: 9px;
+                activated => { root.attachment-open = !root.attachment-open; }
+                Glyph { text: Fa.attach; color: root.storage-connected && !root.sending ? SandboxTheme.icon : SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
             } }
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
@@ -91,6 +96,29 @@ component ChatComposer inherits VerticalLayout {
             } }
         }
     }
+    if root.attachment-open: Rectangle {
+        height: 83px; border-radius: 10px; background: #0e101fdc;
+        border-width: 1px; border-color: SandboxTheme.border;
+        VerticalLayout {
+            padding: 8px; spacing: 6px;
+            HorizontalLayout {
+                spacing: 6px;
+                Field { text <=> root.attachment-path; horizontal-stretch: 1;
+                    placeholder: I18n.i18n("sandbox.attachment.path", "Абсолютный путь к локальному файлу");
+                    enabled: root.storage-connected && !root.sending;
+                }
+                GhostButton {
+                    text: I18n.i18n("sandbox.attachment.save", "В историю");
+                    enabled: root.storage-connected && !root.sending && root.attachment-path != "";
+                    activated => { root.attach(root.draft, root.attachment-path); }
+                }
+            }
+            Caption {
+                text: I18n.i18n("sandbox.attachment.note", "Файл сохраняется в Timeline; модель пока не получает вложения.");
+                color: SandboxTheme.muted; font-size: 10px;
+            }
+        }
+    }
     HorizontalLayout {
         padding-left: 6px; padding-right: 8px; spacing: 4px; height: 17px;
         Rectangle { horizontal-stretch: 1; }
@@ -102,10 +130,13 @@ export component SandboxChat inherits Rectangle {
     in property <[ChatRow]> messages;
     in property <int> character;
     in property <bool> connected;
+    in property <bool> storage-connected;
     in property <bool> sending;
     in-out property <string> draft;
+    in-out property <string> attachment-path;
     in-out property <bool> follow-tail;
     callback send(string);
+    callback attach(string, string);
     callback cancel(string);
     callback refresh();
     background: #0e101ff7; border-color: SandboxTheme.border; border-width: 1px; border-radius: 20px;
@@ -130,9 +161,11 @@ export component SandboxChat inherits Rectangle {
             }
         }
         ChatComposer {
-            connected: root.connected; sending: root.sending; character: root.character;
-            draft <=> root.draft;
+            connected: root.connected; storage-connected: root.storage-connected;
+            sending: root.sending; character: root.character;
+            draft <=> root.draft; attachment-path <=> root.attachment-path;
             send(text) => { root.send(text); }
+            attach(text, path) => { root.attach(text, path); }
         }
     }
 }

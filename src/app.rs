@@ -951,6 +951,40 @@ impl ApplicationLifecycle {
             .publish_conversation_message(expected, message)
     }
 
+    /// Publish an attachment-bearing event only after verifying all binary
+    /// references, under the same Timeline selection lock as the canonical write.
+    /// An unsuccessful append may leave an orphan object; it never records a
+    /// receipt for an unavailable reference. The asset root is injected.
+    pub fn publish_attached_conversation_message(
+        &self,
+        expected: TimelineSelection,
+        message: ConversationMessage,
+        assets: &crate::timeline::storage::assets::TimelineAssetStore,
+    ) -> Result<TimelineFact, crate::timeline::storage::assets::TimelineAttachmentCommitError> {
+        use crate::timeline::{
+            domain::parse_message_content,
+            storage::assets::{TimelineAssetError, TimelineAttachmentCommitError},
+        };
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline lock poisoned".into()))?;
+        timeline.assert_selection(expected)?;
+        let parts = parse_message_content(&message.content)
+            .map_err(|_| TimelineAssetError::InvalidReference)?;
+        if !parts.iter().any(|part| part.asset().is_some()) {
+            return Err(TimelineAttachmentCommitError::Asset(
+                TimelineAssetError::InvalidReference,
+            ));
+        }
+        for part in parts {
+            if let Some(reference) = part.asset() {
+                assets.verify(reference)?;
+            }
+        }
+        Ok(timeline.publish_conversation_message(expected, message)?)
+    }
+
     /// Change the presentation of already known conversation messages for one character.
     /// The operation EventId must be preserved when retrying an uncertain write.
     pub fn change_message(

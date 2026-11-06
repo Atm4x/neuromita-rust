@@ -31,10 +31,12 @@ export component SandboxPage inherits Rectangle {
     in property <string> stress;
     in property <string> accepted;
     in-out property <string> draft;
+    in-out property <string> attachment-path;
     in-out property <string> model-input;
     in-out property <bool> follow-tail;
     callback connect(string);
     callback send(string);
+    callback attach(string, string);
     callback cancel(string);
     callback select-character(int);
     callback refresh();
@@ -74,9 +76,11 @@ export component SandboxPage inherits Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 SandboxChat {
                     width: 100%; height: 100%; messages: root.messages; character: root.character;
-                    connected: root.generation-ready; sending: root.sending;
-                    draft <=> root.draft; follow-tail <=> root.follow-tail;
+                    connected: root.generation-ready; storage-connected: root.connected; sending: root.sending;
+                    draft <=> root.draft; attachment-path <=> root.attachment-path;
+                    follow-tail <=> root.follow-tail;
                     send(text) => { root.send(text); }
+                    attach(text, path) => { root.attach(text, path); }
                     cancel(id) => { root.cancel(id); }
                     refresh => { root.refresh(); }
                 }

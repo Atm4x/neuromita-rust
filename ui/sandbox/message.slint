@@ -80,6 +80,17 @@ export component MessageRow inherits VerticalLayout {
                 Text { text: root.item.text; font-family: SandboxTheme.font-family; font-size: SandboxTheme.chat-size;
                     color: root.item.user ? #fff6fb : #f3eaf3; wrap: word-wrap; min-width: 0px;
                 }
+                if root.item.attachment-summary != "": Rectangle {
+                    min-height: 30px; border-radius: 7px; border-width: 1px;
+                    border-color: #ffffff24; background: #ffffff0a;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px; padding-top: 6px; padding-bottom: 6px;
+                        Caption {
+                            text: I18n.i18n("sandbox.attachment.saved", "Вложение: ") + root.item.attachment-summary;
+                            color: SandboxTheme.text; font-size: 11px; horizontal-stretch: 1;
+                        }
+                    }
+                }
                 if !root.item.user && root.item.tool-name != "" && SettingsUi.structured-mode != 0: Rectangle {
                     background: #a78bfa0d;
                     border-color: #a78bfa33;

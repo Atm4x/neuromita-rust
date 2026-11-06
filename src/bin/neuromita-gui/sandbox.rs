@@ -93,6 +93,14 @@ pub fn attach(
         send(Command::Send(text.into()));
     });
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    window.on_chat_attach(move |text, path| {
+        if let Some(window) = weak.upgrade() {
+            window.set_chat_sending(true);
+        }
+        send(Command::AttachFile(text.into(), path.into()));
+    });
+    let send = dispatch.clone();
     window.on_chat_select_character(move |id| {
         let Some(character) = CharacterId::from_index(id) else {
             return;
@@ -288,6 +296,16 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 window.set_chat_draft("".into());
             }
         }
+        Update::FileAttached(text, path) => {
+            window.set_chat_sending(false);
+            window.set_chat_error("".into());
+            if window.get_chat_draft() == text {
+                window.set_chat_draft("".into());
+            }
+            if window.get_chat_attachment_path() == path {
+                window.set_chat_attachment_path("".into());
+            }
+        }
         Update::Error(error) => {
             if !window.get_core_connected() {
                 window
@@ -377,6 +395,25 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         .map(|message| {
             let mut row = ChatRow {
                 text: message.content.clone().into(),
+                attachment_summary: message
+                    .fields
+                    .get("content")
+                    .and_then(|content| {
+                        neuromita::timeline::domain::parse_message_content(content).ok()
+                    })
+                    .map(|parts| {
+                        parts
+                            .into_iter()
+                            .filter_map(|part| {
+                                part.asset().map(|asset| {
+                                    format!("{} · {} bytes", asset.media_type, asset.size)
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    })
+                    .unwrap_or_default()
+                    .into(),
                 user: message.speaker.as_deref() == Some("player")
                     || (message.speaker.is_none() && message.role == MessageRole::User),
                 speaker: message.speaker.as_deref().unwrap_or_default().into(),
