@@ -630,25 +630,24 @@ impl AiSupervisor {
         fatal: bool,
     ) {
         self.status.send_modify(|snapshot| {
-            let state = snapshot.services.entry(service).or_default();
-            if state.generation != Some(generation) {
+            if snapshot.service(service).generation != Some(generation) {
                 return;
             }
-            state.last_error = Some(error.to_string());
+            let reason = error.to_string();
             if fatal {
-                let affected = snapshot.services.values_mut().filter(|status| {
-                    self.topology == ProcessTopology::Shared
-                        && status.generation == Some(generation)
-                });
-                for status in affected {
-                    status.phase = RuntimePhase::Failed;
-                    status.active_model = None;
-                    status.pending_model = None;
+                for (tracked, state) in &mut snapshot.services {
+                    if state.generation != Some(generation)
+                        || (self.topology == ProcessTopology::Split && *tracked != service)
+                    {
+                        continue;
+                    }
+                    state.phase = RuntimePhase::Failed;
+                    state.active_model = None;
+                    state.pending_model = None;
+                    state.last_error = Some(reason.clone());
                 }
-                let state = snapshot.services.entry(service).or_default();
-                state.phase = RuntimePhase::Failed;
-                state.active_model = None;
-                state.pending_model = None;
+            } else {
+                snapshot.services.entry(service).or_default().last_error = Some(reason);
             }
         });
     }
@@ -1092,6 +1091,7 @@ impl AiSupervisor {
         let mut locked = worker.lock().await;
         let generation = locked.generation;
         let result = locked.stream_wav(input).await;
+        let fatal = locked.failed;
         drop(locked);
         let current = self
             .workers
@@ -1099,16 +1099,10 @@ impl AiSupervisor {
             .await
             .get(&self.topology.key(service))
             .cloned();
-        let current_generation = if let Some(current) = current {
-            Some(current.lock().await.generation)
-        } else {
-            None
-        };
-        if current_generation != Some(generation) {
+        if !current.is_some_and(|current| Arc::ptr_eq(&worker, &current)) {
             return Err(AiRuntimeError::StaleGeneration);
         }
         if let Err(error) = &result {
-            let fatal = worker.lock().await.failed;
             self.request_failed(service, generation, error, fatal);
         }
         result
@@ -1169,7 +1163,10 @@ impl AiSupervisor {
         drop(guard);
         self.status.send_modify(|snapshot| {
             let state = snapshot.services.entry(service).or_default();
-            if state.generation == Some(generation) {
+            if state.generation == Some(generation)
+                || (self.topology == ProcessTopology::Shared && state.generation.is_none())
+            {
+                state.generation = Some(generation);
                 state.active_model = Some(LoadedModel {
                     plugin_id: plugin_id.into(),
                     asset_revision: revision,
@@ -1785,6 +1782,192 @@ class Plugin:
         assert!(status.active_model.is_none());
         assert!(supervisor.selected_model(AiService::Tts).await.is_none());
         supervisor.stop(AiService::Tts).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_ipc_failure_reports_the_same_reason_to_all_affected_services() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Shared,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        supervisor
+            .initialize(AiService::Asr, "mock_asr", json!({}))
+            .await
+            .unwrap();
+        for service in [AiService::Tts, AiService::Asr] {
+            let state = supervisor.status_snapshot().service(service);
+            assert_eq!(state.phase, RuntimePhase::ModelReady);
+            assert_eq!(state.generation, Some(generation));
+            assert!(state.active_model.is_some());
+        }
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Shared)
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        let error = supervisor
+            .call(AiService::Tts, "status", json!({}))
+            .await
+            .unwrap_err();
+        let expected_reason = error.to_string();
+        let snapshot = supervisor.status_snapshot();
+        for service in [AiService::Tts, AiService::Asr] {
+            let state = snapshot.service(service);
+            assert_eq!(state.phase, RuntimePhase::Failed);
+            assert_eq!(state.generation, Some(generation));
+            assert!(state.active_model.is_none());
+            assert!(state.pending_model.is_none());
+            assert_eq!(state.last_error.as_deref(), Some(expected_reason.as_str()));
+        }
+        supervisor.stop(AiService::Asr).await.unwrap();
+        for service in [AiService::Tts, AiService::Asr] {
+            assert_eq!(
+                supervisor.status_snapshot().service(service).phase,
+                RuntimePhase::Stopped
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_wav_rejects_replaced_worker_without_locking_new_generation() {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let root = std::env::temp_dir().join(format!("nm-stale-wav-{}", Uuid::new_v4()));
+        let plugin = root.join("plugins/mock_tts");
+        tokio::fs::create_dir_all(&plugin).await.unwrap();
+        tokio::fs::copy(
+            source.join("plugins/builtin/mock_tts/plugin.json"),
+            plugin.join("plugin.json"),
+        )
+        .await
+        .unwrap();
+        let code = tokio::fs::read_to_string(source.join("plugins/builtin/mock_tts/plugin.py"))
+            .await
+            .unwrap()
+            .replace("\r\n", "\n");
+        let needle = "    def infer(self, input_data):\n";
+        assert!(code.contains(needle));
+        let blocking = "    def infer(self, input_data):\n        if input_data.get('test_gate'):\n            from pathlib import Path\n            import time\n            Path(input_data['entered']).write_text('entered', encoding='utf-8')\n            deadline = time.monotonic() + 8\n            while not Path(input_data['release']).exists():\n                if time.monotonic() >= deadline: raise TimeoutError('test gate expired')\n                time.sleep(0.01)\n";
+        tokio::fs::write(plugin.join("plugin.py"), code.replace(needle, blocking))
+            .await
+            .unwrap();
+        let supervisor = Arc::new(AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: source,
+                plugins_directory: root.join("plugins"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(10),
+            },
+        ));
+        let previous = supervisor.start(AiService::Tts).await.unwrap();
+        supervisor
+            .initialize(AiService::Tts, "mock_tts", json!({}))
+            .await
+            .unwrap();
+        let entered = root.join("entered");
+        let release = root.join("release");
+        let pending = Arc::clone(&supervisor);
+        let old_stream = tokio::spawn(async move {
+            pending
+                .synthesize_streamed_wav(json!({
+                    "text": "old audio",
+                    "test_gate": true,
+                    "entered": entered,
+                    "release": release,
+                }))
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while !tokio::fs::try_exists(root.join("entered")).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("old worker must begin streamed inference");
+        let next = Arc::clone(&supervisor);
+        let activation = tokio::spawn(async move {
+            next.reconfigure(
+                AiService::Tts,
+                &[AiService::Tts],
+                &[],
+                &[ModelActivation {
+                    service: AiService::Tts,
+                    plugin_id: "mock_tts".into(),
+                    settings: json!({}),
+                    asset_revision: None,
+                }],
+            )
+            .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while supervisor
+                .status_snapshot()
+                .service(AiService::Tts)
+                .generation
+                == Some(previous)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement worker must be published before old stream completes");
+        let new_worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let _busy_new_worker = new_worker.lock().await;
+        tokio::fs::write(root.join("release"), b"continue")
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), old_stream)
+                .await
+                .expect("stale stream must not await new generation's worker lock")
+                .unwrap(),
+            Err(AiRuntimeError::StaleGeneration)
+        ));
+        drop(_busy_new_worker);
+        let current = activation.await.unwrap().unwrap();
+        assert_ne!(current, previous);
+        assert_eq!(
+            supervisor
+                .status_snapshot()
+                .service(AiService::Tts)
+                .generation,
+            Some(current)
+        );
+        assert!(
+            supervisor
+                .synthesize_streamed_wav(json!({"text": "new audio"}))
+                .await
+                .unwrap()
+                .starts_with(b"RIFF")
+        );
+        supervisor.stop(AiService::Tts).await.unwrap();
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
