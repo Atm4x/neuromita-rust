@@ -1,0 +1,30 @@
+name: Import Agent B multimodal bundle
+on:
+  push:
+    branches: [bridge/import-agent-b-parts-20261106]
+    paths: [bridge/agent-b-parts.bundle.b64]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish agent B parts commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=b3c9c37876638af893923daad28c8f7a6c861b06
+          NEW=e568a450af7d5b7a6f97fab9482148cdc499ad35
+          REF=refs/heads/codex/timeline-multimodal-parts-20261106
+          git cat-file -e "$BASE^{commit}"
+          base64 -d bridge/agent-b-parts.bundle.b64 > /tmp/agent-b-parts.bundle
+          git bundle verify /tmp/agent-b-parts.bundle
+          git fetch /tmp/agent-b-parts.bundle "$REF:$REF"
+          test "$(git rev-parse "$REF")" = "$NEW"
+          git merge-base --is-ancestor "$BASE" "$NEW"
+          test -z "$(git ls-remote origin "$REF")"
+          git push origin "$REF:$REF"
+          test "$(git ls-remote origin "$REF" | cut -f1)" = "$NEW"
