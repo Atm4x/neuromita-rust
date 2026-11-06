@@ -1,4 +1,4 @@
-name: Import Agent A Memory Reset Epoch Git Bundle
+name: Import Agent A Memory Fork Follow-up
 on:
   push:
     branches:
@@ -12,21 +12,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish independent Agent A memory reset commit
+      - name: Verify and fast-forward Agent A memory PR
         shell: bash
         run: |
           set -euo pipefail
-          BASE=1f9b6059c61bf6a0349cb27b5b020122e89f31bc
-          TARGET=9b941ef8c74452c40ed7b807c1ead2146eefb703
+          BASE=9b941ef8c74452c40ed7b807c1ead2146eefb703
+          TARGET=1f33da245967ff075fd6a0b5813c4b1aa07ffd26
           BRANCH=codex/knowledge-memory-reset-epoch-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-memory-reset-epoch.bundle.sha256
-          git bundle verify .bridge/agent-a-memory-reset-epoch.bundle
-          git fetch --no-tags .bridge/agent-a-memory-reset-epoch.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-memory-fork-followup.bundle.sha256
+          git bundle verify .bridge/agent-a-memory-fork-followup.bundle
+          git fetch --no-tags .bridge/agent-a-memory-fork-followup.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target branch exists; refusing overwrite."
-            exit 1
-          fi
+          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+          test "$CURRENT" = "$BASE"
           git push origin "$TARGET:refs/heads/$BRANCH"
