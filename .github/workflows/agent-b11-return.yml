@@ -1,0 +1,42 @@
+name: Publish Agent B11 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b11-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 665f2cfedf9465fd4f05c052debbe4a008bded7e
+          fetch-depth: 0
+      - name: Import verified B11 commit and publish independent branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=665f2cfedf9465fd4f05c052debbe4a008bded7e
+          EXPECTED=d79ff2209cd36c4e64ab1e8513f5e45c9a523371
+          SHA256=914f1227a3bfab2e8ecb412be5c82be3c46bff8eb8dc002dc44f4f81cd852aae
+          TARGET=refs/heads/codex/timeline-media-view-anchor-20261107
+          git fetch origin refs/heads/bridge/agent-b11-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b11-20261107.bundle.b64 | base64 --decode > /tmp/agent-b11.bundle
+          echo "$SHA256  /tmp/agent-b11.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b11.bundle
+          git fetch /tmp/agent-b11.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch at unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
