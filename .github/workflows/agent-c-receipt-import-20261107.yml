@@ -1,0 +1,77 @@
+name: Agent C overlay receipt containment bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-receipt-containment-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-staging-cancel-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=5df15165c2cc81208833d05f292f11808f30fefd
+          HEAD=7bef656069c3e7e1f1ff496beb48b5222bf54d5d
+          TARGET=codex/ai-platform-hub-c3-overlay-receipt-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-receipt.bundle
+          IyB2MiBnaXQgYnVuZGxlCi01ZGYxNTE2NWMyY2M4MTIwODgzM2QwNWYyOTJmMTE4MDhmMzBmZWZk
+          IGZpeChhaSk6IGNsZWFuIHN0YWdlZCB1diBpbnN0YWxscyBvbiBjYW5jZWxsYXRpb24gd2l0aG91
+          dCBsYXRlIHJldmlzaW9uIHB1Ymxpc2gKN2JlZjY1NjA2OWMzZTdlMWYxZmY0OTZiZWI0OGI1MjIy
+          YmY1NGQ1ZCByZWZzL2hlYWRzL2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1jMy1vdmVybGF5LXJlY2Vp
+          cHQtMjAyNjExMDcKClBBQ0sAAAACAAAACZUUeJytjEFuxCAMRfecwsuOqkY4DAlUo6pV1+0dXDAz
+          qCREQKrm9mXuUG9s/e/3WmEGUi4gOXlGacJoKYR5tjIYM5NSdvLTNCF6VGKjwmsD7QNqnLQbnTM4
+          SmOU8lJ3dAyIpkuUDBy8oL3dcoFP3kv+iI3g7Xrn3+FC9+PJve6VSx3WXHhLx3CN7bZ/DS4vL4Cz
+          PUtptdTwKPuIni6xNf4vnwjx94Hi6Rlo68+w0NotHuqxpLh+w5ZTdAe0DHGtjVLqXf7hkuiAwo7j
+          1vomX8UfWaln3PgDtzfHbGc1ly37Wm6n9CmfuGNymjx4nAE4AMf//wX/BbCgAROZ6eTPoVEc2jIv
+          1cuI1trCA8yhk7MBuhQDBZiZJ/K+FmpMN+AeEoaKPHmkPpOBAn4m/Rpo/gEVJB3TPksldviPvi3H
+          w507tv6HNXic+8D0gWlCvUhTz0rzr5WfDp3KudHW77Gnwl6s0nbi5LsA9CoPw/wD5jaHhhqyx5BA
+          SrGOWlGFemyMDTN4nLsjvVBmwuaJljx6RanJqZkFJbrJ+XkliZl5ual5QLaxXm4KwyXfgzL/9UK1
+          nZ4L3xHqvGnqzi7Ft3GFCS8A0w8W8b1PeJxdUztv2zAQ3v0rDsjQBLBdoOmUTkG7eGk7pFNR2DR5
+          llhTpMCjnKi/vt9RkpN2ykO873l3Q5/vH8hHKSYEdpQunIMZKbNl3xehQZhKy9SZaBo86E1p6ZiG
+          6EweV6tHEg5si34JQ+PjFcELQIyj40iHkIzbX0n285MDuSH72JD0zLYlm7o+iS8+xS19z3zxaZAw
+          VnrnoagssioyZ/z4PXHL2AUfz0IpYsCUOqMIArB5OGV8ie6KcfKBt/S4zC5Tk413AqeZY6GU9cvh
+          cffFFPN+li4HkuJDIBhKzxBg6GKCd5uQ0lktXUly6sBK/FI4RxPeaCkJFCJr4gtHUKehaenwbSLY
+          zWHlh4drbrd3B/Cp9fHVeWmhTkzHhCnOW3pqOfMpZdZWezzSBNS3wa8XU6ZAxDSZ2W1Xq6ea1D+x
+          xvRMFpRSA5EWQTg6TJT7OS7UWAn3tbWIpJBJM5iMxid6BdMoPLaoM/nMeY2KYU//WYGXzVmKWpPv
+          OnbelKWGpQTVv2zgUgHllMqWdiq7GJi92hD/h9coKHusTB8Qv3dA8WWcgVTMtXfbsj2LbsKP6F8A
+          gmSk7o1NiD4PFgbmfl97XLgUUD2dPAvuAscx425m6ReTvYkKUTOZaptzB7hoAD7ObTrsWPWl5zNE
+          25oIy58QF/72KkNT3dQjBL46OvmXNRqDEor8XLdaRqB2eCopXHQnvnKl6Y09I8LpjZYR7ZCryCWL
+          zIjLcrdkPk9ssDBI8zjU7Zns2nmVphP+7z714Kcz6NAMmoZYbVUpkZ8QNgR+ZGC6+fihLq12PxRz
+          DFiMYhqd7odjWHjyAM01Q8dioaXGRj+tAWII0yPE5eCj+XVr/Ga+G0WUzdtnG3u/7dzddvUX86zY
+          uf8BrdXPF7w0+Q0M0Yc+9NQpOY6jZGx4nLvIdZFrgomIhkpdgxWr/FLN0DW3nkWJh51qn/toowcn
+          KwC8iAxk+gO/1AsSCqoiiflwRzJ3kMwQioO/HXicAToAxf/NCM0IsMkBFN1v54tziTwe5kCWlkvW
+          nKZCrkHsk90BhBTybjMc4sXD9BZM1IDQmIBJiNBfGLN1AtgBWksc7v4Bys9vcTs3AdB1s4JEVKCb
+          r36ZZp94nDsZfCV4Qysfb0FpkkZxaUFqkaZCWt5kRTG9zVv5RKQBvhsK7PMyseil/hWFBjjPg4o8
+          auQb1wBApUd4nK2Rz2sTQRTHSZVaQyq08Qdb0nTdwzhT07RFENnYCoIBwYN/gcO6+1on2cwMM5OU
+          3vTcS+Rd/QMqnqR41Yt/R/8FPYsHZ7NpLPbgQd/pPfi+z+P7fV/GleN3lfHXx9XQ17PkEMwTY5Rp
+          lf1TaV2S5+BnAz1IHbeHg1zIPmQ8LwQ8VQOtJEhn354251rVjz/zGvurlhKduFfs0cnLxXENj5rL
+          +L577UEKQjueqyTz4pJhz0F0PtwXkuvEeARPZMbVCIxH44+mXTAwWd9AvbZzRQ2dFRngp7XdDeuy
+          ON6zcZwaSBzwTBjuPdGppt1TQtLIwGg7Ygzf7DYwDpt4SpZRh5fxQ+PWJU/ArfWgfnFjE18vBp3W
+          JLyzsmAy4D2rZBw7xUeQUmI1pKw9lAcm0ZT91jN8cXcVP5Ml7EerleJ6Hb+ThbTIgItp+DOflEwb
+          bpRyrTAaqLTPnbOR70sDbWE5GEMZ61RnV2YJGBh4At8TOdDZxQYekZUzv1clWAdZuBPitzs3tzdL
+          auci6o8wSblX8u6v12vlXEaFS9eDh+zfU4qf/5dcznnBkN4urE9erLs35klBYDjuBnhMg5Payr32
+          L/NSDfUrwdeBm0i5fBmKc7yqYhgcVdgx1g==
+          BUNDLE
+          echo '48a3907731c1764bb5aaa61dff5daebddd1582f989e0639def00945050528dea  /tmp/agent-c-receipt.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-receipt.bundle
+          git fetch --no-tags /tmp/agent-c-receipt.bundle "refs/heads/codex/ai-platform-hub-c3-overlay-receipt-20261107:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
