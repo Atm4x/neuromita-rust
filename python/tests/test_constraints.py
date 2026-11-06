@@ -30,6 +30,7 @@ class ConstraintTests(unittest.TestCase):
         host = PluginHost(Path("nonexistent-fixture-directory"))
         with patch.object(host, "_load", return_value=plugin), \
                 patch.object(host, "_manifest", return_value={"kind": "tts"}), \
+                patch.object(host, "_plugin_directory", return_value=Path("fixture")), \
                 patch("neuromita_ai_sdk.host.hardware.probe", return_value={"devices": []}):
             with self.assertRaisesRegex(ValueError, "unsupported_fp16"):
                 host.dispatch("initialize", {"plugin_id": "fixture", "settings": {"precision": "fp16"}})
@@ -59,6 +60,7 @@ class ConstraintTests(unittest.TestCase):
         with patch.object(host, "_load", return_value=plugin), \
                 patch.object(host, "_load_install_contract", return_value=contract), \
                 patch.object(host, "_manifest", return_value={"kind": "tts"}), \
+                patch.object(host, "_plugin_directory", return_value=Path("fixture")), \
                 patch("pathlib.Path.exists", return_value=True), \
                 patch("neuromita_ai_sdk.host.hardware.probe", return_value={}):
             with self.assertRaisesRegex(ValueError, "unsupported_fp16"):

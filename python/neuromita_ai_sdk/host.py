@@ -15,6 +15,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import sys
 from typing import Any
@@ -32,50 +33,97 @@ class PluginHost:
         self.active_runtime_by_kind: dict[str, Any] = {}
         self.audio_streams: dict[str, tuple[bytes, int]] = {}
 
+    def _directories(self) -> list[Path]:
+        if not self.plugins_dir.is_dir():
+            return []
+        directories = []
+        for child in sorted(self.plugins_dir.iterdir()):
+            if child.name.startswith("."):
+                continue
+            if child.name in ("builtin", "community") and child.is_dir() and not child.is_symlink():
+                directories.extend(
+                    entry for entry in sorted(child.iterdir())
+                    if not entry.name.startswith(".") and (entry.is_dir() or entry.is_symlink())
+                )
+            elif child.is_dir() or child.is_symlink():
+                directories.append(child)
+        return directories
+
+    def _plugin_directory(self, plugin_id: str) -> Path:
+        if not isinstance(plugin_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", plugin_id):
+            raise ValueError("invalid plugin id")
+        matches = [path for path in self._directories() if path.name == plugin_id]
+        if len(matches) != 1:
+            raise ValueError("plugin id is missing or ambiguous across plugin sources")
+        return matches[0]
+
     def _manifest(self, directory: Path) -> dict[str, Any]:
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError("plugin directory is not a real directory")
         path = directory / "plugin.json"
-        if path.is_symlink():
-            raise ValueError("plugin manifest symlinks are forbidden")
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            raise ValueError("plugin manifest must be a regular file of at most 64 KiB")
         manifest = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("plugin manifest must be an object")
         plugin_id = manifest.get("id")
-        if plugin_id != directory.name or not isinstance(plugin_id, str) or not plugin_id.isascii() or not plugin_id.replace("-", "").replace("_", "").isalnum():
+        if plugin_id != directory.name or not isinstance(plugin_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", plugin_id):
             raise ValueError("plugin id must match its safe directory name")
-        if manifest.get("api_version") != API_VERSION:
+        if type(manifest.get("api_version")) is not int or manifest["api_version"] != API_VERSION:
             raise ValueError("incompatible plugin API version")
         if manifest.get("kind") not in ("tts", "asr", "embedding", "reranker"):
             raise ValueError("unsupported plugin kind")
-        if not isinstance(manifest.get("name"), str) or not manifest["name"]:
+        if not isinstance(manifest.get("name"), str) or not manifest["name"].strip():
             raise ValueError("plugin name is required")
         if manifest.get("entrypoint") != "plugin.py":
             raise ValueError("entrypoint must be plugin.py")
-        return manifest
-
-    def discover(self) -> list[dict[str, Any]]:
-        if not self.plugins_dir.exists():
-            return []
-        result = []
-        for directory in sorted(self.plugins_dir.iterdir()):
-            if directory.name.startswith(".") or not directory.is_dir():
-                continue
-            try:
-                manifest = self._manifest(directory)
-                result.append({**manifest, "discovery_status": "available"})
-            except (ValueError, OSError, json.JSONDecodeError) as error:
-                result.append({"id": directory.name, "discovery_status": "invalid", "error": str(error)})
-        return result
-
-    def _load(self, plugin_id: str) -> Any:
-        if not isinstance(plugin_id, str) or not plugin_id.isascii() or not plugin_id.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("invalid plugin id")
-        directory = self.plugins_dir / plugin_id
-        self._manifest(directory)
         entrypoint = directory / "plugin.py"
         if entrypoint.is_symlink() or not entrypoint.is_file():
             raise ValueError("plugin entrypoint must be a regular file")
+        version = manifest.get("version")
+        if version is not None and (not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version)):
+            raise ValueError("invalid plugin version")
+        publisher = manifest.get("publisher")
+        if publisher is not None and (not isinstance(publisher, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", publisher)):
+            raise ValueError("invalid plugin publisher")
+        permissions = manifest.get("permissions", [])
+        if not isinstance(permissions, list) or any(
+            not isinstance(item, str) or item not in ("network", "filesystem_read", "filesystem_write", "subprocess")
+            for item in permissions
+        ) or len(permissions) != len(set(permissions)):
+            raise ValueError("invalid plugin permissions")
+        if directory.parent.name == "community" and (version is None or publisher is None or "permissions" not in manifest):
+            raise ValueError("community plugin requires version, publisher and permissions")
+        return manifest
+
+    def discover(self) -> list[dict[str, Any]]:
+        directories = self._directories()
+        counts: dict[str, int] = {}
+        for directory in directories:
+            counts[directory.name] = counts.get(directory.name, 0) + 1
+        result = []
+        for directory in directories:
+            try:
+                if counts[directory.name] != 1:
+                    raise ValueError("duplicate plugin id across plugin sources")
+                manifest = self._manifest(directory)
+                permissions = manifest.get("permissions", [])
+                status = "approval_required" if permissions else "available"
+                result.append({**manifest, "source": directory.parent.name if directory.parent.name in ("builtin", "community") else "flat", "discovery_status": status})
+            except (ValueError, OSError, UnicodeError, json.JSONDecodeError) as error:
+                result.append({"id": directory.name, "discovery_status": "invalid", "error": str(error)})
+        return result
+
+    def _checked_manifest(self, directory: Path) -> dict[str, Any]:
+        manifest = self._manifest(directory)
+        if manifest.get("permissions"):
+            raise ValueError("plugin permissions require explicit approval before execution")
+        return manifest
+
+    def _load(self, plugin_id: str) -> Any:
+        directory = self._plugin_directory(plugin_id)
+        self._checked_manifest(directory)
+        entrypoint = directory / "plugin.py"
         spec = importlib.util.spec_from_file_location(
             "neuromita_plugin_" + plugin_id, entrypoint,
             submodule_search_locations=[str(directory)],
@@ -84,19 +132,21 @@ class PluginHost:
             raise ValueError("cannot load plugin entrypoint")
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
-        with contextlib.redirect_stdout(sys.stderr):
-            spec.loader.exec_module(module)
-            plugin = module.Plugin()
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                spec.loader.exec_module(module)
+                plugin = module.Plugin()
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
         for operation in ("describe", "install_plan", "probe_install", "settings_schema", "initialize", "infer", "unload"):
             if not callable(getattr(plugin, operation, None)):
                 raise ValueError(f"plugin missing {operation} contract")
         return plugin
 
     def _load_install_contract(self, plugin_id: str) -> Any:
-        if not isinstance(plugin_id, str) or not plugin_id.isascii() or not plugin_id.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("invalid plugin id")
-        directory = self.plugins_dir / plugin_id
-        self._manifest(directory)
+        directory = self._plugin_directory(plugin_id)
+        self._checked_manifest(directory)
         entrypoint = directory / "installplan.py"
         if not entrypoint.exists():
             return self._load(plugin_id)
@@ -107,9 +157,13 @@ class PluginHost:
             raise ValueError("cannot load install contract")
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
-        with contextlib.redirect_stdout(sys.stderr):
-            spec.loader.exec_module(module)
-            contract = module.InstallContract()
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                spec.loader.exec_module(module)
+                contract = module.InstallContract()
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            raise
         for method in ("install_plan", "probe_install", "settings_schema"):
             if not callable(getattr(contract, method, None)):
                 raise ValueError(f"install contract missing {method}")
@@ -162,7 +216,7 @@ class PluginHost:
             return result
         if op == "initialize":
             plugin_id = args["plugin_id"]
-            kind = self._manifest(self.plugins_dir / plugin_id)["kind"]
+            kind = self._checked_manifest(self._plugin_directory(plugin_id))["kind"]
             if kind in self.active_by_kind:
                 raise ValueError("service already has an active plugin; unload first")
             plugin = self._load(plugin_id)

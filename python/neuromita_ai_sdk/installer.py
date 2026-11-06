@@ -14,14 +14,14 @@ from .host import PluginHost
 def execute(plugins_dir: Path, plugin_id: str, hook_id: str, source_plugin_id: str,
             source_root: Path, output_root: Path, settings: dict) -> None:
     host = PluginHost(plugins_dir)
-    host._manifest(host.plugins_dir / plugin_id)
+    host._checked_manifest(host._plugin_directory(plugin_id))
     plan = host.dispatch("install_plan", {"plugin_id": plugin_id, "settings": settings})
     allowed = plan.get("asset_hooks", [])
     if not any(hook.get("id") == hook_id and hook.get("source_plugin_id") == source_plugin_id for hook in allowed):
         raise ValueError("asset hook is not declared by selected plugin")
     if not source_root.is_dir() or not output_root.is_dir() or source_root.is_symlink() or output_root.is_symlink():
         raise ValueError("installer requires real staged source and output directories")
-    path = host.plugins_dir / plugin_id / "install.py"
+    path = host._plugin_directory(plugin_id) / "install.py"
     if path.is_symlink() or not path.is_file():
         raise ValueError("installer entrypoint must be a regular file")
     spec = importlib.util.spec_from_file_location("neuromita_install_hook_" + plugin_id, path)
