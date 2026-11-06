@@ -12,17 +12,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish Agent A memory settings wiring
+      - name: Verify and publish Agent A Slint memory settings
         shell: bash
         run: |
           set -euo pipefail
-          BASE=0e804d161700be0d17673864333f319e51d860f8
-          TARGET=ed490d65b3556a360807131b426a0c963da4292b
-          BRANCH=codex/knowledge-memory-settings-wiring-20261107
+          BASE=ed490d65b3556a360807131b426a0c963da4292b
+          TARGET=caf94d9b1243ebba5b44751b426aa71334210d0c
+          BRANCH=codex/knowledge-memory-settings-ui-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-memory-settings-wiring.bundle.sha256
-          git bundle verify .bridge/agent-a-memory-settings-wiring.bundle
-          git fetch --no-tags .bridge/agent-a-memory-settings-wiring.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-memory-settings-ui.bundle.sha256
+          git bundle verify .bridge/agent-a-memory-settings-ui.bundle
+          git fetch --no-tags .bridge/agent-a-memory-settings-ui.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
