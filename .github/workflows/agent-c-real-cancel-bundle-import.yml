@@ -1,0 +1,89 @@
+name: Agent C real initialize cancellation bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-inflight-recovery-cancel-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-recovery-exhaustion-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=b1ec5809349551ae97f825474faa4d9da4565935
+          HEAD=09c34f9c2dc950cccc80888a056d0c42b7dd59b5
+          TARGET=codex/ai-platform-hub-inflight-recovery-cancel-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-real-cancel.bundle
+          IyB2MiBnaXQgYnVuZGxlCi1iMWVjNTgwOTM0OTU1MWFlOTdmODI1NDc0ZmFhNGQ5ZGE0NTY1OTM1
+          IGZlYXQoYWkpOiBleHBvc2UgYm91bmRlZCByZWNvdmVyeSBleGhhdXN0aW9uIGFuZCBpbnRlcnJ1
+          cHQgc3RhbGUgYXR0ZW1wdHMKMDljMzRmOWMyZGM5NTBjY2NjODA4ODhhMDU2ZDBjNDJiN2RkNTli
+          NSByZWZzL2hlYWRzL2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1pbmZsaWdodC1yZWNvdmVyeS1jYW5j
+          ZWwtMjAyNjExMDcKClBBQ0sAAAACAAAACpoUeJytjU1OwzAQhfc5xSxBiCj+i2uEEIg13GHijJsR
+          rl05E0o5PekdeKunT+9HGhHMOKSECrUOPhozmkCjGe2YFCkVrPMWjddT6M7YqAhMiqI7DMHY4JxC
+          Cj4dtLPeJkQ7hxmtG10wrsNNltrgk7ZWP1gQ3o63/js84808xtdtpbb2pTY652t/ZFm2qY/19ALK
+          BzsM3hoND8OubqcnFqH/2usS/9wh3z9BI0EukJAzzXCp7Ws/WQVlW+Gy7HBPxPpN7QpcWBgz/xLw
+          ChFLpJxxytT9ARvnaYX5BWZgUmPNe8vwyVtEl285HS9E4AUSeJwBWQCm//8F/wWwoAEU+5Qxf7Il
+          T9Y0bGQtM87yevVdOBKTtAG5NFhxmmvN6NX934HGIJceJ0FTzU7GNDAwMDAgdGVzdHMAL8HpeVPm
+          Y6SqxXlJ/RJ52r60Y3SToQJeZJgqTf4BfeqOSiXUc/0rQk4x6oVOlHCTdDt4nPvA9IFpQr1IaoOv
+          jeB8vbNGcdFX73GJTuSaUn1h4uS7AMIzDVnxAsaxZgHRW5cUYIgJKILjrB/rBu5seJx7JPVIasNr
+          RhH/kDbr5Y2Gb5UUTNtm/1sSGfOiIXrzf8ZkbgAA9Q8m/zaqWepHJAoj06P0YcWdHTyJ9X154Hic
+          bZO/jtRADMYrkNgOKugsXbfKLv11SOikkygQf0pEJomTWJnMRB5PlqPJQ/ACPAAFj4hnkt29k6gy
+          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
+          GNQ3v6VSpZZsMfHFr2mQ
+          BUNDLE
+          echo '0f876bbedf16bd34865cc6ad59cc21a82bd956912edd97253d24625356457db9  /tmp/agent-c-real-cancel.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-real-cancel.bundle
+          git fetch --no-tags /tmp/agent-c-real-cancel.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
