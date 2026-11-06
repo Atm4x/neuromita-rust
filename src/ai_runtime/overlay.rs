@@ -301,6 +301,143 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn cancellation_and_timeout_clean_uv_staging_without_changing_active_revision() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("nm-overlay-cancel-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        tokio::fs::write(
+            &uv,
+            r#"#!/bin/sh
+target=''
+prev=''
+for arg do
+    if [ "$prev" = --target ]; then target="$arg"; fi
+    prev="$arg"
+done
+mkdir -p "$target/partial"
+printf '%s' "$$" > "$target/uv.pid"
+printf 'started' > "$target/started"
+exec sleep 120
+"#,
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        tokio::fs::write(&python, "fake").await.unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv.clone(),
+            python_executable: python,
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(30),
+        };
+        let stable = plan();
+        let stable_path = installer.install(&stable).await.unwrap();
+        let mut pending = stable.clone();
+        pending.revision = "rev2".into();
+        pending.packages.push(LockedPackage {
+            name: "fish-speech-lib".into(),
+            version: "1.0".into(),
+        });
+        let parent = installer.overlays_directory.join("mock_tts");
+        let staging_paths = || -> Vec<PathBuf> {
+            std::fs::read_dir(&parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(".staging-")
+                })
+                .collect()
+        };
+        let task = tokio::spawn({
+            let installer = installer.clone();
+            let pending = pending.clone();
+            async move { installer.install(&pending).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if staging_paths()
+                    .iter()
+                    .any(|path| path.join("started").exists())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        #[cfg(target_os = "linux")]
+        let uv_pid = {
+            let staging = staging_paths().into_iter().next().unwrap();
+            tokio::fs::read_to_string(staging.join("uv.pid"))
+                .await
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        #[cfg(target_os = "linux")]
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::path::Path::new(&format!("/proc/{uv_pid}")).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled uv process should exit");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !staging_paths().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled uv staging should be removed");
+        assert!(installer.installed(&stable).await.unwrap());
+        assert_eq!(stable_path, installer.installed_path(&stable).unwrap());
+        assert!(!installer.installed_path(&pending).unwrap().exists());
+
+        let timed_out = OverlayInstaller {
+            timeout: Duration::from_millis(150),
+            ..installer.clone()
+        };
+        assert!(matches!(
+            timed_out.install(&pending).await,
+            Err(LayerError::Timeout)
+        ));
+        assert!(staging_paths().is_empty());
+        assert!(installer.installed(&stable).await.unwrap());
+
+        tokio::fs::write(
+            &uv,
+            r#"#!/bin/sh
+target=''
+prev=''
+for arg do
+    if [ "$prev" = --target ]; then target="$arg"; fi
+    prev="$arg"
+done
+mkdir -p "$target/fish_speech_lib-1.0.dist-info"
+printf 'Name: fish-speech-lib\nVersion: 1.0\n' > "$target/fish_speech_lib-1.0.dist-info/METADATA"
+"#,
+        )
+        .await
+        .unwrap();
+        let recovered = installer.install(&pending).await.unwrap();
+        assert!(recovered.is_dir());
+        assert!(installer.installed(&pending).await.unwrap());
+        assert!(installer.installed(&stable).await.unwrap());
+        assert!(staging_paths().is_empty());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn explicitly_approved_install_action_runs_only_in_staging_and_is_verified() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("nm-overlay-action-{}", Uuid::new_v4()));
