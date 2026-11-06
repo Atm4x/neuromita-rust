@@ -16,6 +16,7 @@ pub use crate::identity::EventId;
 mod context_read_tests;
 pub mod conversation;
 pub mod domain;
+pub mod file_attachments;
 pub mod ingress;
 mod legacy;
 #[cfg(test)]

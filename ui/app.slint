@@ -65,9 +65,11 @@ export component AppWindow inherits Window {
     in property <string> chat-stress: "—";
     in property <string> chat-accepted: "—";
     in-out property <string> chat-draft;
+    in-out property <string> chat-attachment-path;
     in-out property <string> chat-model-input;
     in-out property <bool> chat-follow-tail: true;
     callback chat-send(string);
+    callback chat-attach(string, string);
     callback chat-cancel(string);
     callback chat-select-character(int);
     callback chat-refresh();
@@ -117,8 +119,10 @@ export component AppWindow inherits Window {
                 error: root.chat-error; anchor: root.chat-anchor; active: root.chat-active;
                 volume: root.chat-volume; voice-enabled: root.chat-voice;
                 attitude: root.chat-attitude; boredom: root.chat-boredom; stress: root.chat-stress; accepted: root.chat-accepted;
-                draft <=> root.chat-draft; model-input <=> root.chat-model-input; follow-tail <=> root.chat-follow-tail;
+                draft <=> root.chat-draft; attachment-path <=> root.chat-attachment-path;
+                model-input <=> root.chat-model-input; follow-tail <=> root.chat-follow-tail;
                 send(text) => { root.chat-send(text); }
+                attach(text, path) => { root.chat-attach(text, path); }
                 cancel(id) => { root.chat-cancel(id); }
                 select-character(id) => { root.chat-select-character(id); }
                 refresh => { root.chat-refresh(); }

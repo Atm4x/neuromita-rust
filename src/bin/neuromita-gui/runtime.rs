@@ -76,6 +76,7 @@ pub enum Command {
     SetToolDepth(u8),
     Select(CharacterId),
     Send(String),
+    AttachFile(String, String),
     Cancel(RequestId),
     Refresh,
     Volume(u8),
@@ -120,6 +121,7 @@ pub enum Update {
     Connected(String),
     Snapshot(Box<ConversationSnapshot>),
     Sent(String),
+    FileAttached(String, String),
     Error(String),
 }
 
@@ -525,6 +527,28 @@ async fn observe(
                 Some(Command::Send(text)) => match presenter.reply(character, text.clone()) {
                     Ok(_) => publish(Update::Sent(text)),
                     Err(error) => publish(Update::Error(error.to_string())),
+                },
+                Some(Command::AttachFile(text, source)) => {
+                    let result = (|| -> Result<(), String> {
+                        use neuromita::timeline::{
+                            file_attachments::{compose_local_file_message, import_local_file},
+                            storage::assets::TimelineAssetStore,
+                        };
+                        let selection = app.timeline_selection();
+                        let assets = TimelineAssetStore::new(directory.join("TimelineAssets"), 8 * 1024 * 1024)
+                            .map_err(|error| error.to_string())?;
+                        let part = import_local_file(&assets, std::path::Path::new(&source))
+                            .map_err(|error| error.to_string())?;
+                        let message = compose_local_file_message(character, text.clone(), part)
+                            .map_err(|error| error.to_string())?;
+                        app.publish_attached_conversation_message(selection, message, &assets)
+                            .map_err(|error| error.to_string())?;
+                        Ok(())
+                    })();
+                    match result {
+                        Ok(()) => publish(Update::FileAttached(text, source)),
+                        Err(error) => publish(Update::Error(error)),
+                    }
                 },
                 Some(Command::Cancel(id)) => match presenter.cancel(id) {
                     Ok(CancelResult::Cancelled | CancelResult::Requested) => {},
