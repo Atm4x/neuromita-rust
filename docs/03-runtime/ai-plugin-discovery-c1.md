@@ -24,6 +24,10 @@ manifest is valid, **not** that the model can be initialized or inference works.
 
 This is a partial #59 change. It does not yet implement versioned side-by-side
 community packages, runtime approval/grants, trusted publisher verification,
-per-plugin probe subprocesses, or typed `list_models` and `verify_install` SDK
-operations. Consumer wiring in AI Hub (#37) is separate. No new data schema
+per-plugin probe subprocesses or Rust-side typed consumers of the SDK
+model DTOs. In the follow-on stage, `list_models` and `verify_install` are
+optional, explicitly typed SDK operations; absent methods fail instead of
+returning synthetic catalog entries/readiness. Consumers must not interpret
+`verified: true` as inference readiness. Consumer wiring in AI Hub (#37) is
+separate. No new data schema
 version or storage migration is introduced.

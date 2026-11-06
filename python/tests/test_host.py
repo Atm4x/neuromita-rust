@@ -51,6 +51,20 @@ class HostTests(unittest.TestCase):
         self.assertTrue(self.request(process, "unload", {"kind": "tts"})["ok"])
         self.assertFalse(self.request(process, "infer", {"kind": "tts", "input": {"text": "again"}})["ok"])
 
+    def test_typed_model_enumeration_and_install_verification_over_ipc(self):
+        process = self.start_host()
+        for plugin_id in ("mock_tts", "mock_asr"):
+            models = self.request(process, "list_models", {"plugin_id": plugin_id})
+            self.assertTrue(models["ok"])
+            self.assertEqual(models["result"][0]["id"], plugin_id)
+            verified = self.request(process, "verify_install", {"plugin_id": plugin_id})
+            self.assertEqual(verified["result"], {
+                "installed": True, "verified": True, "problems": []
+            })
+        unsupported = self.request(process, "verify_install", {"plugin_id": "silero_rvc_cuda"})
+        self.assertFalse(unsupported["ok"])
+        self.assertIn("does not implement verify_install", unsupported["error"]["message"])
+
     def test_chunked_wav_stream_is_bounded_and_correlated(self):
         import base64
         process = self.start_host()

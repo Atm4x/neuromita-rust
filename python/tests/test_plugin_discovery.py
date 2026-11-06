@@ -98,6 +98,30 @@ class PluginDiscoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.dispatch("describe", {"plugin_id": "linked"})
 
+    def test_nested_install_constraints_are_enforced_at_initialize(self):
+        directory = self.fixture("community", "restricted_setting")
+        (directory / "plugin.py").write_text(PLUGIN_CODE.replace(
+            "def settings_schema(self): return {}",
+            "def settings_schema(self): return {'precision': {'type': 'string'}}"
+        ))
+        (directory / "installplan.py").write_text('''from neuromita_ai_sdk import InstallPlan
+class InstallContract:
+    def settings_schema(self): return {'precision': {'type': 'string'}}
+    def probe_install(self): return {'installed': True}
+    def install_plan(self): return InstallPlan()
+    def configuration_constraints(self, context):
+        return [{'field': 'settings.precision', 'value': 'fp16', 'severity': 'forbidden',
+                 'code': 'forbidden_precision', 'message': 'Cannot use fp16'}]
+''')
+        host = PluginHost(self.root)
+        with self.assertRaisesRegex(ValueError, "forbidden_precision"):
+            host.dispatch("initialize", {"plugin_id": "restricted_setting", "settings": {"precision": "fp16"}})
+        self.assertEqual(host.active_by_kind, {})
+        self.assertTrue(host.dispatch("initialize", {
+            "plugin_id": "restricted_setting", "settings": {"precision": "fp32"}
+        })["model_ready"])
+        host.dispatch("unload", {"kind": "tts"})
+
     def test_nested_installer_uses_exact_discovered_plugin(self):
         directory = self.fixture("community", "convert")
         (directory / "installplan.py").write_text('''from neuromita_ai_sdk import InstallPlan, AssetHook
