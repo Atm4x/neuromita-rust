@@ -1,0 +1,11 @@
+# Slint first-run consent integration — partial D2
+
+The installed GUI checks `settings.json` in its injected portable data root before starting its Rust desktop runtime. A missing or current settings profile with `onboarding.eula_accepted=false` presents a blocking EULA overlay. Selection of RU/EN changes only the displayed EULA text until acceptance; Reject closes the window without storing consent. Accept atomically writes `onboarding.eula_accepted=true` and the selected UI language in the current settings document, preserving other fields and incrementing its revision. Existing settings without the new field decode as unaccepted. Invalid settings fail startup rather than being replaced by defaults.
+
+The RU/EN agreement text is copied without alterations from the read-only Python source reference `src/localization/eula_texts.py` at `5f3d061f523d9abefa6a264bb2953048a935fa65`; this is a historical compatibility source, **not** legal approval for a new version. The current GUI implementation does not yet support other Python EULA localizations. Unknown codes select the English read-only text, but the consent action accepts RU/EN only.
+
+On acceptance the GUI opens a **basic three-step** guide (Welcome, Presets, Finish) using existing bundled screenshots; it can be reopened from Settings and has a separate documentation link. It does **not** implement the original Python Guide's advanced/full levels, 13-step inventory, per-step image focus, zoom/crop/scroll, local Wiki deep-links, or keyboard-only/a11y certification. Issue #41 must remain open.
+
+Important observed difference: this D2 slice defers creation of the Rust desktop runtime until EULA acceptance; the Python reference used a presentation overlay after GUI startup and did not guarantee a Core startup gate. No headless runtime consent gate is introduced. The behavior requires real Windows/Linux GUI E2E testing before full acceptance.
+
+Verification targets: local first run and repeat launch, imported Python `EULA_ACCEPTED`, RU/EN selection, malformed existing settings, rejection without disk mutation, offline first launch, reenter guide, font and screenshot packaging, and future full-guide interactions. CLI remains unaffected by EULA acceptance.

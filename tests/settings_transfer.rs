@@ -97,6 +97,7 @@ fn export_is_a_complete_canonical_envelope() {
             "capture",
             "characters",
             "interface",
+            "onboarding",
             "presets",
             "reminders",
             "speech",

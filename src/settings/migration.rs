@@ -86,6 +86,11 @@ impl PythonSettingsMigration {
                         .as_bool()
                         .ok_or_else(|| invalid_python(key, "expected boolean"))?;
                 }
+                "EULA_ACCEPTED" => {
+                    proposed.settings.onboarding.eula_accepted = value
+                        .as_bool()
+                        .ok_or_else(|| invalid_python(key, "expected boolean"))?;
+                }
                 "CHAT_FONT_SIZE" => {
                     let size = python_u64(value, key, "expected integer in range 6..=96")?;
                     proposed.settings.interface.font_size = u16::try_from(size)
