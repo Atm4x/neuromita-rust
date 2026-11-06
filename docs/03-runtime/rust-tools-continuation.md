@@ -4,7 +4,7 @@
 
 ## Configuration and admission
 
-`SettingsApi::edit::<ToolSettings>(...)` edits `AppSettings.tools`. The field uses a serde default for settings created before the tool schema was introduced. Defaults are `enabled=false`, `calculator=false`, `memory_search=true`, `max_depth=2`. Enabling the global switch and the specific tool is mandatory. Depth is bounded at 0–4; zero makes all read-only tools unavailable. The admitted settings snapshot is immutable for each request, so changes made while a request is running do not change its tool permissions.
+`SettingsApi::edit::<ToolSettings>(...)` edits `AppSettings.tools`. The field uses a serde default for settings created before the tool schema was introduced. Defaults are `enabled=false`, `calculator=false`, `memory_search=true`, `max_depth=2`. Enabling the global switch and the specific tool is mandatory. Core accepts depth 0–5 (zero disables read-only tools); the PyQt-parity Slint control offers 1–5; The admitted settings snapshot is immutable for each request, so changes made while a request is running do not change its tool permissions.
 
 `reminder` is an existing durable structured response effect with its own settings/acceptance contract and is not routed through the read-only continuation mechanism. Its presence in the structured schema does not grant permission to execute unrelated tools.
 

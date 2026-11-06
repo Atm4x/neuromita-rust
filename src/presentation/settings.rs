@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 use crate::{
     character::CharacterId,
+    generation::ToolSettings,
     settings::{
         AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
         PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
@@ -107,6 +108,10 @@ pub struct AsrSettingsPresenter {
 
 pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
+}
+
+pub struct ToolsSettingsPresenter {
+    pub state: BoundProperty<ToolSettings>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -236,6 +241,7 @@ pub struct SettingsPresenter {
     pub tts: TtsSettingsPresenter,
     pub asr: AsrSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
+    pub tools: ToolsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
 }
 impl SettingsPresenter {
@@ -261,6 +267,17 @@ impl SettingsPresenter {
                     |owner, value| {
                         owner
                             .edit::<PresetSettings>(|settings| settings.active = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            tools: ToolsSettingsPresenter {
+                state: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.tools.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<ToolSettings>(|settings| *settings = value)
                             .map(|_| ())
                     },
                 ),

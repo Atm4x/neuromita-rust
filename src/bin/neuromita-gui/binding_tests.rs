@@ -472,6 +472,24 @@ fn settings_render_and_bindings(window: &AppWindow) {
         window,
         Rc::new(move |command| sent.borrow_mut().push(command)),
     );
+    settings.invoke_tool_option("calculator".into(), true);
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetToolOption(
+            super::super::runtime::ToolOption::Calculator,
+            true
+        ))
+    ));
+    settings.invoke_tool_depth_change("5".into());
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetToolDepth(5))
+    ));
+    let last_count = commands.borrow().len();
+    settings.invoke_tool_depth_change("6".into());
+    assert_eq!(last_count, commands.borrow().len());
+    assert!(!settings.get_settings_error().is_empty());
+    settings.set_settings_error("".into());
     settings.invoke_preset_edit("7".into());
     assert_eq!(settings.get_preset_model(), "fixture-model");
     assert_eq!(
@@ -611,6 +629,48 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert_eq!(
             app.presenter().settings.asr.preferences.get().recognizer_id,
             "whisper"
+        );
+        let initial_tools = app.presenter().settings.tools.state.get();
+        assert!(!initial_tools.enabled);
+        super::super::settings::execute(
+            app.presenter(),
+            Command::SetToolOption(super::super::runtime::ToolOption::Enabled, true),
+        )
+        .unwrap();
+        super::super::settings::execute(
+            app.presenter(),
+            Command::SetToolOption(super::super::runtime::ToolOption::Calculator, true),
+        )
+        .unwrap();
+        super::super::settings::execute(app.presenter(), Command::SetToolDepth(5)).unwrap();
+        assert!(
+            app.presenter()
+                .settings
+                .tools
+                .state
+                .get()
+                .supports("calculator")
+        );
+        assert_eq!(app.presenter().settings.tools.state.get().max_depth, 5);
+        assert!(
+            super::super::settings::execute(app.presenter(), Command::SetToolDepth(6)).is_err()
+        );
+        assert_eq!(app.presenter().settings.tools.state.get().max_depth, 5);
+        assert!(
+            super::super::settings::execute(
+                app.presenter(),
+                Command::SetToolOption(super::super::runtime::ToolOption::WebSearch, true)
+            )
+            .is_err()
+        );
+        assert!(
+            !app.presenter()
+                .settings
+                .tools
+                .state
+                .get()
+                .web
+                .search_enabled
         );
         let initial_revision = app.presenter().settings.snapshot().unwrap().revision;
         super::super::settings::execute(

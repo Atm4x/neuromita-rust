@@ -34,9 +34,9 @@ impl Default for ToolSettings {
 
 impl ToolSettings {
     pub fn validate(&self) -> Result<(), GenerationError> {
-        if self.max_depth > 4 {
+        if self.max_depth > 5 {
             return Err(GenerationError::Response(
-                "tool depth cannot exceed four".into(),
+                "tool depth cannot exceed five".into(),
             ));
         }
         self.web.validate()?;
@@ -432,6 +432,18 @@ mod tests {
         let serialized = serde_json::to_value(&settings).unwrap();
         let restored: ToolSettings = serde_json::from_value(serialized).unwrap();
         assert_eq!(settings, restored);
+    }
+
+    #[test]
+    fn pyqt_tool_depth_limit_is_one_through_five() {
+        let mut settings = ToolSettings {
+            enabled: true,
+            max_depth: 5,
+            ..ToolSettings::default()
+        };
+        settings.validate().unwrap();
+        settings.max_depth = 6;
+        assert!(settings.validate().is_err());
     }
 
     #[test]

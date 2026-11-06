@@ -9,7 +9,7 @@ This is an opt-in read-only network slice of the existing request-scoped `LLM �
 | Setting | Default | Meaning |
 |---|---|---|
 | `tools.enabled` | `false` | Global tool execution permission |
-| `tools.max_depth` | `2` | Maximum number of tool-continuation turns; range 0–4 |
+| `tools.max_depth` | `2` | Maximum number of tool-continuation turns; Core range 0–5; Slint PyQt-parity input 1–5 |
 | `tools.web.enabled` | `false` | Independent opt-in for all network tools |
 | `tools.web.search_enabled` | `false` | Allow `web_search` |
 | `tools.web.search_endpoint` | `null` | Explicitly configured HTTPS SearXNG-compatible `/search` endpoint; no embedded query or credentials |
