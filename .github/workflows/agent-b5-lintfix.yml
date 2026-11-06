@@ -1,0 +1,32 @@
+name: Publish Agent B5 lint fix
+on:
+  push:
+    branches: [bridge/agent-b5-return-20261107]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cf8cbd49331f034c764c08440a46bf03f36675b5
+          fetch-depth: 0
+      - name: Verify and fast-forward B5 head
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=88efe75864fd563fd38f7e9d42d70b1135e869de
+          PREVIOUS=cf8cbd49331f034c764c08440a46bf03f36675b5
+          TARGET=refs/heads/codex/timeline-live-multimodal-20261107
+          git fetch origin refs/heads/bridge/agent-b5-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b5-lintfix-20261107.bundle.b64 | base64 --decode > /tmp/lintfix.bundle
+          echo "8a30133161396c32f5a28df08e5a65df1f6765e0b36921fd4e16740dfabb404e  /tmp/lintfix.bundle" | sha256sum --check
+          git bundle verify /tmp/lintfix.bundle
+          git fetch /tmp/lintfix.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED"
+          git merge-base --is-ancestor "$PREVIOUS" "$EXPECTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          test "$REMOTE" = "$PREVIOUS" || test "$REMOTE" = "$EXPECTED"
+          git update-ref "$TARGET" "$EXPECTED"
+          if test "$REMOTE" != "$EXPECTED"; then git push origin "$TARGET:$TARGET"; fi
