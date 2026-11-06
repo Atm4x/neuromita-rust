@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::{
     identity::{CharacterId, EventId},
     memory::{MAX_MEMORY_EDIT_CHANGES, MemoryChange, MemoryCommand, MemoryRecord, MemoryRelation},
@@ -15,6 +17,7 @@ pub struct CharacterMemorySnapshot {
     pub(crate) records: Vec<MemoryRecord>,
     pub(crate) relations: Vec<MemoryRelation>,
     pub(crate) memory_revision: Option<EventId>,
+    pub(crate) source_revisions: BTreeMap<crate::memory::MemoryId, u64>,
     pub(crate) selection: TimelineSelection,
 }
 
@@ -35,6 +38,10 @@ impl CharacterMemorySnapshot {
         &self.relations
     }
 
+    pub fn source_revision(&self, source: crate::memory::MemoryId) -> Option<u64> {
+        self.source_revisions.get(&source).copied()
+    }
+
     /// Opaque branch selection plus character-memory identity, without
     /// treating unrelated Timeline appends as memory-edit conflicts.
     pub(crate) fn matches_version(&self, other: &Self) -> bool {
@@ -44,6 +51,7 @@ impl CharacterMemorySnapshot {
             && self.records == other.records
             && self.relations == other.relations
             && self.memory_revision == other.memory_revision
+            && self.source_revisions == other.source_revisions
     }
 }
 
@@ -64,12 +72,14 @@ pub(crate) fn read_memory_snapshot(
     let records = projection.all();
     let relations = projection.relations();
     let memory_revision = super::projection::character_memory_revision_at(&world, character);
+    let source_revisions = projection.source_revisions();
     Ok(CharacterMemorySnapshot {
         character,
         anchor,
         records,
         relations,
         memory_revision,
+        source_revisions,
         selection,
     })
 }
@@ -105,6 +115,7 @@ pub(crate) fn edit_memory_snapshot(
         || memories.relations() != expected.relations
         || super::projection::character_memory_revision_at(&world, character)
             != expected.memory_revision
+        || memories.source_revisions() != expected.source_revisions
     {
         return Err(TimelineError::ConcurrentWrite);
     }
