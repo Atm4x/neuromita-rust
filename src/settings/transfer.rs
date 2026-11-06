@@ -24,6 +24,8 @@ pub enum SettingsTransferError {
         "Python settings need a target Rust settings profile; use PythonSettingsMigration::preview"
     )]
     PythonNeedsTarget,
+    #[error("Python settings have unmapped fields (explicit approval required): {0:?}")]
+    UnmappedPythonFields(Vec<String>),
 }
 
 impl From<SettingsTransferError> for SettingsError {

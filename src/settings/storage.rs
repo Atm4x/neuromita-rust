@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AppSettings, PythonSettingsMigration, PythonSettingsPreview, SettingsError,
-    SettingsImportFormat, SettingsTransfer,
+    SettingsImportFormat, SettingsTransfer, SettingsTransferError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,12 @@ pub struct PythonImportOutcome {
     pub backup_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonUnmappedPolicy {
+    Reject,
+    SkipAfterReview,
+}
+
 pub struct JsonSettingsRepository {
     path: PathBuf,
 }
@@ -92,7 +98,7 @@ impl JsonSettingsRepository {
         bytes: &[u8],
     ) -> Result<SettingsTransfer, SettingsError> {
         if format == SettingsImportFormat::Python {
-            return Ok(self.import_python(bytes)?.preview.transfer);
+            return Err(SettingsTransferError::PythonNeedsTarget.into());
         }
         let transfer = SettingsTransfer::prepare(format, bytes)?;
         atomic_write(&self.path, &transfer.encode()?)?;
@@ -109,10 +115,21 @@ impl JsonSettingsRepository {
     /// Intended only for a stopped application. Uses the settings writer lock
     /// for read/prepare/backup/publish; repeated imports are no-ops.
     pub fn import_python(&self, bytes: &[u8]) -> Result<PythonImportOutcome, SettingsError> {
+        self.import_python_with_policy(bytes, PythonUnmappedPolicy::Reject)
+    }
+
+    pub fn import_python_with_policy(
+        &self,
+        bytes: &[u8],
+        policy: PythonUnmappedPolicy,
+    ) -> Result<PythonImportOutcome, SettingsError> {
         let _lock = writer_lock(&self.path)?;
         let baseline = self.python_import_baseline()?;
         let mut preview = PythonSettingsMigration.preview(bytes, &baseline)?;
         preview.changed |= !self.path.exists();
+        if policy == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+            return Err(SettingsTransferError::UnmappedPythonFields(preview.skipped_keys).into());
+        }
         if !preview.changed {
             return Ok(PythonImportOutcome {
                 preview,
@@ -161,9 +178,14 @@ impl JsonSettingsRepository {
         let mut name = name.to_os_string();
         name.push(format!(".pre-python-import-{}.bak", uuid::Uuid::new_v4()));
         let backup_path = self.path.with_file_name(name);
-        let mut backup = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut backup = options
             .open(&backup_path)
             .map_err(|error| SettingsError::Storage(error.to_string()))?;
         let result = backup.write_all(&original).and_then(|_| backup.sync_all());
@@ -222,9 +244,14 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
     let mut temporary = name.to_os_string();
     temporary.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let temporary = path.with_file_name(temporary);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(&temporary)
         .map_err(|error| SettingsError::Storage(error.to_string()))?;
     let result = (|| {

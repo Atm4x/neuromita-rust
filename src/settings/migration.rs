@@ -82,9 +82,27 @@ impl PythonSettingsMigration {
                     };
                 }
                 "HIDE_PRIVATE" => {
-                    proposed.settings.interface.hide_private = value
-                        .as_bool()
-                        .ok_or_else(|| invalid_python(key, "expected boolean"))?;
+                    proposed.settings.interface.hide_private = python_bool(key, value)?;
+                }
+                "REMINDERS_ENABLED" => {
+                    proposed.settings.reminders.enabled = python_bool(key, value)?;
+                }
+                "VOICE_LANGUAGE" => {
+                    let language = value
+                        .as_str()
+                        .ok_or_else(|| invalid_python(key, "expected ru or en"))?
+                        .trim()
+                        .to_ascii_lowercase();
+                    if !matches!(language.as_str(), "ru" | "en") {
+                        return Err(invalid_python(key, "only ru and en are supported"));
+                    }
+                    proposed.settings.speech.tts.local_language = language;
+                }
+                "LOCAL_VOICE_LOAD_LAST" => {
+                    proposed.settings.speech.tts.local_auto_load = python_bool(key, value)?;
+                }
+                "LOCAL_VOICE_INIT_ON_REQUEST" => {
+                    proposed.settings.speech.tts.local_lazy_init = python_bool(key, value)?;
                 }
                 "EULA_ACCEPTED" => {
                     proposed.settings.onboarding.eula_accepted = value
@@ -202,6 +220,20 @@ fn python_u64(
             text.parse().ok()
         })
         .ok_or_else(|| invalid_python(key, message))
+}
+
+fn python_bool(key: &str, value: &serde_json::Value) -> Result<bool, SettingsTransferError> {
+    match value {
+        serde_json::Value::Bool(value) => Ok(*value),
+        serde_json::Value::Number(number) if number.as_u64() == Some(0) => Ok(false),
+        serde_json::Value::Number(number) if number.as_u64() == Some(1) => Ok(true),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "y" | "t" => Ok(true),
+            "0" | "false" | "no" | "off" | "n" | "f" | "" => Ok(false),
+            _ => Err(invalid_python(key, "expected a Python boolean")),
+        },
+        _ => Err(invalid_python(key, "expected a Python boolean")),
+    }
 }
 
 fn invalid_python(key: &str, message: &str) -> SettingsTransferError {

@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf};
 
 use neuromita::settings::{
-    AppSettings, JsonSettingsRepository, Language, PythonSettingsMigration, SettingsRepository,
-    SettingsTransferError, StoredSettings, Volume,
+    AppSettings, JsonSettingsRepository, Language, PythonSettingsMigration, PythonUnmappedPolicy,
+    SettingsImportFormat, SettingsRepository, SettingsTransferError, StoredSettings, Volume,
 };
 use serde_json::json;
 
@@ -89,7 +89,7 @@ fn preview_rejects_malformed_or_invalid_known_values_without_defaults() {
         b"not json".to_vec(),
         source(json!([])),
         source(json!({"LANGUAGE":"DE"})),
-        source(json!({"HIDE_PRIVATE":"false"})),
+        source(json!({"HIDE_PRIVATE":"perhaps"})),
         source(json!({"CHAT_FONT_SIZE":0})),
         source(json!({"CHAT_FONT_SIZE":true})),
         source(json!({"VOICEOVER_LOCAL_VOLUME":125})),
@@ -127,7 +127,9 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
     let readonly_preview = repository.preview_python(&bytes).unwrap();
     assert_eq!(readonly_preview.transfer.stored().revision, 7);
     assert_eq!(fs::read(&path).unwrap(), original);
-    let result = repository.import_python(&bytes).unwrap();
+    let result = repository
+        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
+        .unwrap();
     assert!(result.preview.changed);
     assert_eq!(result.preview.transfer.stored().revision, 8);
     let backup = result.backup_path.unwrap();
@@ -139,7 +141,9 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
         current.settings.presets.active
     );
     let after = fs::read(&path).unwrap();
-    let repeated = repository.import_python(&bytes).unwrap();
+    let repeated = repository
+        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
+        .unwrap();
     assert!(!repeated.preview.changed);
     assert!(repeated.backup_path.is_none());
     assert_eq!(fs::read(&path).unwrap(), after);
@@ -241,4 +245,90 @@ fn fresh_target_is_created_even_when_python_values_match_initial_defaults() {
     assert!(applied.preview.changed);
     assert_eq!(repository.load().unwrap().revision, 1);
     assert!(path.exists());
+}
+
+#[test]
+fn pr109_unique_flags_merge_into_current_rust_values() {
+    let current = baseline();
+    let python = source(json!({
+        "REMINDERS_ENABLED": "off",
+        "VOICE_LANGUAGE": "EN",
+        "LOCAL_VOICE_LOAD_LAST": 1,
+        "LOCAL_VOICE_INIT_ON_REQUEST": "no",
+        "LANGUAGE": "EN",
+        "CHAT_FONT_SIZE": "20",
+        "VOICEOVER_LOCAL_VOLUME": "33",
+        "PROMPT_SET_Crazy": "My Custom Set"
+    }));
+    let planned = PythonSettingsMigration.preview(&python, &current).unwrap();
+    let after = &planned.transfer.stored().settings;
+    assert!(!after.reminders.enabled);
+    assert_eq!(after.speech.tts.local_language, "en");
+    assert!(after.speech.tts.local_auto_load);
+    assert!(!after.speech.tts.local_lazy_init);
+    assert_eq!(after.voice.volume.get(), 33);
+    assert_eq!(after.interface.font_size, 20);
+    assert_eq!(
+        after.characters.crazy.prompt_set.as_deref(),
+        Some("My Custom Set")
+    );
+    assert_eq!(after.presets, current.settings.presets);
+    assert_eq!(planned.imported_keys.len(), 8);
+    assert!(planned.skipped_keys.is_empty());
+}
+
+#[test]
+fn unknown_fields_are_rejected_by_default_and_never_overwrite() {
+    let dir = Directory::new();
+    let target = dir.path("settings.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    repo.save(&baseline()).unwrap();
+    let before = fs::read(&target).unwrap();
+    let python = source(json!({"LANGUAGE":"EN", "API_KEY":"private-token"}));
+    let preview = repo.preview_python(&python).unwrap();
+    assert_eq!(preview.skipped_keys, vec!["API_KEY"]);
+    let err = repo.import_python(&python).unwrap_err().to_string();
+    assert!(err.contains("API_KEY"));
+    assert!(!err.contains("private-token"));
+    assert_eq!(fs::read(&target).unwrap(), before);
+    let applied = repo
+        .import_python_with_policy(&python, PythonUnmappedPolicy::SkipAfterReview)
+        .unwrap();
+    assert!(applied.preview.changed);
+    assert_eq!(
+        repo.load().unwrap().settings.interface.language,
+        Language::English
+    );
+    assert_eq!(fs::read(&applied.backup_path.unwrap()).unwrap(), before);
+}
+
+#[test]
+fn generic_python_replacement_is_forbidden() {
+    let dir = Directory::new();
+    let target = dir.path("settings.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    repo.save(&baseline()).unwrap();
+    let before = fs::read(&target).unwrap();
+    assert!(
+        repo.import_from(
+            SettingsImportFormat::Python,
+            &source(json!({"LANGUAGE":"EN"}))
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(target).unwrap(), before);
+}
+
+#[test]
+fn invalid_new_fields_are_rejected_without_coercing_defaults() {
+    let current = baseline();
+    for source in [
+        source(json!({"REMINDERS_ENABLED": "what"})),
+        source(json!({"VOICE_LANGUAGE": "fr"})),
+        source(json!({"LOCAL_VOICE_LOAD_LAST": 3})),
+        source(json!({"LOCAL_VOICE_INIT_ON_REQUEST": null})),
+        source(json!({"EULA_ACCEPTED": "true"})),
+    ] {
+        assert!(PythonSettingsMigration.preview(&source, &current).is_err());
+    }
 }
