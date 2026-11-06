@@ -102,6 +102,9 @@ mod tests {
         let plugin = temp.join("plugins/demo_asr");
         tokio::fs::create_dir_all(&plugin).await.unwrap();
         tokio::fs::write(plugin.join("plugin.json"), r#"{"id":"demo_asr","name":"Demo ASR","kind":"asr","entrypoint":"plugin.py","api_version":1}"#).await.unwrap();
+        tokio::fs::write(plugin.join("plugin.py"), "class Plugin: pass\n")
+            .await
+            .unwrap();
         tokio::fs::write(
             plugin.join("installplan.py"),
             r#"from neuromita_ai_sdk import InstallPlan

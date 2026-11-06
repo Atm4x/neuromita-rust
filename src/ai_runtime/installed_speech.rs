@@ -20,7 +20,9 @@ use super::{
     install::PluginInstallPlan,
     layer::valid_segment,
     overlay::{LockedOverlay, OverlayInstaller, load_installed_overlay},
-    speech_catalog::{SpeechInventory, SpeechModelCatalog},
+    speech_catalog::{
+        SpeechInventory, SpeechModelCatalog, executable_plugin_root, verify_executable_plugin,
+    },
     speech_selection::{inspect_speech_selection, select_speech_model},
 };
 
@@ -55,12 +57,7 @@ impl InstalledSpeechEnvironment {
         } else {
             source_sdk.clone()
         };
-        let installed_plugins = data_directory.join("AIData/Scripts");
-        let plugins_directory = if installed_plugins.is_dir() {
-            installed_plugins
-        } else {
-            source_sdk.join("plugins/builtin")
-        };
+        let plugins_directory = executable_plugin_root(&data_directory);
         Self {
             data_directory,
             sdk_root,
@@ -145,17 +142,13 @@ impl InstalledSpeechEnvironment {
         }
         self.validate()?;
         for selected in &selected {
-            if !self
-                .plugins_directory
-                .join(&selected.plugin_id)
-                .join("plugin.json")
-                .is_file()
-            {
-                return Err(InstalledSpeechError::Environment(format!(
-                    "plugin {} absent from configured plugin root",
-                    selected.plugin_id
-                )));
-            }
+            let service = match selected.service {
+                AiService::Tts => "tts",
+                AiService::Asr => "asr",
+                _ => unreachable!("only speech services are selected"),
+            };
+            verify_executable_plugin(&self.plugins_directory, &selected.plugin_id, service)
+                .map_err(InstalledSpeechError::Environment)?;
         }
         let overlays = selected
             .iter()
@@ -465,6 +458,29 @@ mod tests {
         assert_eq!(installed_overlay(&root, "mock_asr").unwrap(), receipt);
         std::fs::create_dir_all(root.join("overlays/mock_asr/rev2")).unwrap();
         assert!(installed_overlay(&root, "mock_asr").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn desktop_activation_and_inventory_select_the_same_plugin_root() {
+        let root = std::env::temp_dir().join(format!("speech-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("AIData/Scripts")).unwrap();
+        let legacy_environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let legacy_inventory = SpeechModelCatalog::for_desktop(root.clone());
+        assert_eq!(
+            legacy_environment.plugins_directory,
+            legacy_inventory.plugin_roots[0]
+        );
+        assert_eq!(
+            legacy_environment.plugins_directory,
+            root.join("AIData/Scripts")
+        );
+
+        std::fs::create_dir_all(root.join("AIData/plugins/community")).unwrap();
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let inventory = SpeechModelCatalog::for_desktop(root.clone());
+        assert_eq!(environment.plugins_directory, inventory.plugin_roots[0]);
+        assert_eq!(environment.plugins_directory, root.join("AIData/plugins"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
