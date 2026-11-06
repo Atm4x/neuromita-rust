@@ -113,13 +113,16 @@ pub(super) fn encode_with_memory(
         &[],
         &[],
         &super::super::ToolSettings::default(),
+        None,
     )
+    .expect("test fixture uses only text messages")
     .body
 }
 
 pub(super) struct EncodedRequest {
     pub(super) body: GenerateContent,
     pub(super) prompt: Vec<PromptMessage>,
+    pub(super) media_present: bool,
 }
 
 pub(super) fn encode_observed(
@@ -130,8 +133,15 @@ pub(super) fn encode_observed(
     tool_history: &[PromptMessage],
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
-) -> EncodedRequest {
+    assets: Option<&crate::timeline::storage::assets::TimelineAssetStore>,
+) -> Result<EncodedRequest, GenerationError> {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
+    let media = super::super::live_multimodal::LiveMedia::prepare(
+        &conversation,
+        &context.view,
+        assets,
+        super::super::live_multimodal::LiveDialect::Gemini,
+    )?;
     let mut prompt = conversation
         .system_segments(&context, prepared)
         .into_iter()
@@ -157,15 +167,27 @@ pub(super) fn encode_observed(
             },
         );
     }
-    encode_prompt(prompt, template, native_history, tools)
+    encode_prompt_with_media(prompt, template, native_history, tools, media.as_ref())
 }
 
+#[cfg(test)]
 fn encode_prompt(
-    mut prompt: Vec<PromptMessage>,
+    prompt: Vec<PromptMessage>,
     template: &GeminiTemplate,
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
 ) -> EncodedRequest {
+    encode_prompt_with_media(prompt, template, native_history, tools, None)
+        .expect("text-only Gemini serialization cannot fail")
+}
+
+fn encode_prompt_with_media(
+    mut prompt: Vec<PromptMessage>,
+    template: &GeminiTemplate,
+    native_history: &[super::super::provider::NativeToolExchange],
+    tools: &super::super::ToolSettings,
+    media: Option<&super::super::live_multimodal::LiveMedia>,
+) -> Result<EncodedRequest, GenerationError> {
     let declarations = super::super::tools::native_definitions(tools);
     let native_tools = !declarations.is_empty();
     if !template.options().structured_output || native_tools {
@@ -224,7 +246,7 @@ fn encode_prompt(
             thought: None,
         })
         .collect::<Vec<_>>();
-    let body = GenerateContent {
+    let mut body = GenerateContent {
         system_instruction: (!instructions.is_empty()).then_some(Content {
             role: None,
             parts: instructions,
@@ -287,7 +309,18 @@ fn encode_prompt(
         }),
         tool_config: native_tools.then(|| json!({"functionCallingConfig":{"mode":"AUTO"}})),
     };
-    EncodedRequest { body, prompt }
+    if let Some(media) = media {
+        media.attach(
+            &prompt,
+            &mut body.contents,
+            super::super::live_multimodal::LiveDialect::Gemini,
+        )?;
+    }
+    Ok(EncodedRequest {
+        body,
+        prompt,
+        media_present: media.is_some(),
+    })
 }
 
 #[derive(Deserialize)]

@@ -35,6 +35,7 @@ pub(crate) struct MessageHandler {
     pub(crate) selection_updates: watch::Receiver<TimelineSelection>,
     pub(crate) context_updates: watch::Receiver<u64>,
     pub(crate) games: Arc<GamePolicy>,
+    pub(crate) assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 impl MessageHandler {
@@ -235,7 +236,8 @@ impl MessageHandler {
                 let request = GenerationRequest::new(context, preset, selected)
                     .with_prompt(prompt)
                     .with_post_dsl(post_dsl)
-                    .with_tools(settings.values.tools.clone());
+                    .with_tools(settings.values.tools.clone())
+                    .with_assets(self.assets.clone());
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),

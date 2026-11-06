@@ -60,6 +60,7 @@ pub struct GenerationRequest {
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
     pub tools: ToolSettings,
+    pub assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 impl GenerationRequest {
@@ -75,7 +76,16 @@ impl GenerationRequest {
             preset,
             prepared_knowledge,
             tools: ToolSettings::default(),
+            assets: None,
         }
+    }
+
+    pub fn with_assets(
+        mut self,
+        assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    ) -> Self {
+        self.assets = assets;
+        self
     }
 
     pub fn with_tools(mut self, tools: ToolSettings) -> Self {
@@ -106,6 +116,7 @@ pub struct GenerationInput {
     pub tool_history: Vec<PromptMessage>,
     pub(crate) native_tool_history: Vec<NativeToolExchange>,
     pub tool_settings: ToolSettings,
+    pub assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,7 +161,8 @@ pub struct PreparedRequest {
     pub max_output_tokens: Option<u32>,
     /// The provider-neutral prompt used to produce `payload_json`.
     pub prompt: Arc<[PromptMessage]>,
-    /// The exact JSON bytes sent as the request body.
+    /// Exact request JSON for text-only requests. Media payloads are redacted
+    /// before passing into observers to prevent retaining binary attachments.
     pub payload_json: Arc<str>,
     pub captured_at: SystemTime,
 }
@@ -275,6 +287,7 @@ impl ResponseGenerator {
             tool_history: Vec::new(),
             native_tool_history: Vec::new(),
             tool_settings: tools.clone(),
+            assets: request.assets,
         };
         let mut depth = 0;
         let structured = loop {

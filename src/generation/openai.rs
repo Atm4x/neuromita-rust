@@ -251,6 +251,17 @@ impl OpenAiProvider {
     ) -> Result<StructuredResponse, GenerationError> {
         let conversation =
             LlmConversation::from_context_with_memory(&input.context, &input.prepared_knowledge);
+        let dialect = if template.definition.protocol == OpenAiProtocol::Responses {
+            super::live_multimodal::LiveDialect::OpenAiResponses
+        } else {
+            super::live_multimodal::LiveDialect::OpenAiChat
+        };
+        let media = super::live_multimodal::LiveMedia::prepare(
+            &conversation,
+            &input.context.view,
+            input.assets.as_deref(),
+            dialect,
+        )?;
         let mut prompt = conversation
             .system_segments(&input.context, input.prompt.as_ref())
             .into_iter()
@@ -276,12 +287,23 @@ impl OpenAiProvider {
                 },
             );
         }
-        let (prompt, body) = encode(
+        let (prompt, mut body) = encode(
             prompt,
             &template.definition,
             &input.tool_settings,
             &input.native_tool_history,
         );
+        if let Some(media) = &media {
+            let key = if template.definition.protocol == OpenAiProtocol::Responses {
+                "input"
+            } else {
+                "messages"
+            };
+            let contents = body[key].as_array_mut().ok_or_else(|| {
+                GenerationError::Response("invalid OpenAI prompt container".into())
+            })?;
+            media.attach(&prompt, contents, dialect)?;
+        }
         let payload = serde_json::to_string(&body)
             .map_err(|_| GenerationError::Response("cannot encode provider request".into()))?;
         let config = &template.definition;
@@ -300,7 +322,11 @@ impl OpenAiProvider {
                 .send_max_output_tokens
                 .then_some(config.max_output_tokens),
             prompt: prompt.into(),
-            payload_json: payload.as_str().into(),
+            payload_json: if media.is_some() {
+                "[REDACTED MULTIMODAL ATTACHMENTS]".into()
+            } else {
+                payload.as_str().into()
+            },
             captured_at: SystemTime::now(),
         });
         let mut request = self

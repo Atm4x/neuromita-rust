@@ -106,6 +106,7 @@ pub struct ApplicationConfig {
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
     pub timeline: TimelineConfig,
+    pub timeline_assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
     pub finetune: Option<FineTuneSettings>,
@@ -136,6 +137,7 @@ impl ApplicationConfig {
             server: ServerConfig::local_control(bind),
             game_link: None,
             timeline: TimelineConfig::Transient,
+            timeline_assets: None,
             presets,
             prompts: None,
             generator,
@@ -233,6 +235,12 @@ impl ApplicationConfig {
         config.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
+        config.timeline_assets = Some(Arc::new(
+            crate::timeline::storage::assets::TimelineAssetStore::new(
+                data_directory.join("TimelineAssets"),
+                8 * 1024 * 1024,
+            )?,
+        ));
         let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
             data_directory.join("presets.json"),
         ));
@@ -275,6 +283,8 @@ pub enum ApplicationError {
     FineTune(#[from] FineTuneError),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
+    #[error(transparent)]
+    Assets(#[from] crate::timeline::storage::assets::TimelineAssetError),
     #[error(transparent)]
     Ai(#[from] AiApplicationError),
     #[error(transparent)]
@@ -415,6 +425,7 @@ impl ApplicationLifecycle {
             ai_knowledge,
             settings,
             timeline,
+            timeline_assets,
             server,
             game_link,
             finetune,
@@ -618,6 +629,7 @@ impl ApplicationLifecycle {
                 selection_updates: selection_updates.clone(),
                 context_updates,
                 games: Arc::clone(&games),
+                assets: timeline_assets.clone(),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),

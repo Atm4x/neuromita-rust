@@ -40,7 +40,8 @@ impl GeminiProvider {
             &context.tool_history,
             &context.native_tool_history,
             &context.tool_settings,
-        );
+            context.assets.as_deref(),
+        )?;
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
             GenerationError::Response(format!("cannot encode provider request: {error}"))
         })?;
@@ -62,7 +63,11 @@ impl GeminiProvider {
                 .send_max_output_tokens
                 .then(|| template.settings().max_output_tokens()),
             prompt: encoded.prompt.into(),
-            payload_json: payload_json.as_str().into(),
+            payload_json: if encoded.media_present {
+                "[REDACTED MULTIMODAL ATTACHMENTS]".into()
+            } else {
+                payload_json.as_str().into()
+            },
             captured_at: SystemTime::now(),
         });
         match tokio::time::timeout(template.settings().timeout(), async {
