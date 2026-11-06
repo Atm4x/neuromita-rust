@@ -31,3 +31,19 @@ returning synthetic catalog entries/readiness. Consumers must not interpret
 `verified: true` as inference readiness. Consumer wiring in AI Hub (#37) is
 separate. No new data schema
 version or storage migration is introduced.
+
+Rust `SpeechModelCatalog` also scans one-level `builtin/` and `community/`
+subdirectories in supplied plugin roots, without importing Python. Manifests
+must declare a supported API and a regular entrypoint; community publisher,
+version, and permissions are inspected statically. Duplicate IDs within a
+single configured root, broken manifests, missing entrypoints and unapproved
+permissions are reported in `SpeechInventory.errors` and excluded from dynamic
+speech choices. The read-only inventory never equates a discovered plugin
+with an installed environment or verified model revision.
+
+This is catalog parity, **not activation parity**: the current
+`InstalledSpeechEnvironment` still selects a single configured executable
+plugin root (`AIData/Scripts` or bundled plugins), so community plugins found
+only in `AIData/plugins` are not launchable until the root-selection boundary
+is unified. That requires a subsequent coordinated integration change rather
+than a second implicit plugin path resolver or a fake "ready" state.
