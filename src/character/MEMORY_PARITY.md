@@ -81,3 +81,37 @@ creation/usage metadata when rewriting an existing row; those fields do not
 exist in the Rust canonical `MemoryRecord`, so timestamp, age and access-based
 forget policies remain separate architectural decisions. Python may produce
 different results for equal-ranked SQL rows; Rust is intentionally deterministic.
+
+## Active structured-response insertion and corrupt-data recovery (2026-11-07)
+
+The read-only Python reference at SHA
+`5f3d061f523d9abefa6a264bb2953048a935fa65` calls
+`MemoryManager.add_memory(priority=..., content=..., entities=...)` from
+`src/characters/character.py::_apply_structured_memory_ops` for each
+`StructuredResponse.memory_add`. That call leaves `skip_if_exists=False`;
+`src/managers/memory_manager.py::add_memory` therefore attempts lexical dedup
+when `MEMORY_DEDUP_ENABLED` (default `True`) and the entry is an ordinary
+fact. The threshold uses `MEMORY_DEDUP_THRESHOLD` (default `0.8`). The same
+method also supports the separate exact-text `skip_if_exists=True` path.
+
+Rust currently reaches `MemoryCommand::Add` from the local GUI memory editor
+(`src/bin/neuromita-gui/memory.rs`), while initial prompt seeding uses
+`SeedFromPrompt`. No production structured-response memory-add path selecting
+`AddLexicallyDeduplicated` was established in this audit. Therefore the
+Python setting must **not** be represented as already effective in Rust, and
+changing ordinary `Add` globally would alter explicit user edits. Integrating
+model-initiated writes requires coordination with the Generation/accepted-turn
+owner; this audit does not wire that path.
+
+The SQLite failure-contract tests
+`malformed_persisted_memory_blocks_new_memory_writes_until_repaired` and
+`invalid_second_memory_change_rolls_back_entire_batch_and_allows_retry`
+exercise corrupt-data admission and partial-write recovery. A syntactically
+valid but semantically invalid persisted `MemoryChange` is **not** interpreted
+as missing memory or silently skipped: further memory appends for the affected
+world fail until the original fact is repaired through an external, controlled
+recovery path. A batch whose later memory effect is invalid leaves no new
+events, head advance or operation receipt; a corrected retry with the same
+operation key succeeds. This proves fail-closed behavior for these fixtures,
+**not** general automatic database repair, damaged-page recovery or full
+Python parity. No storage schema or canonical Timeline contract changed.
