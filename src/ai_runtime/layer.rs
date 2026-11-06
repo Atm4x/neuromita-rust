@@ -33,6 +33,46 @@ pub enum LayerError {
     Corrupted(String),
 }
 
+fn remove_abandoned_staging(path: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), error = %error, "failed to clean abandoned Python layer staging");
+    }
+}
+
+struct StagingCleanup {
+    path: PathBuf,
+    published: bool,
+}
+
+impl StagingCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            published: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        let path = std::mem::take(&mut self.path);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(move || remove_abandoned_staging(&path));
+        } else {
+            remove_abandoned_staging(&path);
+        }
+    }
+}
+
 pub struct LayerInstaller<'a> {
     pub uv_executable: &'a Path,
     pub python_executable: &'a Path,
@@ -199,7 +239,8 @@ impl LayerInstaller<'_> {
         tokio::fs::create_dir_all(parent).await?;
         tokio::fs::create_dir_all(self.cache_directory).await?;
         let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
-        tokio::fs::create_dir(&staging).await?;
+        std::fs::create_dir(&staging)?;
+        let mut cleanup = StagingCleanup::new(staging.clone());
         let result = async {
             if !packages.is_empty() {
                 let mut cmd = Command::new(self.uv_executable);
@@ -259,12 +300,13 @@ impl LayerInstaller<'_> {
             if destination.exists() {
                 return Err(LayerError::Conflict);
             }
-            tokio::fs::rename(&staging, destination).await?;
+            std::fs::rename(&staging, destination)?;
+            cleanup.disarm();
             Ok(destination.to_owned())
         }
         .await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
+        if result.is_err() && tokio::fs::remove_dir_all(&staging).await.is_ok() {
+            cleanup.disarm();
         }
         result
     }
