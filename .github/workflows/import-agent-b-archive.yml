@@ -1,0 +1,30 @@
+name: Import Agent B SessionArchive bundle
+on:
+  push:
+    branches: [bridge/import-agent-b-archive-20261106]
+    paths: [bridge/agent-b-archive.bundle.b64]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact Agent B SessionArchive commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e568a450af7d5b7a6f97fab9482148cdc499ad35
+          NEW=888752d9b3f3be2bfb2330ac3a3de269275981f3
+          REF=refs/heads/codex/timeline-session-archive-20261106
+          git cat-file -e "$BASE^{commit}"
+          base64 -d bridge/agent-b-archive.bundle.b64 > /tmp/agent-b-archive.bundle
+          git bundle verify /tmp/agent-b-archive.bundle
+          git fetch /tmp/agent-b-archive.bundle "$REF:$REF"
+          test "$(git rev-parse "$REF")" = "$NEW"
+          git merge-base --is-ancestor "$BASE" "$NEW"
+          test -z "$(git ls-remote origin "$REF")"
+          git push origin "$REF:$REF"
+          test "$(git ls-remote origin "$REF" | cut -f1)" = "$NEW"
