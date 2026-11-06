@@ -39,6 +39,13 @@ impl LiveMedia {
         assets: Option<&TimelineAssetStore>,
         dialect: LiveDialect,
     ) -> Result<Option<Self>, GenerationError> {
+        if conversation.source_anchor.branch_id != view.branch.0
+            || conversation.source_anchor.through != view.through
+        {
+            return Err(GenerationError::Response(
+                "generation history and media view have different Timeline anchors".into(),
+            ));
+        }
         let known = view
             .messages()
             .into_iter()
@@ -296,6 +303,10 @@ mod tests {
         let (messages, _) =
             super::super::conversation::project_history(view, CharacterId::Crazy, None);
         LlmConversation {
+            source_anchor: crate::timeline::ContextAnchor {
+                branch_id: view.branch.0,
+                through: view.through,
+            },
             system_instruction: "instruction".into(),
             messages,
         }
@@ -817,6 +828,24 @@ mod tests {
             .unwrap();
         let current =
             TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+        assert!(
+            LiveMedia::prepare(
+                &conversation(&historic),
+                &current,
+                Some(&assets),
+                LiveDialect::OpenAiChat
+            )
+            .is_err()
+        );
+        assert!(
+            LiveMedia::prepare(
+                &conversation(&current),
+                &historic,
+                Some(&assets),
+                LiveDialect::Gemini
+            )
+            .is_err()
+        );
         for dialect in [
             LiveDialect::Gemini,
             LiveDialect::OpenAiChat,

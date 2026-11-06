@@ -6,6 +6,7 @@ use crate::{
     identity::{CharacterId, EventId},
     interaction::TurnIntent,
     timeline::{
+        ContextAnchor,
         domain::MessageRole,
         view::{ContextEntry, MitaView},
     },
@@ -25,6 +26,7 @@ pub(crate) struct LlmMessage {
 }
 
 pub(crate) struct LlmConversation {
+    pub source_anchor: ContextAnchor,
     pub system_instruction: String,
     pub messages: Vec<LlmMessage>,
 }
@@ -425,6 +427,10 @@ impl LlmConversation {
             });
         }
         Self {
+            source_anchor: ContextAnchor {
+                branch_id: context.view.branch.0,
+                through: context.view.through,
+            },
             system_instruction: format!(
                 "{}\n{}\nПринятых ответов: {}.",
                 context.description, context.prompt, context.state.accepted_replies
