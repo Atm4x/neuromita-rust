@@ -205,6 +205,9 @@ impl TimelineAssetStore {
                 EventKind::PlayerMessage
                     | EventKind::CharacterMessage
                     | EventKind::CharacterObservation
+                    | EventKind::SessionNote
+                    | EventKind::ReminderToolResult
+                    | EventKind::MessageRevised
             ) {
                 continue;
             }
