@@ -15,7 +15,27 @@ use super::{
 };
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    let result = run_inner();
+    neuromita::diagnostics::boundary(
+        neuromita::diagnostics::Boundary::GuiFinish,
+        if result.is_ok() {
+            neuromita::diagnostics::Outcome::Completed
+        } else {
+            neuromita::diagnostics::Outcome::Failed
+        },
+    );
+    result
+}
+
+fn run_inner() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
+    let diagnostics = neuromita::diagnostics::init()?;
+    let root = neuromita::portable::PortableDataRoot::explicit(options.data_directory.clone())?;
+    diagnostics.attach(&root)?;
+    neuromita::diagnostics::boundary(
+        neuromita::diagnostics::Boundary::GuiStart,
+        neuromita::diagnostics::Outcome::Started,
+    );
     let mut catalog = Localizer::bundled(FallbackPolicy::EnglishThenSource)?;
     if let Some(directory) = &options.directory {
         catalog.reload_directory(directory)?;
