@@ -386,3 +386,96 @@ async fn application_recovery_revalidates_generation_host_and_selection_guard() 
     running.shutdown().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancel_inflight_python_initialize_keeps_failed_generation_retryable() {
+    let root = std::env::temp_dir().join(format!("nm-recovery-cancel-{}", Uuid::new_v4()));
+    let (supervisor, composition, models) =
+        fixture(&root, ProcessTopology::Split, &[AiService::Tts]).await;
+    let supervisor = Arc::new(supervisor);
+    let original = supervisor
+        .activate_composed(AiService::Tts, &composition, &models)
+        .await
+        .unwrap();
+    crash_tts(&supervisor).await;
+    let failed = supervisor.status_snapshot().service(AiService::Tts);
+    assert_eq!(failed.phase, RuntimePhase::Failed);
+    let crash_reason = failed.last_error.clone();
+
+    let plugin_path = root.join("plugins/mock_tts/plugin.py");
+    let blocked = root.join("block-initialize");
+    let entered = root.join("initialize-entered-pid");
+    let code = tokio::fs::read_to_string(&plugin_path).await.unwrap();
+    let needle = "    def initialize(self, settings):\n";
+    assert!(code.contains(needle));
+    let hook = format!(
+        "    def initialize(self, settings):\n        import os, time\n        from pathlib import Path\n        if Path({:?}).exists():\n            Path({:?}).write_text(str(os.getpid()), encoding='utf-8')\n            while True:\n                time.sleep(0.02)\n",
+        blocked.to_string_lossy().to_string(),
+        entered.to_string_lossy().to_string(),
+    );
+    tokio::fs::write(&plugin_path, code.replacen(needle, &hook, 1))
+        .await
+        .unwrap();
+    tokio::fs::write(&blocked, "block").await.unwrap();
+
+    let recovering = Arc::clone(&supervisor);
+    let retry_composition = composition.clone();
+    let retry_models = models.clone();
+    let pending = tokio::spawn(async move {
+        recovering
+            .recover_failed_composed(AiService::Tts, original, &composition, &models)
+            .await
+    });
+    let pid: u32 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(value) = tokio::fs::read_to_string(&entered).await {
+                return value.parse().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("real Python initialize must enter the blocking fixture");
+    let in_flight = supervisor.status_snapshot().service(AiService::Tts);
+    assert_eq!(in_flight.phase, RuntimePhase::Failed);
+    assert_eq!(in_flight.generation, Some(original));
+    assert_eq!(in_flight.last_error, crash_reason);
+    assert!(in_flight.active_model.is_none());
+
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let path = format!("/proc/{pid}/status");
+            let running = tokio::fs::read_to_string(path).await.is_ok_and(|state| {
+                !state
+                    .lines()
+                    .any(|line| line.starts_with("State:") && line.contains("Z (zombie)"))
+            });
+            if !running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("dropping the recovery future must terminate the Python candidate");
+    let after_cancel = supervisor.refresh_status().await.service(AiService::Tts);
+    assert_eq!(after_cancel.phase, RuntimePhase::Failed);
+    assert_eq!(after_cancel.generation, Some(original));
+    assert_eq!(after_cancel.last_error, crash_reason);
+
+    tokio::fs::remove_file(&blocked).await.unwrap();
+    let replacement = supervisor
+        .recover_failed_composed(AiService::Tts, original, &retry_composition, &retry_models)
+        .await
+        .unwrap();
+    assert_ne!(replacement, original);
+    assert_eq!(
+        supervisor.status_snapshot().service(AiService::Tts).phase,
+        RuntimePhase::ModelReady
+    );
+    supervisor.stop(AiService::Tts).await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
