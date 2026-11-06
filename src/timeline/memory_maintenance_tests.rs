@@ -22,6 +22,83 @@ fn append_memory(timeline: &mut SessionTimeline, record: MemoryRecord) {
 }
 
 #[test]
+fn forked_memory_editor_inherits_canonical_facts_without_cross_branch_writes() {
+    use super::domain::BranchId;
+    use crate::{
+        character::memory_access::{edit_memory_snapshot, read_memory_snapshot},
+        memory::MemoryCommand,
+    };
+
+    let mut timeline = SessionTimeline::new();
+    let baseline = read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+    let added = edit_memory_snapshot(
+        &mut timeline,
+        CharacterId::Crazy,
+        &baseline,
+        &[MemoryCommand::Add {
+            priority: MemoryPriority::High,
+            content: "Shared ancestor".into(),
+        }],
+    )
+    .unwrap();
+    let ancestor_editor = added.snapshot;
+    let memory_id = ancestor_editor.records()[0].id;
+    let root = timeline.branch;
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    timeline
+        .append_test_fact("memory:fork-checkpoint", checkpoint)
+        .unwrap();
+    let child = BranchId::new();
+    timeline.store.fork(root, checkpoint_id, child).unwrap();
+    timeline.select_branch(child, timeline.selection()).unwrap();
+
+    let inherited = read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+    assert_eq!(inherited.records(), ancestor_editor.records());
+    assert_eq!(
+        edit_memory_snapshot(
+            &mut timeline,
+            CharacterId::Crazy,
+            &ancestor_editor,
+            &[MemoryCommand::Forget { id: memory_id }],
+        )
+        .err(),
+        Some(TimelineError::ConcurrentWrite),
+    );
+    let updated = edit_memory_snapshot(
+        &mut timeline,
+        CharacterId::Crazy,
+        &inherited,
+        &[MemoryCommand::Update {
+            id: memory_id,
+            priority: None,
+            content: "Only the child changed".into(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        updated.snapshot.records()[0].content,
+        "Only the child changed"
+    );
+
+    timeline.select_branch(root, timeline.selection()).unwrap();
+    let root_editor = read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+    assert_eq!(root_editor.records()[0].content, "Shared ancestor");
+    assert_eq!(root_editor.records()[0].state, MemoryState::Active);
+    assert_eq!(
+        edit_memory_snapshot(
+            &mut timeline,
+            CharacterId::Crazy,
+            &updated.snapshot,
+            &[MemoryCommand::Forget { id: memory_id }],
+        )
+        .err(),
+        Some(TimelineError::ConcurrentWrite),
+    );
+}
+
+#[test]
 fn expiry_commits_only_due_unprotected_memories_once_and_is_character_private() {
     let mut timeline = SessionTimeline::new();
     let first = MemoryId::new();
