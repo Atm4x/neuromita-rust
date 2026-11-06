@@ -29,6 +29,8 @@ struct CacheKey {
 struct EmbeddingCache {
     entries: HashMap<CacheKey, Embedding>,
     order: VecDeque<CacheKey>,
+    revision: u64,
+    invalidation_epoch: u64,
 }
 
 impl EmbeddingCache {
@@ -36,6 +38,8 @@ impl EmbeddingCache {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
+            revision: 0,
+            invalidation_epoch: 0,
         }
     }
     fn insert(&mut self, key: CacheKey, embedding: Embedding, max: usize) {
@@ -44,12 +48,30 @@ impl EmbeddingCache {
         }
         self.order.push_back(key.clone());
         self.entries.insert(key, embedding);
+        self.revision = self.revision.wrapping_add(1);
         while self.order.len() > max {
             if let Some(oldest) = self.order.pop_front() {
                 self.entries.remove(&oldest);
             }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingCachePreview {
+    pub space: EmbeddingSpace,
+    pub total_entries: usize,
+    pub entries_by_character: BTreeMap<CharacterId, usize>,
+    instance: uuid::Uuid,
+    revision: u64,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EmbeddingCacheMaintenanceError {
+    #[error("embedding cache clearing requires explicit confirmation")]
+    ConfirmationRequired,
+    #[error("embedding cache preview is stale or belongs to another retriever")]
+    StalePreview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +139,7 @@ pub struct RetrievedMemory {
 pub struct SemanticMemoryRetriever {
     provider: Arc<dyn EmbeddingProvider>,
     cache: Mutex<EmbeddingCache>,
+    instance: uuid::Uuid,
     max_entries: usize,
     reranker: Option<(Arc<dyn RerankProvider>, RerankPolicy)>,
 }
@@ -134,6 +157,7 @@ impl SemanticMemoryRetriever {
         Ok(Self {
             provider,
             cache: Mutex::new(EmbeddingCache::new()),
+            instance: uuid::Uuid::new_v4(),
             max_entries,
             reranker: None,
         })
@@ -148,13 +172,63 @@ impl SemanticMemoryRetriever {
         Ok(self)
     }
 
+    /// Read-only, model-space scoped inspection of the derived in-memory index.
+    /// Never materializes memory text, vectors, or provider secrets.
+    pub fn preview_cache_clear(&self) -> EmbeddingCachePreview {
+        let cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut entries_by_character = BTreeMap::new();
+        for key in cache.entries.keys() {
+            *entries_by_character.entry(key.character).or_insert(0) += 1;
+        }
+        EmbeddingCachePreview {
+            space: self.provider.space().clone(),
+            total_entries: cache.entries.len(),
+            entries_by_character,
+            instance: self.instance,
+            revision: cache.revision,
+        }
+    }
+
+    /// The user-facing maintenance boundary. Rejects stale or foreign previews.
+    /// In-flight provider results may finish for their original caller, but cannot
+    /// repopulate this cache if they began before the confirmed clear.
+    pub fn clear_cache_confirmed(
+        &self,
+        preview: &EmbeddingCachePreview,
+        confirmed: bool,
+    ) -> Result<usize, EmbeddingCacheMaintenanceError> {
+        if !confirmed {
+            return Err(EmbeddingCacheMaintenanceError::ConfirmationRequired);
+        }
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if preview.instance != self.instance || preview.revision != cache.revision {
+            return Err(EmbeddingCacheMaintenanceError::StalePreview);
+        }
+        Ok(Self::clear_locked_cache(&mut cache))
+    }
+
+    /// Internal cache invalidation; user operations must use confirmed preview/apply.
     pub fn clear_cache(&self) {
         let mut cache = self
             .cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        Self::clear_locked_cache(&mut cache);
+    }
+
+    fn clear_locked_cache(cache: &mut EmbeddingCache) -> usize {
+        let cleared = cache.entries.len();
         cache.entries.clear();
         cache.order.clear();
+        cache.revision = cache.revision.wrapping_add(1);
+        cache.invalidation_epoch = cache.invalidation_epoch.wrapping_add(1);
+        cleared
     }
 
     pub async fn retrieve(
@@ -233,11 +307,13 @@ impl SemanticMemoryRetriever {
             .collect();
         let mut vectors: Vec<Option<Embedding>> = vec![None; memories.len()];
         let mut missing = Vec::new();
+        let invalidation_epoch;
         {
             let cache = self
                 .cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
+            invalidation_epoch = cache.invalidation_epoch;
             for (index, key) in keys.iter().enumerate() {
                 if let Some(vector) = cache.entries.get(key) {
                     cost.cache_hits += 1;
@@ -294,7 +370,9 @@ impl SemanticMemoryRetriever {
                 .unwrap_or_else(|poison| poison.into_inner());
             for (&index, vector) in missing.iter().zip(fresh) {
                 vectors[index] = Some(vector.clone());
-                cache.insert(keys[index].clone(), vector, self.max_entries);
+                if cache.invalidation_epoch == invalidation_epoch {
+                    cache.insert(keys[index].clone(), vector, self.max_entries);
+                }
             }
         }
         let mut ranked = memories

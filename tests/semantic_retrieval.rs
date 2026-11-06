@@ -685,3 +685,112 @@ async fn forgotten_and_deleted_records_never_reach_embeddings_even_via_direct_re
     assert_eq!(result.selected_ids.len(), 1);
     assert_eq!(fixture.embedded_documents.load(Ordering::Relaxed), 1);
 }
+
+#[tokio::test]
+async fn embedding_cache_maintenance_requires_matching_fresh_confirmed_preview() {
+    use neuromita::knowledge::semantic_memory::EmbeddingCacheMaintenanceError;
+
+    let fixture = Arc::new(SemanticFixture::new("cache-maintenance"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+    let records = vec![memory(1, MemoryPriority::Normal, "чай")];
+    let initial = retrieval.preview_cache_clear();
+    assert_eq!(initial.total_entries, 0);
+    retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    let preview = retrieval.preview_cache_clear();
+    assert_eq!(preview.total_entries, 1);
+    assert_eq!(preview.entries_by_character[&CharacterId::Crazy], 1);
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&preview, false),
+        Err(EmbeddingCacheMaintenanceError::ConfirmationRequired)
+    ));
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&initial, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    let foreign = SemanticMemoryRetriever::new(fixture, 16).unwrap();
+    assert!(matches!(
+        foreign.clear_cache_confirmed(&preview, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    assert_eq!(retrieval.clear_cache_confirmed(&preview, true).unwrap(), 1);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 0);
+    assert!(matches!(
+        retrieval.clear_cache_confirmed(&preview, true),
+        Err(EmbeddingCacheMaintenanceError::StalePreview)
+    ));
+    let repeated = retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    assert_eq!(repeated.cost.cache_hits, 0);
+}
+
+struct DelayedEmbeddingFixture {
+    inner: SemanticFixture,
+    block_first_documents: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl EmbeddingProvider for DelayedEmbeddingFixture {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.inner.space
+    }
+
+    fn embed(&self, purpose: EmbeddingPurpose, text: String) -> EmbeddingFuture<'_, Embedding> {
+        self.inner.embed(purpose, text)
+    }
+
+    fn embed_documents(&self, texts: Vec<String>) -> EmbeddingFuture<'_, Vec<Embedding>> {
+        Box::pin(async move {
+            self.inner.document_batches.fetch_add(1, Ordering::Relaxed);
+            if self.block_first_documents.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(texts.iter().map(|text| self.inner.vector(text)).collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn clearing_embedding_cache_during_inflight_batch_prevents_late_repopulation() {
+    let provider = Arc::new(DelayedEmbeddingFixture {
+        inner: SemanticFixture::new("slow-model"),
+        block_first_documents: std::sync::atomic::AtomicBool::new(true),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let retrieval = Arc::new(SemanticMemoryRetriever::new(provider.clone(), 16).unwrap());
+    let records = vec![memory(2, MemoryPriority::High, "чай")];
+    let task_retrieval = Arc::clone(&retrieval);
+    let task_records = records.clone();
+    let task = tokio::spawn(async move {
+        task_retrieval
+            .retrieve(CharacterId::Crazy, &task_records, "чай")
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        provider.entered.notified(),
+    )
+    .await
+    .expect("provider received a document batch");
+    let preview = retrieval.preview_cache_clear();
+    assert_eq!(preview.total_entries, 0);
+    assert_eq!(retrieval.clear_cache_confirmed(&preview, true).unwrap(), 0);
+    provider.release.notify_one();
+    let completed = task.await.unwrap().unwrap();
+    assert_eq!(completed.cost.embedded_texts, 2);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 0);
+    let next = retrieval
+        .retrieve(CharacterId::Crazy, &records, "чай")
+        .await
+        .unwrap();
+    assert_eq!(next.cost.cache_hits, 0);
+    assert_eq!(retrieval.preview_cache_clear().total_entries, 1);
+    assert_eq!(provider.inner.document_batches.load(Ordering::Relaxed), 2);
+}
