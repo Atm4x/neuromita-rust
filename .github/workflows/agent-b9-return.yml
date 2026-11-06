@@ -1,0 +1,43 @@
+name: Publish Agent B9 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b9-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 10e49b1420075093b0e3368c0b7d07eee580380c
+          fetch-depth: 0
+      - name: Verify B9 incremental bundle and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=10e49b1420075093b0e3368c0b7d07eee580380c
+          EXPECTED=aa570dbbd3ff07b56fd028f0fce8e1547844cc7e
+          SHA256=e2b9da0be9f7ad9280abe34ac5ac9f38b40696ccb946281573ae4ad4cd41c922
+          SOURCE=refs/heads/codex/timeline-provenance-preserving-transforms-20261107
+          TARGET=refs/heads/codex/timeline-provenance-preserving-transforms-20261107
+          git fetch origin refs/heads/bridge/agent-b9-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b9-20261107.bundle.b64 | base64 --decode > /tmp/agent-b9.bundle
+          echo "$SHA256  /tmp/agent-b9.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b9.bundle
+          git fetch /tmp/agent-b9.bundle "$SOURCE"
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch is at an unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
