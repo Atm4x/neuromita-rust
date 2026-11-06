@@ -12,21 +12,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish embedding maintenance commit
+      - name: Verify and publish Agent A inline structured graph commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=ab6e8565db55073f4a45fc70ca5495f17b272286
-          TARGET=8e1b7f9c23a236457edcca7cd55ad2ddad0d8ac5
-          BRANCH=codex/knowledge-embedding-maintenance-20261106
+          BASE=8e1b7f9c23a236457edcca7cd55ad2ddad0d8ac5
+          TARGET=c2f526c66df196ee2e957498581ebac19b461070
+          BRANCH=codex/knowledge-inline-structured-20261106
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-embedding-maintenance.bundle.sha256
-          git bundle verify .bridge/agent-a-embedding-maintenance.bundle
-          git fetch --no-tags .bridge/agent-a-embedding-maintenance.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-inline-structured.bundle.sha256
+          git bundle verify .bridge/agent-a-inline-structured.bundle
+          git fetch --no-tags .bridge/agent-a-inline-structured.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Ref exists; refusing rewrite."
+            echo "Target branch exists; refusing overwrite."
             exit 1
           fi
           git push origin "$TARGET:refs/heads/$BRANCH"
