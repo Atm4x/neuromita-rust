@@ -12,17 +12,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish graph maintenance commit
+      - name: Verify and publish embedding maintenance commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=07a214ecac89cf0d0cd56f3f1f7d954df54b4c9c
-          TARGET=ab6e8565db55073f4a45fc70ca5495f17b272286
-          BRANCH=codex/knowledge-graph-maintenance-20261106
+          BASE=ab6e8565db55073f4a45fc70ca5495f17b272286
+          TARGET=8e1b7f9c23a236457edcca7cd55ad2ddad0d8ac5
+          BRANCH=codex/knowledge-embedding-maintenance-20261106
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-maintenance.bundle.sha256
-          git bundle verify .bridge/agent-a-maintenance.bundle
-          git fetch --no-tags .bridge/agent-a-maintenance.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-embedding-maintenance.bundle.sha256
+          git bundle verify .bridge/agent-a-embedding-maintenance.bundle
+          git fetch --no-tags .bridge/agent-a-embedding-maintenance.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
