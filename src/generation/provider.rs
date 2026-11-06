@@ -8,7 +8,10 @@ use std::{
 
 use thiserror::Error;
 
-use super::{GenerationPreset, ProviderKind, ProviderTemplate, StructuredResponse, ToolSettings};
+use super::{
+    GenerationPreset, ModelMemoryAddPolicy, ProviderKind, ProviderTemplate, StructuredResponse,
+    ToolSettings,
+};
 use crate::character::CharacterContext;
 use crate::prompts::PostDslProgram;
 
@@ -60,6 +63,7 @@ pub struct GenerationRequest {
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
     pub tools: ToolSettings,
+    pub model_memory_policy: ModelMemoryAddPolicy,
 }
 
 impl GenerationRequest {
@@ -75,7 +79,14 @@ impl GenerationRequest {
             preset,
             prepared_knowledge,
             tools: ToolSettings::default(),
+            model_memory_policy: ModelMemoryAddPolicy::Ordinary,
         }
+    }
+
+    /// Capture the model-write policy with this request, never from mutable global state.
+    pub fn with_model_memory_policy(mut self, policy: ModelMemoryAddPolicy) -> Self {
+        self.model_memory_policy = policy;
+        self
     }
 
     pub fn with_tools(mut self, tools: ToolSettings) -> Self {
@@ -196,10 +207,19 @@ impl std::ops::Deref for GenerationInput {
 
 impl ProposedResponse {
     pub fn from_structured(structured: StructuredResponse) -> Result<Self, GenerationError> {
+        Self::from_structured_with_memory_policy(structured, ModelMemoryAddPolicy::Ordinary)
+    }
+
+    /// The caller must capture the active memory policy with the generation request.
+    /// This conversion is side-effect free; Timeline acceptance owns the write.
+    pub fn from_structured_with_memory_policy(
+        structured: StructuredResponse,
+        policy: ModelMemoryAddPolicy,
+    ) -> Result<Self, GenerationError> {
         structured.validate()?;
         structured.ensure_supported_effects()?;
         let text = structured.full_text();
-        let effects = structured.proposed_effects()?;
+        let effects = structured.proposed_effects_with_memory_policy(policy)?;
         let segments = structured
             .segments
             .iter()
@@ -260,6 +280,7 @@ impl ResponseGenerator {
     ) -> Result<ProposedResponse, GenerationError> {
         let template = request.preset.template().clone();
         let post_dsl = request.post_dsl;
+        let model_memory_policy = request.model_memory_policy;
         let context_variables = request.context.variables.clone();
         let kind = template.kind();
         let provider = self
@@ -381,7 +402,8 @@ impl ResponseGenerator {
             }
             None => (structured, Default::default()),
         };
-        match ProposedResponse::from_structured(structured) {
+        match ProposedResponse::from_structured_with_memory_policy(structured, model_memory_policy)
+        {
             Ok(response) => Ok(response.with_character_variables(variables)),
             Err(error) => {
                 observer.failed(&error);

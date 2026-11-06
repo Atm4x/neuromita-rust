@@ -14,6 +14,32 @@ use uuid::Uuid;
 
 pub const RESPONSE_PROTOCOL_VERSION: u32 = 3;
 
+/// Selected by the request owner before converting model-proposed memory writes.
+/// The manual editor and prompt seeding do not use this policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelMemoryAddPolicy {
+    #[default]
+    Ordinary,
+    Lexical {
+        threshold_per_mille: u16,
+    },
+}
+
+impl ModelMemoryAddPolicy {
+    fn validate(self) -> Result<(), GenerationError> {
+        if let Self::Lexical {
+            threshold_per_mille,
+        } = self
+            && !(500..=1000).contains(&threshold_per_mille)
+        {
+            return Err(GenerationError::Response(
+                "model memory dedup threshold must be 500..1000 per mille".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCall {
@@ -174,6 +200,14 @@ impl StructuredResponse {
     }
 
     fn memory_commands(&self) -> Result<Vec<MemoryCommand>, GenerationError> {
+        self.memory_commands_with_policy(ModelMemoryAddPolicy::Ordinary)
+    }
+
+    fn memory_commands_with_policy(
+        &self,
+        policy: ModelMemoryAddPolicy,
+    ) -> Result<Vec<MemoryCommand>, GenerationError> {
+        policy.validate()?;
         let invalid =
             |reason: &str| GenerationError::Response(format!("invalid memory operation: {reason}"));
         let total = [
@@ -218,9 +252,16 @@ impl StructuredResponse {
             if raw.trim().starts_with("island:") {
                 return Err(invalid("island upsert not implemented"));
             }
-            commands.push(MemoryCommand::Add {
-                priority,
-                content: validate_text(content)?,
+            let content = validate_text(content)?;
+            commands.push(match policy {
+                ModelMemoryAddPolicy::Ordinary => MemoryCommand::Add { priority, content },
+                ModelMemoryAddPolicy::Lexical {
+                    threshold_per_mille,
+                } => MemoryCommand::AddLexicallyDeduplicated {
+                    priority,
+                    content,
+                    threshold_per_mille,
+                },
             });
         }
         for raw in self.memory_update.iter().flatten() {
@@ -261,6 +302,16 @@ impl StructuredResponse {
     }
 
     pub fn proposed_effects(&self) -> Result<Vec<ResponseEffect>, GenerationError> {
+        self.proposed_effects_with_memory_policy(ModelMemoryAddPolicy::Ordinary)
+    }
+
+    /// Translates only model-proposed `memory_add` under the request's captured policy.
+    /// Updates, deletes, merges, user edits and seed instructions remain unchanged.
+    pub fn proposed_effects_with_memory_policy(
+        &self,
+        policy: ModelMemoryAddPolicy,
+    ) -> Result<Vec<ResponseEffect>, GenerationError> {
+        policy.validate()?;
         let change = CharacterStateDelta {
             attitude: self.attitude_change,
             boredom: self.boredom_change,
@@ -273,7 +324,7 @@ impl StructuredResponse {
         if let Some(state) = &self.working_state {
             effects.push(ResponseEffect::ReplaceWorkingState(state.clone()));
         }
-        let memory = self.memory_commands()?;
+        let memory = self.memory_commands_with_policy(policy)?;
         if !memory.is_empty() {
             effects.push(ResponseEffect::MutateMemory(memory));
         }
@@ -542,6 +593,91 @@ mod tests {
             .unwrap()
             .ensure_supported_effects()
             .unwrap();
+    }
+
+    #[test]
+    fn explicit_model_memory_policy_changes_only_adds_and_is_immutable() {
+        let id = Uuid::from_u128(42);
+        let response = StructuredResponse::parse(
+            &json!({
+                "segments": [{"text":"ok"}],
+                "memory_add": ["high|Кошка любит молоко", "normal|Новая память"],
+                "memory_update": [format!("{id}|low|Player prefers tea")],
+                "memory_delete": [id.to_string()]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let original = response.proposed_effects().unwrap();
+        assert!(
+            matches!(&original[0], ResponseEffect::MutateMemory(commands)
+            if matches!(&commands[0], MemoryCommand::Add { priority: MemoryPriority::High, .. })
+            && matches!(&commands[2], MemoryCommand::Update { id: MemoryId(value), .. } if *value == id)
+            && matches!(&commands[3], MemoryCommand::SoftDelete { id: MemoryId(value) } if *value == id))
+        );
+
+        let lexical = response
+            .proposed_effects_with_memory_policy(ModelMemoryAddPolicy::Lexical {
+                threshold_per_mille: 800,
+            })
+            .unwrap();
+        assert!(matches!(&lexical[0], ResponseEffect::MutateMemory(commands)
+        if matches!(&commands[0], MemoryCommand::AddLexicallyDeduplicated {
+            priority: MemoryPriority::High, threshold_per_mille: 800, ..
+        }) && matches!(&commands[1], MemoryCommand::AddLexicallyDeduplicated {
+            priority: MemoryPriority::Normal, threshold_per_mille: 800, ..
+        }) && commands[2..] == match &original[0] {
+            ResponseEffect::MutateMemory(commands) => commands[2..].to_vec(),
+            _ => unreachable!(),
+        }));
+        assert_eq!(response.proposed_effects().unwrap(), original);
+    }
+
+    #[test]
+    fn accepted_proposal_holds_chosen_model_memory_policy() {
+        let response = StructuredResponse::parse(
+            r#"{"segments":[{"text":"hi"}],"memory_add":["normal|Кошка любит молоко"]}"#,
+        )
+        .unwrap();
+        let selected = crate::generation::ProposedResponse::from_structured_with_memory_policy(
+            response.clone(),
+            ModelMemoryAddPolicy::Lexical {
+                threshold_per_mille: 800,
+            },
+        )
+        .unwrap();
+        assert!(matches!(selected.effects(),
+            [ResponseEffect::MutateMemory(commands)]
+            if matches!(&commands[0], MemoryCommand::AddLexicallyDeduplicated { threshold_per_mille: 800, .. })));
+        let legacy = crate::generation::ProposedResponse::from_structured(response).unwrap();
+        assert!(matches!(legacy.effects(),
+            [ResponseEffect::MutateMemory(commands)]
+            if matches!(&commands[0], MemoryCommand::Add { .. })));
+    }
+
+    #[test]
+    fn invalid_model_dedup_setting_rejects_complete_proposal_without_partial_effects() {
+        let response = StructuredResponse::parse(
+            r#"{"segments":[{"text":"hi"}],"attitude_change":1,"memory_add":["high|fact"]}"#,
+        )
+        .unwrap();
+        for invalid in [0, 499, 1001, u16::MAX] {
+            let error = response
+                .proposed_effects_with_memory_policy(ModelMemoryAddPolicy::Lexical {
+                    threshold_per_mille: invalid,
+                })
+                .unwrap_err();
+            assert!(matches!(error, GenerationError::Response(message)
+                if message.contains("dedup threshold")));
+        }
+        assert!(matches!(
+            response.proposed_effects().unwrap().as_slice(),
+            [
+                ResponseEffect::ChangeCharacterState(_),
+                ResponseEffect::MutateMemory(_)
+            ]
+        ));
     }
 
     #[test]
