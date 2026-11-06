@@ -3,6 +3,7 @@ use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc};
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
 };
+use neuromita::portable::PortableDataRoot;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
@@ -16,6 +17,7 @@ use super::{
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
+    PortableDataRoot::resolve(Some(&options.data_directory))?.ensure_writable()?;
     let mut catalog = Localizer::bundled(FallbackPolicy::EnglishThenSource)?;
     if let Some(directory) = &options.directory {
         catalog.reload_directory(directory)?;
@@ -246,7 +248,7 @@ impl Options {
         let mut options = Self {
             directory: None,
             locale: LocaleId::russian(),
-            data_directory: super::runtime::data_directory()?,
+            data_directory: PathBuf::new(),
             model: None,
             sandbox: false,
             voice_preview: None,
@@ -321,6 +323,14 @@ impl Options {
                 }
             }
         }
+        options.data_directory =
+            PortableDataRoot::resolve(if options.data_directory.as_os_str().is_empty() {
+                None
+            } else {
+                Some(&options.data_directory)
+            })?
+            .path()
+            .to_path_buf();
         Ok(options)
     }
 }

@@ -621,28 +621,6 @@ async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) ->
     }
 }
 
-pub fn data_directory() -> Result<PathBuf, String> {
-    if let Some(directory) = std::env::var_os("NEUROMITA_DATA_DIR") {
-        if directory.is_empty() {
-            return Err("NEUROMITA_DATA_DIR must not be empty".into());
-        }
-        return Ok(directory.into());
-    }
-    #[cfg(windows)]
-    if let Some(directory) = std::env::var_os("APPDATA") {
-        return Ok(PathBuf::from(directory).join("NeuroMita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(directory) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(directory).join("neuromita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(directory) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(directory).join(".config/neuromita"));
-    }
-    Err("Specify --data-dir or NEUROMITA_DATA_DIR".into())
-}
-
 struct MemoryWatch {
     updates: mpsc::Receiver<Update>,
     task: tokio::task::JoinHandle<()>,
