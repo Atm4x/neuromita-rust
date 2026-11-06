@@ -1,0 +1,33 @@
+name: Import PyQt Tool Activity Parity Git Bundle
+on:
+  push:
+    branches:
+      - bridge/pyqt-tool-activity-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify bundle and publish the exact Rust/Slint commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=f2455c72ce3ad988bc2dd8279737b7fb24b485bb
+          HEAD=66e603d7ae3916c6f1f74089ecff3a8b40db2049
+          TARGET=refs/heads/codex/pyqt-tool-activity-20261106
+          base64 --decode bridge_payloads/pyqt-tool-activity.bundle.b64 >/tmp/pyqt-tool-activity.bundle
+          echo '49d099d44a85e20114ef1772e27b993022ab0ea2b4dee59506de440ea566a3fe  /tmp/pyqt-tool-activity.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/pyqt-tool-activity.bundle
+          git fetch /tmp/pyqt-tool-activity.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
