@@ -1,0 +1,33 @@
+name: Import PyQt Tools Settings Parity Bundle
+on:
+  push:
+    branches:
+      - bridge/pyqt-tools-settings-import-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify bundle and publish exact source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=235afacb9cf023cb1d32d114b21f6ced1a2da035
+          HEAD=f2455c72ce3ad988bc2dd8279737b7fb24b485bb
+          TARGET=refs/heads/codex/pyqt-tools-settings-parity-20261106
+          base64 --decode bridge_payloads/pyqt-tools-settings.bundle.b64 >/tmp/pyqt-tools.bundle
+          echo '3256db0e2da1951eae32819f8b460e0c06dda4b817772737a1199a67e0154ac6  /tmp/pyqt-tools.bundle' | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/pyqt-tools.bundle
+          git fetch /tmp/pyqt-tools.bundle "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git diff --check "$BASE" "$HEAD"
+          git fetch origin "$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git push origin "$HEAD:$TARGET"
