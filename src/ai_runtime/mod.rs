@@ -980,7 +980,9 @@ impl AiSupervisor {
             runtime_profiles.retain(|service, _| selected.contains(service));
             runtime_profiles.insert(service, profile.clone());
         }
-        self.starting(services, models);
+        if expected_failed_generation.is_none() {
+            self.starting(services, models);
+        }
         let mut candidate = match WorkerProcess::launch(&self.config, layers, models).await {
             Ok(worker) => worker,
             Err(error) => {
