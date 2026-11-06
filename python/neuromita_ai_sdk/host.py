@@ -23,6 +23,7 @@ from typing import Any
 from neuromita_ai_sdk import API_VERSION, InstallPlan, validate_settings
 from neuromita_ai_sdk.constraints import inspect_constraints, enforce_constraints
 from neuromita_ai_sdk import hardware
+from neuromita_ai_sdk.catalog import InstallVerification, encode_models
 
 
 class PluginHost:
@@ -195,9 +196,9 @@ class PluginHost:
                     for kind in self.active_by_kind
                 }
             }
-        if op in ("describe", "install_plan", "probe_install", "settings_schema", "validate_config"):
+        if op in ("describe", "list_models", "install_plan", "probe_install", "verify_install", "settings_schema", "validate_config"):
             plugin = (self._load_install_contract(args["plugin_id"])
-                      if op in ("install_plan", "probe_install", "settings_schema", "validate_config")
+                      if op in ("list_models", "install_plan", "probe_install", "verify_install", "settings_schema", "validate_config")
                       else self._load(args["plugin_id"]))
             with contextlib.redirect_stdout(sys.stderr):
                 if op == "validate_config":
@@ -208,7 +209,16 @@ class PluginHost:
                         raise ValueError("plugin does not support model-specific install settings")
                     result = operation(args["settings"])
                 else:
-                    result = getattr(plugin, op)()
+                    operation = getattr(plugin, op, None)
+                    if not callable(operation):
+                        raise ValueError(f"plugin does not implement {op}")
+                    result = operation()
+            if op == "list_models":
+                return encode_models(result)
+            if op == "verify_install":
+                if not isinstance(result, InstallVerification):
+                    raise ValueError("verify_install must return InstallVerification")
+                return result.to_wire()
             if op == "install_plan":
                 if not isinstance(result, InstallPlan):
                     raise ValueError("install_plan must return InstallPlan")
@@ -243,7 +253,7 @@ class PluginHost:
                 ):
                     raise ValueError("plugin did not declare the selected backend, device and precision")
             contract = (self._load_install_contract(plugin_id)
-                        if (self.plugins_dir / plugin_id / "installplan.py").exists() else plugin)
+                        if (self._plugin_directory(plugin_id) / "installplan.py").exists() else plugin)
             providers = [contract] if contract is plugin else [contract, plugin]
             for provider in providers:
                 if callable(getattr(provider, "configuration_constraints", None)):

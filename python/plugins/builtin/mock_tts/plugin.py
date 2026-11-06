@@ -6,7 +6,7 @@ import math
 import struct
 import wave
 
-from neuromita_ai_sdk import InstallPlan
+from neuromita_ai_sdk import InstallPlan, ModelDescriptor, InstallVerification
 
 
 class Plugin:
@@ -16,6 +16,12 @@ class Plugin:
 
     def describe(self):
         return {"kind": "tts", "voices": ["default", "bright"]}
+
+    def list_models(self):
+        return (ModelDescriptor("mock_tts", "Mock TTS"),)
+
+    def verify_install(self):
+        return InstallVerification(installed=True, verified=True)
 
     def install_plan(self):
         return InstallPlan(supported_backends=("remote-api",))
