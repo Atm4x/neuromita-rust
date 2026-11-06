@@ -513,7 +513,9 @@ impl AiSupervisor {
     pub async fn refresh_status(&self) -> RuntimeSnapshot {
         let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
         for worker in workers {
-            let mut process = worker.lock().await;
+            let Ok(mut process) = worker.try_lock() else {
+                continue;
+            };
             let generation = process.generation;
             let failure = if process.failed {
                 Some("worker retired after an IPC failure".to_owned())
@@ -532,15 +534,24 @@ impl AiSupervisor {
             };
             drop(process);
             if let Some(reason) = failure {
-                self.status.send_modify(|snapshot| {
+                self.status.send_if_modified(|snapshot| {
+                    let mut changed = false;
                     for state in snapshot.services.values_mut() {
-                        if state.generation == Some(generation) {
-                            state.phase = RuntimePhase::Failed;
-                            state.active_model = None;
-                            state.pending_model = None;
-                            state.last_error = Some(reason.clone());
+                        if state.generation != Some(generation)
+                            || (state.phase == RuntimePhase::Failed
+                                && state.active_model.is_none()
+                                && state.pending_model.is_none()
+                                && state.last_error.is_some())
+                        {
+                            continue;
                         }
+                        state.phase = RuntimePhase::Failed;
+                        state.active_model = None;
+                        state.pending_model = None;
+                        state.last_error = Some(reason.clone());
+                        changed = true;
                     }
+                    changed
                 });
             }
         }
@@ -1668,11 +1679,64 @@ class Plugin:
         let died = supervisor.refresh_status().await.service(AiService::Tts);
         assert_eq!(died.phase, RuntimePhase::Failed);
         assert!(died.active_model.is_none());
+        let failure = died.last_error.clone();
+        observed.borrow_and_update();
+        let repeated = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(repeated.last_error, failure);
+        assert!(!observed.has_changed().unwrap());
         supervisor.stop(AiService::Tts).await.unwrap();
         let stopped = supervisor.status_snapshot().service(AiService::Tts);
         assert_eq!(stopped.phase, RuntimePhase::Stopped);
         assert!(stopped.active_model.is_none());
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_refresh_skips_busy_worker_and_detects_unrelated_crash() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: root.clone(),
+                plugins_directory: root.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        supervisor.start(AiService::Tts).await.unwrap();
+        supervisor.start(AiService::Asr).await.unwrap();
+        let tts = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let asr = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Asr))
+            .cloned()
+            .unwrap();
+        {
+            let mut worker = asr.lock().await;
+            worker.child.start_kill().unwrap();
+            worker.child.wait().await.unwrap();
+        }
+        let _busy = tts.lock().await;
+        let snapshot = timeout(Duration::from_secs(1), supervisor.refresh_status())
+            .await
+            .expect("health refresh must not await an unrelated in-flight worker");
+        assert_eq!(snapshot.service(AiService::Asr).phase, RuntimePhase::Failed);
+        assert_eq!(
+            snapshot.service(AiService::Tts).phase,
+            RuntimePhase::WorkerRunning
+        );
+        drop(_busy);
+        supervisor.stop(AiService::Tts).await.unwrap();
+        supervisor.stop(AiService::Asr).await.unwrap();
     }
 
     #[tokio::test]
