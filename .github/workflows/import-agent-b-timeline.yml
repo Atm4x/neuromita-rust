@@ -1,0 +1,32 @@
+name: Import Agent B Timeline bundle
+on:
+  push:
+    branches:
+      - bridge/import-agent-b-20261106
+    paths:
+      - bridge/agent-b-incremental.bundle.b64
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact local commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=66e603d7ae3916c6f1f74089ecff3a8b40db2049
+          NEW=b3c9c37876638af893923daad28c8f7a6c861b06
+          REF=refs/heads/codex/timeline-multimodal-autonomous-20261106
+          git cat-file -e "$BASE^{commit}"
+          base64 -d bridge/agent-b-incremental.bundle.b64 > /tmp/agent-b.bundle
+          git bundle verify /tmp/agent-b.bundle
+          git fetch /tmp/agent-b.bundle "$REF:$REF"
+          test "$(git rev-parse "$REF")" = "$NEW"
+          git merge-base --is-ancestor "$BASE" "$NEW"
+          test -z "$(git ls-remote origin "$REF")"
+          git push origin "$REF:$REF"
+          test "$(git ls-remote origin "$REF" | cut -f1)" = "$NEW"
