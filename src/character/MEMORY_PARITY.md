@@ -115,3 +115,27 @@ events, head advance or operation receipt; a corrected retry with the same
 operation key succeeds. This proves fail-closed behavior for these fixtures,
 **not** general automatic database repair, damaged-page recovery or full
 Python parity. No storage schema or canonical Timeline contract changed.
+
+## Request-scoped model memory insertion policy (2026-11-07)
+
+`generation::ModelMemoryAddPolicy` is a typed, immutable *conversion intent* for
+accepted structured model responses: `Ordinary` keeps the pre-existing
+`MemoryCommand::Add` behavior (normalized exact-content idempotency), while
+`Lexical { threshold_per_mille }` converts **only** `memory_add` into
+`MemoryCommand::AddLexicallyDeduplicated`. Every `memory_update`, delete, merge,
+state delta, reminder and user-initiated memory edit retains its existing
+semantics. Invalid per-mille thresholds (`<500` or `>1000`) reject the entire
+candidate before Timeline acceptance. The original `from_structured` entry
+point stays unchanged; the request owner may explicitly call
+`GenerationRequest::with_model_memory_policy` with policy captured at
+request creation; `ResponseGenerator` carries that value through the provider
+and post-DSL phases into `ProposedResponse::from_structured_with_memory_policy`. Invalid
+policy is rejected before provider invocation, not after inference.
+Intermediate tool responses do not execute memory writes. Neither conversion writes memory or opens a second database.
+
+This defines the precise adapter point for Python's settings-gated dedup path;
+**production settings-to-request binding is still not wired**. The active Python
+reference enables lexical similarity by default under `MEMORY_DEDUP_ENABLED`,
+while the existing Rust production conversion keeps its pre-existing behavior
+until its owner provides a resolved policy. Choosing a global default here
+would silently change manual editor semantics and is intentionally avoided.

@@ -21,8 +21,8 @@ pub use presets::{
     PresetRepository, PresetTemplate,
 };
 pub use structured::{
-    RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent, StructuredResponse, ToolCall,
-    WorkingState,
+    ModelMemoryAddPolicy, RESPONSE_PROTOCOL_VERSION, ResponseSegment, SegmentIntent,
+    StructuredResponse, ToolCall, WorkingState,
 };
 pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
