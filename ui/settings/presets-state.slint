@@ -9,6 +9,10 @@ export struct PresetParameterItem { id: string, wire-key: string, title: string,
 export global SettingsUi {
     in-out property <[bool]> section-visible: [true, true, true, true, true, true, true, true, true, true, true, true];
     in-out property <bool> hide-private: true;
+    in-out property <bool> memory-dedup-enabled: false;
+    in-out property <string> memory-dedup-threshold: "0.800";
+    callback memory-dedup-toggle(bool);
+    callback memory-dedup-threshold-change(string);
     in-out property <int> structured-mode: 0;
     callback structured-mode-change(int);
     in-out property <bool> tool-enabled: false;

@@ -472,6 +472,25 @@ fn settings_render_and_bindings(window: &AppWindow) {
         window,
         Rc::new(move |command| sent.borrow_mut().push(command)),
     );
+    settings.invoke_memory_dedup_toggle(true);
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetMemoryDedupEnabled(true))
+    ));
+    settings.invoke_memory_dedup_threshold_change("0.925".into());
+    assert!(matches!(
+        commands.borrow().last(),
+        Some(super::super::runtime::Command::SetMemoryDedupThreshold(925))
+    ));
+    let before_invalid = commands.borrow().len();
+    settings.invoke_memory_dedup_threshold_change("1.001".into());
+    assert_eq!(commands.borrow().len(), before_invalid);
+    assert!(!settings.get_settings_error().is_empty());
+    settings.set_settings_error("".into());
+    settings.set_memory_dedup_enabled(false);
+    settings.set_memory_dedup_threshold("0.800".into());
+    assert!(!settings.get_memory_dedup_enabled());
+    assert_eq!(settings.get_memory_dedup_threshold(), "0.800");
     settings.invoke_tool_option("calculator".into(), true);
     assert!(matches!(
         commands.borrow().last(),
