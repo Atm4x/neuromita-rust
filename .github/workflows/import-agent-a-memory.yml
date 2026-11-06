@@ -12,20 +12,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish source-scoped graph commit
+      - name: Verify and publish graph maintenance commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=f3db01349f2d6ed273d4d96d457e549b9544d0e5
-          TARGET=07a214ecac89cf0d0cd56f3f1f7d954df54b4c9c
-          BRANCH=codex/knowledge-graph-source-provenance-20261106
+          BASE=07a214ecac89cf0d0cd56f3f1f7d954df54b4c9c
+          TARGET=ab6e8565db55073f4a45fc70ca5495f17b272286
+          BRANCH=codex/knowledge-graph-maintenance-20261106
           git cat-file -e "$BASE^{commit}"
-          git bundle verify .bridge/agent-a-graph-source.bundle
-          git fetch --no-tags .bridge/agent-a-graph-source.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-maintenance.bundle.sha256
+          git bundle verify .bridge/agent-a-maintenance.bundle
+          git fetch --no-tags .bridge/agent-a-maintenance.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target branch exists; refusing overwrite."
+            echo "Ref exists; refusing rewrite."
             exit 1
           fi
           git push origin "$TARGET:refs/heads/$BRANCH"
