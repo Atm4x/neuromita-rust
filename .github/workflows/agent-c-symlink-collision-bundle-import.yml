@@ -1,0 +1,76 @@
+name: Agent C symlink collision bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-symlink-collision-20261106
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-executable-discovery-20261106
+          fetch-depth: 0
+      - name: Verify and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6707034a8fd5c8f042022b2200f8ce05cbaf7c46
+          HEAD=0ee7ba0a52c857d55cfdce14c88444c7856d7578
+          TARGET=codex/ai-platform-hub-symlink-collision-20261106
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-symlink.bundle
+          IyB2MiBnaXQgYnVuZGxlCi02NzA3MDM0YThmZDVjOGYwNDIwMjJiMjIwMGY4Y2UwNWNiYWY3YzQ2
+          IGZpeChhaSk6IGFsaWduIGV4ZWN1dGFibGUgcGx1Z2luIHJvb3RzIHdpdGggc3BlZWNoIGRpc2Nv
+          dmVyeSBhbmQgY29udHJhY3QgZml4dHVyZXMKMGVlN2JhMGE1MmM4NTdkNTVjZmRjZTE0Yzg4NDQ0
+          Yzc4NTZkNzU3OCByZWZzL2hlYWRzL2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1zeW1saW5rLWNvbGxp
+          c2lvbi0yMDI2MTEwNgoKUEFDSwAAAAIAAAALlhR4nK1PW07FIBT8ZxXnU2NsKNBSjDEavzVugZ57
+          aLlSaIBGu3u5e3C+JpPMq2Yi6BWOxjg3KyEHJc2kjBEoezJSWiQ02gothGK7zRQrjJprLpWd3GXA
+          yXEluBCzEJy7CYkPOFunUY3MHnVNGT7pyOnDVwtvy83/Ds/2Rh7x9SiUSxdTpj2c3eLreswdpu0F
+          em2kMUMbBA+8gTV187XSf+Ux53/vrL9/gkxXwgrl3IKP33SBPRyLj4ApBF98iqXRWHyprSSc8NNi
+          4ets3yKsqVT2B5aUaMT3BbsievluxZeVyIIuAuuVyPzOusM5eJwBVwCo//8F/wWwoAEUYHIHi4P4
+          NileWNItjRJ5cbjjuk2TtAGbMi8Dr02FAxZkTffVVXGaNi99mpQtNDAwMDAgc3JjAPiFWkY0QK7I
+          9G7v5CzQCtu/ck1ok4ECfk/4JXr+ARji1AmjSy7VzcMnVkWPMwOTaVLueJwBHgDh//AC8AKQfxS8
+          6LhlkAEX++KUzucS5XlmLx2iiZGT3fJiD+X/AetxixLrdDK0oGGC60bLxSyR6nhBeJxbJb5KfEKJ
+          iNuvpsvuUtZbXbV3Lc/zCE/tWbm1eGOHEjcA2BUNh/USNZG5AkkVQjRsDuNX+W06vyPEXxt4nC2P
+          u23DQAyGezWZIAhTpTG8Q4A06QJkAopH6AifSOHIs63KK2Uf7+HaJzsl+T/48fp2e/+7vlyG33Uu
+          ogdOsJQ2iQJrVGEHrAxkTaNLp8wKiUmS6LRNkbnC99fThfMoU7Pmu2HGoLx5ugF+1simkM3jw8ED
+          QwiSONmR6wojZ7wcxeoOxhZbYn3UKXd5QCJettvowGemFjgW/of0PXyCP8mBUNUCZvQDIKS2FCEM
+          7nhgFaJVHbC/dQ6uiqUDVKawDiAar9YjzqVvHvW+MFOG2RKX/XAHLIJsAfsBBvVHpJWdgE3TK0sx
+          9uiMeeijYyZ4nOtg6mCa8EWEbXdL199V9U8uWGfWyd5I21R3Png5ALPzDcz8AbdnnBvx8A5tmcK7
+          1NKeioOWmgpXeJy7xXyLecMxRhHLA+Vl67JW2t3j35rUtSLE/seDq0wAvPINo/kKaruGAb9xboUz
+          ljabkEsEC+kojhJ4nJtmsdFmwxLuyQIC7N7xyfk5OZnFmfl58Sn5qcXxefkl8bmJ2anxifFFqYk5
+          8QU5pemZefHFqTmpySWJSTmpGkBmmqYVlwIU5BdlAhUk5ijYTo5hk5ocw8U/+b2AhKimXm52SmaR
+          RmpFZnFJfH62bUhRaerkpwJqUsWJualKmnrFlbk5mXnZ8SX5GjAjJqsIek3mEeeaPIGDbfNpLm9B
+          ADzaO1r/Ae0ahKIDZJswvVGrVocPS6KDmgHieJy7yHWRa4KJyNLLDHIpvaK6PW12x3duP3bmCcu8
+          sxs9OFkB1ZoNy/ECU62aZSBjTGckZCad+KWr1trSDFt4nAEhAN7/zQjNCLAwAxS7rsbFx4b8kupd
+          H8gMzaxZ7hfUHbNEAwkBGWMPd/w6BgcRmZBShkSCjghMtTbMoE5ckeB4nJWST2sTQRjGiY3obtSm
+          FiW0ppmkbdyFZD1U22JJq6lS6b/oVdBhujtNx05m1t2JdSFQPUtP79mDeBUVUvSg+A0KgniqBz+B
+          4FHw4G4bshEE6VyGGX7PM8/7vrP3PLH3OvH2u5Zk6ygPP/uH+jwpoZYp9znMgyeZCUD6AOxru+Oc
+          KlTbNDaZcExUQVQoL7DWGadYBS41TES5T+G3Xjgzo6POOjD9rI+G17WzkdJiPg6NQ7pYRAYspaoJ
+          s72TKib6Wi3Ufn/q17FukKRL1AbczpQ6SabTLm/WmUDhkdpKegG8HL7cfte/P3g6yuYHDc7EJnXg
+          R/+IFkPXy+fhbqYAz9IavCgNpiP/LhvGaMPol5xur9eNpmCPzXuA5/OTXQAfPoptIoRUeIM5FBOB
+          SWON1Zuy6WPmYOlh4rqUeJC4VYCv8xdTh6JyZAH6ja3jjwhnDqQqF8Ba1MZtjxJFoz5gwrlxCPvW
+          A8mEUbBloxEGUeAuDpcig7DX/yaCSwe2WCm/YM7oUKyO5v8m15qMKyZ6ObhTHU5F7bKJIlzWYWBq
+          CtybJ05aNpciHCPUpia34wlGaLfYMEpHZvmCuP6GVIZpkS3CVKwgvk89lTfyXZkVvmwxRb0IFoHR
+          akiH8hY62CzmoEoFFXoymrC7nNO6chhZvQ9XV65AeW4sGWHwppqD5tw1cBfyuf9UDA8Xh7Y7o5SC
+          B0croUd45CJiO/i0fE6PrSC7itPhF+DxTw7n8nEpCzuzY1qc/MNsFr5NT8CrhWz76fxy6g8zcUZd
+          p5xfWVpQzzrscgjtIV9G9ge+tOE=
+          BUNDLE
+          echo '088522b1d487289583be4a4119b761338e316564f3d050f2aea999d0b7d46eaa  /tmp/agent-c-symlink.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-symlink.bundle
+          git fetch --no-tags /tmp/agent-c-symlink.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Ref changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
