@@ -62,3 +62,8 @@ unapproved permissions are rejected. The Python host remains the final runtime
 validator. This change does not introduce its own portable data root; it uses
 the existing injected `data_directory`. An explicitly installed plugin package
 is still not equivalent to a ready inference model.
+
+Symlinked plugin entries are counted when deciding whether IDs are ambiguous,
+matching the Python host's static discovery behavior, but they are never
+accepted as executable plugins. A symlink cannot mask a duplicate ID or turn
+an external directory into a selectable speech model.

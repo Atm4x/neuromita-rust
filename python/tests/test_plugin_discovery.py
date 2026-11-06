@@ -69,6 +69,15 @@ class PluginDiscoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             host.dispatch("describe", {"plugin_id": "same"})
 
+    def test_symlink_collision_does_not_make_a_real_plugin_selectable(self):
+        original = self.fixture("builtin", "same")
+        (self.root / "community").mkdir(exist_ok=True)
+        (self.root / "community" / "same").symlink_to(original, target_is_directory=True)
+        host = PluginHost(self.root)
+        self.assertEqual([item["discovery_status"] for item in host.discover()], ["invalid", "invalid"])
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            host.dispatch("describe", {"plugin_id": "same"})
+
     def test_unapproved_permissions_are_not_imported_or_executed(self):
         directory = self.fixture("community", "restricted", permissions=["network"])
         (directory / "plugin.py").write_text("raise RuntimeError('must never import')")
