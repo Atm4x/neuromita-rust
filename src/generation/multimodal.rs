@@ -2,6 +2,8 @@
 //! These codecs accept only a caller-supplied MitaView and injected asset store.
 //! They do not select a branch, root directory, prompt role or alternate history.
 
+use std::collections::{HashMap, HashSet};
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -44,6 +46,8 @@ pub enum MultimodalError {
     Unsupported,
     #[error("provider media payload exceeds the configured limit")]
     TooLarge,
+    #[error("selected Timeline message is not visible in the generation snapshot")]
+    MissingVisibleEvent,
 }
 
 /// The sole source for this projection is MitaView; hidden/revoked messages are
@@ -51,8 +55,16 @@ pub enum MultimodalError {
 pub fn visible_multimodal_messages(
     view: &MitaView,
 ) -> Result<Vec<VisibleMultimodalMessage>, MultimodalError> {
+    visible_multimodal_messages_selected(view, None)
+}
+
+fn visible_multimodal_messages_selected(
+    view: &MitaView,
+    selected: Option<&HashSet<EventId>>,
+) -> Result<Vec<VisibleMultimodalMessage>, MultimodalError> {
     view.messages()
         .into_iter()
+        .filter(|message| selected.is_none_or(|ids| ids.contains(&message.event_id)))
         .map(|message| {
             let parts = message
                 .fields
@@ -114,8 +126,30 @@ pub fn gemini_contents(
     view: &MitaView,
     assets: &TimelineAssetStore,
 ) -> Result<Vec<Value>, MultimodalError> {
+    Ok(gemini_content_pairs(view, assets, None)?
+        .into_iter()
+        .map(|(_, content)| content)
+        .collect())
+}
+
+pub(crate) fn gemini_selected_contents(
+    view: &MitaView,
+    assets: &TimelineAssetStore,
+    selected: &HashSet<EventId>,
+) -> Result<HashMap<EventId, Value>, MultimodalError> {
+    selected_map(
+        gemini_content_pairs(view, assets, Some(selected))?,
+        selected,
+    )
+}
+
+fn gemini_content_pairs(
+    view: &MitaView,
+    assets: &TimelineAssetStore,
+    selected: Option<&HashSet<EventId>>,
+) -> Result<Vec<(EventId, Value)>, MultimodalError> {
     let mut budget = MediaBudget(0);
-    visible_multimodal_messages(view)?
+    visible_multimodal_messages_selected(view, selected)?
         .into_iter()
         .map(|message| {
             let mut parts = Vec::with_capacity(message.parts.len());
@@ -146,7 +180,10 @@ pub fn gemini_contents(
                 };
                 parts.push(value);
             }
-            Ok(json!({"role":provider_role(message.role, "model"), "parts":parts}))
+            Ok((
+                message.event_id,
+                json!({"role":provider_role(message.role, "model"), "parts":parts}),
+            ))
         })
         .collect()
 }
@@ -158,8 +195,48 @@ pub fn openai_contents(
     assets: &TimelineAssetStore,
     dialect: OpenAiImageDialect,
 ) -> Result<Vec<Value>, MultimodalError> {
+    Ok(openai_content_pairs(view, assets, dialect, None)?
+        .into_iter()
+        .map(|(_, content)| content)
+        .collect())
+}
+
+pub(crate) fn openai_selected_contents(
+    view: &MitaView,
+    assets: &TimelineAssetStore,
+    dialect: OpenAiImageDialect,
+    selected: &HashSet<EventId>,
+) -> Result<HashMap<EventId, Value>, MultimodalError> {
+    selected_map(
+        openai_content_pairs(view, assets, dialect, Some(selected))?,
+        selected,
+    )
+}
+
+fn selected_map(
+    pairs: Vec<(EventId, Value)>,
+    selected: &HashSet<EventId>,
+) -> Result<HashMap<EventId, Value>, MultimodalError> {
+    let mut entries = HashMap::with_capacity(pairs.len());
+    for (id, content) in pairs {
+        if entries.insert(id, content).is_some() {
+            return Err(MultimodalError::MissingVisibleEvent);
+        }
+    }
+    if entries.len() != selected.len() {
+        return Err(MultimodalError::MissingVisibleEvent);
+    }
+    Ok(entries)
+}
+
+fn openai_content_pairs(
+    view: &MitaView,
+    assets: &TimelineAssetStore,
+    dialect: OpenAiImageDialect,
+    selected: Option<&HashSet<EventId>>,
+) -> Result<Vec<(EventId, Value)>, MultimodalError> {
     let mut budget = MediaBudget(0);
-    visible_multimodal_messages(view)?
+    visible_multimodal_messages_selected(view, selected)?
         .into_iter()
         .map(|message| {
             let mut parts = Vec::with_capacity(message.parts.len());
@@ -184,7 +261,10 @@ pub fn openai_contents(
                 };
                 parts.push(value);
             }
-            Ok(json!({"role":provider_role(message.role, "assistant"), "content":parts}))
+            Ok((
+                message.event_id,
+                json!({"role":provider_role(message.role, "assistant"), "content":parts}),
+            ))
         })
         .collect()
 }

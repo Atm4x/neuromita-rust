@@ -2,7 +2,7 @@
 //! A transform may alter text-only context, but it must never silently rebind
 //! media bytes to another message or role.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
@@ -39,26 +39,30 @@ impl LiveMedia {
         assets: Option<&TimelineAssetStore>,
         dialect: LiveDialect,
     ) -> Result<Option<Self>, GenerationError> {
-        let visible = super::multimodal::visible_multimodal_messages(view).map_err(|error| {
-            GenerationError::Response(format!("invalid visible message: {error}"))
-        })?;
-        let known = visible
-            .iter()
-            .enumerate()
-            .map(|(i, message)| (message.event_id, i))
+        let known = view
+            .messages()
+            .into_iter()
+            .map(|message| (message.event_id, message))
             .collect::<HashMap<_, _>>();
         let mut affected = Vec::new();
         for projected in &conversation.messages {
             let Some(id) = projected.source else { continue };
-            let Some(&index) = known.get(&id) else {
-                return Err(GenerationError::Response(
+            let original = known.get(&id).ok_or_else(|| {
+                GenerationError::Response(
                     "Timeline event is not visible in the generation snapshot".into(),
-                ));
-            };
-            let original = &visible[index];
-            if original.parts.iter().any(|part| part.asset().is_some()) {
-                let raw = original
-                    .parts
+                )
+            })?;
+            let parts = original
+                .fields
+                .get("content")
+                .map(crate::timeline::domain::parse_message_content)
+                .transpose()
+                .map_err(|error| {
+                    GenerationError::Response(format!("invalid visible message: {error}"))
+                })?
+                .unwrap_or_default();
+            if parts.iter().any(|part| part.asset().is_some()) {
+                let raw = parts
                     .iter()
                     .filter_map(|part| match part {
                         TimelineMessagePart::Text { text } => Some(text.as_str()),
@@ -71,7 +75,7 @@ impl LiveMedia {
                         "multimodal history prefix does not match canonical content".into(),
                     )
                 })?;
-                affected.push((id, index, prefix.to_owned(), projected));
+                affected.push((id, prefix.to_owned(), projected));
             }
         }
         if affected.is_empty() {
@@ -82,25 +86,38 @@ impl LiveMedia {
                 "Timeline assets are not configured for multimodal generation".into(),
             )
         })?;
+        let selected = affected
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect::<HashSet<_>>();
+        if selected.len() != affected.len() {
+            return Err(GenerationError::Response(
+                "duplicate Timeline media event in prompt".into(),
+            ));
+        }
         let encoded = match dialect {
-            LiveDialect::Gemini => super::multimodal::gemini_contents(view, assets),
-            LiveDialect::OpenAiChat => super::multimodal::openai_contents(
+            LiveDialect::Gemini => {
+                super::multimodal::gemini_selected_contents(view, assets, &selected)
+            }
+            LiveDialect::OpenAiChat => super::multimodal::openai_selected_contents(
                 view,
                 assets,
                 super::multimodal::OpenAiImageDialect::ChatCompletions,
+                &selected,
             ),
-            LiveDialect::OpenAiResponses => super::multimodal::openai_contents(
+            LiveDialect::OpenAiResponses => super::multimodal::openai_selected_contents(
                 view,
                 assets,
                 super::multimodal::OpenAiImageDialect::Responses,
+                &selected,
             ),
         }
         .map_err(|error| {
             GenerationError::Response(format!("multimodal provider input rejected: {error}"))
         })?;
         let mut entries = HashMap::new();
-        for (id, index, prefix, projected) in affected {
-            let mut parts = encoded[index][if matches!(dialect, LiveDialect::Gemini) {
+        for (id, prefix, projected) in affected {
+            let mut parts = encoded[&id][if matches!(dialect, LiveDialect::Gemini) {
                 "parts"
             } else {
                 "content"
@@ -147,8 +164,6 @@ impl LiveMedia {
         contents: &mut [Value],
         dialect: LiveDialect,
     ) -> Result<(), GenerationError> {
-        use std::collections::HashSet;
-
         let invalid = || {
             GenerationError::Response(
                 "multimodal event provenance no longer matches the provider prompt".into(),
@@ -650,6 +665,185 @@ mod tests {
             .unwrap()
             .is_some()
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unselected_broken_or_unsupported_assets_do_not_block_selected_media() {
+        let root = std::env::temp_dir().join(format!("nm-media-select-{}", Uuid::new_v4()));
+        let assets = TimelineAssetStore::new(root.join("assets"), 1024).unwrap();
+        let missing = assets
+            .import("image/png", Cursor::new(b"unrelated"))
+            .unwrap();
+        let unsupported = assets
+            .import("audio/ogg", Cursor::new(b"not-an-openai-image"))
+            .unwrap();
+        let selected_image = assets
+            .import("image/png", Cursor::new(b"selected"))
+            .unwrap();
+        let missing_path = root
+            .join("assets/objects")
+            .join(&missing.digest[..2])
+            .join(&missing.digest);
+        fs::remove_file(missing_path).unwrap();
+        let mut repo = TimelineStore::new();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        for content in [
+            json!([{"type":"image", "asset":missing}]),
+            json!([{"type":"audio", "asset":unsupported}]),
+            json!([{"type":"image", "asset":selected_image}]),
+        ] {
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.observers.insert(CharacterId::Crazy);
+            draft.actor = Some("player".into());
+            draft.payload.insert("content".into(), content);
+            let head = repo.branch(branch).unwrap().head_sequence;
+            repo.append(
+                branch,
+                head,
+                &Uuid::new_v4().to_string(),
+                json!({}),
+                vec![draft],
+            )
+            .unwrap();
+        }
+        let view =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+        let mut selected_conversation = conversation(&view);
+        let selected_event = selected_conversation.messages.last().unwrap().source;
+        selected_conversation
+            .messages
+            .retain(|message| message.source == selected_event);
+        for dialect in [
+            LiveDialect::Gemini,
+            LiveDialect::OpenAiChat,
+            LiveDialect::OpenAiResponses,
+        ] {
+            let media = LiveMedia::prepare(&selected_conversation, &view, Some(&assets), dialect)
+                .unwrap()
+                .unwrap();
+            assert_eq!(media.entries.len(), 1);
+            assert!(media.entries.contains_key(&selected_event.unwrap()));
+        }
+        assert!(super::super::multimodal::gemini_contents(&view, &assets).is_err());
+        assert!(
+            super::super::multimodal::openai_contents(
+                &view,
+                &assets,
+                super::super::multimodal::OpenAiImageDialect::ChatCompletions,
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unselected_invalid_part_is_not_parsed_during_live_generation() {
+        let root = std::env::temp_dir().join(format!("nm-media-invalid-{}", Uuid::new_v4()));
+        let assets = TimelineAssetStore::new(root.join("assets"), 1024).unwrap();
+        let image = assets
+            .import("image/png", Cursor::new(b"selected"))
+            .unwrap();
+        let mut repo = TimelineStore::new();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        for content in [
+            json!([{"type":"unknown-media", "data":"not a provider part"}]),
+            json!([{"type":"image", "asset":image}]),
+        ] {
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.observers.insert(CharacterId::Crazy);
+            draft.actor = Some("player".into());
+            draft.payload.insert("content".into(), content);
+            let head = repo.branch(branch).unwrap().head_sequence;
+            repo.append(
+                branch,
+                head,
+                &Uuid::new_v4().to_string(),
+                json!({}),
+                vec![draft],
+            )
+            .unwrap();
+        }
+        let view =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+        let selected_conversation = conversation(&view);
+        assert_eq!(selected_conversation.messages.len(), 1);
+        assert!(
+            LiveMedia::prepare(
+                &selected_conversation,
+                &view,
+                Some(&assets),
+                LiveDialect::OpenAiChat
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(super::super::multimodal::visible_multimodal_messages(&view).is_err());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn edited_media_is_scoped_to_its_historical_view() {
+        let root = std::env::temp_dir().join(format!("nm-media-edits-{}", Uuid::new_v4()));
+        let assets = TimelineAssetStore::new(root.join("assets"), 1024).unwrap();
+        let original = assets.import("image/png", Cursor::new(b"before")).unwrap();
+        let revised = assets.import("image/png", Cursor::new(b"after")).unwrap();
+        let mut repo = TimelineStore::new();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let mut initial = EventDraft::new(EventKind::PlayerMessage);
+        initial.observers.insert(CharacterId::Crazy);
+        initial.actor = Some("player".into());
+        initial.payload.insert(
+            "content".into(),
+            json!([{"type":"image", "asset":original}]),
+        );
+        let id = initial.id;
+        repo.append(branch, 0, "original", json!({}), vec![initial])
+            .unwrap();
+        let historic =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, Some(1)).unwrap();
+        let mut edit = EventDraft::new(EventKind::MessageRevised);
+        edit.observers.insert(CharacterId::Crazy);
+        edit.payload
+            .insert("event_id".into(), json!(id.0.to_string()));
+        edit.payload.insert(
+            "message".into(),
+            json!({"content":[{"type":"image", "asset":revised}]}),
+        );
+        repo.append(branch, 1, "revision", json!({}), vec![edit])
+            .unwrap();
+        let current =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+        for dialect in [
+            LiveDialect::Gemini,
+            LiveDialect::OpenAiChat,
+            LiveDialect::OpenAiResponses,
+        ] {
+            let historical_media =
+                LiveMedia::prepare(&conversation(&historic), &historic, Some(&assets), dialect)
+                    .unwrap()
+                    .unwrap();
+            let current_media =
+                LiveMedia::prepare(&conversation(&current), &current, Some(&assets), dialect)
+                    .unwrap()
+                    .unwrap();
+            let old = historical_media.entries.get(&id).unwrap();
+            let new = current_media.entries.get(&id).unwrap();
+            assert_ne!(old.parts, new.parts);
+            assert!(
+                old.parts
+                    .iter()
+                    .any(|part| part.to_string().contains("YmVmb3Jl"))
+            );
+            assert!(
+                new.parts
+                    .iter()
+                    .any(|part| part.to_string().contains("YWZ0ZXI="))
+            );
+        }
         fs::remove_dir_all(root).ok();
     }
 
