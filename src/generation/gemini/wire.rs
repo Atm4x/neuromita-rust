@@ -110,9 +110,11 @@ pub(super) fn encode_with_memory(
         template,
         memory,
         None,
-        &[],
-        &[],
-        &super::super::ToolSettings::default(),
+        WireTools {
+            history: &[],
+            native_history: &[],
+            settings: &super::super::ToolSettings::default(),
+        },
         None,
     )
     .expect("test fixture uses only text messages")
@@ -125,14 +127,18 @@ pub(super) struct EncodedRequest {
     pub(super) media_present: bool,
 }
 
+pub(super) struct WireTools<'a> {
+    pub(super) history: &'a [PromptMessage],
+    pub(super) native_history: &'a [super::super::provider::NativeToolExchange],
+    pub(super) settings: &'a super::super::ToolSettings,
+}
+
 pub(super) fn encode_observed(
     context: CharacterContext,
     template: &GeminiTemplate,
     memory: &Option<String>,
     prepared: Option<&PreparedPrompt>,
-    tool_history: &[PromptMessage],
-    native_history: &[super::super::provider::NativeToolExchange],
-    tools: &super::super::ToolSettings,
+    tools: WireTools<'_>,
     assets: Option<&crate::timeline::storage::assets::TimelineAssetStore>,
 ) -> Result<EncodedRequest, GenerationError> {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
@@ -157,8 +163,8 @@ pub(super) fn encode_observed(
         },
         text: Arc::from(message.text.as_str()),
     }));
-    prompt.extend_from_slice(tool_history);
-    if let Some(instructions) = super::super::tools::advertisement(tools) {
+    prompt.extend_from_slice(tools.history);
+    if let Some(instructions) = super::super::tools::advertisement(tools.settings) {
         prompt.insert(
             0,
             PromptMessage {
@@ -167,7 +173,13 @@ pub(super) fn encode_observed(
             },
         );
     }
-    encode_prompt_with_media(prompt, template, native_history, tools, media.as_ref())
+    encode_prompt_with_media(
+        prompt,
+        template,
+        tools.native_history,
+        tools.settings,
+        media.as_ref(),
+    )
 }
 
 #[cfg(test)]

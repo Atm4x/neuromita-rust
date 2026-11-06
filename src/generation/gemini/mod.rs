@@ -37,9 +37,11 @@ impl GeminiProvider {
             &template,
             &context.prepared_knowledge,
             context.prompt.as_ref(),
-            &context.tool_history,
-            &context.native_tool_history,
-            &context.tool_settings,
+            wire::WireTools {
+                history: &context.tool_history,
+                native_history: &context.native_tool_history,
+                settings: &context.tool_settings,
+            },
             context.assets.as_deref(),
         )?;
         let payload_json = serde_json::to_string(&encoded.body).map_err(|error| {
