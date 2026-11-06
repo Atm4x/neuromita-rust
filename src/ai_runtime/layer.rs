@@ -86,6 +86,22 @@ pub fn validate_lock(packages: &[LockedPackage], python_version: &str) -> Result
     Ok(())
 }
 
+fn reject_symlinked_layer_components(destination: &Path) -> Result<(), LayerError> {
+    for component in destination.ancestors().take(3) {
+        match std::fs::symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(LayerError::Invalid(
+                    "layer revision or its managed parent must not be a symlink".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(LayerError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
 fn safe_marker_target(root: &Path, target: &Path) -> bool {
     let Ok(relative) = target.strip_prefix(root) else {
         return false;
@@ -118,6 +134,7 @@ impl LayerInstaller<'_> {
                 "absolute paths and nonzero timeout required".into(),
             ));
         }
+        reject_symlinked_layer_components(destination)?;
         Ok(())
     }
 
@@ -129,6 +146,7 @@ impl LayerInstaller<'_> {
         packages: &[LockedPackage],
         actions: &[InstallerAction],
     ) -> Result<bool, LayerError> {
+        reject_symlinked_layer_components(destination)?;
         if !destination.exists() {
             return Ok(false);
         }
