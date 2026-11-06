@@ -1,15 +1,18 @@
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use neuromita::ai_runtime::{
     AiRuntimeError, AiService, AiSupervisor, ModelActivation, ProcessTopology, PythonHostConfig,
+    application::{AiApplicationConfig, AiWorkerSelection},
     backend::BackendInstaller,
     composition::{RuntimeComposition, ServiceSelection},
     overlay::{LockedOverlay, OverlayInstaller},
     runtime_status::RuntimePhase,
 };
+use neuromita::{settings::Volume, voice::VoiceOptions};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -41,7 +44,7 @@ async fn fixture(
     let code = tokio::fs::read_to_string(source.join("plugin.py"))
         .await
         .unwrap()
-        .replace("    def infer(self, input_data):\n", "    def infer(self, input_data):\n        if input_data.get('crash'):\n            import os\n            os._exit(43)\n");
+        .replace("    def infer(self, input_data):\n", "    def infer(self, input_data):\n        if input_data.get('crash') or input_data.get('text') == 'CRASH':\n            import os\n            os._exit(43)\n");
     tokio::fs::write(tts.join("plugin.py"), code).await.unwrap();
     let asr = plugins.join("mock_asr");
     tokio::fs::create_dir_all(&asr).await.unwrap();
@@ -273,5 +276,113 @@ async fn split_recovery_keeps_independent_asr_worker_untouched() {
     assert_eq!(asr_state.phase, RuntimePhase::ModelReady);
     supervisor.stop(AiService::Tts).await.unwrap();
     supervisor.stop(AiService::Asr).await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn application_recovery_revalidates_generation_host_and_selection_guard() {
+    let root = std::env::temp_dir().join(format!("nm-application-recovery-{}", Uuid::new_v4()));
+    let (_, composition, models) = fixture(&root, ProcessTopology::Split, &[AiService::Tts]).await;
+    let (_, asr_composition, asr_models) =
+        fixture(&root, ProcessTopology::Split, &[AiService::Asr]).await;
+    let build_plan = || AiApplicationConfig {
+        topology: ProcessTopology::Split,
+        host: PythonHostConfig {
+            python_executable: test_python(),
+            sdk_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python"),
+            plugins_directory: root.join("plugins"),
+            models_directory: None,
+            request_timeout: Duration::from_secs(5),
+        },
+        workers: vec![
+            AiWorkerSelection {
+                service: AiService::Tts,
+                composition: composition.clone(),
+                models: models.clone(),
+            },
+            AiWorkerSelection {
+                service: AiService::Asr,
+                composition: asr_composition.clone(),
+                models: asr_models.clone(),
+            },
+        ],
+        voice_profiles: None,
+    };
+    let running = build_plan().activate().await.unwrap();
+    let asr_generation = running
+        .status_snapshot()
+        .service(AiService::Asr)
+        .generation
+        .unwrap();
+    let original = running
+        .status_snapshot()
+        .service(AiService::Tts)
+        .generation
+        .unwrap();
+    assert!(
+        running
+            .voice_provider()
+            .synthesize(
+                Arc::from("CRASH"),
+                VoiceOptions {
+                    voice: "default".into(),
+                    volume: Volume::new(50).unwrap(),
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        running.refresh_status().await.service(AiService::Tts).phase,
+        RuntimePhase::Failed
+    );
+    let mut mismatched = build_plan();
+    mismatched.host.request_timeout = Duration::from_secs(10);
+    assert!(
+        running
+            .recover_failed_worker(AiService::Tts, original, &mismatched, &|| Ok(()))
+            .await
+            .is_err()
+    );
+    let rejected = running
+        .recover_failed_worker(AiService::Tts, original, &build_plan(), &|| {
+            Err(AiRuntimeError::ActivationSuperseded)
+        })
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::ActivationSuperseded
+            )
+        )
+    ));
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).phase,
+        RuntimePhase::Failed
+    );
+    let replacement = running
+        .recover_failed_worker(AiService::Tts, original, &build_plan(), &|| Ok(()))
+        .await
+        .unwrap();
+    assert_ne!(original, replacement);
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).phase,
+        RuntimePhase::ModelReady
+    );
+    let healthy_asr = running.status_snapshot().service(AiService::Asr);
+    assert_eq!(healthy_asr.generation, Some(asr_generation));
+    assert_eq!(healthy_asr.phase, RuntimePhase::ModelReady);
+    assert!(matches!(
+        running
+            .recover_failed_worker(AiService::Tts, original, &build_plan(), &|| Ok(()))
+            .await,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::ActivationSuperseded
+            )
+        )
+    ));
+    running.shutdown().await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
