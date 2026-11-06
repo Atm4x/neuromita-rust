@@ -129,7 +129,8 @@ candidate before Timeline acceptance. The original `from_structured` entry
 point stays unchanged; the request owner may explicitly call
 `GenerationRequest::with_model_memory_policy` with policy captured at
 request creation; `ResponseGenerator` carries that value through the provider
-and post-DSL phases into `ProposedResponse::from_structured_with_memory_policy`.
+and post-DSL phases into `ProposedResponse::from_structured_with_memory_policy`. Invalid
+policy is rejected before provider invocation, not after inference.
 Intermediate tool responses do not execute memory writes. Neither conversion writes memory or opens a second database.
 
 This defines the precise adapter point for Python's settings-gated dedup path;

@@ -26,7 +26,7 @@ pub enum ModelMemoryAddPolicy {
 }
 
 impl ModelMemoryAddPolicy {
-    fn validate(self) -> Result<(), GenerationError> {
+    pub(crate) fn validate(self) -> Result<(), GenerationError> {
         if let Self::Lexical {
             threshold_per_mille,
         } = self

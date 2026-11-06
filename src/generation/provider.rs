@@ -278,6 +278,7 @@ impl ResponseGenerator {
         request: GenerationRequest,
         observer: &mut dyn GenerationObserver,
     ) -> Result<ProposedResponse, GenerationError> {
+        request.model_memory_policy.validate()?;
         let template = request.preset.template().clone();
         let post_dsl = request.post_dsl;
         let model_memory_policy = request.model_memory_policy;
