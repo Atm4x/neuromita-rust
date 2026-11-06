@@ -85,7 +85,7 @@ impl ProcessTopology {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonHostConfig {
     pub python_executable: PathBuf,
     pub sdk_root: PathBuf,
@@ -469,6 +469,7 @@ struct Activation<'a> {
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
     expected_failed_generation: Option<Uuid>,
+    check_current: Option<&'a (dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync)>,
 }
 
 impl AiService {
@@ -500,6 +501,10 @@ impl AiSupervisor {
             activation_locks: Mutex::new(HashMap::new()),
             status: watch::channel(RuntimeSnapshot::default()).0,
         }
+    }
+
+    pub(crate) fn accepts_plan(&self, topology: ProcessTopology, host: &PythonHostConfig) -> bool {
+        self.topology == topology && self.config == *host
     }
 
     pub fn observe_status(&self) -> watch::Receiver<RuntimeSnapshot> {
@@ -778,6 +783,25 @@ impl AiSupervisor {
         composition: &composition::RuntimeComposition,
         models: &[ModelActivation],
     ) -> Result<Uuid, AiRuntimeError> {
+        self.recover_failed_composed_guarded(
+            service,
+            expected_generation,
+            composition,
+            models,
+            &|| Ok(()),
+        )
+        .await
+    }
+
+    /// The caller validates its current selection immediately before publication.
+    pub async fn recover_failed_composed_guarded(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
         if !composition.services().contains(&service)
             || (self.topology == ProcessTopology::Split && composition.services() != [service])
         {
@@ -794,6 +818,7 @@ impl AiSupervisor {
             profile: None,
             verify: None,
             expected_failed_generation: Some(expected_generation),
+            check_current: Some(check_current),
         })
         .await
     }
@@ -825,6 +850,7 @@ impl AiSupervisor {
             profile: Some(profile),
             verify: Some(verify),
             expected_failed_generation: None,
+            check_current: None,
         })
         .await
     }
@@ -893,6 +919,7 @@ impl AiSupervisor {
             profile: None,
             verify: None,
             expected_failed_generation: None,
+            check_current: None,
         })
         .await
     }
@@ -906,6 +933,7 @@ impl AiSupervisor {
             profile,
             verify,
             expected_failed_generation,
+            check_current,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -1078,6 +1106,14 @@ impl AiSupervisor {
             },
             None => None,
         };
+        if let Some(check_current) = check_current
+            && let Err(error) = check_current()
+        {
+            let _ = candidate.child.start_kill();
+            let _ = candidate.child.wait().await;
+            self.activation_failed(services, &error, expected_failed_generation);
+            return Err(error);
+        }
         let generation = candidate.generation;
         let old = self
             .workers
@@ -1884,6 +1920,7 @@ class Plugin:
                     profile: None,
                     verify: None,
                     expected_failed_generation: Some(generation),
+                    check_current: None,
                 })
                 .await,
             Err(AiRuntimeError::ActivationGuard(_))

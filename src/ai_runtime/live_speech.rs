@@ -2,13 +2,19 @@
 //! A candidate must initialize before it can replace an active runtime.
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::Arc,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::{
+    sync::{Mutex, RwLock, watch},
+    time::MissedTickBehavior,
+};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
     audio::{
@@ -20,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    AiService,
+    AiRuntimeError, AiService,
     application::{AiApplicationError, RunningAiApplication},
     installed_speech::{InstalledSpeechEnvironment, InstalledSpeechError},
     runtime_status::{RuntimePhase, RuntimeSnapshot},
@@ -94,6 +100,32 @@ pub enum SpeechReconfigurationError {
     Installed(#[from] InstalledSpeechError),
     #[error(transparent)]
     Runtime(#[from] AiApplicationError),
+}
+
+const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const MAX_RECOVERY_ATTEMPTS_PER_GENERATION: u8 = 2;
+
+#[derive(Default)]
+struct RecoveryBudget {
+    observed: HashMap<AiService, (Uuid, u8)>,
+}
+
+impl RecoveryBudget {
+    fn claim(&mut self, service: AiService, generation: Uuid) -> bool {
+        let entry = self.observed.entry(service).or_insert((generation, 0));
+        if entry.0 != generation {
+            *entry = (generation, 0);
+        }
+        if entry.1 >= MAX_RECOVERY_ATTEMPTS_PER_GENERATION {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+
+    fn reset(&mut self) {
+        self.observed.clear();
+    }
 }
 
 pub struct LiveSpeechRuntime {
@@ -252,6 +284,72 @@ impl LiveSpeechRuntime {
         Ok(())
     }
 
+    /// Re-resolve persisted installation and the current model selection before
+    /// recovering one failed process. Only the corresponding split worker, or
+    /// the complete shared worker, is allowed to transition to a new generation.
+    async fn recover_failed_worker(
+        &self,
+        service: AiService,
+        generation: Uuid,
+        settings: &SettingsOwner,
+        stopping: &CancellationToken,
+    ) -> Result<(), SpeechReconfigurationError> {
+        let _transition = self.transition.lock().await;
+        if stopping.is_cancelled() || self.shutting_down.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let snapshot = settings.snapshot_all().map_err(|error| {
+            InstalledSpeechError::Environment(format!("cannot read speech settings: {error}"))
+        })?;
+        let speech = snapshot.values.speech.clone();
+        let key = SelectionKey::from_settings(&speech);
+        if *self.applied_selection.lock().await != key || key.plugin_id(service).is_none() {
+            return Ok(());
+        }
+        let active = self.current.read().await;
+        let Some(running) = active.as_ref() else {
+            return Ok(());
+        };
+        let selected_services: HashSet<_> = key.services().into_iter().collect();
+        let mut effective = speech;
+        if !effective.tts.local_auto_load {
+            effective.tts.enabled = false;
+        }
+        let prepared = self.installed.prepare_from_saved(&effective).await?;
+        let prepared = prepared.ok_or_else(|| {
+            InstalledSpeechError::Environment("selected speech worker is not installed".into())
+        })?;
+        let planned_services: HashSet<_> = prepared
+            .workers
+            .iter()
+            .flat_map(|worker| worker.models.iter().map(|model| model.service))
+            .collect();
+        if planned_services != selected_services {
+            return Err(InstalledSpeechError::Environment(
+                "recovery plan omits a selected speech service".into(),
+            )
+            .into());
+        }
+        let still_current = || {
+            if stopping.is_cancelled() || self.shutting_down.load(Ordering::Acquire) {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+            let current = settings.snapshot_all().map_err(|error| {
+                AiRuntimeError::ActivationGuard(format!("cannot recheck speech selection: {error}"))
+            })?;
+            if SelectionKey::from_settings(&current.values.speech) != key {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+            Ok(())
+        };
+        still_current().map_err(AiApplicationError::from)?;
+        running
+            .recover_failed_worker(service, generation, &prepared, &still_current)
+            .await?;
+        self.status.send_replace(running.status_snapshot());
+        Ok(())
+    }
+
     fn failed(&self, key: &SelectionKey, message: &str) {
         self.status
             .send_modify(|snapshot| mark_failure(snapshot, key, message));
@@ -330,11 +428,15 @@ pub(crate) async fn watch_speech_settings(
     stop: CancellationToken,
 ) {
     let mut previous = SelectionKey::from_settings(&initial);
+    let mut budget = RecoveryBudget::default();
+    let mut poll = tokio::time::interval(RECOVERY_POLL_INTERVAL);
+    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         let speech = updates.borrow_and_update().values.speech.clone();
         let next = SelectionKey::from_settings(&speech);
         if previous != next {
             previous = next;
+            budget.reset();
             if let Err(error) = runtime.reconcile(&speech, &owner, &capture, &stop).await {
                 tracing::warn!(error = %error, "speech worker reconfiguration rejected");
             }
@@ -345,6 +447,23 @@ pub(crate) async fn watch_speech_settings(
             result = updates.changed() => {
                 if result.is_err() { break; }
             }
+            _ = poll.tick() => {
+                let snapshot = runtime.refresh().await;
+                let mut handled = HashSet::new();
+                for service in [AiService::Tts, AiService::Asr] {
+                    let state = snapshot.service(service);
+                    if state.phase != RuntimePhase::Failed || !previous.services().contains(&service) {
+                        continue;
+                    }
+                    let Some(generation) = state.generation else { continue; };
+                    if !handled.insert(generation) || !budget.claim(service, generation) {
+                        continue;
+                    }
+                    if let Err(error) = runtime.recover_failed_worker(service, generation, &owner, &stop).await {
+                        tracing::warn!(service = ?service, generation = %generation, error = %error, "speech worker recovery attempt rejected");
+                    }
+                }
+            }
         }
     }
 }
@@ -352,6 +471,22 @@ pub(crate) async fn watch_speech_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_budget_is_bounded_per_failed_generation_and_resets_on_reselection() {
+        let mut budget = RecoveryBudget::default();
+        let first = Uuid::new_v4();
+        let replacement = Uuid::new_v4();
+        assert!(budget.claim(AiService::Tts, first));
+        assert!(budget.claim(AiService::Tts, first));
+        assert!(!budget.claim(AiService::Tts, first));
+        assert!(budget.claim(AiService::Asr, first));
+        assert!(budget.claim(AiService::Tts, replacement));
+        assert!(budget.claim(AiService::Tts, replacement));
+        assert!(!budget.claim(AiService::Tts, replacement));
+        budget.reset();
+        assert!(budget.claim(AiService::Tts, replacement));
+    }
+
     #[test]
     fn selection_key_ignores_capture_and_non_selected_model_options() {
         let mut speech = SpeechSettings::default();
