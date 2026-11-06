@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { CharacterCatalog } from "characters/catalog.slint";
 import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
@@ -28,6 +29,11 @@ export component AppWindow inherits Window {
     in property <PageId> page: home;
     in property <string> version;
     in property <string> page-title;
+    in-out property <bool> onboarding-required: false;
+    in-out property <string> onboarding-language: "ru";
+    in property <string> onboarding-eula-text;
+    in-out property <bool> onboarding-guide-visible: false;
+    in-out property <int> onboarding-guide-page: 0;
     in property <ComponentCard> backend;
     in property <ComponentCard> client;
     in property <[ReleaseItem]> releases;
@@ -67,6 +73,9 @@ export component AppWindow inherits Window {
     in-out property <string> chat-draft;
     in-out property <string> chat-model-input;
     in-out property <bool> chat-follow-tail: true;
+    callback onboarding-language-selected(string);
+    callback onboarding-accept();
+    callback onboarding-reject();
     callback chat-send(string);
     callback chat-cancel(string);
     callback chat-select-character(int);
@@ -132,7 +141,7 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
-                guide => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
+                guide => { root.onboarding-guide-page = 0; root.onboarding-guide-visible = true; }
                 language-selected(code) => { root.language-selected(code); }
             }
             if root.page == PageId.releases: ReleasesPage {
@@ -168,6 +177,138 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.onboarding-guide-visible && !root.onboarding-required: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #080d19e8;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: 820px; height: 570px; x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.panel; border-width: 1px; border-color: Theme.border;
+            border-radius: 18px;
+            VerticalLayout {
+                padding: 26px; spacing: 18px;
+                Text {
+                    text: root.onboarding-guide-page == 0 ? "Добро пожаловать / Welcome" :
+                          root.onboarding-guide-page == 1 ? "Настройка пресетов / Presets" :
+                          "Готово / Finished";
+                    color: Theme.text; font-size: 24px; font-weight: 700;
+                }
+                Rectangle {
+                    vertical-stretch: 1; background: Theme.background;
+                    border-radius: 12px;
+                    if root.onboarding-guide-page == 0: Image {
+                        source: @image-url("../assets/guide/guide_welcome.png");
+                        image-fit: contain; width: parent.width; height: parent.height;
+                    }
+                    if root.onboarding-guide-page == 1: Image {
+                        source: @image-url("../assets/guide/guide_preset.png");
+                        image-fit: contain; width: parent.width; height: parent.height;
+                    }
+                    if root.onboarding-guide-page == 2: Image {
+                        source: @image-url("../assets/guide/guide_next.png");
+                        image-fit: contain; width: parent.width; height: parent.height;
+                    }
+                }
+                Text {
+                    text: root.onboarding-guide-page == 0 ? "Краткое руководство по первоначальной настройке NeuroMita." :
+                          root.onboarding-guide-page == 1 ? "Создайте или выберите пресет API в настройках приложения." :
+                          "Руководство можно открыть снова из настроек.";
+                    color: Theme.muted; font-size: 14px; wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 150px; height: 40px; label: "Документация"; background: Theme.hover;
+                        Label { text: "Wiki / Help"; horizontal-alignment: center; }
+                        activated => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    Text { text: (root.onboarding-guide-page + 1) + " / 3"; color: Theme.muted; vertical-alignment: center; }
+                    ActionSurface {
+                        width: 115px; height: 40px; label: "Назад";
+                        enabled: root.onboarding-guide-page > 0; background: Theme.hover;
+                        Label { text: "Назад"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-page = root.onboarding-guide-page - 1; }
+                    }
+                    ActionSurface {
+                        width: 130px; height: 40px; label: "Далее"; background: Theme.selected;
+                        Label { text: root.onboarding-guide-page == 2 ? "Завершить" : "Далее"; horizontal-alignment: center; }
+                        activated => {
+                            if root.onboarding-guide-page == 2 { root.onboarding-guide-visible = false; }
+                            else { root.onboarding-guide-page = root.onboarding-guide-page + 1; }
+                        }
+                    }
+                    ActionSurface {
+                        width: 105px; height: 40px; label: "Закрыть"; background: Theme.hover;
+                        Label { text: "Закрыть"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-visible = false; }
+                    }
+                }
+            }
+        }
+    }
+    if root.onboarding-required: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #080d19ef;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: 900px; height: 630px; x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.panel; border-width: 1px; border-color: Theme.border;
+            border-radius: 18px;
+            VerticalLayout {
+                padding: 26px; spacing: 18px;
+                Text {
+                    text: root.onboarding-language == "ru" ? "Лицензионное соглашение пользователя" : "End User License Agreement";
+                    color: Theme.text; font-size: 23px; font-weight: 700;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 105px; height: 38px; label: "Русский";
+                        selected: root.onboarding-language == "ru"; background: root.onboarding-language == "ru" ? Theme.selected : Theme.hover;
+                        Label { text: "Русский"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("ru"); }
+                    }
+                    ActionSurface {
+                        width: 105px; height: 38px; label: "English";
+                        selected: root.onboarding-language == "en"; background: root.onboarding-language == "en" ? Theme.selected : Theme.hover;
+                        Label { text: "English"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("en"); }
+                    }
+                }
+                Rectangle {
+                    background: Theme.background; border-radius: 12px;
+                    vertical-stretch: 1;
+                    ScrollView {
+                        content-width: self.visible-width;
+                        Text {
+                            x: 14px; y: 14px; width: parent.width - 28px;
+                            height: self.preferred-height;
+                            text: root.onboarding-eula-text;
+                            color: Theme.text; font-size: 13px; wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 160px; height: 42px; label: "Reject"; background: Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Отклонить" : "Reject"; horizontal-alignment: center; }
+                        activated => { root.onboarding-reject(); }
+                    }
+                    ActionSurface {
+                        width: 160px; height: 42px; label: "Accept"; background: Theme.selected;
+                        Label { text: root.onboarding-language == "ru" ? "Принять" : "Accept"; horizontal-alignment: center; }
+                        activated => { root.onboarding-accept(); }
                     }
                 }
             }

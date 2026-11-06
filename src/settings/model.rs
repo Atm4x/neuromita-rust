@@ -261,10 +261,18 @@ impl RemindersSettings {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnboardingSettings {
+    pub eula_accepted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSettings {
     pub presets: PresetSettings,
+    #[serde(default)]
+    pub onboarding: OnboardingSettings,
     pub characters: CharactersSettings,
     pub voice: VoiceSettings,
     pub capture: CaptureSettings,
@@ -279,6 +287,7 @@ impl AppSettings {
     pub fn initial_profile() -> Self {
         Self {
             presets: PresetSettings::default(),
+            onboarding: OnboardingSettings::default(),
             characters: CharactersSettings::default(),
             voice: VoiceSettings {
                 volume: Volume(80),
@@ -372,6 +381,7 @@ macro_rules! section {
     };
 }
 section!(PresetSettings, presets);
+section!(OnboardingSettings, onboarding);
 section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(SpeechSettings, speech);

@@ -3,7 +3,6 @@ use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc};
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
 };
-use neuromita::portable::PortableDataRoot;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
@@ -17,7 +16,6 @@ use super::{
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
-    PortableDataRoot::resolve(Some(&options.data_directory))?.ensure_writable()?;
     let mut catalog = Localizer::bundled(FallbackPolicy::EnglishThenSource)?;
     if let Some(directory) = &options.directory {
         catalog.reload_directory(directory)?;
@@ -30,11 +28,19 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .renderer_name("femtovg".into())
         .select()?;
     let window = AppWindow::new()?;
-    let _desktop = super::sandbox::attach(
-        &window,
-        options.data_directory.clone(),
-        options.model.clone(),
-    )?;
+    let requires_consent = super::onboarding::pending(&options.data_directory)?;
+    window.set_onboarding_required(requires_consent);
+    let initial_code = options.locale.as_str();
+    window.set_onboarding_language(initial_code.into());
+    window.set_onboarding_eula_text(super::onboarding::eula_text(initial_code).into());
+    let desktop = Rc::new(RefCell::new(None));
+    if !requires_consent {
+        *desktop.borrow_mut() = Some(super::sandbox::attach(
+            &window,
+            options.data_directory.clone(),
+            options.model.clone(),
+        )?);
+    }
     let catalog = Rc::new(RefCell::new(catalog));
     window
         .global::<I18n>()
@@ -109,6 +115,46 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         };
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
+    });
+    let language_window = window.as_weak();
+    window.on_onboarding_language_selected(move |code| {
+        if let Some(window) = language_window.upgrade() {
+            window.set_onboarding_language(code.clone());
+            window.set_onboarding_eula_text(super::onboarding::eula_text(&code).into());
+        }
+    });
+    let accept_window = window.as_weak();
+    let accept_directory = options.data_directory.clone();
+    let accept_model = options.model.clone();
+    let accept_desktop = desktop.clone();
+    let accept_dispatch = dispatch.clone();
+    window.on_onboarding_accept(move || {
+        let Some(window) = accept_window.upgrade() else {
+            return;
+        };
+        let code = window.get_onboarding_language();
+        if let Err(error) = super::onboarding::accept(&accept_directory, &code) {
+            window.set_notice(format!("Не удалось сохранить согласие: {error}").into());
+            return;
+        }
+        window.set_onboarding_required(false);
+        window.set_onboarding_guide_page(0);
+        window.set_onboarding_guide_visible(true);
+        match super::sandbox::attach(&window, accept_directory.clone(), accept_model.clone()) {
+            Ok(runtime) => {
+                *accept_desktop.borrow_mut() = Some(runtime);
+            }
+            Err(error) => window.set_notice(error.to_string().into()),
+        }
+        if let Ok(locale) = LocaleId::new(&code) {
+            accept_dispatch(ShellCommand::SelectLanguage(locale));
+        }
+    });
+    let reject_window = window.as_weak();
+    window.on_onboarding_reject(move || {
+        if let Some(window) = reject_window.upgrade() {
+            let _ = window.hide();
+        }
     });
     let handler = dispatch.clone();
     let nav_window = window.as_weak();
@@ -256,6 +302,8 @@ impl Options {
             unity_directory: None,
             launcher_config: None,
         };
+        let mut explicit_data_directory = None;
+        let mut explicit_language = false;
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
@@ -297,7 +345,7 @@ impl Options {
                     if directory.is_empty() {
                         return Err("--data-dir must not be empty".into());
                     }
-                    options.data_directory = directory.into();
+                    explicit_data_directory = Some(directory.into());
                 }
                 Some("--translations-dir") => {
                     options.directory = Some(
@@ -308,6 +356,7 @@ impl Options {
                     )
                 }
                 Some("--language") => {
+                    explicit_language = true;
                     options.locale = LocaleId::new(
                         arguments
                             .next()
@@ -323,14 +372,20 @@ impl Options {
                 }
             }
         }
-        options.data_directory =
-            PortableDataRoot::resolve(if options.data_directory.as_os_str().is_empty() {
-                None
-            } else {
-                Some(&options.data_directory)
-            })?
-            .path()
-            .to_path_buf();
+        let root = neuromita::portable::PortableDataRoot::resolve(explicit_data_directory)?;
+        root.ensure_writable()?;
+        options.data_directory = root.into_path_buf();
+        if !explicit_language {
+            let path = options.data_directory.join("settings.json");
+            if path.exists() {
+                use neuromita::settings::{JsonSettingsRepository, Language, SettingsRepository};
+                let stored = JsonSettingsRepository::new(path).load()?;
+                options.locale = match stored.settings.interface.language {
+                    Language::Russian => LocaleId::russian(),
+                    Language::English => LocaleId::english(),
+                };
+            }
+        }
         Ok(options)
     }
 }

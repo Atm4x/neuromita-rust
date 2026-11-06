@@ -206,6 +206,31 @@ fn python_entry_text_values_are_supported_without_coercing_invalid_strings() {
 }
 
 #[test]
+fn python_prior_eula_consent_preserved_and_malformed_value_rejected() {
+    let current = baseline();
+    let preview = PythonSettingsMigration
+        .preview(
+            &source(json!({
+                "EULA_ACCEPTED": true
+            })),
+            &current,
+        )
+        .unwrap();
+    assert!(preview.transfer.stored().settings.onboarding.eula_accepted);
+    assert_eq!(preview.imported_keys, vec!["EULA_ACCEPTED"]);
+    assert!(
+        PythonSettingsMigration
+            .preview(
+                &source(json!({
+                    "EULA_ACCEPTED": "true"
+                })),
+                &current
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn fresh_target_is_created_even_when_python_values_match_initial_defaults() {
     let temp = Directory::new();
     let path = temp.path("new.json");
