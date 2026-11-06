@@ -100,6 +100,7 @@ fn export_is_a_complete_canonical_envelope() {
             "presets",
             "reminders",
             "speech",
+            "tools",
             "voice"
         ]
     );

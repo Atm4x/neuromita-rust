@@ -6,7 +6,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
+use super::{
+    AppSettings, PythonSettingsMigration, PythonSettingsPreview, SettingsError,
+    SettingsImportFormat, SettingsTransfer,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +59,14 @@ impl SettingsRepository for MemorySettingsRepository {
     }
 }
 
+/// Offline Python import outcome: a complete Rust transfer, preview and optional backup.
+/// Source bytes are read-only; the backup is the previous Rust settings document.
+#[derive(Debug)]
+pub struct PythonImportOutcome {
+    pub preview: PythonSettingsPreview,
+    pub backup_path: Option<PathBuf>,
+}
+
 pub struct JsonSettingsRepository {
     path: PathBuf,
 }
@@ -80,9 +91,88 @@ impl JsonSettingsRepository {
         format: SettingsImportFormat,
         bytes: &[u8],
     ) -> Result<SettingsTransfer, SettingsError> {
+        if format == SettingsImportFormat::Python {
+            return Ok(self.import_python(bytes)?.preview.transfer);
+        }
         let transfer = SettingsTransfer::prepare(format, bytes)?;
         atomic_write(&self.path, &transfer.encode()?)?;
         Ok(transfer)
+    }
+
+    pub fn preview_python(&self, bytes: &[u8]) -> Result<PythonSettingsPreview, SettingsError> {
+        let mut preview =
+            PythonSettingsMigration.preview(bytes, &self.python_import_baseline()?)?;
+        preview.changed |= !self.path.exists();
+        Ok(preview)
+    }
+
+    /// Intended only for a stopped application. Uses the settings writer lock
+    /// for read/prepare/backup/publish; repeated imports are no-ops.
+    pub fn import_python(&self, bytes: &[u8]) -> Result<PythonImportOutcome, SettingsError> {
+        let _lock = writer_lock(&self.path)?;
+        let baseline = self.python_import_baseline()?;
+        let mut preview = PythonSettingsMigration.preview(bytes, &baseline)?;
+        preview.changed |= !self.path.exists();
+        if !preview.changed {
+            return Ok(PythonImportOutcome {
+                preview,
+                backup_path: None,
+            });
+        }
+        let next_revision = baseline
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| SettingsError::Validation("settings revision exhausted".into()))?;
+        let mut updated = preview.transfer.stored().clone();
+        updated.revision = next_revision;
+        let transfer = SettingsTransfer::new(updated)?;
+        let encoded = transfer.encode()?;
+        let backup_path = if self.path.exists() {
+            Some(self.backup_for_python_import()?)
+        } else {
+            None
+        };
+        atomic_replace(&self.path, &encoded)?;
+        preview.transfer = transfer;
+        Ok(PythonImportOutcome {
+            preview,
+            backup_path,
+        })
+    }
+
+    fn python_import_baseline(&self) -> Result<StoredSettings, SettingsError> {
+        if self.path.exists() {
+            self.load()
+        } else {
+            Ok(StoredSettings {
+                revision: 0,
+                settings: AppSettings::initial_profile(),
+            })
+        }
+    }
+
+    fn backup_for_python_import(&self) -> Result<PathBuf, SettingsError> {
+        let original =
+            std::fs::read(&self.path).map_err(|error| SettingsError::Storage(error.to_string()))?;
+        let name = self
+            .path
+            .file_name()
+            .ok_or_else(|| SettingsError::Storage("settings path has no file name".into()))?;
+        let mut name = name.to_os_string();
+        name.push(format!(".pre-python-import-{}.bak", uuid::Uuid::new_v4()));
+        let backup_path = self.path.with_file_name(name);
+        let mut backup = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?;
+        let result = backup.write_all(&original).and_then(|_| backup.sync_all());
+        if let Err(error) = result {
+            drop(backup);
+            let _ = std::fs::remove_file(&backup_path);
+            return Err(SettingsError::Storage(error.to_string()));
+        }
+        Ok(backup_path)
     }
 }
 impl SettingsRepository for JsonSettingsRepository {
