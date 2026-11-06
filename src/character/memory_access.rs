@@ -21,6 +21,7 @@ pub struct CharacterMemorySnapshot {
     pub(crate) relations: Vec<MemoryRelation>,
     pub(crate) extracted_relations: Vec<ProvenancedRelation>,
     pub(crate) memory_revision: Option<EventId>,
+    pub(crate) context_epoch: u64,
     pub(crate) source_revisions: BTreeMap<crate::memory::MemoryId, u64>,
     pub(crate) selection: TimelineSelection,
 }
@@ -50,8 +51,8 @@ impl CharacterMemorySnapshot {
         &self.extracted_relations
     }
 
-    /// Opaque branch selection plus character-memory identity, without
-    /// treating unrelated Timeline appends as memory-edit conflicts.
+    /// Branch selection, character memory revision and context-reset epoch,
+    /// without treating unrelated Timeline appends as memory-edit conflicts.
     pub(crate) fn matches_version(&self, other: &Self) -> bool {
         self.character == other.character
             && self.selection == other.selection
@@ -60,6 +61,7 @@ impl CharacterMemorySnapshot {
             && self.relations == other.relations
             && self.extracted_relations == other.extracted_relations
             && self.memory_revision == other.memory_revision
+            && self.context_epoch == other.context_epoch
             && self.source_revisions == other.source_revisions
     }
 }
@@ -82,6 +84,7 @@ pub(crate) fn read_memory_snapshot(
     let relations = projection.relations();
     let extracted_relations = projection.extracted_relations_at(0);
     let memory_revision = super::projection::character_memory_revision_at(&world, character);
+    let context_epoch = timeline.admission(character, selection)?.context_epoch;
     let source_revisions = projection.source_revisions();
     Ok(CharacterMemorySnapshot {
         character,
@@ -90,6 +93,7 @@ pub(crate) fn read_memory_snapshot(
         relations,
         extracted_relations,
         memory_revision,
+        context_epoch,
         source_revisions,
         selection,
     })
@@ -118,7 +122,10 @@ pub(crate) fn edit_memory_snapshot(
         return Err(TimelineError::Invalid("hard deletion is not a user edit"));
     }
     let (selection, anchor, world) = timeline.selected_world_snapshot()?;
-    if selection != expected.selection || anchor.branch_id != expected.anchor.branch_id {
+    if selection != expected.selection
+        || anchor.branch_id != expected.anchor.branch_id
+        || timeline.admission(character, selection)?.context_epoch != expected.context_epoch
+    {
         return Err(TimelineError::ConcurrentWrite);
     }
     let memories = super::projection::character_memories_at(&world, character)?;
@@ -133,7 +140,13 @@ pub(crate) fn edit_memory_snapshot(
     }
     let changes = memories.resolve(commands).map_err(TimelineError::Invalid)?;
     if !changes.is_empty() {
-        timeline.append_character_memory_changes(character, selection, anchor, &changes)?;
+        timeline.append_character_memory_changes(
+            character,
+            selection,
+            anchor,
+            expected.context_epoch,
+            &changes,
+        )?;
     }
     Ok(MemoryEditResult {
         applied: changes,
@@ -243,6 +256,146 @@ mod tests {
         stop.cancel();
         for task in tasks {
             task.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn context_reset_invalidates_only_the_affected_character_memory_editor() {
+        use crate::{identity::EventId, timeline::domain::TimelineError};
+
+        let mut timeline = SessionTimeline::new();
+        let initial = super::read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+        let other = super::read_memory_snapshot(&timeline, CharacterId::Kind).unwrap();
+        let result = super::edit_memory_snapshot(
+            &mut timeline,
+            CharacterId::Crazy,
+            &initial,
+            &[MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "Retained across context reset".into(),
+            }],
+        )
+        .unwrap();
+        let stale = result.snapshot;
+        let id = stale.records()[0].id;
+        timeline
+            .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
+            .unwrap();
+        let fresh = super::read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+        assert_eq!(stale.records(), fresh.records());
+        assert_eq!(stale.memory_revision, fresh.memory_revision);
+        assert_ne!(stale.context_epoch, fresh.context_epoch);
+        assert_eq!(
+            super::edit_memory_snapshot(
+                &mut timeline,
+                CharacterId::Crazy,
+                &stale,
+                &[MemoryCommand::Forget { id }],
+            )
+            .err(),
+            Some(TimelineError::ConcurrentWrite),
+        );
+        assert_eq!(
+            super::read_memory_snapshot(&timeline, CharacterId::Crazy)
+                .unwrap()
+                .records()[0]
+                .state,
+            MemoryState::Active,
+        );
+        let unaffected = super::edit_memory_snapshot(
+            &mut timeline,
+            CharacterId::Kind,
+            &other,
+            &[MemoryCommand::Add {
+                priority: MemoryPriority::Normal,
+                content: "Independent".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(unaffected.snapshot.records().len(), 1);
+        let applied = super::edit_memory_snapshot(
+            &mut timeline,
+            CharacterId::Crazy,
+            &fresh,
+            &[MemoryCommand::Forget { id }],
+        )
+        .unwrap();
+        assert_eq!(applied.snapshot.records()[0].state, MemoryState::Forgotten);
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn reset_epoch_prevents_pre_restart_memory_snapshot_from_writing() {
+        use crate::{
+            identity::EventId,
+            timeline::{
+                TimelineConfig,
+                domain::{BranchId, SessionId, TimelineError},
+            },
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "neuromita-memory-epoch-{}.db",
+            uuid::Uuid::new_v4(),
+        ));
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let stale = {
+            let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let initial = super::read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+            let result = super::edit_memory_snapshot(
+                &mut timeline,
+                CharacterId::Crazy,
+                &initial,
+                &[MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "Durable".into(),
+                }],
+            )
+            .unwrap();
+            timeline
+                .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
+                .unwrap();
+            result.snapshot
+        };
+        {
+            let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: path.clone(),
+                session,
+                root,
+            })
+            .unwrap();
+            let id = stale.records()[0].id;
+            assert_eq!(
+                super::edit_memory_snapshot(
+                    &mut timeline,
+                    CharacterId::Crazy,
+                    &stale,
+                    &[MemoryCommand::Forget { id }],
+                )
+                .err(),
+                Some(TimelineError::ConcurrentWrite),
+            );
+            let fresh = super::read_memory_snapshot(&timeline, CharacterId::Crazy).unwrap();
+            assert_eq!(fresh.records()[0].content, "Durable");
+            assert_ne!(fresh.context_epoch, stale.context_epoch);
+            assert!(
+                super::edit_memory_snapshot(
+                    &mut timeline,
+                    CharacterId::Crazy,
+                    &fresh,
+                    &[MemoryCommand::Forget { id }],
+                )
+                .is_ok()
+            );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
 
