@@ -17,6 +17,7 @@ pub struct ToolSettings {
     pub calculator: bool,
     pub memory_search: bool,
     pub max_depth: u8,
+    pub web: super::web_tools::WebToolSettings,
 }
 
 impl Default for ToolSettings {
@@ -26,6 +27,7 @@ impl Default for ToolSettings {
             calculator: false,
             memory_search: true,
             max_depth: 2,
+            web: super::web_tools::WebToolSettings::default(),
         }
     }
 }
@@ -37,6 +39,7 @@ impl ToolSettings {
                 "tool depth cannot exceed four".into(),
             ));
         }
+        self.web.validate()?;
         Ok(())
     }
 
@@ -46,12 +49,22 @@ impl ToolSettings {
             && match name {
                 "calculator" => self.calculator,
                 "memory_search" => self.memory_search,
+                "web_search" => {
+                    self.web.enabled
+                        && self.web.search_enabled
+                        && self.web.search_endpoint.is_some()
+                }
+                "web_reader" => {
+                    self.web.enabled
+                        && self.web.reader_enabled
+                        && !self.web.reader_allowed_hosts.is_empty()
+                }
                 _ => false,
             }
     }
 
     pub fn available_names(&self) -> Vec<&'static str> {
-        ["calculator", "memory_search"]
+        ["calculator", "memory_search", "web_search", "web_reader"]
             .into_iter()
             .filter(|name| self.supports(name))
             .collect()
@@ -78,6 +91,16 @@ pub(crate) fn native_definitions(settings: &ToolSettings) -> Vec<Value> {
                 "Evaluate a bounded arithmetic expression (read-only)",
                 serde_json::json!({"expression":{"type":"string","maxLength":256}}),
                 vec!["expression"],
+            ),
+            "web_search" => (
+                "Search the web via a configured HTTPS SearXNG JSON endpoint (external untrusted results)",
+                serde_json::json!({"query":{"type":"string","maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":5}}),
+                vec!["query"],
+            ),
+            "web_reader" => (
+                "Read bounded HTML/text from an explicitly allowlisted HTTPS hostname (untrusted source)",
+                serde_json::json!({"url":{"type":"string","maxLength":2048}}),
+                vec!["url"],
             ),
             "memory_search" => (
                 "Search memories visible to the current character (read-only)",
@@ -114,6 +137,10 @@ pub(crate) fn advertisement(settings: &ToolSettings) -> Option<String> {
             "calculator" => {
                 instructions.push_str("calculator({expression: string, arithmetic only}); ")
             }
+            "web_search" => instructions
+                .push_str("web_search({query: string, limit?: 1..5}, opt-in HTTPS search); "),
+            "web_reader" => instructions
+                .push_str("web_reader({url: string}, explicitly allowlisted HTTPS host only); "),
             "memory_search" => instructions.push_str(
                 "memory_search({query: string, limit?: 1..10}, character-scoped memories); ",
             ),
@@ -123,7 +150,7 @@ pub(crate) fn advertisement(settings: &ToolSettings) -> Option<String> {
     Some(instructions)
 }
 
-pub(crate) fn execute(
+pub(crate) async fn execute(
     settings: &ToolSettings,
     name: &str,
     args: &Map<String, Value>,
@@ -134,6 +161,7 @@ pub(crate) fn execute(
         return Err(invalid("disabled or unknown tool"));
     }
     match name {
+        "web_search" | "web_reader" => super::web_tools::execute(&settings.web, name, args).await,
         "calculator" => {
             if args.len() != 1 {
                 return Err(invalid("expected expression only"));
@@ -378,6 +406,32 @@ mod tests {
         assert!(advertisement(&settings).unwrap().contains("calculator"));
         assert!(settings.supports("calculator"));
         assert!(!settings.supports("web_reader"));
+    }
+
+    #[test]
+    fn web_tools_are_explicitly_opt_in_and_advertised_only_when_valid() {
+        let mut settings = ToolSettings::default();
+        assert!(!settings.supports("web_search"));
+        assert!(!settings.supports("web_reader"));
+        settings.enabled = true;
+        settings.web.enabled = true;
+        settings.web.search_enabled = true;
+        settings.web.reader_enabled = true;
+        assert!(settings.validate().is_err());
+        settings.web.search_endpoint = Some("https://search.example.net/search".into());
+        settings.web.reader_allowed_hosts = vec!["docs.example.net".into()];
+        settings.validate().unwrap();
+        assert!(settings.supports("web_search"));
+        assert!(settings.supports("web_reader"));
+        assert!(advertisement(&settings).unwrap().contains("web_search"));
+        assert!(
+            native_definitions(&settings)
+                .iter()
+                .any(|schema| schema["name"] == "web_reader")
+        );
+        let serialized = serde_json::to_value(&settings).unwrap();
+        let restored: ToolSettings = serde_json::from_value(serialized).unwrap();
+        assert_eq!(settings, restored);
     }
 
     #[test]

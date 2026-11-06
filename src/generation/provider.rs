@@ -306,7 +306,8 @@ impl ResponseGenerator {
                 ));
             }
             let result =
-                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)?;
+                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)
+                    .await?;
             if let Some(origin) = tool_call.native_origin {
                 if !input.tool_history.is_empty() {
                     return Err(GenerationError::Response(

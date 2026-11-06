@@ -12,6 +12,7 @@ pub mod python_import;
 mod structured;
 mod tools;
 mod transforms;
+mod web_tools;
 pub use effects::ResponseEffect;
 pub use presets::{
     EnvironmentPresetCredentials, GeminiPresetDefinition, JsonPresetRepository, PresetCatalog,
@@ -25,6 +26,7 @@ pub use structured::{
 };
 pub use tools::ToolSettings;
 pub use transforms::{MessageTransform, apply_message_transforms};
+pub use web_tools::WebToolSettings;
 
 pub use provider::{
     GenerationError, GenerationInput, GenerationObserver, GenerationProvider, GenerationRequest,

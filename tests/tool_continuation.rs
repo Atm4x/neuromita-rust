@@ -332,3 +332,45 @@ async fn cancelling_tool_continuation_drops_unaccepted_result() {
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn web_reader_denies_internal_target_without_followup_or_effects() {
+    let _serial = SERIAL.lock().await;
+    let (app, mut rx) = start().await;
+    SettingsApi::edit::<ToolSettings>(|tools| {
+        tools.enabled = true;
+        tools.web.enabled = true;
+        tools.web.reader_enabled = true;
+        tools.web.reader_allowed_hosts = vec!["docs.rust-lang.org".into()];
+    })
+    .unwrap();
+    let before = CharacterApi::get(CharacterId::Crazy)
+        .unwrap()
+        .state()
+        .await
+        .unwrap();
+    let request = reply();
+    receive(&mut rx)
+        .await
+        .respond
+        .send(call(
+            "web_reader",
+            serde_json::json!({"url":"https://169.254.169.254/latest/meta-data/"}),
+        ))
+        .unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        CharacterApi::get(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        before.accepted_replies
+    );
+    app.shutdown().await.unwrap();
+}
