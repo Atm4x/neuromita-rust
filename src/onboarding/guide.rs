@@ -2,6 +2,60 @@
 //! The Rust catalog is the single source of truth for displayed guide pages.
 
 pub use crate::settings::GuideLevel;
+pub mod focus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideSection {
+    Start,
+    Voice,
+    Memory,
+    Vision,
+    Tools,
+    Finish,
+}
+
+impl GuideSection {
+    pub fn title(self, language: &str) -> &'static str {
+        let ru = language.eq_ignore_ascii_case("ru");
+        match (self, ru) {
+            (Self::Start, true) => "Начало",
+            (Self::Start, false) => "Getting started",
+            (Self::Voice, true) => "Голос и ввод",
+            (Self::Voice, false) => "Voice & input",
+            (Self::Memory, true) => "Память",
+            (Self::Memory, false) => "Memory",
+            (Self::Vision, true) => "Экран и камера",
+            (Self::Vision, false) => "Screen & camera",
+            (Self::Tools, true) => "Модели и песочница",
+            (Self::Tools, false) => "Models & sandbox",
+            (Self::Finish, true) => "Готово",
+            (Self::Finish, false) => "Finish",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuideSectionRange {
+    pub kind: GuideSection,
+    pub first_index: usize,
+    pub last_index: usize,
+}
+
+pub fn sections(level: GuideLevel) -> Vec<GuideSectionRange> {
+    let mut sections: Vec<GuideSectionRange> = Vec::new();
+    for (index, page) in pages(level).enumerate() {
+        let kind = page.section();
+        match sections.last_mut() {
+            Some(last) if last.kind == kind => last.last_index = index,
+            _ => sections.push(GuideSectionRange {
+                kind,
+                first_index: index,
+                last_index: index,
+            }),
+        }
+    }
+    sections
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GuidePage {
@@ -16,6 +70,18 @@ pub struct GuidePage {
 }
 
 impl GuidePage {
+    pub fn section(self) -> GuideSection {
+        match self.id {
+            "welcome" | "preset" => GuideSection::Start,
+            "voiceover" | "microphone" => GuideSection::Voice,
+            "memoryrag" | "memoryvector" | "memorygraph" => GuideSection::Memory,
+            "screencapture" | "camera" | "cameradependencies" => GuideSection::Vision,
+            "models" | "sandbox" => GuideSection::Tools,
+            "final" => GuideSection::Finish,
+            _ => unreachable!("unrecognized Guide page identity"),
+        }
+    }
+
     pub fn title(self, language: &str) -> &'static str {
         if language.eq_ignore_ascii_case("ru") {
             self.title_ru
@@ -30,6 +96,14 @@ impl GuidePage {
         } else {
             self.description_en
         }
+    }
+
+    pub fn image_crop(self) -> focus::ImageCrop {
+        focus::crop(self.id)
+    }
+
+    pub fn focus_steps(self) -> &'static [focus::FocusStep] {
+        focus::steps(self.id)
     }
 
     pub fn wiki_url(self, language: &str) -> Option<String> {
@@ -479,6 +553,37 @@ mod tests {
         assert!(welcome.wiki_url("ru").unwrap().ends_with("/ru/getting-started.md"));
         assert!(welcome.wiki_url("en").unwrap().ends_with("/en/getting-started.md"));
         assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
+    }
+
+    #[test]
+    fn sections_match_original_pyqt_order_for_all_levels() {
+        let basic = sections(GuideLevel::Basic);
+        assert_eq!(basic.len(), 2);
+        assert_eq!(basic[0], GuideSectionRange { kind: GuideSection::Start, first_index: 0, last_index: 1 });
+        assert_eq!(basic[1], GuideSectionRange { kind: GuideSection::Finish, first_index: 2, last_index: 2 });
+        assert_eq!(sections(GuideLevel::Advanced).len(), 3);
+        let full = sections(GuideLevel::Full);
+        assert_eq!(full.len(), 6);
+        assert_eq!(full[0].kind, GuideSection::Start);
+        assert_eq!(full[1].kind, GuideSection::Voice);
+        assert_eq!(full[2].kind, GuideSection::Memory);
+        assert_eq!(full[3].kind, GuideSection::Vision);
+        assert_eq!(full[4].kind, GuideSection::Tools);
+        assert_eq!(full[5].kind, GuideSection::Finish);
+        assert_eq!(full[5].last_index, count(GuideLevel::Full) - 1);
+        assert_eq!(full[2].kind.title("ru"), "Память");
+    }
+
+    #[test]
+    fn focus_catalog_is_attached_to_page_identity() {
+        let voiceover = page(GuideLevel::Advanced, 2).unwrap();
+        assert_eq!(voiceover.id, "voiceover");
+        assert_eq!(voiceover.focus_steps().len(), 16);
+        assert_eq!(voiceover.image_crop(), focus::ImageCrop::FULL);
+        let rag = page(GuideLevel::Full, 4).unwrap();
+        assert_eq!(rag.id, "memoryrag");
+        assert_eq!(rag.focus_steps().len(), 7);
+        assert!(rag.image_crop().top > 0.0);
     }
 
     #[test]

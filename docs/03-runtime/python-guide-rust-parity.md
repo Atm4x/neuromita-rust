@@ -33,10 +33,25 @@ recognizes `GUIDE_LEVEL` as exactly `basic`, `advanced`, or `full`. Old
 Restarting after EULA acceptance does not re-show the modal; users can reopen
 the Guide from Settings. The EULA consent field and acceptance flow are unchanged.
 
-**Not implemented:** per-control focus rectangles and hotspots, advanced
-image focus/crop hotspots, direct page-specific *local* Wiki navigation,
-contents menu / section progress, advanced keyboard/accessibility polish, and
-Windows GUI behavioral E2E. The Help button now links to the exact historical
+**D16 focus implementation:** All 64 original Python normalized focus rectangles
+and six screenshot crops are maintained in typed `guide/focus.rs` metadata,
+referenced by the canonical Rust page catalog. Slint `GuideMedia` uses native
+source clipping, aspect-ratio-preserving size, and correctly aligned overlays
+relative to the *cropped* screenshot. Users can select the numbered focus steps
+through keyboard-accessible buttons; the selected rectangle is highlighted and
+the zoomed screenshot is centered toward it. The image geometry and button list
+are not separately hardcoded in Slint.
+
+Section navigation now matches the six historical PyQt groups, with only
+groups visible for the current Guide level (Basic two, Advanced three, Full
+six). Each section tab jumps to its first page and indicates the current group.
+The ordered group ranges and RU/EN labels are computed in the same Rust page
+catalog, not duplicated in the UI.
+
+**Not implemented:** rich-text inline step links/hover, PyQt page-by-page
+progress segments and contents popup, full PyQt image toolbar parity (fit-width/actual-pixel-size,
+scrollbars and free panning), direct page-specific *local* Wiki navigation,
+advanced keyboard/accessibility E2E and Windows GUI behavioral E2E. The Help button now links to the exact historical
 RU/EN Wiki article for the current page using the pinned read-only Python
 documentation revision; pages without an article hide Help. Centered screenshot
 zoom is supported at 1×–2.5× with explicit buttons and clipping; this is not
@@ -55,3 +70,8 @@ D15 persistence checks: historical onboarding JSON compatibility, strict level
 round-trips, selected-level restart/EULA independence, presenter-owned mutation
 with observable revision, and GUI command/snapshot wiring. Visual acceptance
 still requires an adequately provisioned Slint GUI runner.
+
+D16 source reference: `Atm4x/NeuroMita@5f3d061f523d9abefa6a264bb2953048a935fa65`,
+`GuideWidget._STEP_TARGETS`, `IGuidePage.get_image_crop`.
+Do not treat these original Python screenshot hotspots as current Rust controls
+until interactive GUI acceptance confirms their usefulness.
