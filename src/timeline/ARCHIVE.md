@@ -260,3 +260,13 @@ of each MIME component must be an ASCII lowercase letter or digit;
 `image/jpg` cannot be used as an on-disk alias. Valid extensions such as
 `image/vnd.example` remain allowed. This does not enable unsupported
 image codecs or alter native AssetStore MIME rules.
+
+## Direct Python image content (B40)
+
+In addition to `attachments: [{type: image_ref, ...}]`, the verified Python
+archive schema allows `content` to contain one complete `image_ref` object.
+The native converter now represents that verified reference as a single
+ordered `TimelineMessagePart::Image`, without inventing an empty text part.
+Both source layouts use the same SHA-256/MIME/length verification. Combining
+a direct image reference with a second `attachments` array remains ambiguous
+and is rejected; arbitrary nested media objects are not silently accepted.
