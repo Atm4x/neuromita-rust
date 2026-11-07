@@ -1,0 +1,38 @@
+name: Agent B45 verified source patch return
+on:
+  push:
+    branches: [bridge/agent-b45-patch-20261107]
+    paths: [bridge/agent-b45.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify patch SHA and resulting tree, publish once
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=14a73bb5ca455539310cdbb52e9f8671aa918324
+          tree=ab28d6c63b87ffec92709457839bf73653829c9d
+          branch=codex/timeline-b45-historical-sse-anchor-20261107
+          base64 -d bridge/agent-b45.patch.gz.b64 > /tmp/b45.patch.gz
+          echo "14f1b84237aa612978e3b45bae5c9291e74bcd79582e95cfb7aeb1a7b9b264bb  /tmp/b45.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b45.patch.gz
+          gzip -dc /tmp/b45.patch.gz > /tmp/b45.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b45.patch
+          git apply --index /tmp/b45.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(timeline): reject mismatched generation anchors and certify historical SSE privacy"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "ref already exists"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "REMOTE_HEAD=$remote"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
