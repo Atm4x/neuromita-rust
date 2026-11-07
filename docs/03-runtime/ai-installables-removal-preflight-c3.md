@@ -75,3 +75,33 @@ speech settings record plugin choices rather than exact locked backend and
 overlay plans, so a separate verified manifest resolver is required. Activation
 coordination outside cooperating revision leases remains unproven. No token
 from this API authorizes rename, quarantine, physical delete or GUI Remove.
+
+## Persisted speech overlay inventory (C3.5)
+
+`InstalledSpeechEnvironment::persisted_speech_overlay_inventory` resolves the
+currently selected local TTS and ASR plugins directly from typed persisted
+`SpeechSettings`, the *actual* executable plugin manifests and the unique
+installed immutable overlay receipt. It never executes plugin code, probes
+Python or changes an installation. Any invalid discovery result, missing
+selected plugin, ambiguous overlay revision or invalid receipt is an explicit
+error rather than an empty set of references.
+
+`removal::inspect_overlay_with_persisted_speech` holds the
+application-owned persisted-settings freeze while resolving those selections,
+then acquires the target exclusive revision lease and assesses exact selected
+speech overlays. Its return value retains the settings, portable-root and
+revision guards. Tests prove that an actually selected TTS overlay is reported
+as `SelectedBy(Tts)` without trusting a caller-provided `configured: []`, and
+that the result changes only after a settings edit has been saved and a new
+freeze is acquired. Foreign portable roots are refused.
+
+**Scope is deliberately narrow.** An overlay receipt does not attest which
+backend revision an executable Python plugin requires. The inventory therefore
+returns the explicit `unresolved_backend_services` collection for every
+selected local speech service, and its `ServiceSelection.backends` is empty
+only as an unresolved placeholder, **never** evidence that a backend is unused.
+Non-speech services (Embedding/Reranker/Beats), foreign direct filesystem
+writers, and crash-recoverable quarantine remain outside this proof. No
+physical deletion or GUI Remove is enabled. A future backend inventory must
+pin the exact installed plan and protect its production-to-activation binding
+before it can be used by a destructive operation.

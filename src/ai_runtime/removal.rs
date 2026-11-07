@@ -17,6 +17,7 @@ use super::{
     AiService,
     backend::{BackendInstaller, LockedBackend},
     composition::ServiceSelection,
+    installed_speech::InstalledSpeechEnvironment,
     layer::{LayerError, reject_unsafe_layer_receipt},
     overlay::{LockedOverlay, OverlayInstaller},
     revision_lease::RevisionLease,
@@ -137,6 +138,65 @@ pub(crate) fn inspect_overlay_with_frozen_settings<'a>(
         persisted_revision: frozen.snapshot().revision,
         _settings: frozen,
         _layers: inspection,
+    })
+}
+
+/// An overlay-only persisted selection diagnosis. This cannot attest to
+/// non-speech services or backend dependencies, and is never delete authority.
+#[allow(dead_code)]
+pub(crate) struct ResolvedSpeechOverlayInspection<'a> {
+    pub(crate) inspected: FrozenRemovalInspection<'a>,
+    pub(crate) unresolved_backend_services: Vec<AiService>,
+}
+
+/// Unlike caller-supplied ServiceSelection snapshots, this entry point derives
+/// TTS and ASR overlay references from frozen persisted settings and verified
+/// installed overlay receipts. No Python install-plan code is executed.
+#[allow(dead_code)]
+pub(crate) async fn inspect_overlay_with_persisted_speech<'a>(
+    root_owner: &'a SettingsInstanceLease,
+    settings: &'a SettingsOwner,
+    data_root: &Path,
+    environment: &InstalledSpeechEnvironment,
+    installer: &OverlayInstaller,
+    overlay: &LockedOverlay,
+    running: &[ActiveWorkerLayers],
+) -> Result<ResolvedSpeechOverlayInspection<'a>, LayerError> {
+    let frozen = settings
+        .freeze_persisted_for_root(root_owner)
+        .map_err(|error| {
+            LayerError::Invalid(format!("cannot freeze persisted selections: {error}"))
+        })?;
+    if environment.data_directory.canonicalize()? != data_root.canonicalize()? {
+        return Err(LayerError::Invalid(
+            "speech inventory and removal root differ".into(),
+        ));
+    }
+    let resolved = environment
+        .persisted_speech_overlay_inventory(&frozen.snapshot().values.speech)
+        .await
+        .map_err(|error| {
+            LayerError::Invalid(format!(
+                "selected speech overlay inventory is not authoritative: {error}"
+            ))
+        })?;
+    let layers = inspect_overlay_with_root(
+        root_owner,
+        data_root,
+        installer,
+        overlay,
+        &resolved.selected,
+        running,
+    )?;
+    let inspected = FrozenRemovalInspection {
+        assessment: layers.assessment.clone(),
+        persisted_revision: frozen.snapshot().revision,
+        _settings: frozen,
+        _layers: layers,
+    };
+    Ok(ResolvedSpeechOverlayInspection {
+        inspected,
+        unresolved_backend_services: resolved.unresolved_backends,
     })
 }
 
@@ -434,6 +494,119 @@ mod tests {
         drop(settings);
         drop(root_owner);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinned_speech_overlay_references_come_from_frozen_persisted_settings() {
+        use crate::lifecycle::Lifecycle;
+        use crate::settings::{
+            AppSettings, LeasedJsonSettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsRepository, SettingsSource, SpeechSettings, TtsBackend,
+        };
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let (root, _, overlays) = managed_installers();
+        let plugin = root.join("AIData/plugins/builtin/tts_one");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("plugin.json"),
+            r#"{"id":"tts_one","name":"TTS One","kind":"tts","api_version":1,"entrypoint":"plugin.py"}"#,
+        ).unwrap();
+        std::fs::write(plugin.join("plugin.py"), "class Plugin: pass").unwrap();
+
+        let root_owner = Arc::new(SettingsInstanceLease::acquire(&root).unwrap());
+        let repository: Arc<dyn SettingsRepository> = Arc::new(LeasedJsonSettingsRepository::new(
+            root.join("settings.json"),
+            Arc::clone(&root_owner),
+        ));
+        let mut initial = AppSettings::initial_profile();
+        initial.speech.tts.enabled = true;
+        initial.speech.tts.backend = TtsBackend::Local;
+        initial.speech.tts.local_model_id = "tts_one".into();
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository,
+        })
+        .await
+        .unwrap();
+        let settings = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(lifecycle.run(stop.clone()));
+        settings.flush().await.unwrap();
+
+        let environment = InstalledSpeechEnvironment::for_desktop(root.clone());
+        let chosen = overlay("tts_one");
+        let path = overlays.installed_path(&chosen).unwrap();
+        let diagnosis = inspect_overlay_with_persisted_speech(
+            &root_owner,
+            &settings,
+            &root,
+            &environment,
+            &overlays,
+            &chosen,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(diagnosis.inspected.persisted_revision, 0);
+        assert_eq!(
+            diagnosis.inspected.assessment.blockers,
+            vec![RemovalBlocker::SelectedBy(AiService::Tts)],
+        );
+        assert_eq!(diagnosis.unresolved_backend_services, vec![AiService::Tts]);
+        assert_eq!(
+            RevisionLease::shared(&path).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock,
+        );
+        assert!(matches!(
+            settings.edit::<SpeechSettings>(|speech| speech.tts.enabled = false),
+            Err(crate::settings::SettingsError::MaintenanceActive)
+        ));
+        drop(diagnosis);
+        settings
+            .edit::<SpeechSettings>(|speech| speech.tts.enabled = false)
+            .unwrap();
+        settings.flush().await.unwrap();
+        let diagnosis = inspect_overlay_with_persisted_speech(
+            &root_owner,
+            &settings,
+            &root,
+            &environment,
+            &overlays,
+            &chosen,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(diagnosis.inspected.assessment.blockers.is_empty());
+        assert!(diagnosis.unresolved_backend_services.is_empty());
+        drop(diagnosis);
+
+        let foreign_root =
+            std::env::temp_dir().join(format!("nm-foreign-speech-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        let foreign = InstalledSpeechEnvironment::for_desktop(foreign_root.clone());
+        assert!(matches!(
+            inspect_overlay_with_persisted_speech(
+                &root_owner,
+                &settings,
+                &root,
+                &foreign,
+                &overlays,
+                &chosen,
+                &[],
+            )
+            .await,
+            Err(LayerError::Invalid(_)),
+        ));
+        settings.request_save().unwrap();
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        drop(settings);
+        drop(root_owner);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(foreign_root).unwrap();
     }
 
     #[tokio::test]
