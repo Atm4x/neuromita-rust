@@ -27,7 +27,8 @@ use neuromita::{
     settings::{AsrPreferences, PresetId, PresetSelection, TtsBackend, TtsPreferences, Volume},
     telegram_sidecar::TelethonSession,
     telegram_voice::{
-        DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramVoiceService,
+        DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramError,
+        TelegramVoiceService,
     },
 };
 use tokio::sync::mpsc;
@@ -310,6 +311,35 @@ async fn start(
         .map_err(|e| e.to_string())
 }
 
+async fn open_telegram_session(
+    directory: &std::path::Path,
+    api_id: &str,
+    api_hash: &str,
+    phone: &str,
+) -> Result<(Arc<TelethonSession>, bool), String> {
+    let id = api_id
+        .parse::<u32>()
+        .map_err(|_| "Некорректный API ID".to_owned())?;
+    let python = std::env::var("NEUROMITA_PYTHON").unwrap_or_else(|_| {
+        if cfg!(windows) { "python".into() } else { "python3".into() }
+    });
+    let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
+        });
+    let session = TelethonSession::spawn(std::path::Path::new(&python), &script)
+        .map_err(|e| e.to_string())?;
+    let authorized = session
+        .connect(id, api_hash, phone, &directory.join("telegram-user"))
+        .await
+        .map_err(|e| e.to_string())?;
+    if !authorized {
+        session.request_code().await.map_err(|e| e.to_string())?;
+    }
+    Ok((session, authorized))
+}
+
 async fn activate_telegram_voice(
     administration: &GuiPresenter,
     router: &Arc<DynamicTelegramVoice>,
@@ -415,6 +445,52 @@ async fn observe(
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
     let mut telegram_session: Option<Arc<TelethonSession>> = None;
+    // API credentials are intentionally never persisted as plain-text app
+    // settings. Explicit environment credentials permit opt-in startup
+    // rehydration of the protected Telethon session.
+    let telegram_auto_connect = administration
+        .settings
+        .snapshot()
+        .ok()
+        .is_some_and(|s| {
+            let tts = &s.values.speech.tts;
+            tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect
+        });
+    if telegram_auto_connect {
+        let credentials = (
+            std::env::var("NEUROMITA_TG_API_ID"),
+            std::env::var("NEUROMITA_TG_API_HASH"),
+            std::env::var("NEUROMITA_TG_PHONE"),
+        );
+        match credentials {
+            (Ok(id), Ok(hash), Ok(phone)) => {
+                match open_telegram_session(directory, &id, &hash, &phone).await {
+                    Ok((session, authorized)) => {
+                        if authorized {
+                            match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
+                                Ok(()) => publish(Update::TelegramAuth {
+                                    phase: 3,
+                                    status: "Telegram: сессия восстановлена".into(),
+                                }),
+                                Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
+                            }
+                        } else {
+                            publish(Update::TelegramAuth {
+                                phase: 1,
+                                status: "Telegram: ожидается код входа".into(),
+                            });
+                        }
+                        telegram_session = Some(session);
+                    }
+                    Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
+                }
+            }
+            _ => publish(Update::TelegramAuth {
+                phase: 0,
+                status: "Telegram: автоподключение требует NEUROMITA_TG_API_ID, NEUROMITA_TG_API_HASH и NEUROMITA_TG_PHONE".into(),
+            }),
+        }
+    }
     let mut character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -467,7 +543,13 @@ async fn observe(
         refresh_views = true;
         tokio::select! {
             biased;
-            _ = stop.cancelled() => return Ok(()),
+            _ = stop.cancelled() => {
+                telegram_voice.clear().await;
+                if let Some(session) = telegram_session.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), session.disconnect()).await;
+                }
+                return Ok(());
+            },
             command = receive.recv() => match command {
                 Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
@@ -495,31 +577,23 @@ async fn observe(
                     }
                 },
                 Some(Command::TelegramConnect { api_id, api_hash, phone }) => {
-                    let result = async {
-                        let id = api_id.parse::<u32>().map_err(|_| "Некорректный API ID".to_owned())?;
-                        let python = std::env::var("NEUROMITA_PYTHON").unwrap_or_else(|_| {
-                            if cfg!(windows) { "python".into() } else { "python3".into() }
-                        });
-                        let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py"));
-                        let new_session = TelethonSession::spawn(std::path::Path::new(&python), &script)
-                            .map_err(|e| e.to_string())?;
-                        let authorized = new_session.connect(id, &api_hash, &phone, &directory.join("telegram-user"))
-                            .await.map_err(|e| e.to_string())?;
-                        if authorized {
-                            activate_telegram_voice(administration, telegram_voice, new_session.clone()).await?;
-                            Ok((new_session, 3, "Telegram: подключён".to_owned()))
-                        } else {
-                            new_session.request_code().await.map_err(|e| e.to_string())?;
-                            Ok((new_session, 1, "Telegram: ожидается код".to_owned()))
-                        }
-                    }.await;
+                    // Invalidate an old provider before changing account/session.
+                    telegram_voice.clear().await;
+                    if let Some(old) = telegram_session.take() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), old.disconnect()).await;
+                    }
+                    let result = open_telegram_session(directory, &api_id, &api_hash, &phone).await;
                     match result {
-                        Ok((session, phase, status)) => {
-                            if let Some(old) = telegram_session.replace(session) {
-                                let _ = old.disconnect().await;
-                            }
+                        Ok((session, authorized)) => {
+                            let (phase, status) = if authorized {
+                                match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
+                                    Ok(()) => (3, "Telegram: подключён".to_owned()),
+                                    Err(error) => (0, error),
+                                }
+                            } else {
+                                (1, "Telegram: ожидается код".to_owned())
+                            };
+                            telegram_session = Some(session);
                             publish(Update::TelegramAuth { phase, status });
                         }
                         Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
@@ -532,6 +606,18 @@ async fn observe(
                             Ok(false) => match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
                                 Ok(()) => publish(Update::TelegramAuth { phase: 3, status: "Telegram: подключён".into() }),
                                 Err(error) => publish(Update::TelegramAuth { phase: 1, status: error }),
+                            },
+                            Err(TelegramError::ExpiredCode) => {
+                                match session.request_code().await {
+                                    Ok(()) => publish(Update::TelegramAuth {
+                                        phase: 1,
+                                        status: "Telegram: код истёк, запрошен новый".into(),
+                                    }),
+                                    Err(error) => publish(Update::TelegramAuth {
+                                        phase: 0,
+                                        status: error.to_string(),
+                                    }),
+                                }
                             },
                             Err(error) => publish(Update::TelegramAuth { phase: 1, status: error.to_string() }),
                         }
