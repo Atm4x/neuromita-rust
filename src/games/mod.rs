@@ -5,6 +5,7 @@
 //! sanitized public facts and the read-only projections handed to the model.
 
 pub mod api;
+pub mod chess;
 pub mod seabattle;
 mod session;
 
