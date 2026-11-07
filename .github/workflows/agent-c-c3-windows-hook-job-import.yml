@@ -1,0 +1,52 @@
+name: Agent C C3 Windows gated installer hook native crash verification
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-windows-hook-job-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-windows-hook-job-20261107
+          fetch-depth: 0
+      - name: Verify incremental bundle and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=2502d894b9d8e70c64f59d38724d1429fb24b50a
+          HEAD=edf2ebd9ec352f9709f27ad364c69307a34dd08c
+          TARGET=codex/ai-platform-hub-c3-windows-hook-job-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-windows-hook-job.bundle.b64 > /tmp/c3-windows-hook-job.bundle
+          echo 'e79b00666670833fcbb5a7ad3b1db9c47c6f5d9c27c00958bedf45bddd2245ac  /tmp/c3-windows-hook-job.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-windows-hook-job.bundle
+          git fetch --no-tags /tmp/c3-windows-hook-job.bundle "HEAD:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows-native-hook-owner:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-windows-hook-job-20261107
+          fetch-depth: 1
+      - name: Rust 1.98.1 actual Python hook and descendant owner-crash tests
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          python --version
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::assets::generation::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_job_terminates_real_python_worker_after_rust_owner_is_killed -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::windows_uv_job::tests -- --nocapture
