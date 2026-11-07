@@ -886,8 +886,9 @@ async fn client(
                                 let media = BeatRuntime::read_source(&path);
                                 match media {
                                     Ok(bytes) => {
+                                        let request_id_string = request_id.to_string();
                                         let job = MusicJob {
-                                            request_id: &request_id.to_string(),
+                                            request_id: &request_id_string,
                                             track_name: &track_name,
                                             audio_path: &audio_path,
                                             stream,
