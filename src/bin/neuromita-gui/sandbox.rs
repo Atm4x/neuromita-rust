@@ -95,22 +95,6 @@ pub fn attach(
 
     bind_chat_actions(window, dispatch.clone(), selection_revision.clone());
     let send = dispatch.clone();
-    let weak = window.as_weak();
-    let revision = selection_revision.clone();
-    window.on_chat_cancel(move |id| {
-        let Some(window) = weak.upgrade() else {
-            return;
-        };
-        match (
-            current_origin(&window, &revision),
-            uuid::Uuid::parse_str(&id),
-        ) {
-            (Some(origin), Ok(id)) => send(Command::Cancel(origin, RequestId(id))),
-            (None, _) => window.set_chat_error("Unknown chat character selection".into()),
-            (_, Err(error)) => window.set_chat_error(error.to_string().into()),
-        }
-    });
-    let send = dispatch.clone();
     window.on_chat_refresh(move || send(Command::Refresh));
     window.on_chat_set_volume(move |value| {
         if let Ok(value) = u8::try_from(value) {
@@ -181,6 +165,22 @@ pub(super) fn bind_chat_actions(
             character,
             selection_revision: next,
         }));
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_cancel(move |id| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        match (
+            current_origin(&window, &revision),
+            uuid::Uuid::parse_str(&id),
+        ) {
+            (Some(origin), Ok(id)) => send(Command::Cancel(origin, RequestId(id))),
+            (None, _) => window.set_chat_error("Unknown chat character selection".into()),
+            (_, Err(error)) => window.set_chat_error(error.to_string().into()),
+        }
     });
 }
 
