@@ -488,7 +488,8 @@ async fn search_history_semantic_with_window(
     if !matches!(mode, FusionMode::VectorOnly) {
         buckets.push(lexical_bucket(character, view, &messages, query));
     }
-    let hits = fuse(character, &buckets, fusion)?;
+    let mut hits = fuse(character, &buckets, fusion)?;
+    retriever.rerank_fused(query, &mut hits).await?;
     Ok(finish(
         view,
         messages.is_empty(),

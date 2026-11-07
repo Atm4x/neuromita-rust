@@ -336,3 +336,115 @@ async fn live_history_fts_is_a_separate_user_visible_read_only_selection() {
         Err(HistorySearchApiError::Unavailable)
     ));
 }
+
+struct PausedHistoryReranker {
+    started: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+    pause_once: Mutex<bool>,
+}
+
+impl PausedHistoryReranker {
+    fn new() -> Self {
+        Self {
+            started: Arc::new(tokio::sync::Notify::new()),
+            resume: Arc::new(tokio::sync::Notify::new()),
+            pause_once: Mutex::new(true),
+        }
+    }
+}
+
+impl neuromita::knowledge::reranking::RerankProvider for PausedHistoryReranker {
+    fn score<'a>(
+        &'a self,
+        _query: &'a str,
+        candidates: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        Box::pin(async move {
+            let pause = {
+                let mut once = self.pause_once.lock().unwrap();
+                std::mem::take(&mut *once)
+            };
+            if pause {
+                self.started.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(candidates
+                .iter()
+                .map(|candidate| {
+                    if candidate.contains("painting") {
+                        0.9
+                    } else {
+                        0.1
+                    }
+                })
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn local_reranked_history_rejects_stale_timeline_after_model_await() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let embeddings = Arc::new(PausedEmbedding::new());
+    *embeddings.pause_once.lock().unwrap() = false;
+    let reranker = Arc::new(PausedHistoryReranker::new());
+    let retriever = Arc::new(
+        SemanticMemoryRetriever::new(embeddings, 16)
+            .unwrap()
+            .with_reranker(
+                reranker.clone(),
+                neuromita::knowledge::reranking::RerankPolicy {
+                    alpha: 1.0,
+                    limit: 3,
+                },
+            )
+            .unwrap(),
+    );
+    let app =
+        ApplicationLifecycle::start(application_config(KnowledgeRetrieval::semantic(retriever)))
+            .await
+            .unwrap();
+    let tea = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("tea in kitchen".into()).unwrap(),
+    )
+    .unwrap();
+    let painting = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("oil painting".into()).unwrap(),
+    )
+    .unwrap();
+    let pending = tokio::spawn(async {
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::Union, None).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), reranker.started.notified())
+        .await
+        .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("recent event that invalidates the captured prefix".into()).unwrap(),
+    )
+    .unwrap();
+    reranker.resume.notify_one();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(HistorySearchApiError::StaleSelection)
+    ));
+    let refreshed =
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::Union, None)
+            .await
+            .unwrap();
+    assert_eq!(refreshed.status, HistorySearchStatus::Selected);
+    assert_eq!(refreshed.hits[0].key.id, painting.0.to_string());
+    assert!(
+        refreshed
+            .hits
+            .iter()
+            .any(|hit| hit.key.id == tea.0.to_string())
+    );
+    assert_eq!(refreshed.hits[0].metadata["role"], "user");
+    app.shutdown().await.unwrap();
+}

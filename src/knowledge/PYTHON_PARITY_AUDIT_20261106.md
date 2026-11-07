@@ -142,3 +142,28 @@ It eliminates the previous same-message duplication but is **not exact Python pa
 Checked pinned Python `Atm4x/NeuroMita@5f3d061f523d9abefa6a264bb2953048a935fa65`, specifically `src/controllers/history_controller.py` (`_prepare_for_prompt_locked`, `_archive_out_of_window`) and `src/managers/history_manager.py` (`save_missed_history`, `apply_history_ttl_cleanup`, `clear_history`). The normal SQLite path loads active history then selects a bounded prompt tail. When compression is enabled, `_archive_out_of_window` archives **summarized** rows, but preserves unsummarized overflow for later compression; when disabled, overflow can also be archived. TTL separately soft-archives expired active rows. A history reset marks rows inactive **and deleted**, so they must not reappear in RAG.
 
 Crucially, `_prepare_for_prompt_locked` first checks `services().get_optional(TimelineContext)`: if present it obtains `timeline_context.unsummarized(...)` and returns an already bounded projection **without** executing the SQLite archive branch of that invocation. This means persisted `history.is_active=0` is an accurate SQLite-RAG query condition, but is **not** sufficient evidence that every active Python runtime call takes the same archival side effects; TimelineContext registration and invocation need an independent runtime trace. Copying Python's mutable `is_active` flag into Rust would create a second authority and is deferred. Rust cycle 20's active/archive split remains a read-only one-Timeline projection, not a claimed one-to-one Python lifecycle implementation.
+
+## Shared configured Memory/History reranking (Agent A Cycle32)
+
+The existing `SemanticMemoryRetriever::with_reranker` configures one optional
+model-backed rerank provider and bounded scoring policy. Both memory retrieval
+and explicit semantic History selection now apply that **same** provider after
+source validation and deterministic vector/keyword fusion. The History result
+keeps the original EventId, branch/through, visibility, rank evidence, metadata,
+embedding-space identity and embedding cost; the reranker may only reorder the
+admitted bounded prefix. A provider or malformed-score failure rejects the
+entire selected query; neither the lexical History API nor unreranked semantic
+hits are substituted. If no reranker was configured, behavior stays unchanged.
+
+The local `HistorySearchApi::inspect_semantic` checks a fresh owner anchor
+**after** all embedding and reranking awaits, so a Timeline change during the
+reranker call does not expose stale results. Tests: `rag_history_vector`
+(model-scoped source identity, ordering, fail-closed errors, zero foreign scope),
+`rag_history_api` (live stale-completion rejection), and existing
+`ai_rag_reranking` (bounded policy + score validation).
+
+**R5 remains PARTIAL.** This is one real production-boundary parity gap closed,
+not complete Python mode/source selection, explicit Python `is_active`
+semantics, all-source cross-encoder ranking, automatic Reply/React/Initiate
+composition or end-to-end configuration UX. In particular, this does not
+introduce a separate stored index or a second history owner.

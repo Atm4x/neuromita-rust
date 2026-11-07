@@ -580,3 +580,139 @@ async fn vector_archived_window_only_embeds_excluded_history_and_never_active() 
     .unwrap();
     assert_eq!(none.status, HistorySearchStatus::EmptyCorpus);
 }
+
+struct HistoryReranker {
+    calls: AtomicUsize,
+    fail: bool,
+}
+
+impl neuromita::knowledge::reranking::RerankProvider for HistoryReranker {
+    fn score<'a>(
+        &'a self,
+        _query: &'a str,
+        candidates: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if self.fail {
+                return Err(EmbeddingError::Transport("history reranker offline".into()));
+            }
+            Ok(candidates
+                .iter()
+                .map(|content| {
+                    if content.contains("painting") {
+                        0.95
+                    } else {
+                        0.05
+                    }
+                })
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn configured_history_reranker_reorders_fused_evidence_without_losing_identity() {
+    let fixture = Arc::new(Fixture::new("model-one", Fault::None));
+    let reranker = Arc::new(HistoryReranker {
+        calls: AtomicUsize::new(0),
+        fail: false,
+    });
+    let retriever = SemanticMemoryRetriever::new(fixture, 32)
+        .unwrap()
+        .with_reranker(
+            reranker.clone(),
+            neuromita::knowledge::reranking::RerankPolicy {
+                alpha: 1.0,
+                limit: 2,
+            },
+        )
+        .unwrap();
+    let (mut repo, branch) = fixture_timeline();
+    let tea = append(&mut repo, branch, &[CharacterId::Crazy], "tea in kitchen");
+    let painting = append(&mut repo, branch, &[CharacterId::Crazy], "oil painting");
+    let view = messages(&repo, branch, CharacterId::Crazy);
+    let selected = search_history_semantic(
+        &retriever,
+        CharacterId::Crazy,
+        &view,
+        "warm",
+        HistorySearchConfig::default(),
+        FusionMode::Union,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(selected.hits.len(), 2);
+    assert_eq!(selected.hits[0].key.id, painting.0.to_string());
+    assert_eq!(selected.hits[1].key.id, tea.0.to_string());
+    assert!(selected.hits[0].score > selected.hits[1].score);
+    assert_eq!(selected.hits[0].metadata["branch_id"], branch.0.to_string());
+    assert_eq!(selected.hits[0].evidence[0].method, RetrievalMethod::Vector);
+    assert_eq!(selected.hits[0].content, "oil painting");
+    assert_eq!(selected.hits[1].content, "tea in kitchen");
+
+    let kind_view = messages(&repo, branch, CharacterId::Kind);
+    let empty = search_history_semantic(
+        &retriever,
+        CharacterId::Kind,
+        &kind_view,
+        "warm",
+        HistorySearchConfig::default(),
+        FusionMode::Union,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty.status, HistorySearchStatus::EmptyCorpus);
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn history_reranker_failure_is_explicit_and_never_uses_lexical_fallback() {
+    let fixture = Arc::new(Fixture::new("model-one", Fault::None));
+    let reranker = Arc::new(HistoryReranker {
+        calls: AtomicUsize::new(0),
+        fail: true,
+    });
+    let retriever = SemanticMemoryRetriever::new(fixture, 32)
+        .unwrap()
+        .with_reranker(
+            reranker.clone(),
+            neuromita::knowledge::reranking::RerankPolicy {
+                alpha: 0.75,
+                limit: 2,
+            },
+        )
+        .unwrap();
+    let (mut repo, branch) = fixture_timeline();
+    append(&mut repo, branch, &[CharacterId::Crazy], "tea in kitchen");
+    let view = messages(&repo, branch, CharacterId::Crazy);
+    assert!(matches!(
+        search_history_semantic(
+            &retriever,
+            CharacterId::Crazy,
+            &view,
+            "tea",
+            HistorySearchConfig::default(),
+            FusionMode::Union,
+            None,
+        )
+        .await,
+        Err(HistorySearchError::Embedding(EmbeddingError::Transport(_)))
+    ));
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        search_history(
+            CharacterId::Crazy,
+            &view,
+            "tea",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .hits
+        .len(),
+        1
+    );
+}

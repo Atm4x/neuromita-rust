@@ -202,6 +202,19 @@ impl SemanticMemoryRetriever {
         Ok(self)
     }
 
+    /// Apply the single configured reranker to any already-validated, character-scoped
+    /// fusion output. Memory and History share the same provider and strict error policy.
+    pub(crate) async fn rerank_fused(
+        &self,
+        query: &str,
+        hits: &mut [super::retrieval_fusion::FusedHit],
+    ) -> Result<(), EmbeddingError> {
+        if let Some((provider, policy)) = &self.reranker {
+            rerank_prefix(provider.as_ref(), query, hits, *policy).await?;
+        }
+        Ok(())
+    }
+
     /// Read-only, model-space scoped inspection of the derived in-memory index.
     /// Never materializes memory text, vectors, or provider secrets.
     pub fn preview_cache_clear(&self) -> EmbeddingCachePreview {
@@ -611,9 +624,7 @@ impl SemanticMemoryRetriever {
         }
         let mut fused = fuse(character, &buckets, config)
             .map_err(|error| EmbeddingError::Response(error.to_string()))?;
-        if let Some((provider, policy)) = &self.reranker {
-            rerank_prefix(provider.as_ref(), &query, &mut fused, *policy).await?;
-        }
+        self.rerank_fused(query, &mut fused).await?;
         let by_id = memories
             .iter()
             .map(|memory| (memory.id.0.to_string(), memory))
