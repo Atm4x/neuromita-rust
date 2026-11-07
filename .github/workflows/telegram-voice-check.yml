@@ -27,7 +27,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Compile Slint Telegram GUI integration
         run: cargo +1.92.0 check --locked --offline --features gui --bin neuromita-gui
-      - name: Unit and integration tests
-        run: cargo test --locked --offline
+      - name: Telegram focused tests
+        run: cargo test --locked --offline telegram_
       - name: Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Full unit and integration suite
+        run: cargo test --locked --offline
