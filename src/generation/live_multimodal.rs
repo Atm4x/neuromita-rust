@@ -39,7 +39,8 @@ impl LiveMedia {
         assets: Option<&TimelineAssetStore>,
         dialect: LiveDialect,
     ) -> Result<Option<Self>, GenerationError> {
-        if conversation.source_anchor.branch_id != view.branch.0
+        if conversation.source_observer != view.observer()
+            || conversation.source_anchor.branch_id != view.branch.0
             || conversation.source_anchor.through != view.through
         {
             return Err(GenerationError::Response(
@@ -301,8 +302,9 @@ mod tests {
 
     fn conversation(view: &MitaView) -> LlmConversation {
         let (messages, _) =
-            super::super::conversation::project_history(view, CharacterId::Crazy, None);
+            super::super::conversation::project_history(view, view.observer(), None);
         LlmConversation {
+            source_observer: view.observer(),
             source_anchor: crate::timeline::ContextAnchor {
                 branch_id: view.branch.0,
                 through: view.through,
@@ -792,6 +794,61 @@ mod tests {
             .is_some()
         );
         assert!(super::super::multimodal::visible_multimodal_messages(&view).is_err());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn matching_branch_and_head_from_another_observer_is_rejected() {
+        let root = std::env::temp_dir().join(format!("nm-media-observer-{}", Uuid::new_v4()));
+        let assets = TimelineAssetStore::new(root.join("assets"), 1024).unwrap();
+        let image = assets.import("image/png", Cursor::new(b"shared")).unwrap();
+        let mut repo = TimelineStore::new();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let mut draft = EventDraft::new(EventKind::PlayerMessage);
+        draft
+            .observers
+            .extend([CharacterId::Crazy, CharacterId::Kind]);
+        draft.actor = Some("player".into());
+        draft
+            .payload
+            .insert("content".into(), json!([{"type":"image", "asset":image}]));
+        repo.append(branch, 0, "shared", json!({}), vec![draft])
+            .unwrap();
+        let first =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+        let second =
+            TimelineMessageQueries::capture(&repo, branch, CharacterId::Kind, None).unwrap();
+        assert_eq!(first.branch, second.branch);
+        assert_eq!(first.through, second.through);
+        assert!(
+            LiveMedia::prepare(
+                &conversation(&first),
+                &second,
+                Some(&assets),
+                LiveDialect::Gemini
+            )
+            .is_err()
+        );
+        assert!(
+            LiveMedia::prepare(
+                &conversation(&second),
+                &first,
+                Some(&assets),
+                LiveDialect::OpenAiChat
+            )
+            .is_err()
+        );
+        assert!(
+            LiveMedia::prepare(
+                &conversation(&second),
+                &second,
+                Some(&assets),
+                LiveDialect::OpenAiChat
+            )
+            .unwrap()
+            .is_some()
+        );
         fs::remove_dir_all(root).ok();
     }
 

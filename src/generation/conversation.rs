@@ -26,6 +26,7 @@ pub(crate) struct LlmMessage {
 }
 
 pub(crate) struct LlmConversation {
+    pub source_observer: CharacterId,
     pub source_anchor: ContextAnchor,
     pub system_instruction: String,
     pub messages: Vec<LlmMessage>,
@@ -427,6 +428,7 @@ impl LlmConversation {
             });
         }
         Self {
+            source_observer: context.character_id,
             source_anchor: ContextAnchor {
                 branch_id: context.view.branch.0,
                 through: context.view.through,

@@ -105,6 +105,10 @@ impl MitaView {
         }
     }
 
+    pub fn observer(&self) -> CharacterId {
+        self.projection.observer()
+    }
+
     pub fn count(&self) -> usize {
         self.projection.count()
     }
