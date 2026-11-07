@@ -18,6 +18,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub mod activation;
+
 use crate::portable::PortableDataRoot;
 
 const MAX_PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
