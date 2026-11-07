@@ -47,6 +47,9 @@ pub enum Command {
         Vec<neuromita::memory::MemoryCommand>,
     ),
     MemoryRecall(uuid::Uuid, CharacterId, neuromita::memory::MemoryId, String),
+    GraphPreview(uuid::Uuid, CharacterId, neuromita::memory::MemoryId),
+    GraphApply(uuid::Uuid, CharacterId),
+    GraphAbort(uuid::Uuid),
     Preview(ConversationChange),
     Confirm,
     Abort,
@@ -106,6 +109,8 @@ pub enum Update {
     MemorySaved(uuid::Uuid),
     MemoryEditError(uuid::Uuid, String),
     MemoryRecallResult(uuid::Uuid, Result<Option<String>, String>),
+    GraphPreviewResult(uuid::Uuid, Result<usize, String>),
+    GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(Option<(ConversationChange, usize)>),
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
@@ -370,6 +375,11 @@ async fn observe(
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
     let mut pending: Option<ConversationChangePreview> = None;
+    let mut graph_pending: Option<(
+        uuid::Uuid,
+        CharacterId,
+        neuromita::knowledge::maintenance::GraphMaintenancePreview,
+    )> = None;
     let mut character = CharacterId::Crazy;
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
@@ -498,7 +508,51 @@ async fn observe(
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),
-                Some(Command::MemorySelect(id)) => { memories = MemoryWatch::start(administration, id)?; },
+                Some(Command::MemorySelect(id)) => {
+                    graph_pending = None;
+                    memories = MemoryWatch::start(administration, id)?;
+                },
+                Some(Command::GraphPreview(request_id, selected, memory_id)) => {
+                    graph_pending = None;
+                    let result = neuromita::api::GraphMaintenanceApi::preview(
+                        selected,
+                        &[memory_id],
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                        neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear,
+                    ).await;
+                    match result {
+                        Ok(plan) => {
+                            let count = plan.entries().iter().map(|entry| entry.existing_relations.len()).sum();
+                            graph_pending = Some((request_id, selected, plan));
+                            publish(Update::GraphPreviewResult(request_id, Ok(count)));
+                        }
+                        Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error.to_string()))),
+                    }
+                },
+                Some(Command::GraphApply(request_id, selected)) => {
+                    let result = match graph_pending.take() {
+                        Some((id, owner, plan)) if id == request_id && owner == selected => {
+                            neuromita::api::GraphMaintenanceApi::apply_confirmed(
+                                selected, plan, true, stop,
+                            ).await.map(|_| ()).map_err(|error| error.to_string())
+                        }
+                        other => {
+                            graph_pending = other;
+                            Err("Graph preview is missing or belongs to another selection".to_owned())
+                        }
+                    };
+                    publish(Update::GraphApplyResult(request_id, result));
+                },
+                Some(Command::GraphAbort(request_id)) => {
+                    if graph_pending.as_ref().is_some_and(|(id, _, _)| *id == request_id) {
+                        graph_pending = None;
+                    }
+                },
                 Some(Command::MemoryEdit(edit_id, expected, commands)) => {
                     match administration.characters.edit_memories(expected.character(), expected, commands).await {
                         Ok(_) => publish(Update::MemorySaved(edit_id)), Err(error) => publish(Update::MemoryEditError(edit_id, error.to_string())),
