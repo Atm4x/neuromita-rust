@@ -238,7 +238,7 @@ impl PythonPresetStage {
         Ok(Self { preview, files })
     }
 
-    fn file(&self, name: &str) -> Result<&[u8], PythonPresetStageError> {
+    pub(super) fn file(&self, name: &str) -> Result<&[u8], PythonPresetStageError> {
         self.files
             .iter()
             .find_map(|(path, bytes)| (*path == name).then_some(bytes.as_slice()))
@@ -308,7 +308,7 @@ impl PythonPresetStage {
     }
 }
 
-fn parse_credentials(
+pub(super) fn parse_credentials(
     bytes: Option<&[u8]>,
 ) -> Result<BTreeMap<String, String>, PythonPresetStageError> {
     let Some(bytes) = bytes else {
@@ -391,7 +391,7 @@ impl<'de> Deserialize<'de> for StrictJson {
     }
 }
 
-fn parse_unique_json(bytes: &[u8]) -> Result<Value, PythonPresetStageError> {
+pub(super) fn parse_unique_json(bytes: &[u8]) -> Result<Value, PythonPresetStageError> {
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let parsed = StrictJson::deserialize(&mut decoder)
         .map_err(|_| PythonPresetStageError::Invalid("malformed or duplicate-key JSON".into()))?;

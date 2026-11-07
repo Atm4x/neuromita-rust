@@ -220,6 +220,7 @@ impl ApplicationConfig {
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
+        crate::settings::PresetActivation::ensure_ready(data_directory)?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
@@ -271,6 +272,8 @@ pub enum ApplicationError {
     Settings(#[from] SettingsError),
     #[error(transparent)]
     Presets(#[from] PresetCatalogError),
+    #[error(transparent)]
+    PresetActivation(#[from] crate::settings::PresetActivationError),
     #[error(transparent)]
     FineTune(#[from] FineTuneError),
     #[error(transparent)]
