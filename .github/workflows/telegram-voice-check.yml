@@ -23,23 +23,6 @@ jobs:
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           rustup default 1.89.0
           rustup toolchain install 1.92.0 --profile minimal
-      - name: One-time rustfmt sync from bridge changes
-        run: |
-          cargo fmt --all
-          if git diff --quiet; then
-            exit 0
-          fi
-          for path in $(git diff --name-only); do
-            case "$path" in
-              src/telegram_sidecar.rs|src/telegram_voice.rs|src/bin/neuromita-gui/runtime.rs) ;;
-              *) echo "Unexpected rustfmt change: $path"; exit 1 ;;
-            esac
-          done
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/telegram_sidecar.rs src/telegram_voice.rs src/bin/neuromita-gui/runtime.rs
-          git commit -m "style(telegram): apply rustfmt to bridge changes"
-          git push origin HEAD:codex/telegram-voice-47
       - name: Python Telethon fake-transport tests
         run: python3 -m unittest discover -s tools/tests -p 'test_telegram_sidecar.py' -v
       - name: Check formatting
@@ -49,6 +32,20 @@ jobs:
       - name: Telegram focused tests
         run: cargo test --locked --offline telegram_
       - name: Clippy
-        run: cargo clippy --locked --offline --all-targets -- -D warnings
+        run: |
+          set +e
+          cargo clippy --locked --offline --all-targets -- -D warnings > /tmp/telegram-clippy.log 2>&1
+          result=$?
+          set -e
+          cat /tmp/telegram-clippy.log
+          if [ "$result" -ne 0 ]; then
+            cp /tmp/telegram-clippy.log docs/03-runtime/telegram-ci-clippy.log
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/03-runtime/telegram-ci-clippy.log
+            git commit -m "ci(telegram): capture clippy diagnostic for review"
+            git push origin HEAD:codex/telegram-voice-47
+          fi
+          exit "$result"
       - name: Full unit and integration suite
         run: cargo test --locked --offline
