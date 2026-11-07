@@ -1,0 +1,36 @@
+name: Agent B50 retrieve exact B49 source diff
+on:
+  push:
+    branches: [bridge/agent-b50-source-patch-20261107]
+    paths: [bridge/agent-b50-source-trigger.txt]
+permissions:
+  contents: read
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-b49-conversation-owner-fence-20261107
+          fetch-depth: 0
+      - name: Diff exact B41-to-B49 tree, no Git bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=63148ad3a5948bf987129edd788690aab83dca68
+          head=5a6cca378308d66ad6c31741262bd5e4a4cd6bec
+          expected_tree=88697d520734346fe0af5b3a1c42128e68fd366d
+          test "$(git rev-parse HEAD)" = "$head"
+          test "$(git rev-parse HEAD^{tree})" = "$expected_tree"
+          git cat-file -e "$base^{commit}"
+          mkdir -p /tmp/b50source
+          git diff --binary "$base" "$head" > /tmp/b50source/B41-to-B49.patch
+          printf '%s\n' "$base" "$head" "$expected_tree" > /tmp/b50source/verified-refs.txt
+          sha256sum /tmp/b50source/B41-to-B49.patch > /tmp/b50source/source-patch.sha256
+          wc -c /tmp/b50source/B41-to-B49.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-b50-b49-source-diff
+          path: /tmp/b50source/
+          retention-days: 1
+          compression-level: 6
