@@ -24,6 +24,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             PresetActivation::apply(&PathBuf::from(review), &PathBuf::from(active))?;
             println!("Both preset files activated; no live process was modified");
         }
+        [action, review, active] if action == "--apply-with-preferences" => {
+            PresetActivation::apply_with_preferences(&PathBuf::from(review), &PathBuf::from(active))?;
+            println!("Presets, credentials and active user selection installed; no live process was modified");
+        }
         [action, active] if action == "--recover" => {
             let state = PresetActivation::recover(&PathBuf::from(active))?;
             match state {
@@ -33,7 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 PresetRecovery::DiscardedUnprepared => println!("Removed incomplete pre-activation journal; existing presets unchanged"),
             }
         }
-        _ => return Err("usage: activate_python_presets --apply REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --recover ACTIVE_USERDATA_DIR --confirm-stopped".into()),
+        _ => return Err("usage: activate_python_presets --apply REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --apply-with-preferences REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --recover ACTIVE_USERDATA_DIR --confirm-stopped".into()),
     }
     Ok(())
 }
