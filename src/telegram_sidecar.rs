@@ -37,6 +37,17 @@ fn error_code(text: &str) -> TelegramError {
     }
 }
 
+/// Treat an inconclusive sidecar auth reply as unauthorized, never as success.
+fn code_sign_in_result(result: &Value) -> Result<bool, TelegramError> {
+    if result["password_required"] == true {
+        Ok(true)
+    } else if result["authorized"] == true {
+        Ok(false)
+    } else {
+        Err(TelegramError::Unauthorized)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ResponseId {
     Stale,
@@ -225,10 +236,11 @@ impl TelethonSession {
         Ok(())
     }
 
-    /// Returns true when Telegram requests an additional 2FA password.
+    /// Returns true only when Telegram requests an additional 2FA password.
+    /// A reply that confirms neither 2FA nor authorization must fail closed.
     pub async fn sign_in_code(&self, code: &str) -> Result<bool, TelegramError> {
         let result = self.call(json!({"op":"sign_in","code":code})).await?;
-        Ok(result["password_required"] == true)
+        code_sign_in_result(&result)
     }
 
     pub async fn sign_in_password(&self, password: &str) -> Result<(), TelegramError> {
@@ -336,6 +348,23 @@ mod tests {
         assert_eq!(error_code("expired_code"), TelegramError::ExpiredCode);
         assert_eq!(error_code("media_too_large"), TelegramError::MediaTooLarge);
         assert_eq!(error_code("telegram_failure"), TelegramError::Network);
+    }
+
+    #[test]
+    fn sign_in_requires_explicit_authorization_or_2fa() {
+        assert_eq!(code_sign_in_result(&json!({"authorized": true})), Ok(false));
+        assert_eq!(
+            code_sign_in_result(&json!({"password_required": true})),
+            Ok(true)
+        );
+        assert_eq!(
+            code_sign_in_result(&json!({"authorized": false})),
+            Err(TelegramError::Unauthorized)
+        );
+        assert_eq!(
+            code_sign_in_result(&json!({})),
+            Err(TelegramError::Unauthorized)
+        );
     }
 
     #[test]
