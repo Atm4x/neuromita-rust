@@ -1,0 +1,57 @@
+name: Agent D32 pinned Python reference source bundle
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d32-python-ref-20261108
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Atm4x/NeuroMita
+          ref: 5f3d061f523d9abefa6a264bb2953048a935fa65
+          fetch-depth: 1
+          path: python-reference
+          persist-credentials: false
+      - name: Export selected source code only
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=5f3d061f523d9abefa6a264bb2953048a935fa65
+          test "$(git -C python-reference rev-parse HEAD)" = "$EXPECTED"
+          git init -q -b source-snapshot selected-python
+          for p in \
+            src/managers/settings_manager.py \
+            src/core/settings_registry.py \
+            src/controllers/api_presets_controller.py \
+            src/services/update_contour.py \
+            src/model_settings/schema.py \
+            src/model_settings/repository.py \
+            src/model_settings/service.py \
+            src/model_settings/migration.py \
+            src/controllers/gui/general_settings.py \
+            src/controllers/gui/api_settings/editor_mixin.py; do
+            if test -f "python-reference/$p"; then
+              mkdir -p "selected-python/$(dirname "$p")"
+              cp "python-reference/$p" "selected-python/$p"
+            fi
+          done
+          test -f selected-python/src/managers/settings_manager.py
+          test -f selected-python/src/controllers/api_presets_controller.py
+          printf 'Python source pinned SHA: %s\nSelected source only; no user JSON or secrets.\n' "$EXPECTED" > selected-python/SOURCE_MANIFEST.txt
+          git -C selected-python add -A
+          git -C selected-python -c user.name='Agent D' -c user.email='agent-d@local.invalid' commit -qm 'Snapshot pinned Python settings reference sources'
+          mkdir transfer
+          git -C selected-python bundle create ../transfer/agent-d32-python-reference.bundle refs/heads/source-snapshot
+          git -C selected-python bundle verify ../transfer/agent-d32-python-reference.bundle
+          sha256sum transfer/agent-d32-python-reference.bundle > transfer/agent-d32-python-reference.bundle.sha256
+          git -C selected-python ls-files
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d32-python-source
+          path: transfer/
+          retention-days: 1
