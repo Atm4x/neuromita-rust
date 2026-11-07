@@ -10,6 +10,8 @@ pub mod bootstrap;
 pub mod composition;
 pub mod constraints;
 mod distribution;
+#[cfg(windows)]
+mod windows_uv_job;
 pub mod hardware;
 pub mod install;
 pub mod installed_speech;

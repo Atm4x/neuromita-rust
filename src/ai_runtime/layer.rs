@@ -10,6 +10,9 @@ use std::{
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
+
+#[cfg(windows)]
+use super::windows_uv_job::WindowsUvJob;
 use uuid::Uuid;
 
 use super::{
@@ -138,6 +141,8 @@ struct StagingCleanup {
     owner: Option<File>,
     published: bool,
     child_may_be_running: bool,
+    #[cfg(windows)]
+    job: Option<WindowsUvJob>,
 }
 
 impl StagingCleanup {
@@ -162,6 +167,8 @@ impl StagingCleanup {
             owner: Some(owner),
             published: false,
             child_may_be_running: false,
+            #[cfg(windows)]
+            job: None,
         })
     }
 
@@ -173,6 +180,12 @@ impl StagingCleanup {
         let child = owner.try_clone()?;
         self.child_may_be_running = true;
         Ok(Stdio::from(child))
+    }
+
+    #[cfg(windows)]
+    fn attach_child(&mut self, handle: std::os::windows::io::RawHandle) -> Result<(), LayerError> {
+        self.job = Some(WindowsUvJob::attach(handle)?);
+        Ok(())
     }
 
     fn child_finished(&mut self) {
@@ -191,14 +204,30 @@ impl Drop for StagingCleanup {
             return;
         }
         #[cfg(windows)]
-        if self.child_may_be_running {
-            tracing::warn!(path = %self.path.display(), "staging retained: Windows cannot prove a surviving uv child released ownership");
+        if self.child_may_be_running && self.job.is_none() {
+            tracing::warn!(path = %self.path.display(), "staging retained: unguarded Windows uv child may still run");
             return;
         }
         let path = std::mem::take(&mut self.path);
         let lock_path = std::mem::take(&mut self.lock_path);
         let owner = self.owner.take();
+        #[cfg(windows)]
+        let job = self.job.take();
         let cleanup = move || {
+            #[cfg(windows)]
+            if let Some(job) = job {
+                match job.terminate_and_wait(Duration::from_secs(4)) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(path = %path.display(), "Windows uv job still has active processes; retaining staging");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), error = %error, "cannot prove Windows uv job termination; retaining staging");
+                        return;
+                    }
+                }
+            }
             drop(owner);
             for _ in 0..40 {
                 if let Some(reclaimed_owner) = open_stage_owner(&lock_path) {
@@ -425,9 +454,30 @@ impl LayerInstaller<'_> {
                 for package in packages {
                     cmd.arg(format!("{}=={}", package.name, package.version));
                 }
+                #[cfg(not(windows))]
                 let outcome = timeout(self.timeout, cmd.output()).await;
+                #[cfg(windows)]
+                let outcome = {
+                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                    let child = match cmd.spawn() {
+                        Ok(child) => child,
+                        Err(error) => {
+                            cleanup.child_finished();
+                            return Err(LayerError::Io(error));
+                        }
+                    };
+                    let handle = child.raw_handle().ok_or_else(|| {
+                        LayerError::Invalid("spawned uv process handle is unavailable".into())
+                    })?;
+                    cleanup.attach_child(handle)?;
+                    timeout(self.timeout, child.wait_with_output()).await
+                };
                 if matches!(&outcome, Ok(Ok(_))) {
                     cleanup.child_finished();
+                    #[cfg(windows)]
+                    {
+                        cleanup.job.take();
+                    }
                 }
                 let output = outcome.map_err(|_| LayerError::Timeout)??;
                 if !output.status.success() {
@@ -501,6 +551,84 @@ impl LayerInstaller<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_cancelled_uv_job_releases_staging_only_after_child_shutdown() {
+        use std::time::Instant;
+
+        let root = std::env::temp_dir().join(format!("nm-win-job-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let uv = root.join("uv.cmd");
+        let python = root.join("python.exe");
+        let ready = root.join("uv-started");
+        std::fs::write(&python, []).unwrap();
+        std::fs::write(
+            &uv,
+            format!(
+                "@echo off\r\necho started > \"{}\"\r\nping -n 50 127.0.0.1 >nul\r\n",
+                ready.display()
+            ),
+        )
+        .unwrap();
+        let destination = root.join("layers").join("model-v1");
+        let uv_for_task = uv.clone();
+        let py_for_task = python.clone();
+        let cache = root.join("cache");
+        let task = tokio::spawn(async move {
+            let installer = LayerInstaller {
+                uv_executable: &uv_for_task,
+                python_executable: &py_for_task,
+                cache_directory: &cache,
+                timeout: Duration::from_secs(60),
+            };
+            installer
+                .publish(
+                    &destination,
+                    ".receipt.json",
+                    &serde_json::json!({"revision": "model-v1"}),
+                    &[LockedPackage {
+                        name: "mockpkg".into(),
+                        version: "1.0.0".into(),
+                    }],
+                    &[],
+                )
+                .await
+        });
+        let start = Instant::now();
+        while !ready.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "uv child did not start"
+            );
+            assert!(!task.is_finished(), "layer install exited before uv began");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        task.abort();
+        let _ = task.await;
+        let start = Instant::now();
+        loop {
+            let stages: Vec<_> = std::fs::read_dir(root.join("layers"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry.file_type().is_ok_and(|ty| ty.is_dir())
+                        && entry.file_name().to_string_lossy().starts_with(".staging-")
+                })
+                .collect();
+            if stages.is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(12),
+                "Windows job owner did not reclaim cancelled staging"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!root.join("layers").join("model-v1").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]
