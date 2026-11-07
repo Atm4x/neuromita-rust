@@ -62,6 +62,7 @@ fn remove_stage_lock(path: &Path) {
     }
 }
 
+#[cfg(not(windows))]
 fn is_owned_stage_name(name: &str) -> bool {
     name.strip_prefix(".staging-")
         .and_then(|id| {
@@ -95,6 +96,12 @@ fn open_stage_owner(lock_path: &Path) -> Option<File> {
     }
 }
 
+#[cfg(windows)]
+fn reclaim_abandoned_staging(_parent: &Path) -> Result<(), LayerError> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn reclaim_abandoned_staging(parent: &Path) -> Result<(), LayerError> {
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
@@ -130,6 +137,7 @@ struct StagingCleanup {
     lock_path: PathBuf,
     owner: Option<File>,
     published: bool,
+    child_may_be_running: bool,
 }
 
 impl StagingCleanup {
@@ -153,15 +161,22 @@ impl StagingCleanup {
             lock_path,
             owner: Some(owner),
             published: false,
+            child_may_be_running: false,
         })
     }
 
-    fn child_stdin(&self) -> Result<Stdio, LayerError> {
+    fn child_stdin(&mut self) -> Result<Stdio, LayerError> {
         let owner = self
             .owner
             .as_ref()
             .ok_or_else(|| LayerError::Invalid("staging owner unavailable".into()))?;
-        Ok(Stdio::from(owner.try_clone()?))
+        let child = owner.try_clone()?;
+        self.child_may_be_running = true;
+        Ok(Stdio::from(child))
+    }
+
+    fn child_finished(&mut self) {
+        self.child_may_be_running = false;
     }
 
     fn disarm(&mut self) {
@@ -173,6 +188,11 @@ impl StagingCleanup {
 impl Drop for StagingCleanup {
     fn drop(&mut self) {
         if self.published {
+            return;
+        }
+        #[cfg(windows)]
+        if self.child_may_be_running {
+            tracing::warn!(path = %self.path.display(), "staging retained: Windows cannot prove a surviving uv child released ownership");
             return;
         }
         let path = std::mem::take(&mut self.path);
@@ -405,9 +425,11 @@ impl LayerInstaller<'_> {
                 for package in packages {
                     cmd.arg(format!("{}=={}", package.name, package.version));
                 }
-                let output = timeout(self.timeout, cmd.output())
-                    .await
-                    .map_err(|_| LayerError::Timeout)??;
+                let outcome = timeout(self.timeout, cmd.output()).await;
+                if matches!(&outcome, Ok(Ok(_))) {
+                    cleanup.child_finished();
+                }
+                let output = outcome.map_err(|_| LayerError::Timeout)??;
                 if !output.status.success() {
                     return Err(LayerError::Install(
                         String::from_utf8_lossy(&output.stderr)
@@ -479,6 +501,29 @@ impl LayerInstaller<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_never_reclaims_orphan_without_proven_child_termination() {
+        let root = std::env::temp_dir().join(format!("nm-windows-stage-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let abandoned = root.join(format!(".staging-{}", Uuid::new_v4()));
+        std::fs::create_dir(&abandoned).unwrap();
+        let marker = staging_lock_path(&abandoned);
+        std::fs::write(&marker, []).unwrap();
+        reclaim_abandoned_staging(&root).unwrap();
+        assert!(abandoned.is_dir());
+        assert!(marker.is_file());
+
+        let pending = root.join(format!(".staging-{}", Uuid::new_v4()));
+        let mut cleanup = StagingCleanup::new(pending.clone()).unwrap();
+        let child = cleanup.child_stdin().unwrap();
+        drop(child);
+        drop(cleanup);
+        assert!(pending.is_dir());
+        assert!(staging_lock_path(&pending).is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
