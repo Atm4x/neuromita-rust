@@ -54,6 +54,7 @@ export component AiHubCard inherits Rectangle {
     in property <[AiHubOperation]> operations;
     in property <bool> card-visible: true;
     in property <bool> action-adapter-connected: false;
+    in property <bool> settings-adapter-connected: false;
     // V1 has no can-update/can-reinstall. The eventual presenter must explicitly
     // authorize these verbs before they become active; can-install is NOT enough.
     in property <bool> can-update: false;
@@ -86,10 +87,14 @@ export component AiHubCard inherits Rectangle {
     }
     function dispatch-action(action: string) {
         if !root.blocked && root.component.component-id != "" {
-            root.request-pending = true;
-            root.pending-revision = root.component.revision;
-            root.pending-component-id = root.component.component-id;
-            root.pending-token = root.component.token;
+            // Settings is local navigation, not a backend operation: it must
+            // never hold an install admission latch.
+            if action != "settings" {
+                root.request-pending = true;
+                root.pending-revision = root.component.revision;
+                root.pending-component-id = root.component.component-id;
+                root.pending-token = root.component.token;
+            }
             root.action-requested(root.component.component-id, action, root.component.revision, root.component.token);
         }
     }
@@ -167,7 +172,8 @@ export component AiHubCard inherits Rectangle {
             color: root.component.phase == AiHubLoadPhase.failed ? SettingsTheme.error-text : SettingsTheme.muted;
             height: 19px;
         }
-        if root.component.unsupported-reason != "" && !root.component.supported: SettingsLabel {
+        if root.component.unsupported-reason != "" && !root.component.supported
+            && root.action-adapter-connected: SettingsLabel {
             text: root.component.unsupported-reason;
             font-size: 11px; color: SettingsTheme.error-text;
             wrap: word-wrap; overflow: clip; height: max(20px, self.preferred-height);
@@ -206,9 +212,10 @@ export component AiHubCard inherits Rectangle {
                 width: action.id == "reinstall" ? 124px : 103px;
                 height: 31px;
                 label: root.localized("ai-hub.action." + action.id, action.ru, action.en);
-                enabled: root.action-adapter-connected && !root.blocked && root.component.component-id != ""
-                    && (action.id == "settings" ? root.component.can-open-settings
-                        : root.component.supported
+                enabled: !root.blocked && root.component.component-id != ""
+                    && (action.id == "settings"
+                        ? root.settings-adapter-connected && root.component.can-open-settings
+                        : root.action-adapter-connected && root.component.supported
                             && (action.id == "install" ? root.component.can-install
                                 : action.id == "uninstall" ? root.component.can-uninstall
                                 : action.id == "update" ? root.can-update : root.can-reinstall));

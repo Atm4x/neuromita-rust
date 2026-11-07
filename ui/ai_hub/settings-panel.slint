@@ -283,6 +283,9 @@ export component AiHubSettingsPanel inherits Rectangle {
 
     // Host MUST route category/tab/native-close/hide through these functions.
     // Default of the visible dirty dialog is Cancel.
+    public function request-component(component-id: string, revision: int) {
+        root.navigate("component", component-id, revision);
+    }
     public function request-category(category-id: string) {
         root.navigate("category", category-id, root.accepted-revision);
     }

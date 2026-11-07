@@ -490,6 +490,8 @@ fn ai_hub_render_and_bindings(window: &AppWindow) {
     window.set_ai_hub_open(true);
     for (width, height, lang, filename) in [
         (1180, 680, "ru", "aihub-ru-compact.ppm"),
+        (1560, 918, "ru", "aihub-ru-large.ppm"),
+        (1180, 680, "en", "aihub-en-compact.ppm"),
         (1560, 918, "en", "aihub-en-large.ppm"),
     ] {
         window.global::<I18n>().set_locale(lang.into());

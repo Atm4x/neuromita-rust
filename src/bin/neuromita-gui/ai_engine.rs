@@ -152,8 +152,17 @@ fn status_gates<'a>(
             None,
         );
     };
+    let associated = status.pending_model.as_deref() == Some(component_id)
+        || status
+            .active_model
+            .as_ref()
+            .is_some_and(|model| model.plugin_id == component_id);
     let worker = match status.phase {
-        RuntimePhase::WorkerRunning | RuntimePhase::ModelReady if status.generation.is_some() => {
+        // A service's worker can be running for an unrelated plugin. Do not
+        // label every model of that service ready without a matching ID.
+        RuntimePhase::WorkerRunning | RuntimePhase::ModelReady
+            if status.generation.is_some() && associated =>
+        {
             AiHubTruth::Yes
         }
         RuntimePhase::Stopped | RuntimePhase::Failed => AiHubTruth::No,
@@ -179,11 +188,6 @@ fn status_gates<'a>(
     };
     // A service-wide failure is not necessarily an individual model failure.
     // Only label the exact pending or active model with its backend error.
-    let associated = status.pending_model.as_deref() == Some(component_id)
-        || status
-            .active_model
-            .as_ref()
-            .is_some_and(|model| model.plugin_id == component_id);
     let error = if associated {
         status.last_error.as_deref()
     } else {
@@ -283,7 +287,8 @@ mod hub_inventory_tests {
         let (worker, model, _, _) = status_gates(Some(&status), "tts-one");
         assert_eq!(worker, AiHubTruth::Yes);
         assert_eq!(model, AiHubTruth::Yes);
-        let (_, other, _, _) = status_gates(Some(&status), "tts-two");
+        let (other_worker, other, _, _) = status_gates(Some(&status), "tts-two");
+        assert_eq!(other_worker, AiHubTruth::Unknown);
         assert_eq!(other, AiHubTruth::Unknown);
         let mut stale = status.clone();
         stale.generation = None;

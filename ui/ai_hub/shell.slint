@@ -84,7 +84,7 @@ export component AiHubShell inherits Rectangle {
     }
     // Sort supported + inference-ready first without changing the source model.
     pure function card-rank(component: AiHubComponent) -> int {
-        return !component.supported ? 2 : component.model-ready == AiHubTruth.yes ? 0 : 1;
+        return component.model-ready == AiHubTruth.yes ? 0 : !component.supported ? 2 : 1;
     }
     background: SettingsTheme.workspace;
     border-radius: 16px;
@@ -269,6 +269,7 @@ export component AiHubShell inherits Rectangle {
                                             component: component;
                                             operations: root.operations;
                                             action-adapter-connected: root.operation-adapter-connected;
+                                            settings-adapter-connected: root.settings-adapter-connected;
                                             card-visible: root.show-component(component) && root.card-rank(component) == rank;
                                             inspect-requested(id, revision, token) => {
                                                 // The selection only changes visible details;
@@ -277,7 +278,12 @@ export component AiHubShell inherits Rectangle {
                                             }
                                             action-requested(id, verb, revision, token) => {
                                                 root.operation-target = component;
-                                                root.component-action-requested(id, verb, revision, token);
+                                                if verb == "settings" {
+                                                    root.active-tab = 1;
+                                                    settings-editor.request-component(id, revision);
+                                                } else {
+                                                    root.component-action-requested(id, verb, revision, token);
+                                                }
                                             }
                                         }
                                     }
