@@ -54,3 +54,10 @@ Python event/receipt variants without changing their meaning, and prove
 atomic Memory/SQLite replay, conflict and export/re-import equality.
 Do not create an auxiliary history database or silently coerce incompatible
 fields. No GC authorization follows from this inspection.
+
+A second fixture, `tests/fixtures/python_session_archive_asset_20261107.json`,
+was re-exported and accepted by the **actual Python**
+`SessionArchive.from_document` implementation with a real `TimelineAsset`
+constructed by Python's `TimelineAsset.create`. Rust verifies the same fixture
+and rejects a tampered asset. This verifies the cross-language hash/reference
+contract, but still does not certify a native session import.

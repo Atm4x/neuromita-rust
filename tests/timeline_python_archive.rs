@@ -227,3 +227,24 @@ fn python_archive_does_not_disclose_an_unknown_message_via_hidden_edit() {
     });
     assert!(inspect_python_archive(&modified).is_err());
 }
+
+#[test]
+fn real_python_asset_archive_fixture_cross_language_roundtrip() {
+    let source = include_bytes!("fixtures/python_session_archive_asset_20261107.json");
+    let document: Value = serde_json::from_slice(source).unwrap();
+    assert_eq!(document["assets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        document["events"][1]["payload"]["attachments"][0]["type"],
+        "image_ref"
+    );
+    let parsed = inspect_python_archive(source).unwrap();
+    assert_eq!(parsed.external_session_id(), "session:русский");
+    assert_eq!(parsed.identities.observer_ids, ["A"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&parsed.to_python_json().unwrap()).unwrap(),
+        document
+    );
+    let mut corrupted = document;
+    corrupted["assets"][0]["base64"] = json!("YmFk");
+    assert!(inspect_python_archive(&serde_json::to_vec(&corrupted).unwrap()).is_err());
+}
