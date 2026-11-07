@@ -28,18 +28,21 @@ pub type GameSessionId = Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameId {
     SeaBattle,
+    Chess,
 }
 
 impl GameId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SeaBattle => "seabattle",
+            Self::Chess => "chess",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "seabattle" => Some(Self::SeaBattle),
+            "chess" => Some(Self::Chess),
             _ => None,
         }
     }
@@ -79,8 +82,9 @@ impl Default for GamePolicy {
 
 /// Commands accepted from the human owner. They never carry an acting side:
 /// the owner always plays the player side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserGameCommand {
+    Chess(chess::ChessUserCommand),
     Start {
         auto_reactions: bool,
     },
@@ -201,6 +205,24 @@ impl EndReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GameFact {
+    ChessStarted {
+        session: GameSessionId,
+        generation: u64,
+        auto_reactions: bool,
+    },
+    ChessMoved {
+        session: GameSessionId,
+        generation: u64,
+        revision: u64,
+        actor: chess::ChessSide,
+    },
+    ChessEnded {
+        session: GameSessionId,
+        generation: u64,
+        revision: u64,
+        reason: EndReason,
+        result: String,
+    },
     Started {
         session: GameSessionId,
         generation: u64,
@@ -232,7 +254,10 @@ pub enum GameFact {
 
 impl GameFact {
     pub const fn game(&self) -> GameId {
-        GameId::SeaBattle
+        match self {
+            Self::ChessStarted { .. } | Self::ChessMoved { .. } | Self::ChessEnded { .. } => GameId::Chess,
+            _ => GameId::SeaBattle,
+        }
     }
 
     pub const fn session(&self) -> GameSessionId {
@@ -240,7 +265,10 @@ impl GameFact {
             Self::Started { session, .. }
             | Self::PhaseChanged { session, .. }
             | Self::Shot { session, .. }
-            | Self::Ended { session, .. } => *session,
+            | Self::Ended { session, .. }
+            | Self::ChessStarted { session, .. }
+            | Self::ChessMoved { session, .. }
+            | Self::ChessEnded { session, .. } => *session,
         }
     }
 
@@ -249,7 +277,10 @@ impl GameFact {
             Self::Started { generation, .. }
             | Self::PhaseChanged { generation, .. }
             | Self::Shot { generation, .. }
-            | Self::Ended { generation, .. } => *generation,
+            | Self::Ended { generation, .. }
+            | Self::ChessStarted { generation, .. }
+            | Self::ChessMoved { generation, .. }
+            | Self::ChessEnded { generation, .. } => *generation,
         }
     }
 
@@ -260,6 +291,21 @@ impl GameFact {
         payload.insert("session_id".into(), json!(self.session()));
         payload.insert("generation".into(), json!(self.generation()));
         match self {
+            Self::ChessStarted { auto_reactions, .. } => {
+                payload.insert("event".into(), json!("started"));
+                payload.insert("auto_reactions".into(), json!(auto_reactions));
+            }
+            Self::ChessMoved { revision, actor, .. } => {
+                payload.insert("event".into(), json!("move"));
+                payload.insert("revision".into(), json!(revision));
+                payload.insert("actor".into(), json!(match actor { chess::ChessSide::White => "white", chess::ChessSide::Black => "black" }));
+            }
+            Self::ChessEnded { revision, reason, result, .. } => {
+                payload.insert("event".into(), json!("ended"));
+                payload.insert("revision".into(), json!(revision));
+                payload.insert("reason".into(), json!(reason.code()));
+                payload.insert("result".into(), json!(result));
+            }
             Self::Started { auto_reactions, .. } => {
                 payload.insert("event".into(), json!("started"));
                 payload.insert("auto_reactions".into(), json!(auto_reactions));
