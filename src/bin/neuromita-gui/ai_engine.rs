@@ -105,8 +105,8 @@ fn project_models(
             compatibility: model.installation_label().into(),
             // Inventory has no component-level action compatibility result.
             supported: false,
-            unsupported_reason:
-                "Installation actions require a verified Core AI Hub adapter".into(),
+            unsupported_reason: "Installation actions require a verified Core AI Hub adapter"
+                .into(),
             discovered: AiHubTruth::Yes,
             installed: installation_truth(model),
             environment_ready: AiHubTruth::Unknown,
