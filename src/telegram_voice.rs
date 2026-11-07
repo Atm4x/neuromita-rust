@@ -19,6 +19,9 @@ pub type TelegramFuture<'a, T> =
 pub enum TelegramError {
     Disconnected,
     Unauthorized,
+    InvalidCode,
+    ExpiredCode,
+    InvalidPassword,
     Unavailable,
     Network,
     Timeout,
