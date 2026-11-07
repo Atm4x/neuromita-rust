@@ -10,8 +10,6 @@ pub mod bootstrap;
 pub mod composition;
 pub mod constraints;
 mod distribution;
-#[cfg(windows)]
-mod windows_uv_job;
 pub mod hardware;
 pub mod install;
 pub mod installed_speech;
@@ -30,6 +28,8 @@ pub mod speech_selection;
 pub mod system_hardware;
 pub mod uv;
 pub mod voice_profile;
+#[cfg(windows)]
+mod windows_uv_job;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 

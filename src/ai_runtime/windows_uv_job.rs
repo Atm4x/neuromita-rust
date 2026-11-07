@@ -7,23 +7,71 @@ use std::{
     time::{Duration, Instant},
 };
 
+use uuid::Uuid;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::{
+    Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND},
+    System::{RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId},
+};
+
+const JOB_QUERY_ACCESS: u32 = 0x0004;
+
+fn name_for(stage: Uuid) -> Vec<u16> {
+    format!("Local\\NeuroMita-AI-uv-stage-{stage}")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+pub(super) fn current_session() -> io::Result<u32> {
+    let mut session = 0;
+    if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &raw mut session) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(session)
+}
+
+pub(super) fn job_is_gone(stage: Uuid, expected_session: u32) -> io::Result<bool> {
+    if current_session()? != expected_session {
+        return Ok(false);
+    }
+    let name = name_for(stage);
+    let handle = unsafe { OpenJobObjectW(JOB_QUERY_ACCESS, 0, name.as_ptr()) };
+    if !handle.is_null() {
+        drop(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+        Ok(true)
+    } else {
+        Err(error)
+    }
+}
 
 pub(super) struct WindowsUvJob {
     handle: OwnedHandle,
 }
 
 impl WindowsUvJob {
-    pub(super) fn attach(process: RawHandle) -> io::Result<Self> {
+    pub(super) fn attach(process: RawHandle, stage: Uuid) -> io::Result<Self> {
         // The kernel object is deliberately not inheritable by uv or its descendants.
-        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        let name = name_for(stage);
+        let handle = unsafe { CreateJobObjectW(ptr::null(), name.as_ptr()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
+        }
+        if io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+            drop(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "uv job name collision",
+            ));
         }
         let job = Self {
             handle: unsafe { OwnedHandle::from_raw_handle(handle.cast()) },
@@ -90,7 +138,7 @@ mod tests {
             .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
             .spawn()
             .unwrap();
-        let job = WindowsUvJob::attach(child.as_raw_handle()).unwrap();
+        let job = WindowsUvJob::attach(child.as_raw_handle(), Uuid::new_v4()).unwrap();
         assert!(job.terminate_and_wait(Duration::from_secs(10)).unwrap());
         assert!(child.wait().unwrap().code().is_some());
     }
