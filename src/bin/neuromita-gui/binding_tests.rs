@@ -427,14 +427,13 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.hide().unwrap();
 }
 
-
 fn ai_hub_render_and_bindings(window: &AppWindow) {
+    use super::super::view::AiHubTruth;
     use neuromita::ai_runtime::{
         AiService,
         runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
         speech_catalog::{SpeechInventory, SpeechModelOption},
     };
-    use super::super::view::AiHubTruth;
 
     // This is a test-only Core fixture, never a production GUI catalog.
     super::super::ai_engine::inventory(
@@ -459,7 +458,11 @@ fn ai_hub_render_and_bindings(window: &AppWindow) {
     );
     assert_eq!(window.get_ai_hub_components().row_count(), 2);
     assert_eq!(
-        window.get_ai_hub_components().row_data(0).unwrap().installed,
+        window
+            .get_ai_hub_components()
+            .row_data(0)
+            .unwrap()
+            .installed,
         AiHubTruth::Unknown
     );
 
