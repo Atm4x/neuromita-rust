@@ -296,6 +296,8 @@ pub struct HistoryGenerationSettings {
     pub mode: HistoryGenerationMode,
     pub max_results: u8,
     pub max_content_chars: u16,
+    /// Recent conversational messages retained verbatim when History RAG is enabled.
+    pub active_messages: u8,
 }
 
 impl Default for HistoryGenerationSettings {
@@ -304,15 +306,19 @@ impl Default for HistoryGenerationSettings {
             mode: HistoryGenerationMode::Off,
             max_results: 4,
             max_content_chars: 600,
+            active_messages: 8,
         }
     }
 }
 
 impl HistoryGenerationSettings {
     pub fn validate(self) -> Result<(), SettingsError> {
-        if !(1..=8).contains(&self.max_results) || !(64..=1200).contains(&self.max_content_chars) {
+        if !(1..=8).contains(&self.max_results)
+            || !(64..=1200).contains(&self.max_content_chars)
+            || !(1..=64).contains(&self.active_messages)
+        {
             return Err(SettingsError::Validation(
-                "history generation budgets require 1..=8 results and 64..=1200 characters".into(),
+                "history generation requires 1..=8 results, 64..=1200 characters and 1..=64 active messages".into(),
             ));
         }
         Ok(())

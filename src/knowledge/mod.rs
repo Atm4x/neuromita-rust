@@ -7,6 +7,7 @@ pub mod graph;
 pub mod graph_retrieval;
 pub mod history_generation;
 pub mod history_retrieval;
+pub mod history_window;
 pub mod maintenance;
 pub mod memory_context;
 pub mod reranking;
@@ -159,6 +160,34 @@ impl KnowledgeRetrieval {
             retriever,
             character,
             view,
+            query,
+            config,
+            mode,
+            minimum_cosine,
+        )
+        .await
+    }
+
+    /// Same live semantic owner, but only the older messages excluded by the
+    /// admission-pinned conversation window may become retrieval evidence.
+    pub async fn search_archived_history_semantic(
+        &self,
+        character: CharacterId,
+        view: &crate::timeline::view::MitaView,
+        window: &history_window::HistoryWindow,
+        query: &str,
+        config: history_retrieval::HistorySearchConfig,
+        mode: FusionMode,
+        minimum_cosine: Option<f64>,
+    ) -> Result<history_retrieval::HistorySearchResult, history_retrieval::HistorySearchError> {
+        let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
+            return Err(history_retrieval::HistorySearchError::BackendUnavailable);
+        };
+        history_retrieval::search_archived_history_semantic(
+            retriever,
+            character,
+            view,
+            window,
             query,
             config,
             mode,

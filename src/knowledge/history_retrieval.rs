@@ -13,6 +13,7 @@ use crate::{
 
 use super::{
     embedding::{EmbeddingError, EmbeddingSpace},
+    history_window::HistoryWindow,
     memory_context::tokens,
     retrieval_fusion::{
         FusedHit, FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit,
@@ -56,6 +57,8 @@ pub struct HistorySearchResult {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HistorySearchError {
+    #[error("history window does not match the selected Timeline prefix")]
+    StaleWindow,
     #[error("history view belongs to a different character")]
     WrongCharacter,
     #[error("invalid history search: {0}")]
@@ -106,6 +109,22 @@ fn candidates(view: &MitaView, max_content_chars: usize) -> Vec<ProjectedMessage
             (!message.content.trim().is_empty()).then_some(message)
         })
         .collect()
+}
+
+fn scoped_candidates(
+    view: &MitaView,
+    max_content_chars: usize,
+    window: Option<&HistoryWindow>,
+) -> Result<Vec<ProjectedMessage>, HistorySearchError> {
+    if let Some(window) = window {
+        if !window.matches(view) {
+            return Err(HistorySearchError::StaleWindow);
+        }
+    }
+    Ok(candidates(view, max_content_chars)
+        .into_iter()
+        .filter(|message| window.is_none_or(|window| window.is_archived(message.event_id)))
+        .collect())
 }
 
 fn hit(
@@ -202,8 +221,28 @@ pub fn search_history(
     query: &str,
     config: HistorySearchConfig,
 ) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_with_window(character, view, query, config, None)
+}
+
+pub fn search_archived_history(
+    character: CharacterId,
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_with_window(character, view, query, config, Some(window))
+}
+
+fn search_history_with_window(
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+    window: Option<&HistoryWindow>,
+) -> Result<HistorySearchResult, HistorySearchError> {
     validate(character, view, query, config)?;
-    let messages = candidates(view, config.max_content_chars);
+    let messages = scoped_candidates(view, config.max_content_chars, window)?;
     let hits = fuse(
         character,
         &[lexical_bucket(character, view, &messages, query)],
@@ -225,8 +264,28 @@ pub fn search_history_fts(
     query: &str,
     config: HistorySearchConfig,
 ) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_fts_with_window(character, view, query, config, None)
+}
+
+pub fn search_archived_history_fts(
+    character: CharacterId,
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_fts_with_window(character, view, query, config, Some(window))
+}
+
+fn search_history_fts_with_window(
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+    window: Option<&HistoryWindow>,
+) -> Result<HistorySearchResult, HistorySearchError> {
     validate(character, view, query, config)?;
-    let messages = candidates(view, config.max_content_chars);
+    let messages = scoped_candidates(view, config.max_content_chars, window)?;
     if messages.len() > 1024 {
         return Err(HistorySearchError::CorpusLimit {
             found: messages.len(),
@@ -342,6 +401,52 @@ pub async fn search_history_semantic(
     mode: FusionMode,
     minimum_cosine: Option<f64>,
 ) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_semantic_with_window(
+        retriever,
+        character,
+        view,
+        query,
+        config,
+        mode,
+        minimum_cosine,
+        None,
+    )
+    .await
+}
+
+pub async fn search_archived_history_semantic(
+    retriever: &SemanticMemoryRetriever,
+    character: CharacterId,
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+    mode: FusionMode,
+    minimum_cosine: Option<f64>,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    search_history_semantic_with_window(
+        retriever,
+        character,
+        view,
+        query,
+        config,
+        mode,
+        minimum_cosine,
+        Some(window),
+    )
+    .await
+}
+
+async fn search_history_semantic_with_window(
+    retriever: &SemanticMemoryRetriever,
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+    mode: FusionMode,
+    minimum_cosine: Option<f64>,
+    window: Option<&HistoryWindow>,
+) -> Result<HistorySearchResult, HistorySearchError> {
     validate(character, view, query, config)?;
     if minimum_cosine.is_some_and(|value| !value.is_finite() || !(-1.0..=1.0).contains(&value)) {
         return Err(HistorySearchError::Configuration(
@@ -354,7 +459,7 @@ pub async fn search_history_semantic(
         minimum_graph: 0,
     };
     fuse(character, &[], fusion)?;
-    let messages = candidates(view, config.max_content_chars);
+    let messages = scoped_candidates(view, config.max_content_chars, window)?;
     if messages.len() > 1024 {
         return Err(HistorySearchError::CorpusLimit {
             found: messages.len(),

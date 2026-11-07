@@ -10,6 +10,7 @@ use crate::{
         conversation::{LlmConversation, LlmRole},
         structured::StructuredResponse,
     },
+    knowledge::history_window::HistoryWindow,
 };
 
 #[cfg(test)]
@@ -110,6 +111,7 @@ pub(super) fn encode_with_memory(
         template,
         memory,
         None,
+        None,
         &[],
         &[],
         &super::super::ToolSettings::default(),
@@ -126,12 +128,13 @@ pub(super) fn encode_observed(
     context: CharacterContext,
     template: &GeminiTemplate,
     memory: &Option<String>,
+    history_window: Option<&HistoryWindow>,
     prepared: Option<&PreparedPrompt>,
     tool_history: &[PromptMessage],
     native_history: &[super::super::provider::NativeToolExchange],
     tools: &super::super::ToolSettings,
 ) -> EncodedRequest {
-    let conversation = LlmConversation::from_context_with_memory(&context, memory);
+    let conversation = LlmConversation::from_context_with_window(&context, memory, history_window);
     let mut prompt = conversation
         .system_segments(&context, prepared)
         .into_iter()
@@ -793,7 +796,11 @@ mod tests {
         let mut store = TimelineStore::new();
         store.create_session(SessionId::new(), branch).unwrap();
         let mut ids = Vec::new();
-        for (key, content) in [("target", "old question"), ("newer", "new question")] {
+        for (key, content) in [
+            ("ancient", "Archived moonstone story"),
+            ("target", "old question"),
+            ("newer", "new question"),
+        ] {
             let mut draft = EventDraft::new(EventKind::PlayerMessage);
             draft.actor = Some("player".into());
             draft.observers.insert(CharacterId::Crazy);
@@ -827,29 +834,29 @@ mod tests {
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,
-                    through: 2,
+                    through: 3,
                 },
                 events: vec![],
             },
             view,
             current_input: Arc::from("old question"),
             focus: GenerationFocus {
-                intent: TurnIntent::Reply(ids[0]),
+                intent: TurnIntent::Reply(ids[1]),
                 reaction: None,
             },
             anchor: ContextAnchor {
                 branch_id: branch.0,
-                through: 2,
+                through: 3,
             },
             turn: TimelineTurn {
                 selection: TimelineSelection {
                     branch_id: branch,
                     generation: 1,
                 },
-                context_head: 2,
+                context_head: 3,
                 character: CharacterId::Crazy,
                 context_epoch: 0,
-                trigger: Some(ids[0]),
+                trigger: Some(ids[1]),
             },
             game: None,
             game_key: None,
@@ -862,8 +869,46 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let encoded = serde_json::to_value(encode(context, &template)).unwrap();
+        let encoded = serde_json::to_value(encode(context.clone(), &template)).unwrap();
         let contents = encoded["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 3);
+        assert!(
+            contents[0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Archived moonstone")
+        );
+        assert!(
+            contents[1]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("old question")
+        );
+        assert!(
+            contents[1]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("на которое готовится текущий ответ")
+        );
+        assert_eq!(contents[2]["parts"][0]["text"], "new question");
+        assert_eq!(encoded.to_string().matches("old question").count(), 1);
+        let window = crate::knowledge::history_window::HistoryWindow::capture(
+            &context.view,
+            Some(ids[1]),
+            1,
+        );
+        let scoped = encode_observed(
+            context,
+            &template,
+            &None,
+            Some(&window),
+            None,
+            &[],
+            &[],
+            &crate::generation::ToolSettings::default(),
+        );
+        let scoped_json = serde_json::to_value(scoped.body).unwrap();
+        let contents = scoped_json["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 2);
         assert!(
             contents[0]["parts"][0]["text"]
@@ -871,14 +916,8 @@ mod tests {
                 .unwrap()
                 .contains("old question")
         );
-        assert!(
-            contents[0]["parts"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("на которое готовится текущий ответ")
-        );
         assert_eq!(contents[1]["parts"][0]["text"], "new question");
-        assert_eq!(encoded.to_string().matches("old question").count(), 1);
+        assert!(!scoped_json.to_string().contains("Archived moonstone"));
     }
 
     #[test]
