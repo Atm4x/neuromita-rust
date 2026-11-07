@@ -67,7 +67,18 @@ pub enum PresetRecovery {
 /// All participants must use the same stable lock file; foreign applications
 /// that ignore the lease are not prevented from editing files.
 pub struct PresetStorageLease {
-    _file: fs::File,
+    _file: PresetStorageLock,
+}
+
+/// Releases the OS lock before closing a potentially inherited descriptor.
+struct PresetStorageLock {
+    file: fs::File,
+}
+
+impl Drop for PresetStorageLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 pub struct PresetActivation;
@@ -439,7 +450,7 @@ fn validate_pair(catalog: &[u8], credentials: &[u8]) -> Result<(), PresetActivat
     Ok(())
 }
 
-fn lock_storage(active: &Path) -> Result<fs::File, PresetActivationError> {
+fn lock_storage(active: &Path) -> Result<PresetStorageLock, PresetActivationError> {
     let path = active.join(STORAGE_LOCK);
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true);
@@ -480,7 +491,7 @@ fn lock_storage(active: &Path) -> Result<fs::File, PresetActivationError> {
         }
     }
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(PresetStorageLock { file }),
         Err(std::fs::TryLockError::WouldBlock) => Err(PresetActivationError::StorageBusy),
         Err(std::fs::TryLockError::Error(error)) => Err(PresetActivationError::Io(error)),
     }
@@ -651,6 +662,18 @@ mod tests {
             PresetRecovery::NoJournal
         );
         assert!(root.path().join(STORAGE_LOCK).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn releasing_a_lease_unlocks_an_inherited_file_description() {
+        let root = Root::new();
+        let first = lock_storage(root.path()).unwrap();
+        let inherited = first.file.try_clone().unwrap();
+        drop(first);
+        let second = lock_storage(root.path()).unwrap();
+        drop(second);
+        drop(inherited);
     }
 
     #[test]

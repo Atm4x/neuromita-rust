@@ -219,7 +219,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
     atomic_replace(path, bytes)
 }
 
-pub(super) fn writer_lock(path: &Path) -> Result<std::fs::File, SettingsError> {
+/// Explicitly releases the OS lock independently of inherited file handles.
+pub(super) struct SettingsWriterLease {
+    file: std::fs::File,
+}
+
+impl Drop for SettingsWriterLease {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+pub(super) fn writer_lock(path: &Path) -> Result<SettingsWriterLease, SettingsError> {
     let name = path
         .file_name()
         .ok_or_else(|| SettingsError::Storage("settings path has no file name".into()))?;
@@ -234,7 +245,7 @@ pub(super) fn writer_lock(path: &Path) -> Result<std::fs::File, SettingsError> {
         .map_err(|error| SettingsError::Storage(error.to_string()))?;
     file.lock()
         .map_err(|error| SettingsError::Storage(error.to_string()))?;
-    Ok(file)
+    Ok(SettingsWriterLease { file })
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
@@ -269,6 +280,21 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn writer_unlocks_while_inherited_descriptor_is_still_open() {
+        let root = std::env::temp_dir().join(format!("settings-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("settings.json");
+        let first = writer_lock(&path).unwrap();
+        let inherited = first.file.try_clone().unwrap();
+        drop(first);
+        let second = writer_lock(&path).unwrap();
+        drop(second);
+        drop(inherited);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_previous_dev_document_without_rewriting() {
         let path =
