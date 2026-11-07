@@ -24,7 +24,9 @@ use neuromita::{
         PresetSlot,
     },
     request::{CancelResult, RequestId},
-    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
+    settings::{AsrPreferences, PresetId, PresetSelection, TtsBackend, TtsPreferences, Volume},
+    telegram_sidecar::TelethonSession,
+    telegram_voice::{DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramVoiceService},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +56,10 @@ pub enum Command {
     VoiceInGame(bool),
     VoiceName(String),
     SaveTts(TtsPreferences),
+    TelegramConnect { api_id: String, api_hash: String, phone: String },
+    TelegramCode(String),
+    TelegramPassword(String),
+    TelegramDisconnect,
     SaveCharacterVoice(Option<CharacterId>, String),
     SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
@@ -95,6 +101,7 @@ pub enum Update {
     Administration(Box<super::settings::AdministrationSnapshot>),
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
+    TelegramAuth { phase: i32, status: String },
     PresetSaved(PresetId),
     AdminError(String),
     Stopped,
@@ -241,6 +248,7 @@ async fn enable_speech_session(
 async fn start(
     directory: &std::path::Path,
     model: Option<&str>,
+    telegram_voice: Arc<DynamicTelegramVoice>,
 ) -> Result<ApplicationLifecycle, String> {
     let provider: Arc<dyn GenerationProvider> =
         Arc::new(GeminiProvider::new().map_err(|e| e.to_string())?);
@@ -286,10 +294,40 @@ async fn start(
     let root = std::env::var_os("NEUROMITA_PROMPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| directory.join("Prompts"));
-    let config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    config.voice = telegram_voice;
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn activate_telegram_voice(
+    administration: &GuiPresenter,
+    router: &Arc<DynamicTelegramVoice>,
+    session: Arc<TelethonSession>,
+) -> Result<(), String> {
+    let snapshot = administration.settings.snapshot().map_err(|e| e.to_string())?;
+    let prefs = &snapshot.values.speech.tts;
+    if !prefs.enabled || prefs.backend != TtsBackend::Telegram {
+        router.clear().await;
+        return Ok(());
+    }
+    let ffmpeg = std::env::var("NEUROMITA_FFMPEG").unwrap_or_else(|_| {
+        if cfg!(windows) { "ffmpeg.exe".into() } else { "ffmpeg".into() }
+    });
+    let service = TelegramVoiceService::new(
+        session,
+        Arc::new(FfmpegTelegramDecoder::new(ffmpeg)),
+        TelegramConfig {
+            peer: prefs.telegram_service.clone(),
+            wait: Duration::from_secs(u64::from(prefs.telegram_wait_seconds)),
+            interval: Duration::from_secs(u64::from(prefs.telegram_interval_seconds)),
+            poll: Duration::from_millis(330),
+            max_media_bytes: 32 * 1024 * 1024,
+        },
+    ).map_err(|e| e.to_string())?;
+    router.install(Arc::new(service)).await;
+    Ok(())
 }
 
 async fn run(
@@ -301,7 +339,8 @@ async fn run(
 ) {
     publish(Update::Connecting);
     let catalog = SpeechModelCatalog::for_desktop(directory.clone());
-    let app = match start(&directory, initial_model.as_deref()).await {
+    let telegram_voice = Arc::new(DynamicTelegramVoice::default());
+    let app = match start(&directory, initial_model.as_deref(), telegram_voice.clone()).await {
         Ok(app) => app,
         Err(error) => {
             publish(Update::Error(error));
@@ -324,7 +363,7 @@ async fn run(
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish).await {
+    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish, &telegram_voice).await {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
@@ -340,6 +379,7 @@ async fn observe(
     receive: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
     publish: &impl Fn(Update),
+    telegram_voice: &Arc<DynamicTelegramVoice>,
 ) -> Result<(), String> {
     let administration = app.presenter();
     let mut releases = administration.releases.observe();
@@ -347,6 +387,7 @@ async fn observe(
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
+    let mut telegram_session: Option<Arc<TelethonSession>> = None;
     let mut character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -407,11 +448,87 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
                     }
+                },
+                Some(Command::SaveTts(value)) => {
+                    match super::settings::execute(administration, Command::SaveTts(value)) {
+                        Ok(()) => {
+                            if let Some(session) = &telegram_session {
+                                if let Err(error) = activate_telegram_voice(administration, telegram_voice, session.clone()).await {
+                                    publish(Update::AdminError(error));
+                                }
+                            }
+                            publish(Update::AdminSaved);
+                        }
+                        Err(error) => publish(Update::AdminError(error)),
+                    }
+                },
+                Some(Command::TelegramConnect { api_id, api_hash, phone }) => {
+                    let result = async {
+                        let id = api_id.parse::<u32>().map_err(|_| "Некорректный API ID".to_owned())?;
+                        let python = std::env::var("NEUROMITA_PYTHON").unwrap_or_else(|_| {
+                            if cfg!(windows) { "python".into() } else { "python3".into() }
+                        });
+                        let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py"));
+                        let new_session = TelethonSession::spawn(std::path::Path::new(&python), &script)
+                            .map_err(|e| e.to_string())?;
+                        let authorized = new_session.connect(id, &api_hash, &phone, &directory.join("telegram-user"))
+                            .await.map_err(|e| e.to_string())?;
+                        if authorized {
+                            activate_telegram_voice(administration, telegram_voice, new_session.clone()).await?;
+                            Ok((new_session, 3, "Telegram: подключён".to_owned()))
+                        } else {
+                            new_session.request_code().await.map_err(|e| e.to_string())?;
+                            Ok((new_session, 1, "Telegram: ожидается код".to_owned()))
+                        }
+                    }.await;
+                    match result {
+                        Ok((session, phase, status)) => {
+                            if let Some(old) = telegram_session.replace(session) {
+                                let _ = old.disconnect().await;
+                            }
+                            publish(Update::TelegramAuth { phase, status });
+                        }
+                        Err(error) => publish(Update::TelegramAuth { phase: 0, status: error }),
+                    }
+                },
+                Some(Command::TelegramCode(code)) => {
+                    if let Some(session) = &telegram_session {
+                        match session.sign_in_code(&code).await {
+                            Ok(true) => publish(Update::TelegramAuth { phase: 2, status: "Telegram: требуется пароль 2FA".into() }),
+                            Ok(false) => match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
+                                Ok(()) => publish(Update::TelegramAuth { phase: 3, status: "Telegram: подключён".into() }),
+                                Err(error) => publish(Update::TelegramAuth { phase: 1, status: error }),
+                            },
+                            Err(error) => publish(Update::TelegramAuth { phase: 1, status: error.to_string() }),
+                        }
+                    } else {
+                        publish(Update::TelegramAuth { phase: 0, status: "Telegram: нет активной сессии".into() });
+                    }
+                },
+                Some(Command::TelegramPassword(password)) => {
+                    if let Some(session) = &telegram_session {
+                        match session.sign_in_password(&password).await {
+                            Ok(()) => match activate_telegram_voice(administration, telegram_voice, session.clone()).await {
+                                Ok(()) => publish(Update::TelegramAuth { phase: 3, status: "Telegram: подключён".into() }),
+                                Err(error) => publish(Update::TelegramAuth { phase: 2, status: error }),
+                            },
+                            Err(error) => publish(Update::TelegramAuth { phase: 2, status: error.to_string() }),
+                        }
+                    }
+                },
+                Some(Command::TelegramDisconnect) => {
+                    telegram_voice.clear().await;
+                    if let Some(session) = telegram_session.take() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), session.disconnect()).await;
+                    }
+                    publish(Update::TelegramAuth { phase: 0, status: "Telegram: отключён".into() });
                 },
                 Some(Command::NewPreset) => match administration.presets.create_unconfigured() {
                     Ok((id, record)) => publish(Update::PresetCreated(id, record)),
