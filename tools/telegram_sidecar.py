@@ -102,6 +102,7 @@ async def handle(req):
                 "id": msg.id,
                 "peer": peer,
                 "outgoing": bool(msg.out),
+                "reply_to_id": getattr(msg, "reply_to_msg_id", None),
                 "kind": kind,
             })
         return {"messages": rows}
