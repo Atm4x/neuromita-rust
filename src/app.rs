@@ -55,7 +55,8 @@ use crate::{
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
         AppSettings, JsonSettingsRepository, MemorySettingsRepository, SettingsConfig,
-        SettingsError, SettingsLifecycle, SettingsSource, SettingsStartupMigration,
+        SettingsError, SettingsInstanceLease, SettingsLifecycle, SettingsSource,
+        SettingsStartupMigration,
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
@@ -105,6 +106,7 @@ pub struct ApplicationConfig {
     pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
+    settings_instance: Option<SettingsInstanceLease>,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
@@ -151,6 +153,7 @@ impl ApplicationConfig {
                 source: SettingsSource::initial(AppSettings::initial_profile()),
                 repository: Arc::new(MemorySettingsRepository::new()),
             },
+            settings_instance: None,
             finetune: None,
             games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
@@ -220,6 +223,8 @@ impl ApplicationConfig {
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
+        let instance = SettingsInstanceLease::acquire(data_directory)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
@@ -247,6 +252,7 @@ impl ApplicationConfig {
             source,
             repository: Arc::new(JsonSettingsRepository::new(settings_path)),
         };
+        config.settings_instance = Some(instance);
         let finetune_path = data_directory.join("finetune.json");
         config.finetune = match std::fs::metadata(&finetune_path) {
             Ok(_) => Some(FineTuneSettings::load(&finetune_path)?),
@@ -386,6 +392,7 @@ struct ApplicationOwner {
     server_task: Option<JoinHandle<std::io::Result<()>>>,
     game_link_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
+    _settings_instance: Option<SettingsInstanceLease>,
     ai_runtime: Option<RunningAiApplication>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
@@ -414,6 +421,7 @@ impl ApplicationLifecycle {
             ai_hardware,
             ai_knowledge,
             settings,
+            settings_instance,
             timeline,
             server,
             game_link,
@@ -421,6 +429,37 @@ impl ApplicationLifecycle {
             games,
             reminders: reminders_config,
         } = config;
+        let settings_instance = match (settings_instance, settings.repository.lifecycle_root()) {
+            (Some(instance), Some(root))
+                if instance
+                    .matches_root(root)
+                    .map_err(|error| SettingsError::Storage(error.to_string()))? =>
+            {
+                Some(instance)
+            }
+            (Some(_), _) => {
+                return Err(SettingsError::Storage(
+                    "persistent settings root changed after application configuration".into(),
+                )
+                .into());
+            }
+            (None, Some(root)) => Some(
+                SettingsInstanceLease::acquire(root)
+                    .map_err(|error| SettingsError::Storage(error.to_string()))?,
+            ),
+            (None, None) => None,
+        };
+        if let (Some(instance), Some(environment)) = (&settings_instance, &ai_installed_speech)
+            && !instance
+                .matches_root(&environment.data_directory)
+                .map_err(|error| SettingsError::Storage(error.to_string()))?
+        {
+            return Err(SettingsError::Storage(
+                "installed speech and persisted settings must share the same owned data root"
+                    .into(),
+            )
+            .into());
+        }
         let finetune = finetune
             .map(|settings| FineTuneCollector::from_settings(&settings))
             .transpose()?;
@@ -728,6 +767,7 @@ impl ApplicationLifecycle {
             server_task: None,
             game_link_task: None,
             lease,
+            _settings_instance: settings_instance,
             ai_runtime,
             live_speech,
             speech_watch_task,
@@ -1210,5 +1250,110 @@ impl Lifecycle for ApplicationLifecycle {
     async fn run(self, stop: CancellationToken) -> Result<(), Self::Error> {
         stop.cancelled().await;
         self.shutdown().await
+    }
+}
+
+#[cfg(test)]
+mod settings_instance_tests {
+    use super::*;
+    use crate::generation::GenerationProvider;
+
+    fn config(root: &Path) -> Result<ApplicationConfig, ApplicationError> {
+        ApplicationConfig::persistent_unconfigured(
+            ResponseGenerator::new(Vec::<Arc<dyn GenerationProvider>>::new()).unwrap(),
+            RuntimeLimits {
+                request_queue: NonZeroUsize::new(2).unwrap(),
+                discovery_buffer: NonZeroUsize::new(2).unwrap(),
+                character_commands: NonZeroUsize::new(2).unwrap(),
+                presenter_updates: NonZeroUsize::new(2).unwrap(),
+                retained_finished: NonZeroUsize::new(2).unwrap(),
+            },
+            "127.0.0.1:0".parse().unwrap(),
+            root,
+        )
+    }
+
+    #[test]
+    fn portable_application_configs_cannot_own_the_same_root_concurrently() {
+        let root = std::env::temp_dir().join(format!("nm-app-owner-{}", Uuid::new_v4()));
+        let first = config(&root).unwrap();
+        assert!(matches!(
+            config(&root),
+            Err(ApplicationError::Settings(SettingsError::Storage(message)))
+                if message.contains("lock") || message.contains("used")
+        ));
+        drop(first);
+        assert!(config(&root).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn subprocess_persistent_config_fixture() {
+        let Ok(path) = std::env::var("NM_APP_INSTANCE_CHILD_ROOT") else {
+            return;
+        };
+        let ready = std::env::var("NM_APP_INSTANCE_CHILD_READY").unwrap();
+        let _owner = config(Path::new(&path)).unwrap();
+        std::fs::write(ready, "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn second_os_process_cannot_prepare_the_same_persisted_app_and_crash_reopens_it() {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let root = std::env::temp_dir().join(format!("nm-app-process-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ready = root.join("ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::settings_instance_tests::subprocess_persistent_config_fixture",
+            ])
+            .env("NM_APP_INSTANCE_CHILD_ROOT", &root)
+            .env("NM_APP_INSTANCE_CHILD_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "other application did not prepare"
+            );
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "other application exited"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(
+            config(&root),
+            Err(ApplicationError::Settings(SettingsError::Storage(_)))
+        ));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(config(&root).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_retargeted_settings_root_without_releasing_original_owner() {
+        let root = std::env::temp_dir().join(format!("nm-app-retarget-{}", Uuid::new_v4()));
+        let foreign = std::env::temp_dir().join(format!("nm-app-foreign-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&foreign).unwrap();
+        let mut configured = config(&root).unwrap();
+        configured.settings.repository =
+            Arc::new(JsonSettingsRepository::new(foreign.join("settings.json")));
+        assert!(matches!(
+            ApplicationLifecycle::start(configured).await,
+            Err(ApplicationError::Settings(SettingsError::Storage(_)))
+        ));
+        assert!(config(&root).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(foreign).unwrap();
     }
 }

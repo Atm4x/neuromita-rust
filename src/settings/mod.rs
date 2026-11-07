@@ -1,3 +1,4 @@
+mod instance_lease;
 mod migration;
 mod model;
 mod speech;
@@ -5,6 +6,7 @@ mod storage;
 mod transfer;
 
 pub use crate::generation::PresetId;
+pub(crate) use instance_lease::SettingsInstanceLease;
 pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
