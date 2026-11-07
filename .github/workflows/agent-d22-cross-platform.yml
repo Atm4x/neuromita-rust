@@ -16,7 +16,7 @@ jobs:
           persist-credentials: false
       - name: Verify pinned D22 commit
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "172efc83665de0fa5e761602222697e0fdb7ad68"
+        run: test "$(git rev-parse HEAD)" = "acca8e68385c71576cdd25df05c0aa79b6c5462a"
       - name: Install Rust toolchain
         shell: pwsh
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
@@ -34,7 +34,7 @@ jobs:
           ref: codex/updater-post-exit-helper-20261107
           persist-credentials: false
       - name: Verify pinned D22 commit
-        run: test "$(git rev-parse HEAD)" = "172efc83665de0fa5e761602222697e0fdb7ad68"
+        run: test "$(git rev-parse HEAD)" = "acca8e68385c71576cdd25df05c0aa79b6c5462a"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
