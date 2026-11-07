@@ -1,3 +1,4 @@
+pub mod ai_hub_catalog;
 mod audio_input;
 mod characters;
 pub use audio_input::AudioInputPresenter;

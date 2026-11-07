@@ -66,6 +66,7 @@ export component AppWindow inherits Window {
     in property <[HubModel]> ai-hub-entries;
     in property <[int]> ai-hub-category-counts;
     in property <bool> ai-hub-can-refresh: false;
+    in property <int> ai-hub-discovery-warning-count: 0;
     callback ai-hub-refresh();
     in property <string> chat-attitude: "—";
     in property <string> chat-boredom: "—";
@@ -109,6 +110,7 @@ export component AppWindow inherits Window {
                 entries: root.ai-hub-entries;
                 category-counts: root.ai-hub-category-counts;
                 can-refresh: root.ai-hub-can-refresh;
+                discovery-warning-count: root.ai-hub-discovery-warning-count;
                 refresh-requested => { root.ai-hub-refresh(); }
             }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
