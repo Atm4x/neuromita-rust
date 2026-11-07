@@ -1,0 +1,37 @@
+name: Agent C PR194 exact full-source bundle export
+on:
+  push:
+    branches:
+      - bridge/export-agent-c-pr194-source-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/export-agent-c-pr194-source-20261107
+          fetch-depth: 0
+      - name: Export exact PR194 ancestor-complete bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=09b3c8b85697dcb16c21e543ded44de4f756f049
+          BRANCH=codex/ai-platform-hub-c3-linux-worker-parent-death-20261107
+          git fetch --no-tags origin "refs/heads/$BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$SHA"
+          git update-ref refs/heads/agent-c-pr194-export "$SHA"
+          mkdir -p export
+          git bundle create export/NEUROMITA_AGENT_C_PR194_FULL_SOURCE.bundle refs/heads/agent-c-pr194-export
+          git bundle verify export/NEUROMITA_AGENT_C_PR194_FULL_SOURCE.bundle
+          git fsck --full
+          sha256sum export/NEUROMITA_AGENT_C_PR194_FULL_SOURCE.bundle > export/SHA256SUMS
+          printf 'PR #194\nSHA %s\nBASE 2781acae3f2b6e0aa2477b38a32a177c1678e721\n' "$SHA" > export/MANIFEST.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-c-pr194-full-source
+          path: export/*
+          compression-level: 0
+          retention-days: 7
