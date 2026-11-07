@@ -18,12 +18,13 @@ use crate::{
     interaction::TurnIntent,
     knowledge::{
         KnowledgeRetrieval,
+        generation_fusion::select_lexical_generation,
         history_generation::render_archived_history_evidence,
         history_retrieval::{
             HistorySearchConfig, search_archived_history, search_archived_history_fts,
         },
         history_window::HistoryWindow,
-        retrieval_fusion::FusionMode,
+        retrieval_fusion::{FusionMode, RetrievalMethod},
     },
     settings::HistoryGenerationMode,
     settings::SettingsOwner,
@@ -238,14 +239,19 @@ impl MessageHandler {
             }
             response = async {
                 let query = LlmConversation::memory_query(&context);
-                let selected = self.knowledge
-                    .select_with_relations(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query)
-                    .await
-                    .map_err(|error| GenerationError::Response(
-                        format!("knowledge retrieval failed: {error}")
-                    ))?;
                 let history_policy = settings.values.history_generation;
-                let mut selected = selected;
+                let joint_lexical = self.knowledge.is_lexical()
+                    && matches!(history_policy.mode, HistoryGenerationMode::Keyword | HistoryGenerationMode::Fts);
+                let mut selected = if joint_lexical {
+                    None
+                } else {
+                    self.knowledge
+                        .select_with_relations(context.character_id, &context.memories, &context.memory_islands, &context.memory_relations, &query)
+                        .await
+                        .map_err(|error| GenerationError::Response(
+                            format!("knowledge retrieval failed: {error}")
+                        ))?
+                };
                 let mut history_window = None;
                 if history_policy.mode != HistoryGenerationMode::Off {
                     let focus = match context.focus.intent {
@@ -257,7 +263,7 @@ impl MessageHandler {
                     );
                     let history_query = query.chars().take(512).collect::<String>();
                     let config = HistorySearchConfig {
-                        limit: usize::from(history_policy.max_results),
+                        limit: if joint_lexical { 32 } else { usize::from(history_policy.max_results) },
                         max_content_chars: usize::from(history_policy.max_content_chars),
                     };
                     let history_result = match history_policy.mode {
@@ -284,7 +290,31 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(format!(
                         "selected history retrieval failed: {error}"
                     )))?;
-                    if let Some(evidence) = render_archived_history_evidence(
+                    if joint_lexical {
+                        let method = if history_policy.mode == HistoryGenerationMode::Fts {
+                            RetrievalMethod::Fts
+                        } else {
+                            RetrievalMethod::Keyword
+                        };
+                        selected = select_lexical_generation(
+                            context.character_id,
+                            &context.memories,
+                            &context.memory_islands,
+                            &context.memory_relations,
+                            &context.view,
+                            &window,
+                            &history_result,
+                            method,
+                            &history_query,
+                            HistorySearchConfig {
+                                limit: usize::from(history_policy.max_results),
+                                max_content_chars: usize::from(history_policy.max_content_chars),
+                            },
+                        )
+                        .map_err(|error| GenerationError::Response(format!(
+                            "combined generation evidence rejected: {error}"
+                        )))?;
+                    } else if let Some(evidence) = render_archived_history_evidence(
                         context.character_id, &context.view, &window, &history_result,
                         usize::from(history_policy.max_results),
                         usize::from(history_policy.max_content_chars),

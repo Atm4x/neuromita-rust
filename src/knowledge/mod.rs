@@ -3,6 +3,7 @@
 
 pub mod embedding;
 pub mod forgotten_recall;
+pub(crate) mod generation_fusion;
 pub mod graph;
 pub mod graph_retrieval;
 pub mod history_generation;
@@ -219,6 +220,10 @@ impl KnowledgeRetrieval {
             return Err(KnowledgeCacheClearError::BackendUnavailable);
         };
         Ok(retriever.clear_cache_confirmed(preview, confirmed)?)
+    }
+
+    pub(crate) fn is_lexical(&self) -> bool {
+        matches!(self.mode, KnowledgeMode::Lexical)
     }
 
     pub fn lexical() -> Self {

@@ -553,3 +553,262 @@ async fn generation_renderer_rejects_forged_content_and_cross_character_source_i
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn lexical_generation_fuses_memory_and_archived_history_under_one_result_budget() {
+    use neuromita::{
+        api::CharacterApi,
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let first_memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Jasmine tea is the preferred evening drink",
+    );
+    let second_memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Low,
+        "Jasmine tea is available in the pantry",
+    );
+    let selected_memory_id = first_memory.id;
+    let excluded_memory_id = second_memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![
+                MemoryCommand::ImportRecord {
+                    record: first_memory,
+                },
+                MemoryCommand::ImportRecord {
+                    record: second_memory,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Jasmine tea was shared on the balcony".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Current unrelated topic".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Keyword,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Jasmine",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(
+        evidence.contains(&selected_memory_id.0.to_string()),
+        "{evidence}"
+    );
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(
+        !evidence.contains(&excluded_memory_id.0.to_string()),
+        "{evidence}"
+    );
+    assert_eq!(evidence.matches("[LONG-TERM MEMORY]").count(), 1);
+    assert_eq!(evidence.matches("[RETRIEVED TIMELINE EVIDENCE]").count(), 1);
+    assert!(
+        call.input
+            .history_window
+            .as_ref()
+            .unwrap()
+            .is_archived(archived)
+    );
+    call.reply.send("Both selected".into()).unwrap();
+    let done = timeout(Duration::from_secs(5), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        done.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn fts_generation_fuses_memory_and_archived_history_without_keyword_fallback() {
+    use neuromita::{
+        api::CharacterApi,
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::High,
+        "Orchid flower is growing near the window",
+    );
+    let id = memory.id;
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Orchid flower has bloomed yesterday".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Today we travel".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Fts,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    call.reply.send("Found both".into()).unwrap();
+    let done = timeout(Duration::from_secs(5), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        done.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reply_and_react_share_lexical_memory_history_admission_without_cross_character_evidence() {
+    use neuromita::{
+        api::CharacterApi,
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+        request::ReactRequest,
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::High,
+        "Pear orchard belongs to Crazy",
+    );
+    let memory_id = memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Pear orchard grew in spring".into()).unwrap(),
+    )
+    .unwrap();
+    let target = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("What happened to the orchard?".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Keyword,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+
+    let reply = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Crazy,
+        target,
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&target.0.to_string()), "{evidence}");
+    call.reply.send("Remembered".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), reply.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    let react = ChatApi::react(ReactRequest::new(
+        CharacterId::Crazy,
+        target,
+        Arc::clone(
+            UserInput::new("Remember the pear orchard".into())
+                .unwrap()
+                .text(),
+        ),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&target.0.to_string()), "{evidence}");
+    call.reply.send("Acknowledged".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), react.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
