@@ -125,12 +125,17 @@ packages and isolated Linux linker/pkg-config shims (outside the repository):
   `ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets`.
   That test explicitly requires Python 3.12, while this runner has Python 3.13.5.
   Repeating with that test explicitly excluded gives 395 PASS, zero failures;
-  the excluded case is NOT considered verified.
+  the excluded case is NOT considered verified **by the local Python 3.13 runner**.
+- **Independent Python 3.12 verification:** GitHub Actions run
+  [42375125455](https://github.com/Atm4x/neuromita-rust/actions/runs/42375125455)
+  checked out exact D18 code SHA `377a54a167c2b1d200164dc8ddf08513bbce1d9b`,
+  installed Rust 1.98.1 and Python 3.12, and executed the complete library
+  suite **396 passed / 0 failed / 0 skipped**. This closes the missing fixture
+  verification without suppressing or modifying its test.
 - Full library Clippy with `-D warnings`: FAIL on nine existing issues in
   `src/prompts/{dsl,expression,post_dsl,mod}.rs` and
   `src/request/prompt_preparation.rs`; none occur in the D18 modified source.
 
 These are compilation and source-level proofs, **not** Windows/desktop E2E or
-pixel-accurate image focus acceptance. GUI interaction tests, Python 3.12
-fixture verification, local Wiki routing and inline rich-text step hotspots
-remain open. Issue #41 must stay open until those are validated.
+pixel-accurate image focus acceptance. GUI interaction tests, local Wiki
+routing and inline rich-text step hotspots remain open. Issue #41 must stay open until those are validated.
