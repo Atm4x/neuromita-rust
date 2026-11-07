@@ -1,0 +1,35 @@
+name: Agent D29 pinned Windows lock regression
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d29-windows-test-20261107
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exactly pinned D29 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e ace68913a8c2bfdd5378e8755042d3672c1dc823^{commit}
+          test "$(git rev-parse ace68913a8c2bfdd5378e8755042d3672c1dc823^{tree})" = b78da2f9049ad0969159d1c7ce82da63c97a7706
+          git checkout --detach ace68913a8c2bfdd5378e8755042d3672c1dc823
+          test "$(git rev-parse HEAD)" = ace68913a8c2bfdd5378e8755042d3672c1dc823
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows preset recovery and lock lifecycle
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          cargo test --locked --offline --lib settings::preset_activation::tests -- --test-threads=8
+          cargo test --locked --offline --lib settings::storage::tests -- --test-threads=8
+          cargo test --locked --offline --test preset_storage_lock -- --test-threads=8
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
