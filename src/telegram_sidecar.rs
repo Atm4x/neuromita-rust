@@ -228,7 +228,7 @@ impl TelethonSession {
                 "api_hash": api_hash, "phone": phone, "session": session
             }))
             .await?;
-        Ok(result["authorized"] == true)
+        result["authorized"].as_bool().ok_or(TelegramError::Network)
     }
 
     pub async fn request_code(&self) -> Result<(), TelegramError> {
