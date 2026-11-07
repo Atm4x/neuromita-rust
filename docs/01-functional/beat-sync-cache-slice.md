@@ -94,3 +94,21 @@ Python-compatible request/response flows are tested. The synthetic
 cache fixtures do not establish actual beat detection quality or Unity
 delivery. PR #190 should remain Draft until these stages are complete
 or explicitly split into follow-up PRs.
+
+### Cache-first producer boundary
+
+`BeatCache::analyze_or_reuse` now hashes the supplied byte slice and
+passes that **same immutable slice** to the injected analyzer callback.
+It returns the filtered timeline and a typed origin (cache or fresh
+analysis), whether a corrupt entry was recomputed, and an optional
+nonfatal cache I/O/storage warning. Invalid identity and threshold are
+rejected before invoking the producer. This is a synchronous
+**integration seam**, not a production worker implementation; callers
+must bound source size and offload expensive analysis outside the
+real-time Core executor.
+
+The adapter deliberately cannot guarantee that a producer obeys the
+raw-confidence contract, nor can it guarantee worker cancellation.
+End-to-end parity requires a worker with a verifiable raw-output
+contract and real fixture coverage. Source file path → immutable byte
+snapshot → actual decoder/worker still needs a dedicated implementation.
