@@ -59,7 +59,10 @@ async fn read_bounded_line(
 ) -> Result<Option<Vec<u8>>, TelegramError> {
     let mut line = Vec::new();
     loop {
-        let available = reader.fill_buf().await.map_err(|_| TelegramError::Disconnected)?;
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|_| TelegramError::Disconnected)?;
         if available.is_empty() {
             return if line.is_empty() {
                 Ok(None)

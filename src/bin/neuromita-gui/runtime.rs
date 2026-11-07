@@ -321,7 +321,11 @@ async fn open_telegram_session(
         .parse::<u32>()
         .map_err(|_| "Некорректный API ID".to_owned())?;
     let python = std::env::var("NEUROMITA_PYTHON").unwrap_or_else(|_| {
-        if cfg!(windows) { "python".into() } else { "python3".into() }
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
     });
     let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
         .map(PathBuf::from)
@@ -330,9 +334,11 @@ async fn open_telegram_session(
                 exe.parent()
                     .map(|parent| parent.join("tools/telegram_sidecar.py"))
             });
-            beside_executable.filter(|candidate| candidate.is_file()).unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
-            })
+            beside_executable
+                .filter(|candidate| candidate.is_file())
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
+                })
         });
     if !script.is_file() {
         return Err(format!("Telegram sidecar не найден: {}", script.display()));
@@ -457,14 +463,10 @@ async fn observe(
     // API credentials are intentionally never persisted as plain-text app
     // settings. Explicit environment credentials permit opt-in startup
     // rehydration of the protected Telethon session.
-    let telegram_auto_connect = administration
-        .settings
-        .snapshot()
-        .ok()
-        .is_some_and(|s| {
-            let tts = &s.values.speech.tts;
-            tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect
-        });
+    let telegram_auto_connect = administration.settings.snapshot().ok().is_some_and(|s| {
+        let tts = &s.values.speech.tts;
+        tts.enabled && tts.backend == TtsBackend::Telegram && tts.telegram_auto_connect
+    });
     if telegram_auto_connect {
         let credentials = (
             std::env::var("NEUROMITA_TG_API_ID"),

@@ -186,7 +186,9 @@ fn normalize_speaker_command(value: &str) -> Result<Option<String>, TelegramErro
     let voice = value.strip_prefix("/speaker ").unwrap_or(value).trim();
     if voice.is_empty()
         || voice.len() > 100
-        || voice.chars().any(|ch| ch.is_control() || ch.is_whitespace() || ch == '/')
+        || voice
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '/')
     {
         return Err(TelegramError::Unavailable);
     }
@@ -486,13 +488,15 @@ mod tests {
         router.install(Arc::new(PendingProvider)).await;
         let running = Arc::clone(&router);
         let task = tokio::spawn(async move {
-            running.synthesize(
-                Arc::from("hello"),
-                VoiceOptions {
-                    voice: "mita".into(),
-                    volume: crate::settings::Volume::new(100).unwrap(),
-                },
-            ).await
+            running
+                .synthesize(
+                    Arc::from("hello"),
+                    VoiceOptions {
+                        voice: "mita".into(),
+                        volume: crate::settings::Volume::new(100).unwrap(),
+                    },
+                )
+                .await
         });
         tokio::task::yield_now().await;
         router.clear().await;
@@ -613,5 +617,4 @@ mod tests {
         setup(fake.clone()).speak("new", "mita").await.unwrap();
         assert_eq!(fake.downloads.load(Ordering::SeqCst), 1);
     }
-
 }
