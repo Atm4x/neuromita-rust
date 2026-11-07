@@ -1,0 +1,68 @@
+name: Agent D26 pinned Rust and Windows checks
+on:
+  push:
+    branches:
+      - bridge/agent-d26-check-20261107
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-python-core-transaction-20261107
+          persist-credentials: false
+      - name: Exact D26 tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "f2a34962755a702955000e7cc01d6291a27b97c6"
+          test "$(git rev-parse HEAD^{tree})" = "a7c8ff88262a5e70bbbdc987042b84650821c238"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux native dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Rustfmt
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Updater tests
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --lib updater::
+      - name: GUI all-targets compile
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: Entire library regression on Python 3.12
+        shell: bash
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-python-core-transaction-20261107
+          persist-credentials: false
+      - name: Exact D26 source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "f2a34962755a702955000e7cc01d6291a27b97c6"
+      - name: Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Windows library compilation
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --lib
