@@ -26,6 +26,7 @@ pub mod request;
 mod runtime;
 pub mod server;
 pub mod settings;
+pub mod telegram_sidecar;
 pub mod telegram_voice;
 pub mod timeline;
 pub mod voice;
