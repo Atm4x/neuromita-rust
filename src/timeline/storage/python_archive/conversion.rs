@@ -262,9 +262,9 @@ fn convert_message_content(
         ));
     }
     let Some(attachments) = attachments else {
-        let content = payload.get("content").ok_or(PythonArchiveError::Invalid(
-            "Python message content missing",
-        ))?;
+        let Some(content) = payload.get("content") else {
+            return Ok(());
+        };
         let parts = crate::timeline::domain::parse_message_content(content).map_err(|_| {
             PythonArchiveError::Invalid("Python message content is not representable")
         })?;
