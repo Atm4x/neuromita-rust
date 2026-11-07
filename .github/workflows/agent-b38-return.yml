@@ -1,0 +1,41 @@
+name: Publish B38 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b38-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e5fee6f3d15311689bffd1a6c0bce77479f38126
+          fetch-depth: 0
+      - name: Import exact B38 Git objects without force-push
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e5fee6f3d15311689bffd1a6c0bce77479f38126
+          EXPECTED=2f8f2ea82d926b5ff1b645c7c6b0b8573ac536a5
+          SHA256=239570d120597f75874462fff47d1f16e1b2ab94f58ed26d0e749e051ccb6fa8
+          TARGET=refs/heads/codex/timeline-python-image-only-20261107
+          git fetch origin refs/heads/bridge/agent-b38-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b38-20261107.bundle.b64 | base64 --decode > /tmp/agent-b38.bundle
+          echo "$SHA256  /tmp/agent-b38.bundle" | sha256sum --check
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git bundle verify /tmp/agent-b38.bundle
+          git fetch /tmp/agent-b38.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch has unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$EXPECTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "B38 exact HEAD verified: $EXPECTED"
