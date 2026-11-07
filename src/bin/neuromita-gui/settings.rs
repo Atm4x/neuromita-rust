@@ -66,24 +66,10 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .update_connection(id, record)
             .map_err(|e| e.to_string())?,
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
-        Command::MovePreset(id, step) => {
-            let mut order: Vec<_> = api.presets.list().into_iter().map(|(id, _)| id).collect();
-            let position = order
-                .iter()
-                .position(|candidate| *candidate == id)
-                .ok_or_else(|| format!("Preset {id:?} does not exist"))?;
-            let destination = if step < 0 {
-                position.checked_sub(1)
-            } else if step > 0 {
-                (position + 1 < order.len()).then_some(position + 1)
-            } else {
-                None
-            };
-            if let Some(destination) = destination {
-                order.swap(position, destination);
-                api.presets.reorder(&order).map_err(|e| e.to_string())?;
-            }
-        }
+        Command::MovePreset(id, step) => api
+            .presets
+            .move_one(id, step)
+            .map_err(|error| error.to_string())?,
         Command::ActivePreset(id) => {
             api.presets
                 .require_configured(id)
@@ -1022,4 +1008,33 @@ pub(super) fn provider_templates(
             available: provider.supported,
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod preset_move_gui_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn slint_move_callback_dispatches_selected_id_and_direction() {
+        let window = AppWindow::new().expect("Slint test window");
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let events = Rc::clone(&captured);
+        bind(
+            &window,
+            Rc::new(move |command| events.borrow_mut().push(command)),
+        );
+        let settings = window.global::<SettingsUi>();
+        settings.invoke_preset_move("42".into(), -1);
+        settings.invoke_preset_move("42".into(), 1);
+        let commands = captured.borrow();
+        assert!(matches!(
+            commands.first(),
+            Some(Command::MovePreset(PresetId(42), -1))
+        ));
+        assert!(matches!(
+            commands.get(1),
+            Some(Command::MovePreset(PresetId(42), 1))
+        ));
+    }
 }

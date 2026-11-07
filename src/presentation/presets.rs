@@ -95,6 +95,10 @@ impl PresetsPresenter {
         self.catalog.reorder(order)
     }
 
+    pub fn move_one(&self, id: PresetId, step: i32) -> Result<(), PresetCatalogError> {
+        self.catalog.move_one(id, step)
+    }
+
     pub fn snapshot(&self) -> PresetsView {
         let catalog = self.catalog.observe();
         let snapshot = catalog.borrow();
@@ -724,5 +728,36 @@ mod tests {
         assert!(matches!(record.definition, PresetDefinition::Unconfigured));
         assert!(!presenter.catalog.configured(id).unwrap());
         assert_eq!(presenter.snapshot().records.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod move_one_tests {
+    use super::*;
+
+    #[test]
+    fn presenter_move_reorders_snapshot_using_same_catalog() {
+        let catalog = Arc::new(PresetCatalog::new(Default::default()));
+        let presenter = PresetsPresenter::new(Arc::clone(&catalog));
+        let a = presenter.create_unconfigured().unwrap().0;
+        let b = presenter.create_unconfigured().unwrap().0;
+        let c = presenter.create_unconfigured().unwrap().0;
+        let previous = presenter.snapshot().revision;
+        presenter.move_one(c, -1).unwrap();
+        assert_eq!(
+            presenter
+                .snapshot()
+                .records
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [a, c, b]
+        );
+        assert_eq!(
+            catalog.list().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [a, c, b]
+        );
+        assert_eq!(presenter.snapshot().revision, previous + 1);
+        assert_eq!(presenter.observe().borrow().order, [a, c, b]);
     }
 }
