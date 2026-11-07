@@ -83,6 +83,9 @@ pub(crate) struct AcceptanceContext {
     pub turn: TimelineTurn,
     pub game: Option<EventId>,
     pub game_guard: Option<EventId>,
+    /// An explicitly opted-in external evidence selection must still have the
+    /// exact same authoritative Timeline head when the turn is accepted.
+    pub require_exact_timeline_prefix: bool,
 }
 
 enum Command {
@@ -798,6 +801,9 @@ impl CharacterHandler {
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         let current_at = timeline.anchor();
+        if context.require_exact_timeline_prefix && current_at != context.anchor {
+            return Err(CharacterError::StaleState);
+        }
         let current = timeline
             .inspect_context_at(self.character.id, current_at)
             .map_err(CharacterError::Internal)?;
@@ -1336,6 +1342,7 @@ mod turn_tests {
             turn: context.turn,
             game: context.game_key,
             game_guard: context.game_guard,
+            require_exact_timeline_prefix: false,
         }
     }
 
