@@ -4,8 +4,10 @@
 use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
     sync::Mutex,
     time::{Instant, sleep, timeout},
 };
@@ -22,6 +24,8 @@ pub enum TelegramError {
     Timeout,
     InvalidMedia,
     MediaTooLarge,
+    DecoderUnavailable,
+    DecodeFailed,
 }
 impl std::fmt::Display for TelegramError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,6 +56,62 @@ pub trait TelegramTransport: Send + Sync {
     fn send<'a>(&'a self, peer: &'a str, text: &'a str) -> TelegramFuture<'a, i64>;
     fn recent<'a>(&'a self, peer: &'a str, after: i64) -> TelegramFuture<'a, Vec<Incoming>>;
     fn download<'a>(&'a self, peer: &'a str, id: i64, limit: usize) -> TelegramFuture<'a, Vec<u8>>;
+}
+
+/// Production decoder using a locally installed FFmpeg executable. The output
+/// is always owned PCM16 WAV; the source is never passed to playback directly.
+/// The FFmpeg executable must be provisioned explicitly by the host installer.
+pub struct FfmpegTelegramDecoder {
+    executable: std::path::PathBuf,
+}
+
+impl FfmpegTelegramDecoder {
+    pub fn new(executable: impl Into<std::path::PathBuf>) -> Self {
+        Self { executable: executable.into() }
+    }
+}
+
+impl TelegramDecoder for FfmpegTelegramDecoder {
+    fn decode(&self, kind: MediaKind, bytes: Vec<u8>) -> TelegramFuture<'_, AudioArtifact> {
+        Box::pin(async move {
+            if !matches!(kind, MediaKind::Mp3 | MediaKind::VoiceOgg) || bytes.is_empty() {
+                return Err(TelegramError::InvalidMedia);
+            }
+            if bytes.len() > 32 * 1024 * 1024 {
+                return Err(TelegramError::MediaTooLarge);
+            }
+            // -t bounds output duration to 120 seconds (~21 MiB at 44.1 kHz stereo PCM16).
+            let mut child = Command::new(&self.executable)
+                .args([
+                    "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-i", "pipe:0", "-t", "120", "-vn", "-ac", "2",
+                    "-ar", "44100", "-c:a", "pcm_s16le", "-f", "wav", "pipe:1",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|_| TelegramError::DecoderUnavailable)?;
+            let mut stdin = child.stdin.take().ok_or(TelegramError::DecodeFailed)?;
+            let write = tokio::spawn(async move {
+                let result = stdin.write_all(&bytes).await;
+                drop(stdin);
+                result
+            });
+            let output = child.wait_with_output().await.map_err(|_| TelegramError::DecodeFailed)?;
+            let write_result = write.await.map_err(|_| TelegramError::DecodeFailed)?;
+            if !output.status.success() || write_result.is_err() {
+                return Err(TelegramError::DecodeFailed);
+            }
+            let wav = output.stdout;
+            if wav.len() < 44 || wav.len() > 24 * 1024 * 1024
+                || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+                return Err(TelegramError::InvalidMedia);
+            }
+            Ok(AudioArtifact { format: AudioFormat::Wave, bytes: Arc::from(wav) })
+        })
+    }
 }
 
 pub trait TelegramDecoder: Send + Sync {
@@ -86,7 +146,34 @@ impl TelegramConfig {
 
 struct Conversation {
     last_send: Option<Instant>,
+    send_times: VecDeque<Instant>,
     speaker: Option<String>,
+}
+
+impl Conversation {
+    // Bot commands and text both count against Telegram's rolling send budget.
+    fn permitted_at(&mut self, now: Instant, interval: Duration) -> Instant {
+        while self.send_times.front().is_some_and(|t| *t + Duration::from_secs(60) <= now) {
+            self.send_times.pop_front();
+        }
+        let mut due = now;
+        if let Some(last) = self.last_send {
+            due = due.max(last + interval);
+        }
+        if self.send_times.len() >= 20 {
+            if let Some(first) = self.send_times.front() {
+                due = due.max(*first + Duration::from_secs(60));
+            }
+        }
+        due
+    }
+    fn record_send(&mut self, at: Instant) {
+        while self.send_times.front().is_some_and(|t| *t + Duration::from_secs(60) <= at) {
+            self.send_times.pop_front();
+        }
+        self.last_send = Some(at);
+        self.send_times.push_back(at);
+    }
 }
 pub struct TelegramVoiceService {
     transport: Arc<dyn TelegramTransport>,
@@ -115,14 +202,12 @@ impl TelegramVoiceService {
     }
 
     async fn send(&self, state: &mut Conversation, text: &str) -> Result<i64, TelegramError> {
-        if let Some(last) = state.last_send {
-            let due = last + self.config.interval;
-            if let Some(delay) = due.checked_duration_since(Instant::now()) {
-                sleep(delay).await;
-            }
+        let due = state.permitted_at(Instant::now(), self.config.interval);
+        if let Some(delay) = due.checked_duration_since(Instant::now()) {
+            sleep(delay).await;
         }
-        // Even a failed send might have reached Telegram.
-        state.last_send = Some(Instant::now());
+        // Count uncertain sends: the network can fail after Telegram accepted a message.
+        state.record_send(Instant::now());
         self.transport.send(&self.config.peer, text).await
     }
 
@@ -272,6 +357,30 @@ mod tests {
             kind: Some(MediaKind::Mp3),
         }
     }
+    #[test]
+    fn rolling_rate_limit_includes_commands_and_recovers_after_window() {
+        let start = Instant::now();
+        let mut state = Conversation {
+            last_send: None,
+            send_times: VecDeque::new(),
+            speaker: None,
+        };
+        for n in 0..20 {
+            state.record_send(start + Duration::from_millis(n));
+        }
+        let due = state.permitted_at(start + Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(due, start + Duration::from_secs(60));
+        let recovered = state.permitted_at(start + Duration::from_secs(61), Duration::ZERO);
+        assert_eq!(recovered, start + Duration::from_secs(61));
+    }
+
+    #[tokio::test]
+    async fn missing_decoder_is_an_error_not_fake_audio() {
+        let decoder = FfmpegTelegramDecoder::new("/nonexistent/neuromita-ffmpeg");
+        let result = decoder.decode(MediaKind::Mp3, vec![1, 2, 3]).await;
+        assert_eq!(result.unwrap_err(), TelegramError::DecoderUnavailable);
+    }
+
     #[tokio::test]
     async fn stale_foreign_media_ignored_and_wav_returned() {
         let fake = Arc::new(Fake::default());
