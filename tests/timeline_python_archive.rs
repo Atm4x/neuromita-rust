@@ -175,6 +175,59 @@ fn python_asset_closure_hash_and_base64_roundtrip() {
     assert!(inspect_python_archive(&serde_json::to_vec(&forged).unwrap()).is_err());
 }
 
+fn archive_with_rehashed_media_type(media_type: &str) -> Vec<u8> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use ring::digest::{Context, SHA256};
+
+    let mut archive: Value =
+        serde_json::from_slice(&with_binary(b"canonical MIME fixture")).unwrap();
+    let bytes = STANDARD
+        .decode(archive["assets"][0]["base64"].as_str().unwrap())
+        .unwrap();
+    let mut hasher = Context::new(&SHA256);
+    hasher.update(media_type.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    let digest = hasher.finish();
+    let id = format!(
+        "sha256:{}",
+        digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    archive["assets"][0]["media_type"] = json!(media_type);
+    archive["assets"][0]["asset_id"] = json!(id);
+    archive["events"][1]["payload"]["embedded_image"]["media_type"] = json!(media_type);
+    archive["events"][1]["payload"]["embedded_image"]["asset_id"] = json!(id);
+    archive["operations"][1]["intent"]["events"][0]["payload"] =
+        archive["events"][1]["payload"].clone();
+    serde_json::to_vec(&archive).unwrap()
+}
+
+#[test]
+fn python_archive_rejects_noncanonical_mime_with_valid_hash_and_receipt() {
+    for media_type in [
+        "image/jpg",
+        "!mage/png",
+        "image/!png",
+        "image/+",
+        "/png",
+        "image/",
+        "image/_png",
+    ] {
+        let bytes = archive_with_rehashed_media_type(media_type);
+        assert!(
+            inspect_python_archive(&bytes).is_err(),
+            "accepted noncanonical Python MIME: {media_type}"
+        );
+    }
+    for mime in ["image/png", "image/jpeg", "image/vnd.example"] {
+        assert!(inspect_python_archive(&archive_with_rehashed_media_type(mime)).is_ok());
+    }
+}
+
 #[test]
 fn python_archive_rejects_missing_duplicate_and_inconsistent_binary() {
     let valid = with_binary(b"image bytes");
