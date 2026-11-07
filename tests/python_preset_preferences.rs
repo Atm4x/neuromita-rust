@@ -178,3 +178,41 @@ fn repeated_review_attachment_fails_explicitly_without_publishing() {
             .is_err()
     );
 }
+
+#[test]
+fn offline_two_file_activation_does_not_apply_reviewed_selection_or_order() {
+    use neuromita::settings::PresetActivation;
+
+    let root = std::env::temp_dir().join(format!("neuromita-pref-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let review_dir = root.join("review");
+    let active_dir = root.join("UserData");
+    std::fs::create_dir(&active_dir).unwrap();
+
+    let settings = br#"{"revision":9,"settings":"existing opaque bytes"}"#;
+    std::fs::write(active_dir.join("settings.json"), settings).unwrap();
+    let (review, prefs) = plan()
+        .with_preferences(br#"{"LAST_API_PRESET_ID":19}"#)
+        .unwrap();
+    assert_eq!(prefs.selected_user_id, Some(19));
+    review.stage_new_directory(&review_dir).unwrap();
+    PresetActivation::apply(&review_dir, &active_dir).unwrap();
+
+    assert_eq!(
+        std::fs::read(active_dir.join("settings.json")).unwrap(),
+        settings
+    );
+    assert!(
+        !active_dir
+            .join("python-preset-preferences-review.json")
+            .exists()
+    );
+    assert!(active_dir.join("presets.json").exists());
+    assert!(active_dir.join("preset-credentials.json").exists());
+    assert!(
+        review_dir
+            .join("python-preset-preferences-review.json")
+            .exists()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
