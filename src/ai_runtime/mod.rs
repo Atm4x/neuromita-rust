@@ -59,19 +59,6 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
-// Before the Windows Job Object is attached, Python runs only the isolated
-// stdlib gate (-I -S). On owner death, stdin closes and no plugin import occurs.
-// Once attached, the OS job kills the process tree if its Rust owner dies.
-#[cfg(windows)]
-const WINDOWS_GATED_WORKER_BOOTSTRAP: &str = concat!(
-    "import os,sys\n",
-    "if sys.stdin.buffer.read(1) != b'\\x01': sys.exit(71)\n",
-    "import site\nsite.main()\n",
-    "sys.path[:0] = os.environ['PYTHONPATH'].split(os.pathsep)\n",
-    "import runpy\n",
-    "runpy.run_module('neuromita_ai_sdk.host', run_name='__main__', alter_sys=True)\n",
-);
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcessTopology {
     Shared,
@@ -256,11 +243,7 @@ impl WorkerProcess {
         }
 
         #[cfg(windows)]
-        command
-            .arg("-I")
-            .arg("-S")
-            .arg("-c")
-            .arg(WINDOWS_GATED_WORKER_BOOTSTRAP);
+        windows_uv_job::gated_module(&mut command, "neuromita_ai_sdk.host");
         #[cfg(not(windows))]
         command.arg("-m").arg("neuromita_ai_sdk.host");
         command
@@ -279,24 +262,10 @@ impl WorkerProcess {
         let generation = Uuid::new_v4();
         let mut child = command.spawn().map_err(AiRuntimeError::Spawn)?;
         #[cfg(windows)]
-        let job = {
-            let outcome = child
-                .raw_handle()
-                .ok_or_else(|| std::io::Error::other("Python worker process handle unavailable"))
-                .and_then(|handle| {
-                    windows_uv_job::WindowsKillOnCloseJob::attach_worker(handle, generation)
-                });
-            match outcome {
-                Ok(job) => job,
-                Err(error) => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    return Err(AiRuntimeError::Spawn(error));
-                }
-            }
-        };
-        #[allow(unused_mut)]
-        let mut input = child
+        let job = windows_uv_job::attach_and_activate(&mut child)
+            .await
+            .map_err(AiRuntimeError::Spawn)?;
+        let input = child
             .stdin
             .take()
             .ok_or_else(|| AiRuntimeError::Protocol("stdin unavailable".into()))?;
@@ -304,12 +273,6 @@ impl WorkerProcess {
             .stdout
             .take()
             .ok_or_else(|| AiRuntimeError::Protocol("stdout unavailable".into()))?;
-        #[cfg(windows)]
-        if let Err(error) = input.write_all(&[1]).await {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return Err(AiRuntimeError::Io(error));
-        }
         let mut worker = Self {
             child,
             #[cfg(windows)]

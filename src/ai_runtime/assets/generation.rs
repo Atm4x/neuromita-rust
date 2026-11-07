@@ -18,6 +18,8 @@ use super::{
 };
 #[cfg(target_os = "linux")]
 use crate::ai_runtime::linux_worker_lifetime;
+#[cfg(windows)]
+use crate::ai_runtime::windows_uv_job;
 use crate::ai_runtime::{install::PluginInstallPlan, revision_lease};
 
 pub struct ModelGenerationRequest<'a> {
@@ -148,9 +150,11 @@ impl ModelAssetStore {
             let python_path = std::env::join_paths(&paths)
                 .map_err(|error| ModelGenerationError::Invalid(error.to_string()))?;
             let mut command = Command::new(request.python_executable);
+            #[cfg(windows)]
+            windows_uv_job::gated_module(&mut command, "neuromita_ai_sdk.installer");
+            #[cfg(not(windows))]
+            command.arg("-m").arg("neuromita_ai_sdk.installer");
             command
-                .arg("-m")
-                .arg("neuromita_ai_sdk.installer")
                 .arg("--python-version")
                 .arg(request.python_version)
                 .arg("--plugins-dir")
@@ -171,7 +175,11 @@ impl ModelAssetStore {
                 .env("PYTHONNOUSERSITE", "1")
                 .env("PYTHONDONTWRITEBYTECODE", "1")
                 .env_remove("PYTHONHOME")
-                .stdin(Stdio::null())
+                .stdin(if cfg!(windows) {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
@@ -307,26 +315,32 @@ async fn run_install_hook(
 
     let (sender, mut cancellation) = oneshot::channel();
     let _cancel_on_drop = CancelHook(Some(sender));
-    let handle = tokio::spawn(async move {
-        let _leases = leases;
-        let mut child = command.spawn()?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| std::io::Error::other("Python installer stdout pipe unavailable"))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| std::io::Error::other("Python installer stderr pipe unavailable"))?;
-        let stdout_reader = tokio::spawn(async move {
-            let mut data = Vec::new();
-            stdout.read_to_end(&mut data).await.map(|_| data)
-        });
-        let stderr_reader = tokio::spawn(async move {
-            let mut data = Vec::new();
-            stderr.read_to_end(&mut data).await.map(|_| data)
-        });
-        let started = Instant::now();
+    let handle =
+        tokio::spawn(async move {
+            let _leases = leases;
+            let mut child = command.spawn()?;
+            #[cfg(windows)]
+            let job = windows_uv_job::attach_and_activate(&mut child).await?;
+            #[cfg(windows)]
+            drop(child.stdin.take());
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| std::io::Error::other("Python installer stdout pipe unavailable"))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| std::io::Error::other("Python installer stderr pipe unavailable"))?;
+            let stdout_reader = tokio::spawn(async move {
+                let mut data = Vec::new();
+                stdout.read_to_end(&mut data).await.map(|_| data)
+            });
+            let stderr_reader = tokio::spawn(async move {
+                let mut data = Vec::new();
+                stderr.read_to_end(&mut data).await.map(|_| data)
+            });
+            let started = Instant::now();
+            let result = async {
         let status = tokio::select! {
             outcome = child.wait() => outcome?,
             _ = tokio::time::sleep(max_duration) => {
@@ -348,12 +362,23 @@ async fn run_install_hook(
         })
         .await
         .map_err(|_| ModelGenerationError::Timeout)??;
-        Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
-    });
+        Ok(Output { status, stdout, stderr })
+        }.await;
+            #[cfg(windows)]
+            {
+                let job_result = tokio::task::spawn_blocking(move || {
+                    job.terminate_and_wait(Duration::from_secs(10))
+                })
+                .await
+                .map_err(std::io::Error::other)??;
+                if !job_result {
+                    return Err(ModelGenerationError::Invalid(
+                        "Python installer job did not become empty".into(),
+                    ));
+                }
+            }
+            result
+        });
     handle
         .await
         .map_err(|error| ModelGenerationError::Invalid(format!("installer task failed: {error}")))?
@@ -383,11 +408,17 @@ mod tests {
             }
         });
         let mut command = Command::new(interpreter);
+        #[cfg(windows)]
+        windows_uv_job::gated_script(&mut command, script);
+        #[cfg(not(windows))]
+        command.arg("-c").arg(script);
         command
-            .arg("-c")
-            .arg(script)
             .arg(marker)
-            .stdin(Stdio::null())
+            .stdin(if cfg!(windows) {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command
@@ -499,6 +530,90 @@ mod tests {
             "cancelled hook released its lease while Python was still alive"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_hook_owner_crash_fixture() {
+        let Ok(marker) = std::env::var("NM_WINDOWS_HOOK_OWNER_MARKER") else {
+            return;
+        };
+        let (root, revision) = layer_fixture();
+        let command = python_command(
+            "import os,pathlib,subprocess,sys,time; child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())+' '+str(child.pid)); time.sleep(120)",
+            Path::new(&marker),
+        );
+        let _ = run_install_hook(command, &[revision], Duration::from_secs(125)).await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminated_rust_hook_owner_kills_python_and_descendant() {
+        use std::{
+            fs,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+            process::{Command as ProcessCommand, Stdio},
+        };
+        use windows_sys::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE_PROCESS: u32 = 0x0010_0000;
+        let root = std::env::temp_dir().join(format!("nm-win-hook-owner-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("python-and-child.pid");
+        let mut owner = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ai_runtime::assets::generation::tests::windows_hook_owner_crash_fixture",
+            ])
+            .env("NM_WINDOWS_HOOK_OWNER_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "Python hook did not launch");
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "hook owner exited early"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let pids: Vec<u32> = fs::read_to_string(&marker)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        let handles: Vec<OwnedHandle> = pids
+            .iter()
+            .map(|pid| {
+                let raw = unsafe { OpenProcess(SYNCHRONIZE_PROCESS, 0, *pid) };
+                assert!(!raw.is_null(), "Python process {pid} not running");
+                unsafe { OwnedHandle::from_raw_handle(raw.cast()) }
+            })
+            .collect();
+        for handle in &handles {
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+                WAIT_TIMEOUT,
+                "Python hook or descendant exited before owner termination"
+            );
+        }
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        for handle in &handles {
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 10_000) },
+                WAIT_OBJECT_0,
+                "orphan Python hook or descendant survived Rust owner termination"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn plan(role: &str, path: &str, hooks: bool) -> PluginInstallPlan {
