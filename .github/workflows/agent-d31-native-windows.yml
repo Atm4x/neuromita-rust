@@ -1,0 +1,33 @@
+name: Agent D31 native Windows settings CLI acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d31-windows-verify-20261107
+jobs:
+  settings-cli:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bfec9f74c7b4fb1e235fec68118e8ff4a12060b7
+          persist-credentials: false
+      - name: Native Rust 1.98.1
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustc --version
+      - name: Windows settings CLI integration
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --test settings_cli -- --test-threads=8
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Get-ChildItem target/debug/deps/settings_cli-*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $binary) { throw "Missing settings_cli test binary" }
+          for ($i = 1; $i -le 50; $i++) {
+            & $binary.FullName --test-threads=8 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "CLI stress failed in iteration $i" }
+          }
+          Write-Host "Windows: 50 consecutive 7-test CLI suites PASS"
