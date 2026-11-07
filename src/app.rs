@@ -25,7 +25,7 @@ use crate::{
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
     finetune::{FineTuneCollector, FineTuneError, FineTuneSettings},
-    game_link::{GameLinkConfig, GameLinkHandle, GameLinkLifecycle},
+    game_link::{GameBeatConfig, GameLinkConfig, GameLinkHandle, GameLinkLifecycle},
     games::GamePolicy,
     generation::{
         GenerationPreset, JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetId,
@@ -108,6 +108,8 @@ pub struct ApplicationConfig {
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
+    /// Optional, explicitly scoped game Beat Sync; disabled by default.
+    pub game_beats: Option<GameBeatConfig>,
     pub finetune: Option<FineTuneSettings>,
     /// Explicit gates for the character-owned mini-games.
     pub games: GamePolicy,
@@ -135,6 +137,7 @@ impl ApplicationConfig {
             migrations: StartupMigrations::new(),
             server: ServerConfig::local_control(bind),
             game_link: None,
+            game_beats: None,
             timeline: TimelineConfig::Transient,
             presets,
             prompts: None,
@@ -417,6 +420,7 @@ impl ApplicationLifecycle {
             timeline,
             server,
             game_link,
+            game_beats,
             finetune,
             games,
             reminders: reminders_config,
@@ -469,7 +473,7 @@ impl ApplicationLifecycle {
         };
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let game_link = match game_link {
-            Some(config) => Some(GameLinkLifecycle::bind(config).await?),
+            Some(config) => Some(GameLinkLifecycle::bind_with_beats(config, game_beats).await?),
             None => None,
         };
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));

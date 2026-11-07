@@ -1,0 +1,43 @@
+name: Beat Sync cache verification
+
+on:
+  push:
+    branches:
+      - codex/beat-sync-cache-29
+  pull_request:
+    paths:
+      - src/music.rs
+      - tests/beat_sync_cache.rs
+      - .github/workflows/beat-sync-cache.yml
+
+permissions:
+  contents: read
+
+jobs:
+  beat-cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux native audio headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config libasound2-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Beat Sync cache acceptance tests
+        run: cargo test --locked --offline --test beat_sync_cache
+      - name: Run real WAV and runtime delivery fixtures
+        run: cargo test --locked --offline --test beat_sync_runtime
+      - name: Run GameLink TCP Beat Sync fixture
+        run: cargo test --locked --offline --test game_beat_sync
+      - name: Full offline Rust suite
+        run: cargo test --locked --offline -- --test-threads=1
+      - name: Strict Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
