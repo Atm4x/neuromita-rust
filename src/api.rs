@@ -276,6 +276,13 @@ pub enum GraphMaintenanceApiError {
 }
 
 impl GraphMaintenanceApi {
+    /// Report the running application's explicit typed GraphExtractor capability.
+    /// Unavailable is not a request to fall back to lexical reconstruction.
+    pub fn reindex_available() -> Result<bool, GraphMaintenanceApiError> {
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        Ok(bindings.graph_extractor.is_some())
+    }
+
     /// Capture a read-only preview of exact source IDs at a caller-supplied clock time.
     pub async fn preview(
         character: CharacterId,
@@ -294,9 +301,8 @@ impl GraphMaintenanceApi {
             .map_err(Into::into)
     }
 
-    /// Apply one confirmed, version-checked batch. Reindex is explicitly
-    /// unavailable until a production GraphExtractor is connected; never
-    /// silently synthesize relations or replace it with lexical heuristics.
+    /// Apply one confirmed, version-checked batch using the running application's
+    /// explicitly configured typed extractor. Missing backends remain unavailable.
     pub async fn apply_confirmed(
         character: CharacterId,
         plan: crate::knowledge::maintenance::GraphMaintenancePreview,
@@ -312,7 +318,11 @@ impl GraphMaintenanceApi {
             .get(character)
             .ok_or(GraphMaintenanceApiError::CharacterUnavailable)?;
         crate::knowledge::maintenance::apply_graph_maintenance(
-            &owner, plan, None, confirmed, cancel,
+            &owner,
+            plan,
+            bindings.graph_extractor.as_deref(),
+            confirmed,
+            cancel,
         )
         .await
         .map_err(Into::into)

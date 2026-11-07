@@ -478,11 +478,12 @@ pub async fn run(
                                             for item in preview.entries() {
                                                 println!("  {}: {} связей", item.source.record.id.0, item.existing_relations.len());
                                             }
-                                            if mode == GraphMaintenanceMode::Reindex {
-                                                println!("Reindex: производственный GraphExtractor пока не подключён; apply вернёт BackendUnavailable, без подмены извлечения.");
+                                            if mode == GraphMaintenanceMode::Reindex && !GraphMaintenanceApi::reindex_available().unwrap_or(false) {
+                                                println!("Reindex: производственный GraphExtractor не настроен; применение недоступно (BackendUnavailable).");
+                                            } else {
+                                                println!("Подтвердить одним действием: /knowledge graph apply {token}");
+                                                pending_graph = Some((token, character, preview));
                                             }
-                                            println!("Подтвердить одним действием: /knowledge graph apply {token}");
-                                            pending_graph = Some((token, character, preview));
                                         }
                                         Err(error) => eprintln!("Graph: {error}"),
                                     }
