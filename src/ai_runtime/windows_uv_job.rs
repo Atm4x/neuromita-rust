@@ -7,7 +7,72 @@ use std::{
     time::{Duration, Instant},
 };
 
+use tokio::{
+    io::AsyncWriteExt,
+    process::{Child, Command},
+};
 use uuid::Uuid;
+
+const PYTHON_GATE_BOOTSTRAP: &str = concat!(
+    "import os,sys\n",
+    "if sys.stdin.buffer.read(1) != b'\\x01': sys.exit(71)\n",
+    "import site\nsite.main()\n",
+    "imports = os.environ.get('PYTHONPATH')\n",
+    "if imports: sys.path[:0] = imports.split(os.pathsep)\n",
+    "if sys.argv[1] == '--module':\n",
+    " import runpy\n",
+    " name = sys.argv.pop(2)\n",
+    " sys.argv.pop(1)\n",
+    " runpy.run_module(name, run_name='__main__', alter_sys=True)\n",
+    "elif sys.argv[1] == '--script':\n",
+    " source = sys.argv[2]\n",
+    " sys.argv = ['-c', *sys.argv[3:]]\n",
+    " exec(compile(source, '<gated-python>', 'exec'), {'__name__': '__main__'})\n",
+    "else: sys.exit(72)\n",
+);
+
+pub(super) fn gated_module(command: &mut Command, module: &str) {
+    command
+        .arg("-I")
+        .arg("-S")
+        .arg("-c")
+        .arg(PYTHON_GATE_BOOTSTRAP)
+        .arg("--module")
+        .arg(module);
+}
+
+#[cfg(test)]
+pub(super) fn gated_script(command: &mut Command, script: &str) {
+    command
+        .arg("-I")
+        .arg("-S")
+        .arg("-c")
+        .arg(PYTHON_GATE_BOOTSTRAP)
+        .arg("--script")
+        .arg(script);
+}
+
+pub(super) async fn attach_and_activate(child: &mut Child) -> io::Result<WindowsKillOnCloseJob> {
+    let result = async {
+        let raw_handle = child
+            .raw_handle()
+            .ok_or_else(|| io::Error::other("Python process handle unavailable"))?;
+        let job = WindowsKillOnCloseJob::attach_worker(raw_handle, Uuid::new_v4())?;
+        let input = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("Python gate stdin unavailable"))?;
+        input.write_all(&[1]).await?;
+        Ok(job)
+    }
+    .await;
+    if result.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    result
+}
+
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
