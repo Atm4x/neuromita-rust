@@ -13,3 +13,12 @@ Open boundaries for #7 and #8: the production chat ingress must adopt `append_ch
 Tests in `tests/timeline_assets.rs` cover deduplication, concurrent import, bounded/failing I/O, corruption, missing files, invalid references, in-memory and SQLite visibility, fork/historical reads, hide, import-before-receipt, and SQLite restart. These are local fixtures and do not prove end-to-end chat attachment UI or provider uploads.
 
 For newly published objects, Unix imports synchronize the parent AssetStore directory, the `objects/` directory, and the final shard after the hard-link publication. The same directory synchronization applies to deduplicated concurrent imports before returning success. This closes the gap where a blob file and shard were synced but the newly created shard's parent entry had not been persisted. It does **not** certify full power-loss resilience across every OS/filesystem or a newly created external installation-root ancestor, nor does it solve the documented hostile concurrent path-swap race. On non-Unix platforms the standard library offers no equivalent directory-sync guarantee through this implementation; platform-specific durability remains a separate task.
+
+### Revision content identity
+
+`MessageRevised` has exactly one replacement content source:
+`payload.message.content`. A top-level `payload.content` on the same event
+is rejected by domain validation, even if its bytes are identical. Asset
+verification (`append_checked`) and SessionArchive reference collection use
+the same canonical resolver, so a shadow field cannot mask an unavailable
+replacement or cause the archive to omit the replacement's binary.

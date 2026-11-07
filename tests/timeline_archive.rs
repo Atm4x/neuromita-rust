@@ -228,6 +228,61 @@ fn sqlite_retention_manifest_enumerates_all_canonical_branches() {
 }
 
 #[test]
+fn revision_with_shadow_content_is_not_a_valid_archived_fact_or_receipt() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, root, _, reference, original, _) = build_session(&mut origin, &assets);
+    let mut revision = EventDraft::new(EventKind::MessageRevised);
+    revision.observers.insert(CharacterId::Crazy);
+    revision
+        .payload
+        .insert("event_id".into(), json!(original.id.0.to_string()));
+    let revised = json!([{"type":"text","text":"revised"},{"type":"image","asset":reference}]);
+    revision
+        .payload
+        .insert("message".into(), json!({"content":revised.clone()}));
+    origin
+        .append(root, 2, "revision", json!({}), vec![revision])
+        .unwrap();
+    let valid = export_memory(&origin, session, &assets).unwrap();
+    let forged = bytes_with_change(&valid, |envelope| {
+        let branch = envelope["branches"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|branch| branch["info"]["id"] == json!(root))
+            .unwrap();
+        let event = branch["events"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|fact| {
+                fact["draft"]["kind"] == serde_json::to_value(EventKind::MessageRevised).unwrap()
+            })
+            .unwrap();
+        event["draft"]["payload"]["content"] = revised.clone();
+        let receipt = branch["receipts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|receipt| receipt["operation_key"] == "revision")
+            .unwrap();
+        receipt["drafts"][0]["payload"]["content"] = revised.clone();
+        receipt["result"][0]["draft"]["payload"]["content"] = revised;
+    });
+    let destination_assets =
+        TimelineAssetStore::new(temp.path().join("destination"), 1024).unwrap();
+    let mut destination = TimelineStore::new();
+    assert!(import_memory(&mut destination, &forged, &destination_assets).is_err());
+    assert!(destination.branch(root).is_err());
+    assert_eq!(
+        import_memory(&mut destination, &valid, &destination_assets).unwrap(),
+        session
+    );
+}
+
+#[test]
 fn invalid_archive_is_rejected_before_session_publication() {
     let temp = TestDir::new();
     let assets = TimelineAssetStore::new(temp.path().join("origin"), 1024).unwrap();

@@ -17,6 +17,7 @@ mod world;
 pub use crate::memory::{
     CharacterMemories, MemoryChange, MemoryCommand, MemoryId, MemoryPriority, MemoryRecord,
 };
+pub(crate) use content::canonical_message_content;
 pub use content::{
     TimelineAssetRef, TimelineContentError, TimelineMessagePart, parse_message_content,
 };

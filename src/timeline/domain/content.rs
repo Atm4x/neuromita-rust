@@ -2,6 +2,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use super::model::{EventDraft, EventKind};
+
+/// Resolve the single canonical content location for a Timeline event.
+/// Revisions store their replacement inside `message`; original events may
+/// retain the legacy top-level representation.
+pub(crate) fn canonical_message_content(draft: &EventDraft) -> Option<&Value> {
+    let nested = || {
+        draft
+            .payload
+            .get("message")
+            .and_then(|value| value.get("content"))
+    };
+    if draft.kind == EventKind::MessageRevised {
+        nested()
+    } else {
+        draft.payload.get("content").or_else(nested)
+    }
+}
+
 /// Content identity is independent of event identity. Timeline owns the
 /// reference, while the injected AssetStore owns the corresponding bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

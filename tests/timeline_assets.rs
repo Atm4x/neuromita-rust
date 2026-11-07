@@ -402,6 +402,75 @@ fn append_checked_validates_assets_in_revisions_and_session_notes() {
     assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
 }
 
+#[test]
+fn shadow_top_level_content_cannot_mask_an_unavailable_revised_asset() {
+    let temp = TempDir::new();
+    let root = temp.path().join("assets");
+    let assets = TimelineAssetStore::new(&root, 1024).unwrap();
+    let original = assets
+        .import("image/png", Cursor::new(b"canonical original"))
+        .unwrap();
+    let missing = assets
+        .import("image/png", Cursor::new(b"missing replacement"))
+        .unwrap();
+    fs::remove_file(
+        root.join("objects")
+            .join(&missing.digest[..2])
+            .join(&missing.digest),
+    )
+    .unwrap();
+
+    let mut timeline = TimelineStore::new();
+    let branch = BranchId::new();
+    timeline.create_session(SessionId::new(), branch).unwrap();
+    let first = attachment(&original, &[CharacterId::Crazy]);
+    let target = first.id;
+    assets
+        .append_checked(&mut timeline, branch, 0, "original", json!({}), vec![first])
+        .unwrap();
+
+    let mut revision = EventDraft::new(EventKind::MessageRevised);
+    revision.observers.insert(CharacterId::Crazy);
+    revision
+        .payload
+        .insert("event_id".into(), json!(target.0.to_string()));
+    revision.payload.insert(
+        "message".into(),
+        json!({"content":[{"type":"image","asset":missing}]}),
+    );
+    revision
+        .payload
+        .insert("content".into(), json!([{"type":"image","asset":original}]));
+    assert!(matches!(
+        assets.append_checked(
+            &mut timeline,
+            branch,
+            1,
+            "shadowed-revision",
+            json!({}),
+            vec![revision.clone()],
+        ),
+        Err(
+            neuromita::timeline::storage::assets::TimelineAttachmentCommitError::Asset(
+                TimelineAssetError::Missing,
+            )
+        )
+    ));
+    assert!(
+        timeline
+            .append(branch, 1, "direct-revision", json!({}), vec![revision])
+            .is_err()
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
+    let view =
+        TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(view.messages()[0].content, "look");
+    assert_eq!(
+        assets.read_visible(&view, target, &original).unwrap(),
+        b"canonical original"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn asset_object_symlink_is_not_a_valid_blob_even_with_correct_digest() {

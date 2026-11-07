@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::timeline::domain::{Branch, Receipt};
 use crate::timeline::domain::{
     BranchId, BranchInfo, EventDraft, EventKind, SessionId, TimelineAssetRef, TimelineError,
-    TimelineFact, TimelineStore, parse_message_content,
+    TimelineFact, TimelineStore, canonical_message_content, parse_message_content,
 };
 
 #[cfg(feature = "sqlite-system")]
@@ -172,12 +172,7 @@ fn local_content(draft: &EventDraft) -> Option<&Value> {
     ) {
         return None;
     }
-    draft.payload.get("content").or_else(|| {
-        draft
-            .payload
-            .get("message")
-            .and_then(|message| message.get("content"))
-    })
+    canonical_message_content(draft)
 }
 
 fn collect_references(
