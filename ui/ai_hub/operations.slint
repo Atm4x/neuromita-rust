@@ -47,7 +47,15 @@ component AiHubOperationRow inherits Rectangle {
     in property <AiHubOperationSnapshot> task;
     in property <bool> showing: true;
     in property <bool> connected: false;
+    in property <bool> logs-connected: false;
     in-out property <bool> expanded: false;
+    property <bool> cancel-clicked: false;
+    property <int> cancel-revision: -1;
+    changed task => {
+        if root.cancel-clicked && root.task.revision > root.cancel-revision {
+            root.cancel-clicked = false;
+        }
+    }
     callback cancel-queued(string, string, int, string);
     callback cancel-running(string, string, int, string);
     callback view-logs(string, string, int, string);
@@ -89,9 +97,11 @@ component AiHubOperationRow inherits Rectangle {
         || root.task.stage == AiHubOperationStage.running
         || root.task.stage == AiHubOperationStage.cancelling;
     property <bool> can-cancel-pending: root.connected && root.task.operation-id != ""
-        && root.task.can-cancel-queued && root.task.stage == AiHubOperationStage.queued;
+        && root.task.can-cancel-queued && !root.cancel-clicked
+        && root.task.stage == AiHubOperationStage.queued;
     property <bool> can-cancel-active: root.connected && root.task.operation-id != ""
-        && root.task.can-cancel-running && root.task.stage == AiHubOperationStage.running;
+        && root.task.can-cancel-running && !root.cancel-clicked
+        && root.task.stage == AiHubOperationStage.running;
 
     visible: root.showing;
     height: root.showing ? max(98px, detail-layout.preferred-height + 18px) : 0px;
@@ -191,7 +201,7 @@ component AiHubOperationRow inherits Rectangle {
             if root.task.can-view-logs: ActionSurface {
                 width: 103px; height: 29px;
                 label: root.localized("ai-hub.ops.logs", "Журнал", "Logs");
-                enabled: root.connected && root.task.operation-id != "";
+                enabled: root.connected && root.logs-connected && root.task.operation-id != "";
                 SettingsLabel { text: parent.label; font-size: 11px; horizontal-alignment: center; }
                 activated => {
                     root.view-logs(root.task.operation-id, root.task.component-id,
@@ -209,6 +219,8 @@ component AiHubOperationRow inherits Rectangle {
                     color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
                 }
                 activated => {
+                    root.cancel-clicked = true;
+                    root.cancel-revision = root.task.revision;
                     root.cancel-queued(root.task.operation-id, root.task.component-id,
                         root.task.revision, root.task.token);
                 }
@@ -225,6 +237,8 @@ component AiHubOperationRow inherits Rectangle {
                     color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
                 }
                 activated => {
+                    root.cancel-clicked = true;
+                    root.cancel-revision = root.task.revision;
                     root.cancel-running(root.task.operation-id, root.task.component-id,
                         root.task.revision, root.task.token);
                 }
@@ -401,6 +415,7 @@ export component AiHubOperationsPanel inherits Rectangle {
                 for op in root.operations: AiHubOperationRow {
                     task: op;
                     connected: root.connected;
+                    logs-connected: root.capabilities.can-show-logs;
                     showing: op.stage == AiHubOperationStage.running || op.stage == AiHubOperationStage.cancelling;
                     cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
                     cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
@@ -413,6 +428,7 @@ export component AiHubOperationsPanel inherits Rectangle {
                 for op in root.operations: AiHubOperationRow {
                     task: op;
                     connected: root.connected;
+                    logs-connected: root.capabilities.can-show-logs;
                     showing: op.stage == AiHubOperationStage.requested || op.stage == AiHubOperationStage.preparing
                         || op.stage == AiHubOperationStage.admitted || op.stage == AiHubOperationStage.queued;
                     cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
@@ -426,6 +442,7 @@ export component AiHubOperationsPanel inherits Rectangle {
                 for op in root.operations: AiHubOperationRow {
                     task: op;
                     connected: root.connected;
+                    logs-connected: root.capabilities.can-show-logs;
                     showing: op.stage == AiHubOperationStage.succeeded
                         || op.stage == AiHubOperationStage.failed || op.stage == AiHubOperationStage.cancelled;
                     cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
