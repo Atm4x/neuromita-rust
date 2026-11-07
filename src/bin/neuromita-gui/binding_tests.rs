@@ -757,15 +757,19 @@ fn memory_render_and_contract(window: &AppWindow) {
             .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
         assert!(ui.get_graph_eligible());
-        ui.invoke_graph_preview();
+        ui.invoke_graph_preview(0);
         assert!(ui.get_graph_pending());
-        let Command::GraphPreview(graph_request, graph_character, graph_memory) =
+        let Command::GraphPreview(graph_request, graph_character, graph_memory, graph_mode) =
             commands.borrow_mut().pop().unwrap()
         else {
             panic!("expected graph maintenance preview")
         };
         assert_eq!(graph_character, CharacterId::Crazy);
         assert_eq!(graph_memory, page.records()[0].id);
+        assert_eq!(
+            graph_mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear
+        );
         memory::graph_previewed(window, &state, uuid::Uuid::new_v4(), Ok(9));
         assert!(ui.get_graph_pending());
         assert!(!ui.get_graph_confirm_ready());
@@ -794,8 +798,9 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert!(!ui.get_graph_pending());
         assert!(ui.get_error().contains("stale graph preview"));
         assert!(!ui.get_graph_confirm_ready());
-        ui.invoke_graph_preview();
-        let Command::GraphPreview(aborted_id, _, _) = commands.borrow_mut().pop().unwrap() else {
+        ui.invoke_graph_preview(0);
+        let Command::GraphPreview(aborted_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
             panic!("expected second graph preview")
         };
         ui.invoke_graph_cancel();
@@ -808,8 +813,9 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert!(!ui.get_graph_confirm_ready());
         assert!(ui.get_graph_summary().is_empty());
         ui.set_content("Изменённый текст".into());
-        ui.invoke_graph_preview();
-        let Command::GraphPreview(in_flight_id, _, _) = commands.borrow_mut().pop().unwrap() else {
+        ui.invoke_graph_preview(0);
+        let Command::GraphPreview(in_flight_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
             panic!("expected in-flight graph preview")
         };
         memory::graph_previewed(window, &state, in_flight_id, Ok(1));
@@ -843,6 +849,58 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert!(!ui.get_graph_pending());
         assert!(ui.get_graph_summary().contains("Canonical memory retained"));
         assert_eq!(ui.get_content(), "Изменённый текст");
+
+        assert!(!ui.get_graph_reindex_available());
+        ui.invoke_graph_preview(1);
+        assert!(ui.get_error().contains("unavailable"));
+        assert!(commands.borrow().is_empty());
+        ui.set_graph_reindex_available(true);
+        ui.invoke_graph_preview(1);
+        let Command::GraphPreview(reindex_id, reindex_character, reindex_source, reindex_mode) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected typed graph reindex preview")
+        };
+        assert_eq!(reindex_character, CharacterId::Crazy);
+        assert_eq!(reindex_source, page.records()[0].id);
+        assert_eq!(
+            reindex_mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+        );
+        memory::graph_previewed(window, &state, reindex_id, Ok(3));
+        assert!(ui.get_graph_reindex_confirmation());
+        assert!(ui.get_graph_summary().contains("Reindex will replace 3"));
+        ui.invoke_graph_confirm();
+        let Command::GraphApply(reindex_apply_id, reindex_apply_character) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected confirmed reindex")
+        };
+        assert_eq!(reindex_apply_id, reindex_id);
+        assert_eq!(reindex_apply_character, CharacterId::Crazy);
+        assert!(ui.get_graph_applying());
+        memory::graph_applied(window, &state, reindex_id, Ok(()));
+        assert!(!ui.get_graph_pending());
+        assert!(!ui.get_graph_reindex_confirmation());
+        assert!(ui.get_graph_summary().contains("reindexed"));
+
+        ui.invoke_graph_preview(1);
+        let Command::GraphPreview(backend_lost_id, _, _, mode) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected reindex preview after previous apply")
+        };
+        assert_eq!(
+            mode,
+            neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+        );
+        ui.set_graph_reindex_available(false);
+        memory::graph_previewed(window, &state, backend_lost_id, Ok(4));
+        assert!(!ui.get_graph_confirm_ready());
+        assert!(!ui.get_graph_reindex_confirmation());
+        assert!(ui.get_error().contains("unavailable"));
+        ui.invoke_graph_confirm();
+        assert!(commands.borrow().is_empty());
         ui.invoke_apply(0);
         let command = commands.borrow_mut().pop().unwrap();
         let Command::MemoryEdit(edit_id, expected, edits) = command else {

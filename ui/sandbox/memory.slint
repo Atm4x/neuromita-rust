@@ -26,11 +26,13 @@ export global MemoryUi {
     in-out property <string> recall-result;
     in-out property <bool> recall-pending;
     in-out property <bool> graph-eligible;
+    in-out property <bool> graph-reindex-available;
     in-out property <bool> graph-pending;
     in-out property <bool> graph-applying;
     in-out property <bool> graph-confirm-ready;
+    in-out property <bool> graph-reindex-confirmation;
     in-out property <string> graph-summary;
-    callback graph-preview();
+    callback graph-preview(int);
     callback graph-confirm();
     callback graph-cancel();
     callback recall();
@@ -174,10 +176,17 @@ export component MemoryPanel inherits Rectangle {
                         QuickAction {
                             text: I18n.i18n("memory.graph.preview", "Проверить связи");
                             enabled: !MemoryUi.graph-pending && !MemoryUi.graph-confirm-ready;
-                            activated => { MemoryUi.graph-preview(); }
+                            activated => { MemoryUi.graph-preview(0); }
+                        }
+                        if MemoryUi.graph-reindex-available: QuickAction {
+                            text: I18n.i18n("memory.graph.reindex.preview", "Проверить reindex");
+                            enabled: !MemoryUi.graph-pending && !MemoryUi.graph-confirm-ready;
+                            activated => { MemoryUi.graph-preview(1); }
                         }
                         if MemoryUi.graph-confirm-ready: QuickAction {
-                            text: I18n.i18n("memory.graph.confirm", "Подтвердить очистку");
+                            text: MemoryUi.graph-reindex-confirmation
+                                ? I18n.i18n("memory.graph.reindex.confirm", "Подтвердить reindex")
+                                : I18n.i18n("memory.graph.confirm", "Подтвердить очистку");
                             enabled: !MemoryUi.graph-pending;
                             activated => { MemoryUi.graph-confirm(); }
                         }

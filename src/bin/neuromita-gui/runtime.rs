@@ -47,7 +47,12 @@ pub enum Command {
         Vec<neuromita::memory::MemoryCommand>,
     ),
     MemoryRecall(uuid::Uuid, CharacterId, neuromita::memory::MemoryId, String),
-    GraphPreview(uuid::Uuid, CharacterId, neuromita::memory::MemoryId),
+    GraphPreview(
+        uuid::Uuid,
+        CharacterId,
+        neuromita::memory::MemoryId,
+        neuromita::knowledge::maintenance::GraphMaintenanceMode,
+    ),
     GraphApply(uuid::Uuid, CharacterId),
     GraphAbort(uuid::Uuid),
     Preview(ConversationChange),
@@ -109,6 +114,7 @@ pub enum Update {
     MemorySaved(uuid::Uuid),
     MemoryEditError(uuid::Uuid, String),
     MemoryRecallResult(uuid::Uuid, Result<Option<String>, String>),
+    GraphCapability(bool),
     GraphPreviewResult(uuid::Uuid, Result<usize, String>),
     GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(Option<(ConversationChange, usize)>),
@@ -337,6 +343,9 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
+    publish(Update::GraphCapability(
+        neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false),
+    ));
     match app.presenter().audio_input.devices().await {
         Ok(devices) => publish(Update::SpeechInventory(
             Box::new(catalog.snapshot().await),
@@ -357,6 +366,7 @@ async fn run(
     if let Err(error) = app.shutdown().await {
         publish(Update::Error(error.to_string()));
     }
+    publish(Update::GraphCapability(false));
     publish(Update::Stopped);
 }
 
@@ -512,26 +522,32 @@ async fn observe(
                     graph_pending = None;
                     memories = MemoryWatch::start(administration, id)?;
                 },
-                Some(Command::GraphPreview(request_id, selected, memory_id)) => {
+                Some(Command::GraphPreview(request_id, selected, memory_id, mode)) => {
                     graph_pending = None;
-                    let result = neuromita::api::GraphMaintenanceApi::preview(
-                        selected,
-                        &[memory_id],
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            .try_into()
-                            .unwrap_or(u64::MAX),
-                        neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear,
-                    ).await;
+                    let result = if mode == neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
+                        && !neuromita::api::GraphMaintenanceApi::reindex_available().unwrap_or(false)
+                    {
+                        Err("Graph Reindex backend is unavailable".to_owned())
+                    } else {
+                        neuromita::api::GraphMaintenanceApi::preview(
+                            selected,
+                            &[memory_id],
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                .try_into()
+                                .unwrap_or(u64::MAX),
+                            mode,
+                        ).await.map_err(|error| error.to_string())
+                    };
                     match result {
                         Ok(plan) => {
                             let count = plan.entries().iter().map(|entry| entry.existing_relations.len()).sum();
                             graph_pending = Some((request_id, selected, plan));
                             publish(Update::GraphPreviewResult(request_id, Ok(count)));
                         }
-                        Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error.to_string()))),
+                        Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error))),
                     }
                 },
                 Some(Command::GraphApply(request_id, selected)) => {
