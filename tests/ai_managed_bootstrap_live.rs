@@ -110,14 +110,8 @@ async fn real_uv_installs_and_reuses_a_verified_managed_cpython() {
             let install_root = uv.data_directory.join("bootstrap/python");
             for arguments in [
                 vec!["python", "dir"],
-                vec!["python", "list", "--only-installed", "--managed-python"],
-                vec![
-                    "python",
-                    "find",
-                    "--managed-python",
-                    "--no-python-downloads",
-                    "3.12.10",
-                ],
+                vec!["python", "list", "--only-installed"],
+                vec!["python", "find", "--no-python-downloads", "3.12.10"],
             ] {
                 let output = Command::new(uv.uv_executable())
                     .args(&arguments)

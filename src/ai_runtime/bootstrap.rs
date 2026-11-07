@@ -125,7 +125,6 @@ impl PythonBootstrap {
         command.args([
             "python",
             "find",
-            "--managed-python",
             "--no-python-downloads",
             &self.python_version,
         ]);
