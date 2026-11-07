@@ -112,7 +112,9 @@ async def handle(req):
             raise RuntimeError("missing_media")
         size = int(getattr(message.file, "size", 0) or 0)
         limit = int(req["limit"])
-        if size > limit:
+        # Reject unknown sizes rather than downloading an unbounded payload
+        # into Python memory before checking its length.
+        if size <= 0 or limit <= 0 or limit > 32 * 1024 * 1024 or size > limit:
             raise RuntimeError("media_too_large")
         data = await client.download_media(message, file=bytes)
         if not isinstance(data, bytes) or len(data) > limit:
