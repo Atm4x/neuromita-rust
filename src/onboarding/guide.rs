@@ -550,8 +550,18 @@ mod tests {
     #[test]
     fn wiki_links_resolve_to_the_page_document_and_language() {
         let welcome = page(GuideLevel::Basic, 0).unwrap();
-        assert!(welcome.wiki_url("ru").unwrap().ends_with("/ru/getting-started.md"));
-        assert!(welcome.wiki_url("en").unwrap().ends_with("/en/getting-started.md"));
+        assert!(
+            welcome
+                .wiki_url("ru")
+                .unwrap()
+                .ends_with("/ru/getting-started.md")
+        );
+        assert!(
+            welcome
+                .wiki_url("en")
+                .unwrap()
+                .ends_with("/en/getting-started.md")
+        );
         assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
     }
 
@@ -559,8 +569,22 @@ mod tests {
     fn sections_match_original_pyqt_order_for_all_levels() {
         let basic = sections(GuideLevel::Basic);
         assert_eq!(basic.len(), 2);
-        assert_eq!(basic[0], GuideSectionRange { kind: GuideSection::Start, first_index: 0, last_index: 1 });
-        assert_eq!(basic[1], GuideSectionRange { kind: GuideSection::Finish, first_index: 2, last_index: 2 });
+        assert_eq!(
+            basic[0],
+            GuideSectionRange {
+                kind: GuideSection::Start,
+                first_index: 0,
+                last_index: 1
+            }
+        );
+        assert_eq!(
+            basic[1],
+            GuideSectionRange {
+                kind: GuideSection::Finish,
+                first_index: 2,
+                last_index: 2
+            }
+        );
         assert_eq!(sections(GuideLevel::Advanced).len(), 3);
         let full = sections(GuideLevel::Full);
         assert_eq!(full.len(), 6);

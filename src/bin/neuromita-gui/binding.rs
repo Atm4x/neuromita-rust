@@ -285,21 +285,15 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub(super) fn sync_guide_level(
-    window: &AppWindow,
-    next: neuromita::onboarding::guide::GuideLevel,
-) {
+pub(super) fn sync_guide_level(window: &AppWindow, next: neuromita::onboarding::guide::GuideLevel) {
     use neuromita::onboarding::guide::{self, GuideLevel};
 
     let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
     if previous == next {
         return;
     }
-    let destination = guide::remap_index(
-        previous,
-        window.get_onboarding_guide_page() as usize,
-        next,
-    );
+    let destination =
+        guide::remap_index(previous, window.get_onboarding_guide_page() as usize, next);
     window.set_onboarding_guide_level(next.index());
     reset_guide_image_view(window);
     update_guide(window, destination as i32);
@@ -320,7 +314,9 @@ fn set_guide_focus(window: &AppWindow, number: i32) {
         return;
     };
     let chosen = u8::try_from(number).ok().and_then(|number| {
-        page.focus_steps().iter().find(|target| target.number == number)
+        page.focus_steps()
+            .iter()
+            .find(|target| target.number == number)
     });
     match chosen {
         Some(step) => {
