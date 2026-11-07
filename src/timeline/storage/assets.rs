@@ -375,7 +375,7 @@ impl TimelineAssetStore {
 
     /// Check an explicitly referenced blob without returning private bytes.
     pub fn verify(&self, reference: &TimelineAssetRef) -> Result<(), TimelineAssetError> {
-        self.read_checked(reference).map(|_| ())
+        self.stream_checked(reference, io::sink())
     }
 
     /// This is the only public content read: MitaView must already establish
@@ -429,6 +429,16 @@ impl TimelineAssetStore {
     }
 
     fn read_checked(&self, reference: &TimelineAssetRef) -> Result<Vec<u8>, TimelineAssetError> {
+        let mut bytes = Vec::new();
+        self.stream_checked(reference, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn stream_checked(
+        &self,
+        reference: &TimelineAssetRef,
+        mut destination: impl Write,
+    ) -> Result<(), TimelineAssetError> {
         let path = self.path_for(reference)?;
         self.check_object_directories(&path)?;
         real_regular_file(&path)?;
@@ -445,23 +455,25 @@ impl TimelineAssetStore {
         let mut hasher = Context::new(&SHA256);
         hasher.update(reference.media_type.as_bytes());
         hasher.update(&[0]);
-        let capacity = usize::try_from(reference.size).map_err(|_| TimelineAssetError::TooLarge)?;
-        let mut bytes = Vec::with_capacity(capacity);
+        let mut read_bytes = 0_u64;
         let mut buffer = [0_u8; CHUNK];
         loop {
             let count = file.read(&mut buffer)?;
             if count == 0 {
                 break;
             }
-            if bytes.len().saturating_add(count) > capacity {
+            read_bytes = read_bytes
+                .checked_add(count as u64)
+                .ok_or(TimelineAssetError::Corrupt)?;
+            if read_bytes > reference.size {
                 return Err(TimelineAssetError::Corrupt);
             }
             hasher.update(&buffer[..count]);
-            bytes.extend_from_slice(&buffer[..count]);
+            destination.write_all(&buffer[..count])?;
         }
-        if bytes.len() as u64 != reference.size || digest_hex(hasher.finish()) != reference.digest {
+        if read_bytes != reference.size || digest_hex(hasher.finish()) != reference.digest {
             return Err(TimelineAssetError::Corrupt);
         }
-        Ok(bytes)
+        Ok(())
     }
 }
