@@ -56,6 +56,108 @@ fn source_identity_prevents_cross_source_collisions() {
 }
 
 #[test]
+fn independent_sources_can_offer_the_same_method_without_aliasing_identical_ids() {
+    let memory = hit(RetrievalSource::Memory, "7", "remembered favorite tea");
+    let history = hit(
+        RetrievalSource::History,
+        "7",
+        "original conversation about tea",
+    );
+    let buckets = [
+        bucket(RetrievalMethod::Keyword, vec![memory.clone()]),
+        bucket(RetrievalMethod::Keyword, vec![history.clone()]),
+    ];
+    let selected = fuse(
+        CharacterId::Crazy,
+        &buckets,
+        config(FusionMode::Rrf { k: 60 }, 2),
+    )
+    .unwrap();
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].key.source, RetrievalSource::Memory);
+    assert_eq!(selected[1].key.source, RetrievalSource::History);
+    assert_eq!(selected[0].key.id, selected[1].key.id);
+    assert_eq!(selected[0].evidence[0].method, RetrievalMethod::Keyword);
+    assert_eq!(selected[1].evidence[0].method, RetrievalMethod::Keyword);
+    assert_eq!(selected[0].content, memory.content);
+    assert_eq!(selected[1].content, history.content);
+    let reversed = buckets.into_iter().rev().collect::<Vec<_>>();
+    assert_eq!(
+        selected,
+        fuse(
+            CharacterId::Crazy,
+            &reversed,
+            config(FusionMode::Rrf { k: 60 }, 2),
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn duplicate_method_for_one_source_is_rejected_even_with_disjoint_ids() {
+    let buckets = [
+        bucket(
+            RetrievalMethod::Keyword,
+            vec![hit(RetrievalSource::Memory, "first", "first fact")],
+        ),
+        bucket(
+            RetrievalMethod::Keyword,
+            vec![hit(RetrievalSource::Memory, "second", "second fact")],
+        ),
+    ];
+    assert!(matches!(
+        fuse(CharacterId::Crazy, &buckets, config(FusionMode::Union, 2)),
+        Err(FusionError::Evidence(
+            "duplicate retrieval method for the same source"
+        ))
+    ));
+}
+
+#[test]
+fn mixed_source_bucket_cannot_hide_duplicate_source_method() {
+    let buckets = [
+        bucket(
+            RetrievalMethod::Vector,
+            vec![
+                hit(RetrievalSource::Memory, "one", "remembered"),
+                hit(RetrievalSource::History, "two", "original"),
+            ],
+        ),
+        bucket(
+            RetrievalMethod::Vector,
+            vec![hit(RetrievalSource::History, "three", "original second")],
+        ),
+    ];
+    assert!(matches!(
+        fuse(CharacterId::Crazy, &buckets, config(FusionMode::Union, 3)),
+        Err(FusionError::Evidence(
+            "duplicate retrieval method for the same source"
+        ))
+    ));
+}
+
+#[test]
+fn source_scoped_duplicate_methods_still_fail_on_foreign_character() {
+    let mut foreign = hit(RetrievalSource::History, "other", "private");
+    foreign.key.character = CharacterId::Kind;
+    let buckets = [
+        bucket(
+            RetrievalMethod::Keyword,
+            vec![hit(RetrievalSource::Memory, "mine", "owned")],
+        ),
+        bucket(RetrievalMethod::Keyword, vec![foreign]),
+    ];
+    assert!(matches!(
+        fuse(
+            CharacterId::Crazy,
+            &buckets,
+            config(FusionMode::Rrf { k: 60 }, 2)
+        ),
+        Err(FusionError::Evidence("cross-character retrieval hit"))
+    ));
+}
+
+#[test]
 fn union_merges_features_without_overwriting_content_or_metadata() {
     let mut vector = hit(RetrievalSource::Memory, "1", "canonical fact");
     vector.raw_score = Some(0.9);

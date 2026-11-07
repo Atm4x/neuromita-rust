@@ -116,11 +116,14 @@ pub fn fuse(
         _ => {}
     }
 
-    let mut methods = BTreeSet::new();
+    let mut source_methods = BTreeSet::new();
+    let mut empty_methods = BTreeSet::new();
     let mut candidates: BTreeMap<RetrievalKey, FusedHit> = BTreeMap::new();
     for bucket in buckets {
-        if !methods.insert(bucket.method) {
-            return Err(FusionError::Evidence("duplicate retrieval method bucket"));
+        if bucket.hits.is_empty() && !empty_methods.insert(bucket.method) {
+            return Err(FusionError::Evidence(
+                "duplicate empty retrieval method bucket",
+            ));
         }
         if bucket.hits.len() > MAX_HITS {
             return Err(FusionError::Evidence(
@@ -128,6 +131,7 @@ pub fn fuse(
             ));
         }
         let mut seen = BTreeSet::new();
+        let mut sources = BTreeSet::new();
         for (rank, hit) in bucket.hits.iter().enumerate() {
             if hit.key.character != character {
                 return Err(FusionError::Evidence("cross-character retrieval hit"));
@@ -141,6 +145,7 @@ pub fn fuse(
             if !seen.insert(hit.key.clone()) {
                 return Err(FusionError::Evidence("duplicate hit within method bucket"));
             }
+            sources.insert(hit.key.source);
             let candidate = candidates
                 .entry(hit.key.clone())
                 .or_insert_with(|| FusedHit {
@@ -167,6 +172,13 @@ pub fn fuse(
                 rank,
                 raw_score: hit.raw_score,
             });
+        }
+        for source in sources {
+            if !source_methods.insert((source, bucket.method)) {
+                return Err(FusionError::Evidence(
+                    "duplicate retrieval method for the same source",
+                ));
+            }
         }
     }
 
