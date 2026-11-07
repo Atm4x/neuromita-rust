@@ -1,0 +1,35 @@
+name: Agent B42 verified return
+on:
+  push:
+    branches:
+      - bridge/agent-b42-source-20261107
+    paths:
+      - bridge/agent-b42-incremental.bundle.b64
+permissions:
+  contents: write
+jobs:
+  return:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read transport branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and fast-forward publish B42
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent='63148ad3a5948bf987129edd788690aab83dca68'
+          target='e57245c16d7fbaac59f01499a54b1811eb4513f2'
+          branch='codex/timeline-b42-retention-proof-20261107'
+          test "$(git rev-parse "$parent")" = "$parent"
+          base64 -d bridge/agent-b42-incremental.bundle.b64 > /tmp/b42.bundle
+          echo "81a2b3742db90b7c480d73f4b7b538c849779dbc3a63c01caf7e16fd5ed03caf  /tmp/b42.bundle" | sha256sum -c -
+          git bundle verify /tmp/b42.bundle
+          git fetch /tmp/b42.bundle "refs/heads/$branch:refs/heads/$branch"
+          test "$(git rev-parse "refs/heads/$branch")" = "$target"
+          test "$(git rev-parse "$target^")" = "$parent"
+          git merge-base --is-ancestor "$parent" "$target"
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo 'target exists: refusing to overwrite'; exit 1; } || test "$?" = 2
+          git push origin "refs/heads/$branch:refs/heads/$branch"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$target"
