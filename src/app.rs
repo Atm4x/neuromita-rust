@@ -68,6 +68,23 @@ use crate::{
     voice::{UnavailableVoiceProvider, VoiceProvider},
 };
 
+// Infrastructure lease ownership follows the persistent repository lifetime;
+// the generation domain never needs to know about lock files.
+struct LeasedPresetRepository {
+    inner: JsonPresetRepository,
+    _lease: crate::settings::PresetStorageLease,
+}
+
+impl PresetRepository for LeasedPresetRepository {
+    fn load(&self) -> Result<Option<crate::generation::StoredPresets>, PresetCatalogError> {
+        self.inner.load()
+    }
+
+    fn save(&self, value: &crate::generation::StoredPresets) -> Result<(), PresetCatalogError> {
+        self.inner.save(value)
+    }
+}
+
 pub struct RuntimeLimits {
     pub request_queue: NonZeroUsize,
     pub discovery_buffer: NonZeroUsize,
@@ -220,7 +237,7 @@ impl ApplicationConfig {
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
-        crate::settings::PresetActivation::ensure_ready(data_directory)?;
+        let preset_lease = crate::settings::PresetActivation::runtime_lease(data_directory)?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
@@ -234,9 +251,10 @@ impl ApplicationConfig {
         config.timeline = TimelineConfig::Persistent {
             database: data_directory.join("timeline.sqlite3"),
         };
-        let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
-            data_directory.join("presets.json"),
-        ));
+        let repository: Arc<dyn PresetRepository> = Arc::new(LeasedPresetRepository {
+            inner: JsonPresetRepository::new(data_directory.join("presets.json")),
+            _lease: preset_lease,
+        });
         config.presets = PresetCatalog::open(
             runtime,
             repository,

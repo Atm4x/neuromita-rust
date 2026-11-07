@@ -27,3 +27,24 @@ No secrets, JSON values, or credential contents are logged. On Unix, new journal
 This is an **operator-invoked, stopped-app transaction**, not a live `PresetCatalog` reconfiguration. It does not provide cross-process locking against applications that do not participate in the journal protocol, nor a portable compare-and-swap transaction against concurrent external writers. An app kept open can persist stale in-memory definitions or credentials after activation; this is explicitly unsupported. The journal does not alter or delete Settings assignments. Power-loss guarantees depend on the host filesystem honoring `fsync` and rename; Windows directory sync is not certified. The result is a safe *recovery interface* for the supported offline workflow, not full issue #45 parity.
 
 A subprocess crash test is not a power-loss or Windows locked-file test. Absent source files may be temporarily absent during interrupted installation, but unknown present data is never overwritten by recovery. A failed cleanup after the durable commit must be treated as a **committed-but-cleanup-uncertain** status, not rolled back blindly. If the original journal remains, explicit recovery verifies the committed values. If a `finished` sibling remains, do not remove it before determining that the active profile matches the reviewed output.
+
+## Cooperative process exclusion (D9)
+
+The persistent Rust application's composition root obtains an **exclusive OS file lock** on
+`UserData/.preset-storage.lock` before opening its preset catalog and retains the
+lease in the repository for the catalog's lifetime. Offline apply and recovery
+also request a **non-blocking exclusive lock** on the same stable file and fail with
+`StorageBusy` while any other Core or offline operation holds it. The file is never
+unlinked, including after success, to avoid inode replacement and split-brain
+locks. A symlink or non-file lock path is refused; on Unix the file is created
+with `0600`. Pre-existing files are not silently truncated.
+
+This excludes **cooperating Rust processes only**. The lock is advisory: an
+external editor, older executable, Python application or direct filesystem
+writer can still change the files. An explicit stopped-process confirmation and
+snapshot verification remain mandatory; the lock is not a Windows ownership
+certificate or a substitute for a two-file atomic commit. Recovery preserves
+its journal when it detects foreign content. Kernel lock lifetime is scoped to
+the acquired file descriptor (released by Drop/process death), rather than a
+persistent PID file or stale timestamp. Existing unrelated file writers must
+opt into this contract before they can be considered protected.
