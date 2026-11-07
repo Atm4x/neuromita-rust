@@ -92,6 +92,58 @@ impl HistoricalRecallApi {
     }
 }
 
+/// Local, explicit history inspection. This API does not authenticate remote clients.
+/// It never passes retrieved history to ordinary generation.
+pub struct HistorySearchApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistorySearchApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Search(#[from] crate::knowledge::history_retrieval::HistorySearchError),
+    #[error("history selection changed during inspection")]
+    StaleSelection,
+}
+
+impl HistorySearchApi {
+    /// Only invoke from an explicitly authorized local UI or equivalent boundary.
+    pub async fn inspect(
+        character: CharacterId,
+        query: &str,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        let bindings = runtime::current().map_err(|_| HistorySearchApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(HistorySearchApiError::CharacterUnavailable)?;
+        let captured = owner.memories().await?;
+        let context = owner.get_context(captured.anchor()).await?;
+        if context.view.character() != character
+            || context.view.branch.0 != captured.anchor().branch_id
+            || context.view.through != captured.anchor().through
+        {
+            return Err(HistorySearchApiError::StaleSelection);
+        }
+        let selected = crate::knowledge::history_retrieval::search_history(
+            character,
+            &context.view,
+            query,
+            Default::default(),
+        )?;
+        let fresh = owner.memories().await?;
+        if captured.anchor() != fresh.anchor() || !captured.matches_version(&fresh) {
+            return Err(HistorySearchApiError::StaleSelection);
+        }
+        Ok(selected)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

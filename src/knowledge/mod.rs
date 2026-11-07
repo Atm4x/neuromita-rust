@@ -5,6 +5,7 @@ pub mod embedding;
 pub mod forgotten_recall;
 pub mod graph;
 pub mod graph_retrieval;
+pub mod history_retrieval;
 pub mod maintenance;
 pub mod memory_context;
 pub mod reranking;
