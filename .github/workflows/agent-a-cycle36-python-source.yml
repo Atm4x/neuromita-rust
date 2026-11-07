@@ -1,0 +1,28 @@
+name: agent-a-cycle36-python-parity-source
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle36-bundle-export
+permissions:
+  contents: read
+jobs:
+  python-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone active Python repository read-only
+        run: |
+          git clone --quiet https://github.com/Atm4x/NeuroMita.git python-source
+          cd python-source
+          git rev-parse HEAD > ../python-source-head.txt
+          git bundle create ../python-source.bundle HEAD
+          git bundle verify ../python-source.bundle
+          cd ..
+          sha256sum python-source.bundle > python-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle36-python-source
+          path: |
+            python-source.bundle
+            python-source.bundle.sha256
+            python-source-head.txt
+          retention-days: 2
