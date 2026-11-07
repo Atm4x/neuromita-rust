@@ -5,6 +5,7 @@ import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
+import { GuideNavigator, GuideContentsEntry } from "components/guide-navigator.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
@@ -17,7 +18,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget }
+export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 
@@ -53,6 +54,7 @@ export component AppWindow inherits Window {
     in property <float> onboarding-guide-crop-bottom: 1.0;
     in property <[GuideFocusTarget]> onboarding-guide-targets;
     in property <[GuideSectionEntry]> onboarding-guide-sections;
+    in property <[GuideContentsEntry]> onboarding-guide-contents;
     callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-select-level(int);
@@ -163,7 +165,12 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
-                guide => { root.onboarding-guide-visible = true; root.onboarding-guide-navigate(0); }
+                guide => {
+                    root.onboarding-guide-zoom = 1.0;
+                    root.onboarding-guide-select-step(0);
+                    root.onboarding-guide-visible = true;
+                    root.onboarding-guide-navigate(0);
+                }
                 language-selected(code) => { root.language-selected(code); }
             }
             if root.page == PageId.releases: ReleasesPage {
@@ -239,6 +246,21 @@ export component AppWindow inherits Window {
                         Label { text: root.onboarding-language == "ru" ? "Все возможности" : "Everything"; horizontal-alignment: center; }
                         activated => { root.onboarding-guide-select-level(2); }
                     }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language Russian";
+                        selected: root.onboarding-language == "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "RU"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("ru"); }
+                    }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language English";
+                        selected: root.onboarding-language != "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "EN"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("en"); }
+                    }
                 }
                 if root.onboarding-guide-sections.length > 0: HorizontalLayout {
                     height: 30px; spacing: 6px;
@@ -253,6 +275,12 @@ export component AppWindow inherits Window {
                         }
                         activated => { root.onboarding-guide-navigate(section.first); }
                     }
+                }
+                GuideNavigator {
+                    entries: root.onboarding-guide-contents;
+                    current-index: root.onboarding-guide-page;
+                    language: root.onboarding-language;
+                    navigate(index) => { root.onboarding-guide-navigate(index); }
                 }
                 GuideMedia {
                     vertical-stretch: 1;

@@ -427,12 +427,27 @@ mod tests {
         let presenter = SettingsPresenter::new(Arc::clone(&owner));
         let mut observed = presenter.onboarding.guide_level.observe();
         assert_eq!(observed.next().await.unwrap(), GuideLevel::Basic);
-        presenter.onboarding.guide_level.set(GuideLevel::Full).unwrap();
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
         assert_eq!(observed.next().await.unwrap(), GuideLevel::Full);
         assert_eq!(owner.snapshot_all().unwrap().revision, 1);
-        presenter.onboarding.guide_level.set(GuideLevel::Full).unwrap();
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
         assert_eq!(owner.snapshot_all().unwrap().revision, 1);
-        assert!(!owner.snapshot_all().unwrap().values.onboarding.eula_accepted);
+        assert!(
+            !owner
+                .snapshot_all()
+                .unwrap()
+                .values
+                .onboarding
+                .eula_accepted
+        );
     }
 
     #[tokio::test]

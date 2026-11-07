@@ -111,10 +111,7 @@ impl PythonSettingsMigration {
                         Some("advanced") => GuideLevel::Advanced,
                         Some("full") => GuideLevel::Full,
                         _ => {
-                            return Err(invalid_python(
-                                key,
-                                "expected basic, advanced or full",
-                            ));
+                            return Err(invalid_python(key, "expected basic, advanced or full"));
                         }
                     };
                 }

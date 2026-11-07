@@ -123,7 +123,10 @@ mod tests {
     #[test]
     fn guide_level_survives_restart_and_eula_acceptance() {
         let dir = Directory::new();
-        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Basic);
+        assert_eq!(
+            selected_guide_level(&dir.0).unwrap(),
+            guide::GuideLevel::Basic
+        );
         assert!(!dir.0.join("settings.json").exists());
         let repo = JsonSettingsRepository::new(dir.0.join("settings.json"));
         let mut stored = StoredSettings {
@@ -133,10 +136,16 @@ mod tests {
         stored.settings.onboarding.guide_level = guide::GuideLevel::Full;
         repo.save(&stored).unwrap();
         assert!(pending(&dir.0).unwrap());
-        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Full);
+        assert_eq!(
+            selected_guide_level(&dir.0).unwrap(),
+            guide::GuideLevel::Full
+        );
         accept(&dir.0, "ru").unwrap();
         assert_eq!(repo.load().unwrap().revision, 5);
-        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Full);
+        assert_eq!(
+            selected_guide_level(&dir.0).unwrap(),
+            guide::GuideLevel::Full
+        );
         assert!(!pending(&dir.0).unwrap());
     }
 
