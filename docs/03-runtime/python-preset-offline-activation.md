@@ -174,3 +174,33 @@ journal and same stopped-app lock lifetime. Existing `--apply`, `--apply-with-pr
 rollback before commit and verified cleanup after commit. This is still an offline workflow,
 not live hot reload or a Windows power-loss certification. Full Python format coverage and
 production GUI migration remain open in #45.
+
+## D33 — fail-closed preflight for semantics the Rust preset cannot represent
+
+The original Python `ModelSettingsService.resolve` reads optional per-preset
+`schema_override`, `sparse_response`, and capability switches such as
+`support_overrides.tools_native` / `streaming`. The current Rust preset
+converter does not implement their full model-schema and capability semantics.
+A successful conversion must therefore **not silently discard** those values.
+Before creating any staged files, the D-owned staging boundary blocks a preset
+containing nonempty custom schema overrides, an explicitly supplied sparse
+response policy, unsupported capability flags, or duplicate enabled model-setting
+IDs. It also blocks meaningful extra routing/test URL, preferred-model,
+reserve-key distribution, model-profile or known-model choices that are not
+represented in the current Rust preset definition. Empty/default optional
+values and the supported `structured_output` switch remain accepted.
+
+Older Python presets with missing/null `model_settings` remain blocked: Python
+may regenerate them using the protocol registry, model profiles, legacy
+`Settings/settings.json` and an `APIModelSchemas` override directory. None of
+those data sources can be reconstructed safely from `api_presets.json` and
+`api_templates.json` alone. No synthetic defaults are substituted; import
+remains selective, and the original Python source is always a separate
+read-only input (with a private byte-exact stage backup only after successful
+staging). A custom external `APIModelSchemas/*.json` directory is **outside
+this import contract**, not silently imported. Its compatibility must be
+reviewed separately before claiming full backup/restore parity.
+
+The Python `UPDATE_CONTOUR` setting is likewise an explicitly skipped
+application-updater preference until the Rust updater owns an equivalent
+setting. Do not reinterpret it as a Python Core updater instruction.

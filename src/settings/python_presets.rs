@@ -46,6 +46,8 @@ pub struct PythonPresetStagePreview {
     pub converted_ids: Vec<u32>,
     pub blocked_ids: Vec<u32>,
     pub blocked_without_id: usize,
+    /// Unsupported semantic field names only; never expose source values or keys.
+    pub unsupported_fields_by_id: BTreeMap<u32, Vec<String>>,
     pub template_count: usize,
     pub preserved_ids: Vec<u32>,
     pub python_order_imported: bool,
@@ -113,6 +115,7 @@ impl PythonPresetStage {
         })?;
         let mut blocked_ids = Vec::new();
         let mut blocked_without_id = 0;
+        let mut unsupported_fields_by_id = BTreeMap::<u32, Vec<String>>::new();
         let mut valid_ids = Vec::new();
         let mut occurrences = BTreeMap::<u32, usize>::new();
         let template_numeric_ids: BTreeSet<u32> = template_ids
@@ -126,12 +129,22 @@ impl PythonPresetStage {
         }
         for (source_id, source_record) in sources {
             let id = source_id.parse::<u32>().ok().filter(|id| *id > 0);
+            let unsupported = unrepresented_preset_fields(source_record);
+            if let Some(id) = id
+                && !unsupported.is_empty()
+            {
+                unsupported_fields_by_id
+                    .entry(id)
+                    .or_default()
+                    .extend(unsupported.iter().map(|field| (*field).into()));
+            }
             if id.is_none()
                 || id.is_some_and(|id| template_numeric_ids.contains(&id))
                 || id.is_some_and(|id| occurrences.get(&id).copied().unwrap_or(0) != 1)
                 || source_record
                     .get("id")
                     .is_some_and(|inner| user_id(inner) != id)
+                || !unsupported.is_empty()
                 || plan
                     .blockers
                     .iter()
@@ -153,6 +166,7 @@ impl PythonPresetStage {
             converted_ids: valid_ids.clone(),
             blocked_ids,
             blocked_without_id,
+            unsupported_fields_by_id,
             template_count: template_ids.len(),
             preserved_ids: Vec::new(),
             python_order_imported: source_json.get("order").is_some()
@@ -443,6 +457,91 @@ impl PythonPresetStage {
             let _ = fs::remove_dir_all(&sibling);
         }
         result
+    }
+}
+
+fn unrepresented_preset_fields(preset: &Value) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    for (name, field) in [
+        ("openrouter_routing", "openrouter_routing"),
+        ("model_profiles", "model_profiles"),
+        ("known_models", "known_models"),
+    ] {
+        if preset.get(name).is_some_and(has_nonempty_value) {
+            fields.push(field);
+        }
+    }
+    if preset
+        .get("reserve_keys_distribute")
+        .is_some_and(|value| value != &Value::Bool(false) && !value.is_null())
+    {
+        fields.push("reserve_keys_distribute");
+    }
+    if preset.get("test_url").is_some_and(has_nonempty_value) {
+        fields.push("test_url");
+    }
+    if preset
+        .get("preferred_model")
+        .is_some_and(|value| match value {
+            Value::Null => false,
+            Value::String(preferred) => {
+                !preferred.is_empty()
+                    && preset.get("default_model").and_then(Value::as_str) != Some(preferred)
+            }
+            _ => true,
+        })
+    {
+        fields.push("preferred_model");
+    }
+    let Some(settings) = preset.get("model_settings") else {
+        fields.push("model_settings");
+        return fields;
+    };
+    if !settings.is_object() {
+        fields.push("model_settings");
+        return fields;
+    }
+    if settings
+        .get("schema_override")
+        .is_some_and(|value| !value.is_null() && !value.as_object().is_some_and(|m| m.is_empty()))
+    {
+        fields.push("model_settings.schema_override");
+    }
+    if settings
+        .get("sparse_response")
+        .is_some_and(|value| !value.is_null())
+    {
+        fields.push("model_settings.sparse_response");
+    }
+    if let Some(support) = settings.get("support_overrides") {
+        match support.as_object() {
+            Some(values) if values.keys().any(|key| key != "structured_output") => {
+                fields.push("model_settings.support_overrides");
+            }
+            None if !support.is_null() => fields.push("model_settings.support_overrides"),
+            _ => {}
+        }
+    }
+    if let Some(enabled) = settings.get("enabled").and_then(Value::as_array) {
+        let mut unique = BTreeSet::new();
+        if enabled
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|field| !unique.insert(field))
+        {
+            fields.push("model_settings.enabled");
+        }
+    }
+    fields
+}
+
+fn has_nonempty_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+        _ => true,
     }
 }
 

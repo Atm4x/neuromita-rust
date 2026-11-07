@@ -478,3 +478,94 @@ fn historical_list_without_explicit_order_preserves_python_list_position() {
         assert_eq!(review.user_order, [19, 18]);
     }
 }
+
+#[test]
+fn python_semantics_without_a_rust_preset_equivalent_block_entire_stage() {
+    let (presets, templates) = fixture();
+    let changes = [
+        (
+            "model_settings.schema_override",
+            json!({"id": "user-schema", "fields": []}),
+        ),
+        ("model_settings.sparse_response", json!(false)),
+        (
+            "model_settings.support_overrides.tools_native",
+            json!(false),
+        ),
+        ("model_settings.support_overrides.streaming", json!(false)),
+        ("openrouter_routing", json!({"providers": ["first"]})),
+        ("reserve_keys_distribute", json!(true)),
+        ("model_profiles", json!([{"model": "gemini-2.5-flash"}])),
+        ("known_models", json!(["gemini-2.5-flash"])),
+        ("preferred_model", json!("gemini-2.5-pro")),
+        ("test_url", json!("https://custom-test.invalid")),
+        (
+            "model_settings.enabled",
+            json!(["max_tokens", "max_tokens"]),
+        ),
+        ("model_settings", Value::Null),
+    ];
+    for (path, value) in changes {
+        let mut document: Value = serde_json::from_slice(&presets).unwrap();
+        let mut field = &mut document["presets"]["18"];
+        for segment in path
+            .split('.')
+            .collect::<Vec<_>>()
+            .iter()
+            .take(path.split('.').count() - 1)
+        {
+            field = &mut field[*segment];
+        }
+        let last = path.rsplit('.').next().unwrap();
+        field[last] = value;
+        let changed = serde_json::to_vec(&document).unwrap();
+        let review = PythonPresetStage::prepare(&changed, &templates).unwrap();
+        assert_eq!(review.preview.blocked_ids, [18], "{path}");
+        assert_eq!(review.preview.blocked_count(), 1, "{path}");
+        let field_name = if path.starts_with("model_settings.support_overrides.") {
+            "model_settings.support_overrides"
+        } else {
+            path
+        };
+        assert_eq!(
+            review.preview.unsupported_fields_by_id[&18],
+            [field_name],
+            "{path}"
+        );
+        assert!(!format!("{:?}", review.preview).contains("private-fixture-key"));
+        let (_parent, destination) = fresh_directory();
+        assert!(
+            matches!(
+                review.stage_new_directory(&destination),
+                Err(PythonPresetStageError::Blocked(1))
+            ),
+            "{path}"
+        );
+        assert!(!destination.exists(), "{path}");
+    }
+}
+
+#[test]
+fn supported_capability_selection_and_empty_optional_fields_still_import() {
+    let (presets, templates) = fixture();
+    let mut document: Value = serde_json::from_slice(&presets).unwrap();
+    let preset = &mut document["presets"]["18"];
+    preset["model_settings"]["support_overrides"] = json!({"structured_output": false});
+    preset["model_settings"]["schema_override"] = json!({});
+    preset["openrouter_routing"] = json!({});
+    preset["model_profiles"] = json!([]);
+    preset["known_models"] = Value::Null;
+    preset["reserve_keys_distribute"] = json!(false);
+    preset["preferred_model"] = json!("gemini-2.5-flash");
+    preset["test_url"] = json!("");
+    let review =
+        PythonPresetStage::prepare(&serde_json::to_vec(&document).unwrap(), &templates).unwrap();
+    assert_eq!(review.preview.blocked_count(), 0);
+    assert_eq!(review.preview.converted_ids, [18]);
+    assert!(review.preview.unsupported_fields_by_id.is_empty());
+    let (_parent, destination) = fresh_directory();
+    review.stage_new_directory(&destination).unwrap();
+    let catalog = std::fs::read_to_string(destination.join("presets.json")).unwrap();
+    assert!(!catalog.contains("private-fixture-key"));
+    assert!(catalog.contains("structured_output"));
+}

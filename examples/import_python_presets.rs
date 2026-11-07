@@ -41,6 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::fs::read(&arguments[0])?,
         &std::fs::read(&arguments[1])?,
     )?;
+    if !plan.preview.unsupported_fields_by_id.is_empty() {
+        println!(
+            "Unsupported preset field names by numeric ID (values omitted): {:?}",
+            plan.preview.unsupported_fields_by_id
+        );
+    }
     let plan = if let Some(directory) = existing {
         let existing_catalog = read_existing(&directory.join("presets.json"))?;
         let existing_credentials = read_existing(&directory.join("preset-credentials.json"))?;
@@ -80,6 +86,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Python custom user order is stored in the Rust preset catalog; the exact Python source is also preserved."
         );
     }
+    println!(
+        "Scope: Python APIModelSchemas files and updater preferences are not transferred; preserve their original backups separately."
+    );
     if dry_run {
         println!("Dry-run: no files written");
         return Ok(());
