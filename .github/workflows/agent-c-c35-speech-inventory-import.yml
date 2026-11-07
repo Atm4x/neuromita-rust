@@ -1,0 +1,53 @@
+name: Agent C C3.5 persisted speech inventory exact import and native proof
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c35-speech-inventory-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c35-speech-inventory-20261107
+          fetch-depth: 0
+      - name: Verify exact object and publish stacked branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=9bb6d51c9b590fbcf7af34659f937dde420ff918
+          HEAD=054cee83194bb7bbacd4ee0e159a62204948f355
+          TARGET=codex/ai-platform-hub-c35-speech-selection-inventory-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c35-speech-inventory.bundle.b64 >/tmp/c35.bundle
+          echo 'f17131d38a72754e7689de39af92a259a178c7ecb0845ae257d2eebc488af332  /tmp/c35.bundle' | sha256sum -c -
+          git bundle verify /tmp/c35.bundle
+          git fetch --no-tags /tmp/c35.bundle "HEAD:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c35-speech-selection-inventory-20261107
+      - name: Native Windows Rust 1.98.1 speech inventory and removal lifecycle regressions
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::installed_speech::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::removal::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::tests::maintenance_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
