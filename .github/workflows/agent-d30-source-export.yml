@@ -1,0 +1,37 @@
+name: Agent D30 source export
+on:
+  push:
+    branches:
+      - bridge/agent-d30-source-export-20261107
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ace68913a8c2bfdd5378e8755042d3672c1dc823
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and bundle single source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=ace68913a8c2bfdd5378e8755042d3672c1dc823
+          EXPECTED_TREE=b78da2f9049ad0969159d1c7ce82da63c97a7706
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          git branch agent-d30-source "$EXPECTED"
+          mkdir -p "$RUNNER_TEMP/agent-d30-export"
+          git bundle create "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle" refs/heads/agent-d30-source
+          git bundle verify "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle"
+          git clone --quiet "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle" "$RUNNER_TEMP/agent-d30-clone"
+          test "$(git -C "$RUNNER_TEMP/agent-d30-clone" rev-parse HEAD)" = "$EXPECTED"
+          test "$(git -C "$RUNNER_TEMP/agent-d30-clone" rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          (cd "$RUNNER_TEMP/agent-d30-export" && sha256sum agent-d30-source.bundle > agent-d30-source.bundle.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d30-one-branch-source
+          path: ${{ runner.temp }}/agent-d30-export/
+          retention-days: 1
