@@ -628,6 +628,11 @@ impl TimelineStore {
                     return Err(TimelineError::Invalid("cannot modify unknown message"));
                 }
                 if draft.kind == EventKind::MessageRevised {
+                    if draft.payload.contains_key("content") {
+                        return Err(TimelineError::Invalid(
+                            "revision must use only nested message content",
+                        ));
+                    }
                     let replacement = draft
                         .payload
                         .get("message")

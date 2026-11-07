@@ -19,7 +19,7 @@ use crate::identity::EventId;
 use super::super::{
     domain::{
         BranchId, EventDraft, EventKind, TimelineError, TimelineFact, TimelineRepository,
-        parse_message_content,
+        canonical_message_content, parse_message_content,
     },
     view::MitaView,
 };
@@ -359,12 +359,7 @@ impl TimelineAssetStore {
             ) {
                 continue;
             }
-            let content = draft.payload.get("content").or_else(|| {
-                draft
-                    .payload
-                    .get("message")
-                    .and_then(|message| message.get("content"))
-            });
+            let content = canonical_message_content(draft);
             if let Some(content) = content {
                 let parts = parse_message_content(content)
                     .map_err(|_| TimelineAssetError::InvalidReference)?;
