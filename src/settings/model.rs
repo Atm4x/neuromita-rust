@@ -279,6 +279,46 @@ impl MemorySettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryGenerationMode {
+    #[default]
+    Off,
+    Keyword,
+    Fts,
+    Vector,
+    Fusion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HistoryGenerationSettings {
+    pub mode: HistoryGenerationMode,
+    pub max_results: u8,
+    pub max_content_chars: u16,
+}
+
+impl Default for HistoryGenerationSettings {
+    fn default() -> Self {
+        Self {
+            mode: HistoryGenerationMode::Off,
+            max_results: 4,
+            max_content_chars: 600,
+        }
+    }
+}
+
+impl HistoryGenerationSettings {
+    pub fn validate(self) -> Result<(), SettingsError> {
+        if !(1..=8).contains(&self.max_results) || !(64..=1200).contains(&self.max_content_chars) {
+            return Err(SettingsError::Validation(
+                "history generation budgets require 1..=8 results and 64..=1200 characters".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemindersSettings {
@@ -313,6 +353,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub memory: MemorySettings,
     #[serde(default)]
+    pub history_generation: HistoryGenerationSettings,
+    #[serde(default)]
     pub tools: ToolSettings,
 }
 
@@ -342,6 +384,7 @@ impl AppSettings {
             reminders: RemindersSettings::initial_profile(),
             speech: SpeechSettings::default(),
             memory: MemorySettings::default(),
+            history_generation: HistoryGenerationSettings::default(),
             tools: ToolSettings::default(),
         }
     }
@@ -371,6 +414,7 @@ impl AppSettings {
         }
         self.speech.validate()?;
         self.memory.validate()?;
+        self.history_generation.validate()?;
         self.tools
             .validate()
             .map_err(|error| SettingsError::Validation(error.to_string()))?;
@@ -419,6 +463,7 @@ section!(CharactersSettings, characters);
 section!(VoiceSettings, voice);
 section!(SpeechSettings, speech);
 section!(MemorySettings, memory);
+section!(HistoryGenerationSettings, history_generation);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);

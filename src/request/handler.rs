@@ -15,7 +15,13 @@ use crate::{
         GenerationError, GenerationObserver, GenerationRequest, LlmConversation, PreparedRequest,
         PresetCatalog, ProviderReply, ResponseGenerator,
     },
-    knowledge::KnowledgeRetrieval,
+    knowledge::{
+        KnowledgeRetrieval,
+        history_generation::render_history_evidence,
+        history_retrieval::{HistorySearchConfig, search_history, search_history_fts},
+        retrieval_fusion::FusionMode,
+    },
+    settings::HistoryGenerationMode,
     settings::SettingsOwner,
     timeline::selection::TimelineSelection,
     voice::{VoiceError, VoiceOptions, VoiceProvider},
@@ -170,6 +176,8 @@ impl MessageHandler {
             turn: context.turn,
             game: context.game_key,
             game_guard: context.game_guard,
+            require_exact_timeline_prefix: settings.values.history_generation.mode
+                != HistoryGenerationMode::Off,
         };
         record.prepared(context.clone());
         let preset_id = settings
@@ -232,6 +240,59 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(
                         format!("knowledge retrieval failed: {error}")
                     ))?;
+                let history_policy = settings.values.history_generation;
+                let mut selected = selected;
+                if history_policy.mode != HistoryGenerationMode::Off {
+                    let history_query = query.chars().take(512).collect::<String>();
+                    let config = HistorySearchConfig {
+                        limit: usize::from(history_policy.max_results),
+                        max_content_chars: usize::from(history_policy.max_content_chars),
+                    };
+                    let history_result = match history_policy.mode {
+                        HistoryGenerationMode::Off => unreachable!(),
+                        HistoryGenerationMode::Keyword => {
+                            search_history(context.character_id, &context.view, &history_query, config)
+                        }
+                        HistoryGenerationMode::Fts => {
+                            search_history_fts(context.character_id, &context.view, &history_query, config)
+                        }
+                        HistoryGenerationMode::Vector => {
+                            self.knowledge.search_history_semantic(
+                                context.character_id, &context.view, &history_query,
+                                config, FusionMode::VectorOnly, None,
+                            ).await
+                        }
+                        HistoryGenerationMode::Fusion => {
+                            self.knowledge.search_history_semantic(
+                                context.character_id, &context.view, &history_query,
+                                config, FusionMode::Union, None,
+                            ).await
+                        }
+                    }
+                    .map_err(|error| GenerationError::Response(format!(
+                        "selected history retrieval failed: {error}"
+                    )))?;
+                    if let Some(evidence) = render_history_evidence(
+                        context.character_id, &context.view, &history_result,
+                        usize::from(history_policy.max_results),
+                        usize::from(history_policy.max_content_chars),
+                    ).map_err(|error| GenerationError::Response(format!(
+                        "history evidence rejected: {error}"
+                    )))? {
+                        match &mut selected {
+                            Some(text) => { text.push_str("\n"); text.push_str(&evidence); }
+                            None => selected = Some(evidence),
+                        }
+                    }
+                }
+                if history_policy.mode != HistoryGenerationMode::Off {
+                    let latest = self.character.memories().await.map_err(|error| {
+                        GenerationError::Response(format!("history selection check failed: {error}"))
+                    })?;
+                    if latest.anchor() != context.anchor {
+                        return Err(GenerationError::Response("history Timeline prefix changed during retrieval".into()));
+                    }
+                }
                 let request = GenerationRequest::new(context, preset, selected)
                     .with_model_memory_policy(settings.values.memory.model_add_policy())
                     .with_prompt(prompt)

@@ -22,6 +22,7 @@ use neuromita::{
         DiagnosticScope, DiagnosticSection, RequestId, RequestOutcome, RequestSnapshot,
         RequestSource, RequestState,
     },
+    settings::{HistoryGenerationMode, HistoryGenerationSettings, SettingsApi},
 };
 use tokio::sync::mpsc;
 
@@ -45,7 +46,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion], /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -431,6 +432,11 @@ pub async fn run(
                                 }
                                 Err(error) => eprintln!("{error}"),
                             }
+                        } else if slash_command(&line, "/rag generation") {
+                            match history_generation_command(&line) {
+                                Ok(text) => println!("{text}"),
+                                Err(error) => eprintln!("History policy: {error}"),
+                            }
                         } else if slash_command(&line, "/rag") {
                             match parse_history_search(&line) {
                                 Ok(selection) => {
@@ -560,6 +566,41 @@ enum HistoryCommand<'a> {
     Fusion(&'a str),
 }
 
+fn parse_history_generation_mode(
+    line: &str,
+) -> Result<Option<HistoryGenerationMode>, &'static str> {
+    const USAGE: &str = "Используй /rag generation [off|keyword|fts|vector|fusion]";
+    match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["/rag", "generation"] => Ok(None),
+        ["/rag", "generation", "off"] => Ok(Some(HistoryGenerationMode::Off)),
+        ["/rag", "generation", "keyword"] => Ok(Some(HistoryGenerationMode::Keyword)),
+        ["/rag", "generation", "fts"] => Ok(Some(HistoryGenerationMode::Fts)),
+        ["/rag", "generation", "vector"] => Ok(Some(HistoryGenerationMode::Vector)),
+        ["/rag", "generation", "fusion"] => Ok(Some(HistoryGenerationMode::Fusion)),
+        _ => Err(USAGE),
+    }
+}
+
+fn history_generation_command(line: &str) -> Result<String, String> {
+    let requested = parse_history_generation_mode(line).map_err(str::to_owned)?;
+    let current =
+        SettingsApi::snapshot::<HistoryGenerationSettings>().map_err(|error| error.to_string())?;
+    let value = match requested {
+        None => current.value,
+        Some(mode) => {
+            let mut next = current.value;
+            next.mode = mode;
+            SettingsApi::replace(current.revision, next)
+                .map_err(|error| error.to_string())?
+                .value
+        }
+    };
+    Ok(format!(
+        "Генерация: History RAG {:?}, {} результатов, {} символов на запись; изменение влияет только на новые запросы.",
+        value.mode, value.max_results, value.max_content_chars
+    ))
+}
+
 fn parse_history_search(line: &str) -> Result<HistoryCommand<'_>, &'static str> {
     const USAGE: &str = "Используй /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY или /rag history-fusion QUERY";
     let (selection, query) = if let Some(query) = line.strip_prefix("/rag history ") {
@@ -663,6 +704,24 @@ mod forgotten_recall_command_tests {
             Ok(HistoryCommand::Fusion("green tea"))
         );
         assert!(parse_history_search("/rag history-vector").is_err());
+        assert_eq!(
+            parse_history_generation_mode("/rag generation").unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_history_generation_mode("/rag generation off"),
+            Ok(Some(HistoryGenerationMode::Off))
+        );
+        assert_eq!(
+            parse_history_generation_mode("/rag generation fusion"),
+            Ok(Some(HistoryGenerationMode::Fusion))
+        );
+        assert!(parse_history_generation_mode("/rag generation not-a-mode").is_err());
+        assert!(parse_history_generation_mode("/rag generation fusion extra").is_err());
+        assert_eq!(
+            parse_history_generation_mode("/rag\tgeneration fusion"),
+            Ok(Some(HistoryGenerationMode::Fusion))
+        );
     }
 
     #[test]
