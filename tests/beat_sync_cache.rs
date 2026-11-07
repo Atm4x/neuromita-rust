@@ -213,19 +213,12 @@ fn immutable_input_pipeline_reuses_raw_result_after_threshold_change() {
     let first = cache
         .analyze_or_reuse(
             input,
-
             BeatAnalysisRequest {
-
                 backend: BeatBackend::Auto,
-
                 backend_revision: "backend-v1",
-
                 decoder_revision: "decoder-v1",
-
                 analysis_settings_revision: "settings-v1",
-
                 min_confidence: 0.8,
-
             },
             |received| {
                 assert_eq!(received, input);
@@ -239,19 +232,12 @@ fn immutable_input_pipeline_reuses_raw_result_after_threshold_change() {
     let second = cache
         .analyze_or_reuse(
             input,
-
             BeatAnalysisRequest {
-
                 backend: BeatBackend::Auto,
-
                 backend_revision: "backend-v1",
-
                 decoder_revision: "decoder-v1",
-
                 analysis_settings_revision: "settings-v1",
-
                 min_confidence: 0.0,
-
             },
             |_| -> Result<BeatTimeline, ()> {
                 panic!("the cached unfiltered result should be reused")
@@ -281,19 +267,12 @@ fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
     let outcome = cache
         .analyze_or_reuse(
             input,
-
             BeatAnalysisRequest {
-
                 backend: BeatBackend::Dsp,
-
                 backend_revision: "v1",
-
                 decoder_revision: "wav-v1",
-
                 analysis_settings_revision: "analysis-v1",
-
                 min_confidence: 0.0,
-
             },
             |_| Ok::<BeatTimeline, ()>(fixture()),
         )
@@ -310,19 +289,12 @@ fn invalid_threshold_never_invokes_analyzer() {
     let cache = BeatCache::new(&tmp.0);
     let result = cache.analyze_or_reuse(
         b"fixture",
-
         BeatAnalysisRequest {
-
             backend: BeatBackend::Dsp,
-
             backend_revision: "v1",
-
             decoder_revision: "wav-v1",
-
             analysis_settings_revision: "analysis-v1",
-
             min_confidence: f32::NAN,
-
         },
         |_| -> Result<BeatTimeline, ()> {
             panic!("analyzer must not be called with an invalid threshold")
