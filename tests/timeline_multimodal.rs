@@ -157,6 +157,36 @@ fn projection_preserves_id_role_order_and_real_encoded_bytes() {
 }
 
 #[test]
+fn archived_empty_media_is_preserved_but_explicitly_rejected_for_providers() {
+    let (_tmp, assets, mut repo, branch) = setup();
+    let image = assets.import("image/png", Cursor::new([])).unwrap();
+    assert_eq!(image.size, 0);
+    add(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        json!([image_part(&image)]),
+        &[CharacterId::Crazy],
+    );
+    let selected = view(&repo, branch, CharacterId::Crazy, None);
+    assert!(matches!(
+        gemini_contents(&selected, &assets),
+        Err(MultimodalError::EmptyMedia)
+    ));
+    for dialect in [
+        OpenAiImageDialect::ChatCompletions,
+        OpenAiImageDialect::Responses,
+    ] {
+        assert!(matches!(
+            openai_contents(&selected, &assets, dialect),
+            Err(MultimodalError::EmptyMedia)
+        ));
+    }
+    let outsider = view(&repo, branch, CharacterId::Kind, None);
+    assert!(gemini_contents(&outsider, &assets).unwrap().is_empty());
+}
+
+#[test]
 fn private_media_never_leaks_to_other_character_and_hide_respects_historical_branch() {
     let (_tmp, assets, mut repo, branch) = setup();
     let image = assets

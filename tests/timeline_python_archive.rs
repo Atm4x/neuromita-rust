@@ -265,6 +265,81 @@ fn python_direct_image_ref_import_survives_native_memory_roundtrip() {
 }
 
 #[test]
+fn python_zero_length_image_import_and_native_archive_roundtrip_are_lossless() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::{export_memory, import_memory};
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let mut document: Value = serde_json::from_slice(&with_binary(b"")).unwrap();
+    let image = document["events"][1]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("embedded_image")
+        .unwrap();
+    document["events"][1]["payload"]["content"] = image;
+    document["operations"][1]["intent"]["events"][0]["payload"] =
+        document["events"][1]["payload"].clone();
+    let source = inspect_python_archive(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = source
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-zero-asset-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let archive = export_memory(&timeline, session, &assets).unwrap();
+    let mut restored = TimelineStore::new();
+    import_memory(&mut restored, &archive, &assets).unwrap();
+    assert_eq!(export_memory(&restored, session, &assets).unwrap(), archive);
+    let retained = neuromita::timeline::storage::archive::retention_manifest_memory(
+        &restored,
+        &[archive.as_slice()],
+    )
+    .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].size, 0);
+    assets.verify(&retained[0]).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_zero_length_image_survives_sqlite_reopen() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let mut document: Value = serde_json::from_slice(&with_binary(b"")).unwrap();
+    let reference = document["events"][1]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("embedded_image")
+        .unwrap();
+    document["events"][1]["payload"]["content"] = reference;
+    document["operations"][1]["intent"]["events"][0]["payload"] =
+        document["events"][1]["payload"].clone();
+    let source = inspect_python_archive(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-zero-sqlite-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = TimelineAssetStore::new(root.join("assets"), 1024).unwrap();
+    let path = root.join("timeline.sqlite");
+    let session;
+    let exported;
+    {
+        let mut sqlite = SqliteTimelineRepository::open(&path).unwrap();
+        let bound = source.bind_sqlite(&sqlite, &explicit_observers()).unwrap();
+        session = bound.import_sqlite(&mut sqlite, &assets).unwrap();
+        exported = export_sqlite(&sqlite, session, &assets).unwrap();
+    }
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert_eq!(
+        export_sqlite(&reopened, session, &assets).unwrap(),
+        exported
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn python_combined_direct_image_and_attachments_fails_closed() {
     let mut doc: Value = serde_json::from_slice(&python_direct_image_content()).unwrap();
     let reference = doc["events"][1]["payload"]["content"].clone();

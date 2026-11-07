@@ -245,7 +245,7 @@ fn checked_binaries(
         {
             return Err(SessionArchiveError::Invalid("invalid or duplicate asset"));
         }
-        if asset.reference.size == 0 || asset.reference.size > MAX_SINGLE_BINARY {
+        if asset.reference.size > MAX_SINGLE_BINARY {
             return Err(SessionArchiveError::Invalid("asset size"));
         }
         budget = budget
