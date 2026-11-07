@@ -1,0 +1,29 @@
+name: agent-a-cycle37-outgoing-import
+on:
+  push:
+    branches: [bridge/agent-a-cycle36-bundle-export]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and import exact Git bundle to isolated candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .gitbridge/agent-a-cycle37-outgoing.b64 ]]; then
+            echo "No payload yet"
+            exit 0
+          fi
+          git fetch origin 9fecf0c310cfe5d2722ffdfc1ad7140ebd088103
+          base64 --decode .gitbridge/agent-a-cycle37-outgoing.b64 > /tmp/cycle37.bundle
+          echo "5201a023755625a577b4eb5814845f323f7c1bcc20355f8d58d11c1b7dab05f0  /tmp/cycle37.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle37.bundle
+          git fetch /tmp/cycle37.bundle refs/heads/agent-a-cycle37:refs/heads/bridge/agent-a-cycle37-candidate
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle37-candidate)" = "558876b18df4bcb6a4c23efaf4105aab23f17b9b"
+          git merge-base --is-ancestor 9fecf0c310cfe5d2722ffdfc1ad7140ebd088103 refs/heads/bridge/agent-a-cycle37-candidate
+          git push origin refs/heads/bridge/agent-a-cycle37-candidate:refs/heads/bridge/agent-a-cycle37-candidate
