@@ -17,7 +17,8 @@ use crate::{
 };
 
 pub const MEMORY_ARCHIVE_FORMAT: &str = "neuromita-retained-memory-records";
-pub const MEMORY_ARCHIVE_VERSION: u32 = 1;
+pub const MEMORY_ARCHIVE_VERSION: u32 = 2;
+const LEGACY_MEMORY_ARCHIVE_VERSION: u32 = 1;
 pub const MAX_ARCHIVE_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,8 @@ pub struct MemoryArchive {
     scope: String,
     source_character: CharacterId,
     records: Vec<MemoryRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checksum_sha256: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -40,6 +43,8 @@ pub enum MemoryTransferError {
     UnsupportedFormat,
     #[error("archive contains duplicate memory IDs")]
     DuplicateId,
+    #[error("memory archive payload checksum does not match its declared contents")]
+    IntegrityMismatch,
     #[error("archive contains invalid or conflicting memories: {0}")]
     InvalidRecord(&'static str),
     #[error("memory import preview belongs to another character")]
@@ -107,6 +112,23 @@ fn verify(records: &[MemoryRecord]) -> Result<CharacterMemories, MemoryTransferE
     Ok(memory)
 }
 
+fn archive_checksum(archive: &MemoryArchive) -> Result<String, MemoryTransferError> {
+    let payload = serde_json::to_vec(&(
+        &archive.format,
+        archive.version,
+        &archive.scope,
+        archive.source_character,
+        &archive.records,
+    ))
+    .map_err(|error| MemoryTransferError::Serialization(error.to_string()))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &payload);
+    Ok(digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 pub fn export_memory(snapshot: &CharacterMemorySnapshot) -> Result<Vec<u8>, MemoryTransferError> {
     let _ = verify(snapshot.records())?;
     let archive = MemoryArchive {
@@ -115,7 +137,10 @@ pub fn export_memory(snapshot: &CharacterMemorySnapshot) -> Result<Vec<u8>, Memo
         scope: "retained_memory_records".into(),
         source_character: snapshot.character(),
         records: snapshot.records().to_vec(),
+        checksum_sha256: None,
     };
+    let mut archive = archive;
+    archive.checksum_sha256 = Some(archive_checksum(&archive)?);
     let mut bytes = serde_json::to_vec_pretty(&archive)
         .map_err(|e| MemoryTransferError::Serialization(e.to_string()))?;
     if bytes.len().saturating_add(1) > MAX_ARCHIVE_BYTES {
@@ -135,12 +160,22 @@ pub fn preview_memory_import(
     let archive: MemoryArchive =
         serde_json::from_slice(bytes).map_err(|e| MemoryTransferError::Malformed(e.to_string()))?;
     if archive.format != MEMORY_ARCHIVE_FORMAT
-        || archive.version != MEMORY_ARCHIVE_VERSION
+        || !matches!(
+            archive.version,
+            LEGACY_MEMORY_ARCHIVE_VERSION | MEMORY_ARCHIVE_VERSION
+        )
         || archive.scope != "retained_memory_records"
     {
         return Err(MemoryTransferError::UnsupportedFormat);
     }
     let _ = verify(&archive.records)?;
+    match archive.version {
+        LEGACY_MEMORY_ARCHIVE_VERSION if archive.checksum_sha256.is_none() => {}
+        MEMORY_ARCHIVE_VERSION
+            if archive.checksum_sha256.as_deref() == Some(archive_checksum(&archive)?.as_str()) => {
+        }
+        _ => return Err(MemoryTransferError::IntegrityMismatch),
+    }
     let mut target = CharacterMemories::default();
     for record in expected.records() {
         target

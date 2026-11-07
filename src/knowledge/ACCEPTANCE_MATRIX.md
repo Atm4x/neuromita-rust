@@ -47,8 +47,8 @@
 | D1 | Выбор/просмотр/редактирование канонической памяти, stale state | PASS | Memory Editor/Presenter/API |
 | D2 | Preview + подтверждённая очистка derived embedding cache | PASS | #198, bounded cache preview/revision checks |
 | D3 | Preview + подтверждённая очистка source-scoped graph relations; reindex capability path | PASS | #213/#220/#225/#229. Реальная AI-инференция отдельно G5 |
-| D4 | User-scoped export/import с версиями формата, duplicate IDs, mapping, preview и повтором | OPEN | Cycle26: **retained MemoryRecord-only** v1 exact-ID перенос, preview/confirmed CLI/API и SQLite reopen; **не переносит** Timeline history, variables или ручной Graph; ограничение 256 записей/1 MiB. Полный `world-db-export`/SessionArchive не поддержан, см. `MEMORY_TRANSFER.md` |
-| D5 | Recovery/partial failure/cancellation/reopen пользовательского набора, включая malformed archives | OPEN | Cycle26 подтверждает cancellation, bad JSON, conflicting IDs и SQLite reopen **только MemoryRecord**. Общая матрица всех таблиц, частичных IO сбоев и широкого reindex отсутствует |
+| D4 | User-scoped export/import с версиями формата, duplicate IDs, mapping, preview и повтором | OPEN | Cycles26–27: **retained MemoryRecord-only** v1/v2 exact-ID перенос, v2 SHA-256 checksum (legacy v1 accepted), crash-safe no-clobber file publication, preview/confirmed CLI/API и SQLite reopen; **не переносит** Timeline history, variables или ручной Graph; ограничение 256 записей/1 MiB. Полный `world-db-export`/SessionArchive не поддержан, см. `MEMORY_TRANSFER.md` |
+| D5 | Recovery/partial failure/cancellation/reopen пользовательского набора, включая malformed archives | OPEN | Cycles26–27 подтверждают cancellation, bad JSON, conflicting IDs, checksum tampering, concurrent no-clobber and fail-before-publication cleanup, SQLite reopen **только MemoryRecord**. Общая матрица всех таблиц, частичных IO сбоев и широкого reindex отсутствует |
 
 ## Приоритет по зависимостям (не по числу незакрытых клеток)
 

@@ -473,8 +473,9 @@ pub async fn run(
                                 Ok(MemoryTransferCommand::Export(path)) => {
                                     match MemoryTransferApi::export(character).await {
                                         Ok(bytes) => match write_memory_export(&path, &bytes) {
-                                            Ok(()) => println!("Memory records for {character}: {} bytes saved to {path}. Scope: retained MemoryRecord only; NOT history, variables, or graph.", bytes.len()),
-                                            Err(error) => eprintln!("Memory export: {error}"),
+                                            Ok(ExportPublication::Durable) => println!("Memory records for {character}: {} bytes durably published to {path}. Scope: retained MemoryRecord only; NOT history, variables, or graph.", bytes.len()),
+                                            Ok(ExportPublication::PublishedDurabilityUnconfirmed(warning)) => eprintln!("Memory export: COMPLETE bytes published to {path} but durability/cleanup is unconfirmed: {warning}. Check the file before retrying; it was not overwritten."),
+                                            Err(error) => eprintln!("Memory export not published: {error}"),
                                         },
                                         Err(error) => eprintln!("Memory export: {error}"),
                                     }
@@ -495,7 +496,7 @@ pub async fn run(
                                     }
                                 }
                                 Ok(MemoryTransferCommand::Apply(token)) => {
-                                    match take_graph_preview(&mut pending_memory_import, character, token) {
+                                    match take_scoped_preview(&mut pending_memory_import, character, token, "Memory") {
                                         Ok(plan) => match MemoryTransferApi::apply_confirmed(
                                             character, plan, true, &tokio_util::sync::CancellationToken::new()
                                         ).await {
@@ -552,7 +553,7 @@ pub async fn run(
                                     }
                                 }
                                 Ok(GraphCommand::Apply(token)) => {
-                                    match take_graph_preview(&mut pending_graph, character, token) {
+                                    match take_scoped_preview(&mut pending_graph, character, token, "Graph") {
                                         Ok(plan) => {
                                             match GraphMaintenanceApi::apply_confirmed(
                                                 character,
@@ -674,13 +675,93 @@ fn read_memory_import(path: &str) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn write_memory_export(path: &str, bytes: &[u8]) -> io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+#[derive(Debug)]
+enum ExportPublication {
+    Durable,
+    PublishedDurabilityUnconfirmed(String),
+}
+
+fn write_memory_export(path: &str, bytes: &[u8]) -> io::Result<ExportPublication> {
+    write_memory_export_with_preflight(std::path::Path::new(path), bytes, || Ok(()))
+}
+
+/// Publishes only fully written and synced bytes, never replacing an existing path.
+/// Hard-link publication is intentionally required; unsupported filesystems fail closed.
+fn write_memory_export_with_preflight(
+    path: &std::path::Path,
+    bytes: &[u8],
+    before_publish: impl FnOnce() -> io::Result<()>,
+) -> io::Result<ExportPublication> {
+    if bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(invalid("memory export exceeds bounded byte limit"));
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let _ = path
+        .file_name()
+        .ok_or_else(|| invalid("memory export requires a filename"))?;
+    let mut pending = None;
+    for _ in 0..8 {
+        let temp = parent.join(format!(
+            ".neuromita-memory-{}.pending",
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temp) {
+            Ok(file) => {
+                pending = Some((temp, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let (temp, mut file) = pending.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "cannot allocate private export staging file",
+        )
+    })?;
+    let prepublish = file
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .and_then(|_| before_publish());
+    drop(file);
+    let publication = prepublish.and_then(|_| std::fs::hard_link(&temp, path));
+    if let Err(error) = publication {
+        return match std::fs::remove_file(&temp) {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(io::Error::other(format!(
+                "export not published ({error}); private staging cleanup failed at {}: {cleanup}",
+                temp.display()
+            ))),
+        };
+    }
+    let mut warnings = Vec::new();
+    if let Err(error) = std::fs::remove_file(&temp) {
+        warnings.push(format!(
+            "private staging cleanup failed at {}: {error}",
+            temp.display()
+        ));
+    }
+    if let Err(error) = std::fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+        warnings.push(format!("directory sync unavailable: {error}"));
+    }
+    if warnings.is_empty() {
+        Ok(ExportPublication::Durable)
+    } else {
+        Ok(ExportPublication::PublishedDurabilityUnconfirmed(
+            warnings.join("; "),
+        ))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -731,20 +812,21 @@ fn parse_graph_ids(ids: &[&str], usage: &'static str) -> Result<Vec<MemoryId>, &
     Ok(parsed)
 }
 
-fn take_graph_preview<T>(
+fn take_scoped_preview<T>(
     pending: &mut Option<(uuid::Uuid, CharacterId, T)>,
     character: CharacterId,
     token: uuid::Uuid,
-) -> Result<T, &'static str> {
+    kind: &'static str,
+) -> Result<T, String> {
     match pending.as_ref() {
         Some((expected, owner, _)) if *expected == token && *owner == character => {
-            Ok(pending.take().expect("matched graph preview").2)
+            Ok(pending.take().expect("matched confirmed preview").2)
         }
         Some((_, owner, _)) if *owner != character => {
-            Err("Graph preview принадлежит другому персонажу")
+            Err(format!("{kind} preview принадлежит другому персонажу"))
         }
-        Some(_) => Err("Неверный токен Graph; данные не изменены"),
-        None => Err("Нет ожидающего Graph preview"),
+        Some(_) => Err(format!("Неверный токен {kind}; данные не изменены")),
+        None => Err(format!("Нет ожидающего {kind} preview")),
     }
 }
 
@@ -1024,16 +1106,94 @@ mod forgotten_recall_command_tests {
         assert_eq!(read_memory_import(path).unwrap(), b"validated export");
         std::fs::remove_file(path).unwrap();
         let mut pending = Some((id, CharacterId::Crazy, "preview"));
-        assert!(take_graph_preview(&mut pending, CharacterId::Kind, id).is_err());
+        assert!(take_scoped_preview(&mut pending, CharacterId::Kind, id, "Memory").is_err());
         assert!(pending.is_some());
         assert!(
-            take_graph_preview(&mut pending, CharacterId::Crazy, uuid::Uuid::new_v4()).is_err()
+            take_scoped_preview(
+                &mut pending,
+                CharacterId::Crazy,
+                uuid::Uuid::new_v4(),
+                "Memory"
+            )
+            .is_err()
         );
         assert_eq!(
-            take_graph_preview(&mut pending, CharacterId::Crazy, id).unwrap(),
+            take_scoped_preview(&mut pending, CharacterId::Crazy, id, "Memory").unwrap(),
             "preview"
         );
-        assert!(take_graph_preview(&mut pending, CharacterId::Crazy, id).is_err());
+        assert!(take_scoped_preview(&mut pending, CharacterId::Crazy, id, "Memory").is_err());
+    }
+
+    #[test]
+    fn memory_export_is_atomic_no_clobber_and_cleans_failed_staging() {
+        let root =
+            std::env::temp_dir().join(format!("memory-export-atomic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("memory.json");
+        let failed = write_memory_export_with_preflight(&dest, b"private test archive", || {
+            Err(io::Error::other("injected failure before publication"))
+        });
+        assert!(failed.is_err());
+        assert!(!dest.exists());
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        let done = write_memory_export(dest.to_str().unwrap(), b"complete archive").unwrap();
+        #[cfg(unix)]
+        assert!(matches!(done, ExportPublication::Durable));
+        #[cfg(not(unix))]
+        let _ = done;
+        assert_eq!(std::fs::read(&dest).unwrap(), b"complete archive");
+        assert!(write_memory_export(dest.to_str().unwrap(), b"dangerous replacement").is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"complete archive");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            let target = root.join("target.txt");
+            std::fs::write(&target, b"original target").unwrap();
+            let link = root.join("symlink.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(write_memory_export(link.to_str().unwrap(), b"changed").is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"original target");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_export_publish_has_one_writer_and_no_partial_destination() {
+        let root =
+            std::env::temp_dir().join(format!("memory-export-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("export.json");
+        let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first = std::thread::spawn({
+            let destination = destination.clone();
+            let ready = std::sync::Arc::clone(&ready);
+            move || {
+                ready.wait();
+                write_memory_export(destination.to_str().unwrap(), b"archive A")
+            }
+        });
+        let second = std::thread::spawn({
+            let destination = destination.clone();
+            move || {
+                ready.wait();
+                write_memory_export(destination.to_str().unwrap(), b"archive B")
+            }
+        });
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result
+                    .as_ref()
+                    .is_err_and(|err| err.kind() == io::ErrorKind::AlreadyExists))
+                .count(),
+            1
+        );
+        let persisted = std::fs::read(destination).unwrap();
+        assert!(persisted == b"archive A" || persisted == b"archive B");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1060,17 +1220,23 @@ mod forgotten_recall_command_tests {
             Ok(GraphCommand::Apply(token))
         );
         let mut pending = Some((token, CharacterId::Crazy, "graph preview"));
-        assert!(take_graph_preview(&mut pending, CharacterId::Kind, token).is_err());
+        assert!(take_scoped_preview(&mut pending, CharacterId::Kind, token, "Graph").is_err());
         assert!(pending.is_some());
         assert!(
-            take_graph_preview(&mut pending, CharacterId::Crazy, uuid::Uuid::new_v4()).is_err()
+            take_scoped_preview(
+                &mut pending,
+                CharacterId::Crazy,
+                uuid::Uuid::new_v4(),
+                "Graph"
+            )
+            .is_err()
         );
         assert!(pending.is_some());
         assert_eq!(
-            take_graph_preview(&mut pending, CharacterId::Crazy, token).unwrap(),
+            take_scoped_preview(&mut pending, CharacterId::Crazy, token, "Graph").unwrap(),
             "graph preview"
         );
-        assert!(take_graph_preview(&mut pending, CharacterId::Crazy, token).is_err());
+        assert!(take_scoped_preview(&mut pending, CharacterId::Crazy, token, "Graph").is_err());
         for invalid in [
             "/knowledge graph preview",
             "/knowledge graph preview clear",

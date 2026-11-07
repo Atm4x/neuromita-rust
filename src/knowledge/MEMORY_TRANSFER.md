@@ -1,4 +1,4 @@
-# Retained MemoryRecord transfer — version 1 (Agent A, Cycle 26)
+# Retained MemoryRecord transfer — versions 1/2 (Agent A, Cycles 26–27)
 
 **Scope:** this is a *character-scoped transfer of retained `MemoryRecord` values*, not a
 backup of `world.db`, the `SessionTimeline`, the conversation or game state. The
@@ -9,8 +9,17 @@ operation does **not** satisfy the full D4 acceptance gate.
 ## User workflow (trusted local CLI)
 
 1. `/knowledge memory export /path/to/backup.json` exports retained memory records
-   for the selected character. It uses a new file and **never overwrites** an
-   existing path. The exported file records the original character.
+   for the selected character. Version 2 is written to a **private 0600 staging
+   file** on the destination filesystem, synced and only then published with a
+   no-clobber hard link. The destination is never an incomplete file and never
+   overwrites an existing path, even under concurrent exporters. The staging
+   link is removed and the directory synced before success is reported.
+   If the filesystem refuses hard links, the command fails rather than silently
+   using a non-atomic copy. A failure after publication is reported distinctly
+   as **published, durability/cleanup unconfirmed**, so the caller does not
+   mistake a retry failure for absence of data. A process crash can leave an
+   unlinked private `.neuromita-memory-*.pending` staging file; inspect before
+   manual cleanup. The exported file records the original character.
 2. Select the target character explicitly using `/character Kind` or another
    catalog ID. `/knowledge memory preview /path/to/backup.json` validates the
    bounded JSON archive and the **current target Timeline selection**. The preview
@@ -24,17 +33,28 @@ operation does **not** satisfy the full D4 acceptance gate.
 ## Format and validation
 
 The versioned JSON envelope has exact top-level fields: `format`, `version`,
-`scope`, `source_character`, `records`:
+`scope`, `source_character`, `records`, and (since v2) `checksum_sha256`:
 
 ```json
 {
   "format": "neuromita-retained-memory-records",
-  "version": 1,
+  "version": 2,
   "scope": "retained_memory_records",
   "source_character": "Crazy",
-  "records": []
+  "records": [],
+  "checksum_sha256": "<64 lowercase hexadecimal characters>"
 }
 ```
+
+`checksum_sha256` is SHA-256 of a deterministic JSON serialization of the
+payload tuple `(format, version, scope, source_character, records)` excluding the
+checksum field. A v2 archive with a changed valid memory field or source character
+is rejected *before* import preview. The checksum detects accidental corruption;
+it is **not** a digital signature or proof of trusted origin, because a malicious
+writer can recompute it. Older v1 archives are accepted only without a checksum,
+so the previous exported files remain importable; their integrity is not
+cryptographically checked. Unknown keys, invalid record fields and duplicate IDs
+continue to fail strict validation.
 
 `records` are the canonical typed `MemoryRecord` DTOs. All supported fields
 (including UUID, content, kind, priority, entities, protected, Active/Forgotten/
@@ -61,7 +81,7 @@ content or IDs fails before confirmation. No new mutable registry or database.
   Derived embeddings and graph relations can be recomputed separately; manually
   authored graph relations are **not** covered by this memory-only archive.
 - No all-character export, date/status filtering, huge streaming archives,
-  persisted staging plan, checksum/signature, Python `world-db-export` loader or
+  persisted staging plan, *authenticated signature*, Python `world-db-export` loader or
   full session continuity. The origin label is not cryptographic evidence.
 - No import over another character without a deliberate target selection, no
   remote route, no automatic conflict resolution, and no rollback of external
@@ -77,5 +97,8 @@ content or IDs fails before confirmation. No new mutable registry or database.
 protection/TTL metadata, cross-character isolation, replay/no-op, malformed
 version/unknown keys/duplicate UUID/oversize, incompatible ID, cancellation,
 missing confirmation, stale edit and SQLite reopen with a real running
-`ApplicationLifecycle`. The local CLI tests cover malformed commands, one-use
-confirmation and non-overwriting file creation. This is not full Python parity.
+`ApplicationLifecycle`. Cycle27 adds v2 checksum mutation/legacy v1 fixtures,
+private staging, fail-before-publish cleanup, target symlink protection, file
+no-clobber and concurrent exporter races. The local CLI tests cover malformed
+commands, one-use confirmation and non-overwriting durable file publication.
+This is not full Python parity.

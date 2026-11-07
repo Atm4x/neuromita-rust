@@ -199,7 +199,7 @@ async fn malformed_duplicates_conflicts_and_stale_preview_never_write_partially(
         )),
     ));
     let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    json["version"] = serde_json::json!(2);
+    json["version"] = serde_json::json!(3);
     assert!(matches!(
         MemoryTransferApi::preview_import(CharacterId::Kind, &serde_json::to_vec(&json).unwrap())
             .await,
@@ -356,4 +356,103 @@ async fn sqlite_reopen_preserves_exact_import_and_idempotent_preview() {
         app.shutdown().await.unwrap();
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn checksum_v2_detects_semantic_tampering_and_legacy_v1_remains_importable() {
+    let _single = APPLICATION.lock().await;
+    let app = ApplicationLifecycle::start(config()).await.unwrap();
+    let crazy = CharacterApi::get(CharacterId::Crazy).unwrap();
+    crazy
+        .edit_memories(
+            crazy.memories().await.unwrap(),
+            records()
+                .into_iter()
+                .map(|record| MemoryCommand::ImportRecord { record })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let bytes = MemoryTransferApi::export(CharacterId::Crazy).await.unwrap();
+    let archive: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(archive["version"], 2);
+    assert_eq!(archive["checksum_sha256"].as_str().unwrap().len(), 64);
+    let expected = MemoryTransferApi::preview_import(CharacterId::Kind, &bytes)
+        .await
+        .unwrap();
+    assert_eq!(expected.new_records(), 5);
+
+    for field in ["content", "priority"] {
+        let mut forged = archive.clone();
+        forged["records"][0][field] = if field == "content" {
+            serde_json::json!("tampered payload")
+        } else {
+            if forged["records"][0][field] == "low" {
+                serde_json::json!("high")
+            } else {
+                serde_json::json!("low")
+            }
+        };
+        assert!(
+            matches!(
+                MemoryTransferApi::preview_import(
+                    CharacterId::Kind,
+                    &serde_json::to_vec(&forged).unwrap()
+                )
+                .await,
+                Err(MemoryTransferApiError::Transfer(
+                    MemoryTransferError::IntegrityMismatch
+                ))
+            ),
+            "tampered {field} accepted"
+        );
+    }
+    let mut wrong_origin = archive.clone();
+    wrong_origin["source_character"] = serde_json::json!("Kind");
+    assert!(matches!(
+        MemoryTransferApi::preview_import(
+            CharacterId::Kind,
+            &serde_json::to_vec(&wrong_origin).unwrap()
+        )
+        .await,
+        Err(MemoryTransferApiError::Transfer(
+            MemoryTransferError::IntegrityMismatch
+        ))
+    ));
+    let mut no_checksum = archive.clone();
+    no_checksum
+        .as_object_mut()
+        .unwrap()
+        .remove("checksum_sha256");
+    assert!(matches!(
+        MemoryTransferApi::preview_import(
+            CharacterId::Kind,
+            &serde_json::to_vec(&no_checksum).unwrap()
+        )
+        .await,
+        Err(MemoryTransferApiError::Transfer(
+            MemoryTransferError::IntegrityMismatch
+        ))
+    ));
+    no_checksum["version"] = serde_json::json!(1);
+    assert_eq!(
+        MemoryTransferApi::preview_import(
+            CharacterId::Kind,
+            &serde_json::to_vec(&no_checksum).unwrap()
+        )
+        .await
+        .unwrap()
+        .new_records(),
+        5
+    );
+    assert!(
+        CharacterApi::get(CharacterId::Kind)
+            .unwrap()
+            .memories()
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+    );
+    app.shutdown().await.unwrap();
 }
