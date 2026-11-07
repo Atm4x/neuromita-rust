@@ -1,0 +1,38 @@
+name: Agent B46 verified closeout source patch
+on:
+  push:
+    branches: [bridge/agent-b46-closure-patch-20261107]
+    paths: [bridge/agent-b46.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify source patch and publish linear B46 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=df49bcf9b945630919cb9cba603d5e09a0a256cc
+          tree=cea29fd662b854e4c1dfa8680198b656b8bd5777
+          branch=codex/timeline-b46-native-tool-cancel-20261107
+          base64 -d bridge/agent-b46.patch.gz.b64 > /tmp/b46.patch.gz
+          echo "85dd2d792c00a6b645bcb0f941ddb1d8bbd992c18693e81b6afa607a74089896  /tmp/b46.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b46.patch.gz
+          gzip -dc /tmp/b46.patch.gz > /tmp/b46.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b46.patch
+          git apply --index /tmp/b46.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(timeline): prioritize owner invalidation before native tool continuation"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "ref already exists"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_REMOTE_HEAD=$remote"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
