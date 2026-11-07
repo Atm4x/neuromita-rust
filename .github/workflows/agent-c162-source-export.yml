@@ -1,0 +1,37 @@
+name: Agent C export exact PR162 git bundle
+on:
+  push:
+    branches:
+      - bridge/export-agent-c162-source-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3053afe08e70d2a705276e3323d0512ff0647b35
+          fetch-depth: 0
+      - name: Verify and bundle one branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=3053afe08e70d2a705276e3323d0512ff0647b35
+          BRANCH=refs/heads/codex/ai-platform-hub-c3-orphan-lock-20261107
+          test "$(git rev-parse HEAD)" = "$SHA"
+          git update-ref "$BRANCH" "$SHA"
+          git bundle create /tmp/agent-c162-source.bundle "$BRANCH"
+          git bundle verify /tmp/agent-c162-source.bundle
+          sha256sum /tmp/agent-c162-source.bundle > /tmp/agent-c162-source.bundle.sha256
+          printf 'branch=%s\nhead=%s\n' "$BRANCH" "$SHA" > /tmp/agent-c162-source.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-c162-source
+          path: |
+            /tmp/agent-c162-source.bundle
+            /tmp/agent-c162-source.bundle.sha256
+            /tmp/agent-c162-source.manifest
+          compression-level: 0
+          retention-days: 3
