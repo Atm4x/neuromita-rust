@@ -4,7 +4,10 @@ use crate::{
     character::CharacterId,
     game_context::GameRuntimeContext,
     identity::EventId,
-    music::{BeatBackend, BeatCache, runtime::{BeatRuntime, MusicJob}},
+    music::{
+        BeatBackend, BeatCache,
+        runtime::{BeatRuntime, MusicJob},
+    },
     request::{
         InitiateRequest, ReactRequest, ReplyRequest, RequestHandle, RequestOutcome, RequestSource,
         RequestState,
@@ -498,7 +501,9 @@ enum GameCommand {
         error: Option<String>,
     },
 }
-fn default_beat_confidence() -> f32 { 0.2 }
+fn default_beat_confidence() -> f32 {
+    0.2
+}
 
 #[derive(Deserialize)]
 struct Frame {
@@ -570,7 +575,10 @@ impl GameBeatService {
     fn new(config: GameBeatConfig) -> io::Result<Self> {
         let root = std::fs::canonicalize(config.media_root)?;
         if !root.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "music root is not a directory"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "music root is not a directory",
+            ));
         }
         Ok(Self {
             media_root: root,
@@ -589,9 +597,14 @@ impl GameBeatService {
         let resolved = std::fs::canonicalize(candidate)?;
         if !resolved.starts_with(&self.media_root)
             || !resolved.is_file()
-            || resolved.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
+            || resolved
+                .extension()
+                .is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
         {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "music source is not an allowed WAV"));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "music source is not an allowed WAV",
+            ));
         }
         Ok(resolved)
     }

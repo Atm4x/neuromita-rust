@@ -23,7 +23,10 @@ fn main() {
     let runtime = BeatRuntime::new(BeatCache::new(cache_dir));
     let job = MusicJob {
         request_id: "manual-smoke",
-        track_name: source.file_stem().and_then(|name| name.to_str()).unwrap_or("audio"),
+        track_name: source
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audio"),
         audio_path: &file,
         stream: false,
         min_confidence: 0.2,
