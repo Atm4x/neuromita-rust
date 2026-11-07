@@ -38,8 +38,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: GUI typecheck
         run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: Core tests
-        run: cargo test --locked --offline
+      # Compile the executable GUI fixture first so failures in unrelated
+      # Core SDK tests cannot hide AI Hub rendering evidence.
       - name: GUI tests
         env:
           NEUROMITA_GUI_CAPTURE_DIR: target/ai-hub-captures
@@ -53,3 +53,6 @@ jobs:
           if-no-files-found: ignore
       - name: Strict Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Core tests
+        timeout-minutes: 15
+        run: cargo test --locked --offline
