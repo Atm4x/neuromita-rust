@@ -338,3 +338,67 @@ async fn composite_survives_sqlite_reopen_without_replaying_duplicate_events() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn composite_rejects_history_fields_without_mutating_character_state() {
+    let _serial = APPLICATION.lock().await;
+    let app = ApplicationLifecycle::start(config()).await.unwrap();
+    populate_source().await;
+    let bytes = PortableTransferApi::export(CharacterId::Crazy)
+        .await
+        .unwrap();
+    let mut envelope: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    envelope["session_archive"] = json!({
+        "format": "neuromita.timeline.session",
+        "version": 1
+    });
+    assert!(matches!(
+        PortableTransferApi::preview_import(
+            CharacterId::Kind,
+            &serde_json::to_vec(&envelope).unwrap()
+        )
+        .await,
+        Err(PortableTransferApiError::Transfer(
+            PortableTransferError::Malformed(_)
+        ))
+    ));
+    let target = CharacterApi::get(CharacterId::Kind).unwrap();
+    assert!(target.memories().await.unwrap().records().is_empty());
+    assert!(target.user_variables().await.unwrap().values().is_empty());
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn composite_memory_identity_conflict_preserves_unrelated_variables() {
+    let _serial = APPLICATION.lock().await;
+    let app = ApplicationLifecycle::start(config()).await.unwrap();
+    let (id, _) = populate_source().await;
+    let target = CharacterApi::get(CharacterId::Kind).unwrap();
+    let conflicting = MemoryRecord::fact(
+        id,
+        MemoryPriority::High,
+        "Different target-owned memory with the same identifier",
+    );
+    target
+        .edit_memories(
+            target.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord {
+                record: conflicting,
+            }],
+        )
+        .await
+        .unwrap();
+    let before = target.memories().await.unwrap();
+    let bytes = PortableTransferApi::export(CharacterId::Crazy)
+        .await
+        .unwrap();
+    assert!(matches!(
+        PortableTransferApi::preview_import(CharacterId::Kind, &bytes).await,
+        Err(PortableTransferApiError::Transfer(
+            PortableTransferError::Memory(_)
+        ))
+    ));
+    assert_eq!(target.memories().await.unwrap().records(), before.records());
+    assert!(target.user_variables().await.unwrap().values().is_empty());
+    app.shutdown().await.unwrap();
+}
