@@ -20,3 +20,29 @@ The existing installer and worker APIs remain unchanged. This module is read-onl
 ## Canonical path identity
 
 `RuntimeComposition` canonicalizes each installed layer before passing it to a Python worker. A raw install path may refer to the same directory through an alias in an injected ancestor. Preflight therefore compares the filesystem identity of existing paths using `canonicalize` for both saved selections and active worker imports. A UNIX regression covers an alias at the configured backend root with a worker holding the canonical path. Missing paths are left lexical for read-only reporting, **never promoted to deletion authorization**; future destructive removal must require a present, revalidated immutable receipt and exclusive lease.
+
+## Root→revision exclusive inspection boundary (C3.3)
+
+`removal::inspect_backend_with_root` and `inspect_overlay_with_root` are internal,
+read-only preparation operations, not a public uninstall API. An already acquired
+`SettingsInstanceLease` for the portable data root is required **before** an
+exclusive `RevisionLease` is acquired. The installed layer must live at the
+exact `AIData/backends/<kind>/<revision>` or
+`AIData/overlays/<plugin>/<revision>` location; the inspected directory and
+managed ancestors must exist as real (non-symlink) directories. The pinned
+immutable receipt must be present, non-symlinked, bounded, parsable and equal
+exactly to the requested plan. Any mismatch, missing directory, unsafe path or
+contending worker/installer OS lease fails closed.
+
+The returned internal `LeasedRemovalInspection` keeps both the root owner
+borrow and exclusive revision lock alive while its `RemovalAssessment` is used.
+A second cooperating Python import cannot acquire a shared revision lock until
+that inspection is released. Existing configured-service and observed-worker
+blockers are still reported instead of discarded; no blockers is **not** a
+permission to rename, quarantine or physically delete. Callers can supply an
+incomplete `ServiceSelection` list, in-process settings mutations are not yet
+frozen and custom repositories can be outside this contract. A future remover
+must first establish a complete authoritative persisted selection snapshot,
+freeze in-process activation and settings changes, and define an atomic,
+crash-recoverable quarantine transaction under these same locks. This slice
+contains no destructive operation and no GUI Remove.

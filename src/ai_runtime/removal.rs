@@ -5,10 +5,11 @@
 //! Physical removal requires an exclusive application-owned lifecycle boundary.
 
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
 };
 
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -16,9 +17,126 @@ use super::{
     AiService,
     backend::{BackendInstaller, LockedBackend},
     composition::ServiceSelection,
-    layer::LayerError,
+    layer::{LayerError, reject_unsafe_layer_receipt},
     overlay::{LockedOverlay, OverlayInstaller},
+    revision_lease::RevisionLease,
 };
+
+use crate::settings::SettingsInstanceLease;
+
+#[allow(dead_code)]
+pub(crate) struct LeasedRemovalInspection<'a> {
+    pub(crate) assessment: RemovalAssessment,
+    _root_owner: &'a SettingsInstanceLease,
+    _revision_owner: RevisionLease,
+}
+
+/// An exclusive, receipt-verified, read-only inspection.
+///
+/// The caller must already own the portable root. The revision lock is acquired
+/// only after that root lease, so cooperating Python imports cannot start while
+/// this inspection is held. In-process setting edits and unknown repository
+/// implementations can still change references: this is NOT a delete permit.
+#[allow(dead_code)]
+pub(crate) fn inspect_backend_with_root<'a>(
+    root_owner: &'a SettingsInstanceLease,
+    data_root: &Path,
+    installer: &BackendInstaller,
+    backend: &LockedBackend,
+    configured: &[ServiceSelection],
+    running: &[ActiveWorkerLayers],
+) -> Result<LeasedRemovalInspection<'a>, LayerError> {
+    let path = installer.installed_path(backend)?;
+    let revision_owner = lock_owned_revision(root_owner, data_root, &path, "backends")?;
+    check_receipt(&path, ".neuromita-backend.json", backend)?;
+    let assessment = assess_backend(installer, backend, configured, running)?;
+    Ok(LeasedRemovalInspection {
+        assessment,
+        _root_owner: root_owner,
+        _revision_owner: revision_owner,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn inspect_overlay_with_root<'a>(
+    root_owner: &'a SettingsInstanceLease,
+    data_root: &Path,
+    installer: &OverlayInstaller,
+    overlay: &LockedOverlay,
+    configured: &[ServiceSelection],
+    running: &[ActiveWorkerLayers],
+) -> Result<LeasedRemovalInspection<'a>, LayerError> {
+    let path = installer.installed_path(overlay)?;
+    let revision_owner = lock_owned_revision(root_owner, data_root, &path, "overlays")?;
+    check_receipt(&path, ".neuromita-overlay.json", overlay)?;
+    let assessment = assess_overlay(installer, overlay, configured, running)?;
+    Ok(LeasedRemovalInspection {
+        assessment,
+        _root_owner: root_owner,
+        _revision_owner: revision_owner,
+    })
+}
+
+fn lock_owned_revision(
+    root_owner: &SettingsInstanceLease,
+    data_root: &Path,
+    revision: &Path,
+    category: &str,
+) -> Result<RevisionLease, LayerError> {
+    let canonical_root = data_root.canonicalize()?;
+    if !root_owner.matches_root(&canonical_root)? {
+        return Err(LayerError::Invalid(
+            "removal inspection requires the matching portable data root owner".into(),
+        ));
+    }
+    let category_root = canonical_root.join("AIData").join(category);
+    if revision.parent().and_then(Path::parent) != Some(category_root.as_path()) {
+        return Err(LayerError::Invalid(
+            "revision must be located in the exact managed backend or overlay root".into(),
+        ));
+    }
+    let mut cursor = revision;
+    while cursor != canonical_root {
+        let metadata = std::fs::symlink_metadata(cursor)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(LayerError::Invalid(
+                "managed revision and every parent must be real directories".into(),
+            ));
+        }
+        cursor = cursor.parent().ok_or_else(|| {
+            LayerError::Invalid("revision path escapes its portable data root".into())
+        })?;
+    }
+    let lock = RevisionLease::exclusive(revision)?;
+    if !revision.is_dir() || revision.is_symlink() {
+        return Err(LayerError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "installed revision disappeared during exclusive inspection",
+        )));
+    }
+    Ok(lock)
+}
+
+fn check_receipt<T: DeserializeOwned + PartialEq>(
+    revision: &Path,
+    name: &str,
+    expected: &T,
+) -> Result<(), LayerError> {
+    let marker = revision.join(name);
+    reject_unsafe_layer_receipt(&marker)?;
+    let bytes = std::fs::read(&marker).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            LayerError::NotInstalled(revision.display().to_string())
+        } else {
+            LayerError::Io(error)
+        }
+    })?;
+    let actual: T = serde_json::from_slice(&bytes).map_err(|_| LayerError::Conflict)?;
+    if actual != *expected {
+        return Err(LayerError::Conflict);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveWorkerLayers {
@@ -139,6 +257,155 @@ mod tests {
     use super::*;
     use crate::ai_runtime::backend::BackendKind;
     use std::time::Duration;
+
+    fn managed_installers() -> (PathBuf, BackendInstaller, OverlayInstaller) {
+        let data = std::env::temp_dir().join(format!("nm-owned-removal-{}", Uuid::new_v4()));
+        let (mut backends, mut overlays) = installers();
+        backends.backends_directory = data.join("AIData/backends");
+        overlays.overlays_directory = data.join("AIData/overlays");
+        std::fs::create_dir_all(backends.backends_directory.join("remote-api/shared1")).unwrap();
+        std::fs::create_dir_all(overlays.overlays_directory.join("tts_one/overlay1")).unwrap();
+        std::fs::write(
+            backends
+                .backends_directory
+                .join("remote-api/shared1/.neuromita-backend.json"),
+            serde_json::to_vec(&backend()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            overlays
+                .overlays_directory
+                .join("tts_one/overlay1/.neuromita-overlay.json"),
+            serde_json::to_vec(&overlay("tts_one")).unwrap(),
+        )
+        .unwrap();
+        (data, backends, overlays)
+    }
+
+    #[test]
+    fn owned_backend_inspection_is_exclusive_and_preserves_selected_blockers() {
+        let (root, backends, _) = managed_installers();
+        let owner = SettingsInstanceLease::acquire(&root).unwrap();
+        let chosen = backend();
+        let path = backends.installed_path(&chosen).unwrap();
+        let selected = [ServiceSelection {
+            service: AiService::Asr,
+            backends: vec![chosen.clone()],
+            overlays: vec![],
+        }];
+        let inspection =
+            inspect_backend_with_root(&owner, &root, &backends, &chosen, &selected, &[]).unwrap();
+        assert_eq!(
+            inspection.assessment.blockers,
+            vec![RemovalBlocker::SelectedBy(AiService::Asr)],
+        );
+        assert_eq!(
+            RevisionLease::shared(&path).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock,
+        );
+        drop(inspection);
+        assert!(RevisionLease::shared(&path).is_ok());
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owned_overlay_inspection_rejects_foreign_root_and_receipt_mismatch() {
+        let (root, _, overlays) = managed_installers();
+        let foreign = std::env::temp_dir().join(format!("nm-foreign-removal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&foreign).unwrap();
+        let owner = SettingsInstanceLease::acquire(&foreign).unwrap();
+        let chosen = overlay("tts_one");
+        assert!(matches!(
+            inspect_overlay_with_root(&owner, &root, &overlays, &chosen, &[], &[]),
+            Err(LayerError::Invalid(_))
+        ));
+        drop(owner);
+        let owner = SettingsInstanceLease::acquire(&root).unwrap();
+        let revision = overlays.installed_path(&chosen).unwrap();
+        let marker = revision.join(".neuromita-overlay.json");
+        let original = std::fs::read(&marker).unwrap();
+        std::fs::write(&marker, b"{}").unwrap();
+        assert!(matches!(
+            inspect_overlay_with_root(&owner, &root, &overlays, &chosen, &[], &[]),
+            Err(LayerError::Conflict)
+        ));
+        std::fs::write(&marker, &original).unwrap();
+        let assessment =
+            inspect_overlay_with_root(&owner, &root, &overlays, &chosen, &[], &[]).unwrap();
+        assert!(!assessment.assessment.has_observed_references());
+        drop(assessment);
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(foreign).unwrap();
+    }
+
+    #[test]
+    fn active_foreign_python_import_blocks_exclusive_inspection() {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let (root, backends, _) = managed_installers();
+        let owner = SettingsInstanceLease::acquire(&root).unwrap();
+        let chosen = backend();
+        let revision = backends.installed_path(&chosen).unwrap();
+        let ready = root.join("child-ready");
+        let release = root.join("child-release");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ai_runtime::revision_lease::tests::child_process_can_hold_shared_revision_lock",
+            ])
+            .env("NM_REVISION_LEASE_CHILD_PATH", &revision)
+            .env("NM_REVISION_LEASE_CHILD_READY", &ready)
+            .env("NM_REVISION_LEASE_CHILD_RELEASE", &release)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "child never acquired its revision lease"
+            );
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "child exited before leasing revision"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(
+            inspect_backend_with_root(&owner, &root, &backends, &chosen, &[], &[]),
+            Err(LayerError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        std::fs::write(release, []).unwrap();
+        assert!(child.wait().unwrap().success());
+        let inspection =
+            inspect_backend_with_root(&owner, &root, &backends, &chosen, &[], &[]).unwrap();
+        assert!(!inspection.assessment.has_observed_references());
+        drop(inspection);
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_managed_parent_is_not_a_deletion_inspection_root() {
+        use std::os::unix::fs::symlink;
+        let (root, backends, _) = managed_installers();
+        let owner = SettingsInstanceLease::acquire(&root).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::rename(&backends.backends_directory, &elsewhere).unwrap();
+        symlink(&elsewhere, &backends.backends_directory).unwrap();
+        assert!(matches!(
+            inspect_backend_with_root(&owner, &root, &backends, &backend(), &[], &[]),
+            Err(LayerError::Invalid(_))
+        ));
+        drop(owner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn backend() -> LockedBackend {
         LockedBackend {
