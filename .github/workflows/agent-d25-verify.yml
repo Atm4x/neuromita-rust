@@ -1,0 +1,50 @@
+name: Agent D25 pinned updater release GUI check
+on:
+  push:
+    branches:
+      - bridge/agent-d25-verify-20261107
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-python-archive-preflight-20261107
+          persist-credentials: false
+      - name: Assert exact D25 source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "5f682d2ce56e950168c0c04deb158a1775d92f39"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native build deps
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Formatting
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: New Python archive policy tests
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --lib updater::install_policy::tests
+      - name: All-targets GUI compilation
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: GUI release-check tests
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui update_check::tests
+      - name: Full library tests with Python 3.12
+        shell: bash
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
