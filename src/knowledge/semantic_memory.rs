@@ -202,6 +202,12 @@ impl SemanticMemoryRetriever {
         Ok(self)
     }
 
+    /// The number of fused History candidates that a configured reranker can
+    /// reconsider before the user's final result limit is applied.
+    pub(crate) fn rerank_candidate_limit(&self) -> usize {
+        self.reranker.as_ref().map_or(0, |(_, policy)| policy.limit)
+    }
+
     /// Apply the single configured reranker to any already-validated, character-scoped
     /// fusion output. Memory and History share the same provider and strict error policy.
     pub(crate) async fn rerank_fused(

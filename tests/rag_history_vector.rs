@@ -653,6 +653,23 @@ async fn configured_history_reranker_reorders_fused_evidence_without_losing_iden
     assert_eq!(selected.hits[0].content, "oil painting");
     assert_eq!(selected.hits[1].content, "tea in kitchen");
 
+    let first_only = search_history_semantic(
+        &retriever,
+        CharacterId::Crazy,
+        &view,
+        "warm",
+        HistorySearchConfig {
+            limit: 1,
+            ..HistorySearchConfig::default()
+        },
+        FusionMode::VectorOnly,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(first_only.hits.len(), 1);
+    assert_eq!(first_only.hits[0].key.id, painting.0.to_string());
+
     let kind_view = messages(&repo, branch, CharacterId::Kind);
     let empty = search_history_semantic(
         &retriever,
@@ -666,7 +683,7 @@ async fn configured_history_reranker_reorders_fused_evidence_without_losing_iden
     .await
     .unwrap();
     assert_eq!(empty.status, HistorySearchStatus::EmptyCorpus);
-    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

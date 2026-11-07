@@ -455,7 +455,7 @@ async fn search_history_semantic_with_window(
     }
     let fusion = FusionConfig {
         mode,
-        limit: config.limit,
+        limit: config.limit.max(retriever.rerank_candidate_limit()),
         minimum_graph: 0,
     };
     fuse(character, &[], fusion)?;
@@ -490,6 +490,7 @@ async fn search_history_semantic_with_window(
     }
     let mut hits = fuse(character, &buckets, fusion)?;
     retriever.rerank_fused(query, &mut hits).await?;
+    hits.truncate(config.limit);
     Ok(finish(
         view,
         messages.is_empty(),

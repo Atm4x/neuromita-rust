@@ -151,7 +151,11 @@ and explicit semantic History selection now apply that **same** provider after
 source validation and deterministic vector/keyword fusion. The History result
 keeps the original EventId, branch/through, visibility, rank evidence, metadata,
 embedding-space identity and embedding cost; the reranker may only reorder the
-admitted bounded prefix. A provider or malformed-score failure rejects the
+admitted bounded prefix. When the requested result limit is smaller than the
+reranking candidate window, fusion prepares the bounded policy window first,
+then reranks and truncates to the requested final result count; otherwise a
+candidate just below top-N could never be promoted. Without a reranker the
+original top-N behavior is preserved. A provider or malformed-score failure rejects the
 entire selected query; neither the lexical History API nor unreranked semantic
 hits are substituted. If no reranker was configured, behavior stays unchanged.
 
