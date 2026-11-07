@@ -55,10 +55,10 @@ pub enum Command {
         neuromita::character::CharacterMemorySnapshot,
         Vec<neuromita::memory::MemoryCommand>,
     ),
-    Preview(ConversationChange),
-    Confirm,
-    Abort,
-    Diagnostics,
+    Preview(ChatOrigin, ConversationChange),
+    Confirm(ChatOrigin),
+    Abort(ChatOrigin),
+    Diagnostics(ChatOrigin),
     NewPreset,
     UpdatePreset(PresetId, neuromita::generation::PresetConnectionEdit),
     DeletePreset(PresetId),
@@ -113,8 +113,9 @@ pub enum Update {
     MemoryError(String),
     MemorySaved(uuid::Uuid),
     MemoryEditError(uuid::Uuid, String),
-    Confirmation(Option<(ConversationChange, usize)>),
-    Diagnostics(String),
+    Confirmation(ChatOrigin, Option<(ConversationChange, usize)>),
+    Diagnostics(ChatOrigin, String),
+    ConversationError(ChatOrigin, String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
     Administration(Box<super::settings::AdministrationSnapshot>),
     CharacterDebug {
@@ -377,7 +378,7 @@ async fn observe(
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
-    let mut pending: Option<ConversationChangePreview> = None;
+    let mut pending: Option<(ChatOrigin, ConversationChangePreview)> = None;
     let mut character = CharacterId::Crazy;
     let mut selection_revision = 0;
     let mut debug_character = CharacterId::Crazy;
@@ -525,28 +526,72 @@ async fn observe(
                         Ok(_) => publish(Update::MemorySaved(edit_id)), Err(error) => publish(Update::MemoryEditError(edit_id, error.to_string())),
                     }
                 },
-                Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
-                    Ok(preview) => { publish(Update::Confirmation(Some((preview.operation(), preview.message_count())))); pending = Some(preview); },
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::Preview(origin, operation)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        pending = None;
+                        match presenter.preview_change(origin.character, operation).await {
+                            Ok(preview) => {
+                                publish(Update::Confirmation(origin, Some((preview.operation(), preview.message_count()))));
+                                pending = Some((origin, preview));
+                            }
+                            Err(error) => {
+                                publish(Update::Confirmation(origin, None));
+                                publish(Update::ConversationError(origin, error.to_string()));
+                            },
+                        }
+                    }
                 },
-                Some(Command::Confirm) => {
-                    if let Some(preview) = pending.take() && let Err(error) = presenter.apply_change(preview) { publish(Update::Error(error.to_string())); }
-                    publish(Update::Confirmation(None));
+                Some(Command::Confirm(origin)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) && pending.as_ref().is_some_and(|(owner, _)| *owner == origin) {
+                        if let Some((_, preview)) = pending.take()
+                            && let Err(error) = presenter.apply_change(preview)
+                        {
+                            publish(Update::ConversationError(origin, error.to_string()));
+                        }
+                        publish(Update::Confirmation(origin, None));
+                    }
                 },
-                Some(Command::Abort) => { pending = None; publish(Update::Confirmation(None)); },
-                Some(Command::Diagnostics) => {
-                    let model = administration.chat.snapshot();
-                    let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == character).and_then(|r| administration.chat.trace(r.metadata.id));
-                    let text = match trace {
-                        Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
-                            Ok(text) => text,
-                            Err(error) => format!("Cannot export request diagnostics: {error}"),
-                        },
-                        None => "No retained request trace".into(),
-                    };
-                    publish(Update::Diagnostics(text));
+                Some(Command::Abort(origin)) => {
+                    if pending.as_ref().is_some_and(|(owner, _)| *owner == origin) {
+                        pending = None;
+                        publish(Update::Confirmation(origin, None));
+                    }
                 },
-                Some(Command::Select(origin)) => { character = origin.character; selection_revision = origin.selection_revision; pending = None; publish(Update::Confirmation(None)); },
+                Some(Command::Diagnostics(origin)) => {
+                    if chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        let model = administration.chat.snapshot();
+                        let trace = model.requests.iter().rev().find(|r| r.metadata.character_id == origin.character).and_then(|r| administration.chat.trace(r.metadata.id));
+                        let text = match trace {
+                            Some(trace) => match trace.section_json(neuromita::request::DiagnosticSection::All) {
+                                Ok(text) => text,
+                                Err(error) => format!("Cannot export request diagnostics: {error}"),
+                            },
+                            None => "No retained request trace".into(),
+                        };
+                        publish(Update::Diagnostics(origin, text));
+                    }
+                },
+                Some(Command::Select(origin)) => {
+                    character = origin.character;
+                    selection_revision = origin.selection_revision;
+                    pending = None;
+                    publish(Update::Confirmation(origin, None));
+                },
                 Some(Command::Refresh) => {},
                 Some(Command::Send(origin, text)) => {
                     if !chat_fence::accepts(

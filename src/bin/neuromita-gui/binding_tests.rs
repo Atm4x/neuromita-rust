@@ -951,3 +951,124 @@ fn memory_render_and_contract(window: &AppWindow) {
         app.shutdown().await.unwrap();
     });
 }
+
+#[test]
+fn conversation_admin_callbacks_reject_late_a_b_a_results() {
+    use super::super::runtime::{ChatOrigin, Command, Update};
+    use super::super::view::ConversationUi;
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    let first = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let conversation = window.global::<ConversationUi>();
+    conversation.invoke_preview(1);
+    conversation.invoke_trace();
+    conversation.set_confirmation(1);
+    conversation.set_history(true);
+    conversation.set_diagnostics("A-private-trace".into());
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert!(!conversation.get_history());
+    assert_eq!(conversation.get_diagnostics(), "");
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(first, Some((ConversationChange::ClearMessages, 7))),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(first, "A-private-trace".into()),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::ConversationError(first, "A error".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert_eq!(conversation.get_diagnostics(), "");
+    assert_eq!(window.get_chat_error(), "");
+
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(first, Some((ConversationChange::ResetContext, 8))),
+        &editor,
+        &revision,
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(first, "A-private-trace".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    assert_eq!(conversation.get_diagnostics(), "");
+
+    let selected = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 2,
+    };
+    conversation.invoke_preview(2);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(selected, Some((ConversationChange::ResetContext, 3))),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 2);
+    assert_eq!(conversation.get_count(), 3);
+    conversation.invoke_confirm();
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(selected, None),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_confirmation(), 0);
+    conversation.invoke_trace();
+    super::super::sandbox::apply(
+        &window,
+        Update::Diagnostics(selected, "new trace".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(conversation.get_diagnostics(), "new trace");
+    conversation.invoke_abort();
+
+    let recorded = commands.borrow();
+    assert!(
+        matches!(&recorded[0], Command::Preview(origin, ConversationChange::ClearMessages) if *origin == first)
+    );
+    assert!(matches!(&recorded[1], Command::Diagnostics(origin) if *origin == first));
+    assert!(
+        matches!(&recorded[2], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(matches!(&recorded[3], Command::Select(origin) if *origin == selected));
+    assert!(
+        matches!(&recorded[4], Command::Preview(origin, ConversationChange::ResetContext) if *origin == selected)
+    );
+    assert!(matches!(&recorded[5], Command::Confirm(origin) if *origin == selected));
+    assert!(matches!(&recorded[6], Command::Diagnostics(origin) if *origin == selected));
+    assert!(matches!(&recorded[7], Command::Abort(origin) if *origin == selected));
+}

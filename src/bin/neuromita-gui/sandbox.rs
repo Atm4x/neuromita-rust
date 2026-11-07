@@ -71,28 +71,6 @@ pub fn attach(
     super::asr::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
-    let send = dispatch.clone();
-    window.global::<ConversationUi>().on_preview(move |kind| {
-        let operation = match kind {
-            1 => neuromita::presentation::ConversationChange::ClearMessages,
-            2 => neuromita::presentation::ConversationChange::ResetContext,
-            _ => return,
-        };
-        send(Command::Preview(operation));
-    });
-    let send = dispatch.clone();
-    window
-        .global::<ConversationUi>()
-        .on_confirm(move || send(Command::Confirm));
-    let send = dispatch.clone();
-    window
-        .global::<ConversationUi>()
-        .on_abort(move || send(Command::Abort));
-    let send = dispatch.clone();
-    window
-        .global::<ConversationUi>()
-        .on_trace(move || send(Command::Diagnostics));
-
     bind_chat_actions(window, dispatch.clone(), selection_revision.clone());
     let send = dispatch.clone();
     window.on_chat_refresh(move || send(Command::Refresh));
@@ -115,6 +93,51 @@ pub(super) fn bind_chat_actions(
     dispatch: std::rc::Rc<dyn Fn(Command)>,
     selection_revision: Arc<AtomicU64>,
 ) {
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.global::<ConversationUi>().on_preview(move |kind| {
+        let operation = match kind {
+            1 => neuromita::presentation::ConversationChange::ClearMessages,
+            2 => neuromita::presentation::ConversationChange::ResetContext,
+            _ => return,
+        };
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::Preview(origin, operation));
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.global::<ConversationUi>().on_confirm(move || {
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::Confirm(origin));
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.global::<ConversationUi>().on_abort(move || {
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::Abort(origin));
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.global::<ConversationUi>().on_trace(move || {
+        if let Some(window) = weak.upgrade()
+            && let Some(origin) = current_origin(&window, &revision)
+        {
+            send(Command::Diagnostics(origin));
+        }
+    });
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
@@ -159,6 +182,10 @@ pub(super) fn bind_chat_actions(
         };
         window.set_chat_character(id);
         let next = previous + 1;
+        let conversation = window.global::<ConversationUi>();
+        conversation.set_confirmation(0);
+        conversation.set_diagnostics("".into());
+        conversation.set_history(false);
         window.set_chat_sending(false);
         window.set_chat_error("".into());
         send(Command::Select(ChatOrigin {
@@ -303,7 +330,10 @@ pub(super) fn apply(
         Update::MemoryEditError(edit_id, error) => {
             super::memory::failed(window, memory_editor, edit_id, error)
         }
-        Update::Confirmation(preview) => {
+        Update::Confirmation(origin, preview) => {
+            if !matches_origin(window, origin, revision) {
+                return;
+            }
             let ui = window.global::<ConversationUi>();
             match preview {
                 Some((operation, count)) => {
@@ -316,7 +346,10 @@ pub(super) fn apply(
                 None => ui.set_confirmation(0),
             }
         }
-        Update::Diagnostics(value) => {
+        Update::Diagnostics(origin, value) => {
+            if !matches_origin(window, origin, revision) {
+                return;
+            }
             window.global::<ConversationUi>().set_history(false);
             window
                 .global::<ConversationUi>()
@@ -395,6 +428,11 @@ pub(super) fn apply(
         Update::ChatError(origin, error) => {
             if matches_origin(window, origin, revision) {
                 window.set_chat_sending(false);
+                window.set_chat_error(error.into());
+            }
+        }
+        Update::ConversationError(origin, error) => {
+            if matches_origin(window, origin, revision) {
                 window.set_chat_error(error.into());
             }
         }
