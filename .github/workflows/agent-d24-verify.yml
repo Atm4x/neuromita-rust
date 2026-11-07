@@ -1,0 +1,50 @@
+name: Agent D24 verified ZIP staging
+on:
+  push:
+    branches:
+      - bridge/agent-d24-pinned-verification-20261107
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-verified-python-unity-zip-stage-20261107
+          persist-credentials: false
+      - name: Verify exact D24 SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "da4edb23dc644218f8ce4fb58e4f692ce68b0f03"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Install Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check rustfmt
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Check all targets and Slint
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: Test updater core
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --lib updater::
+      - name: Test GUI release check
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui update_check::tests
+      - name: Full library regression Python 3.12
+        shell: bash
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
