@@ -1303,3 +1303,417 @@ async fn joint_generation_retains_memory_intersection_policy_without_suppressing
     ));
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn joint_semantic_react_uses_one_scoped_memory_history_selection() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+        request::ReactRequest,
+    };
+    use std::sync::atomic::Ordering;
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let embedding = Arc::new(JointEmbedding::new());
+    let reranker = Arc::new(JointReranker {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        candidate_count: std::sync::atomic::AtomicUsize::new(0),
+        failure: false,
+    });
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+        SemanticMemoryRetriever::new(embedding.clone(), 64)
+            .unwrap()
+            .with_reranker(
+                reranker.clone(),
+                RerankPolicy {
+                    alpha: 0.75,
+                    limit: 4,
+                },
+            )
+            .unwrap(),
+    ));
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::High,
+        "Orchid exhibit is a private memory",
+    );
+    let memory_id = memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Gallery contains the original orchid photograph".into()).unwrap(),
+    )
+    .unwrap();
+    let active = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("React to the orchid photograph".into()).unwrap(),
+    )
+    .unwrap();
+    let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        previous.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            max_results: 2,
+            active_messages: 1,
+            ..previous.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::react(ReactRequest::new(
+        CharacterId::Crazy,
+        active,
+        Arc::clone(
+            UserInput::new("Orchid gallery memory".into())
+                .unwrap()
+                .text(),
+        ),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&active.0.to_string()), "{evidence}");
+    assert_eq!(embedding.queries.load(Ordering::SeqCst), 1);
+    assert_eq!(embedding.documents.load(Ordering::SeqCst), 1);
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(reranker.candidate_count.load(Ordering::SeqCst), 2);
+    call.reply.send("Acknowledged".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
+
+struct InvalidScoreReranker(Vec<f64>);
+
+impl neuromita::knowledge::reranking::RerankProvider for InvalidScoreReranker {
+    fn score<'a>(
+        &'a self,
+        _: &'a str,
+        _: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+}
+
+#[tokio::test]
+async fn joint_generation_rejects_nonfinite_out_of_range_and_unaligned_reranker_scores() {
+    use neuromita::knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever};
+
+    let _lock = ONE_APP.lock().await;
+    for scores in [
+        vec![],
+        vec![f64::NAN],
+        vec![f64::INFINITY],
+        vec![-0.1],
+        vec![1.1],
+    ] {
+        let (tx, mut calls) = mpsc::unbounded_channel();
+        let mut application = config(tx);
+        application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+            SemanticMemoryRetriever::new(Arc::new(JointEmbedding::new()), 32)
+                .unwrap()
+                .with_reranker(
+                    Arc::new(InvalidScoreReranker(scores)),
+                    RerankPolicy {
+                        alpha: 1.0,
+                        limit: 4,
+                    },
+                )
+                .unwrap(),
+        ));
+        let app = ApplicationLifecycle::start(application).await.unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Archived orchid gallery".into()).unwrap(),
+        )
+        .unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Active message".into()).unwrap(),
+        )
+        .unwrap();
+        let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+        SettingsApi::replace(
+            previous.revision,
+            HistoryGenerationSettings {
+                mode: HistoryGenerationMode::Vector,
+                active_messages: 1,
+                ..previous.value
+            },
+        )
+        .unwrap();
+        let request = ChatApi::initiate(InitiateRequest::new(
+            CharacterId::Crazy,
+            "Orchid",
+            RequestSource::Presenter,
+        ))
+        .unwrap();
+        let done = timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                done.state,
+                RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+            ),
+            "{:?}",
+            done.state
+        );
+        assert!(
+            calls.try_recv().is_err(),
+            "malformed reranker score leaked to LLM"
+        );
+        app.shutdown().await.unwrap();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InvalidEmbeddingCase {
+    QueryNonfinite,
+    QueryWrongSpace,
+    DocumentNonfinite,
+    DocumentWrongSpace,
+    DocumentCountMismatch,
+}
+
+struct InvalidJointEmbedding {
+    space: neuromita::knowledge::embedding::EmbeddingSpace,
+    case: InvalidEmbeddingCase,
+}
+
+impl InvalidJointEmbedding {
+    fn new(case: InvalidEmbeddingCase) -> Self {
+        Self {
+            space: neuromita::knowledge::embedding::EmbeddingSpace::new(
+                "fixture",
+                "invalid-joint-generation",
+                "v1",
+                2,
+            )
+            .unwrap(),
+            case,
+        }
+    }
+}
+
+impl neuromita::knowledge::embedding::EmbeddingProvider for InvalidJointEmbedding {
+    fn space(&self) -> &neuromita::knowledge::embedding::EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(
+        &self,
+        purpose: neuromita::knowledge::embedding::EmbeddingPurpose,
+        _: String,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        neuromita::knowledge::embedding::Embedding,
+    > {
+        use neuromita::knowledge::embedding::{Embedding, EmbeddingPurpose, EmbeddingSpace};
+        Box::pin(async move {
+            match (purpose, self.case) {
+                (EmbeddingPurpose::Query, InvalidEmbeddingCase::QueryNonfinite) => {
+                    Embedding::new(vec![1.0, f32::NAN], &self.space)
+                }
+                (EmbeddingPurpose::Query, InvalidEmbeddingCase::QueryWrongSpace) => {
+                    let wrong = EmbeddingSpace::new("fixture", "other-model", "v1", 2)?;
+                    Embedding::new(vec![1.0, 0.0], &wrong)
+                }
+                _ => Embedding::new(vec![1.0, 0.0], &self.space),
+            }
+        })
+    }
+
+    fn embed_documents(
+        &self,
+        texts: Vec<String>,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        Vec<neuromita::knowledge::embedding::Embedding>,
+    > {
+        use neuromita::knowledge::embedding::{Embedding, EmbeddingSpace};
+        Box::pin(async move {
+            match self.case {
+                InvalidEmbeddingCase::DocumentCountMismatch => Ok(Vec::new()),
+                InvalidEmbeddingCase::DocumentNonfinite => {
+                    Ok(vec![Embedding::new(vec![f32::INFINITY, 0.0], &self.space)?])
+                }
+                InvalidEmbeddingCase::DocumentWrongSpace => {
+                    let wrong = EmbeddingSpace::new("fixture", "other-model", "v1", 2)?;
+                    Ok(vec![Embedding::new(vec![1.0, 0.0], &wrong)?])
+                }
+                _ => texts
+                    .into_iter()
+                    .map(|_| Embedding::new(vec![1.0, 0.0], &self.space))
+                    .collect(),
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn joint_generation_rejects_malformed_query_and_document_embeddings_before_llm() {
+    use neuromita::knowledge::semantic_memory::SemanticMemoryRetriever;
+
+    let _lock = ONE_APP.lock().await;
+    for case in [
+        InvalidEmbeddingCase::QueryNonfinite,
+        InvalidEmbeddingCase::QueryWrongSpace,
+        InvalidEmbeddingCase::DocumentNonfinite,
+        InvalidEmbeddingCase::DocumentWrongSpace,
+        InvalidEmbeddingCase::DocumentCountMismatch,
+    ] {
+        let (tx, mut calls) = mpsc::unbounded_channel();
+        let mut application = config(tx);
+        application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+            SemanticMemoryRetriever::new(Arc::new(InvalidJointEmbedding::new(case)), 32).unwrap(),
+        ));
+        let app = ApplicationLifecycle::start(application).await.unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Archived orchid gallery".into()).unwrap(),
+        )
+        .unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Active topic".into()).unwrap(),
+        )
+        .unwrap();
+        let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+        SettingsApi::replace(
+            previous.revision,
+            HistoryGenerationSettings {
+                mode: HistoryGenerationMode::Vector,
+                active_messages: 1,
+                ..previous.value
+            },
+        )
+        .unwrap();
+        let request = ChatApi::initiate(InitiateRequest::new(
+            CharacterId::Crazy,
+            "Orchid",
+            RequestSource::Presenter,
+        ))
+        .unwrap();
+        let done = timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                done.state,
+                RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+            ),
+            "{:?}",
+            done.state
+        );
+        assert!(
+            calls.try_recv().is_err(),
+            "malformed query or document embedding leaked to LLM"
+        );
+        app.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn timeline_change_during_joint_semantic_react_rerank_cancels_before_llm() {
+    use neuromita::{
+        knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever},
+        request::ReactRequest,
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let reranker = Arc::new(PausedJointReranker {
+        started: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+        SemanticMemoryRetriever::new(Arc::new(JointEmbedding::new()), 32)
+            .unwrap()
+            .with_reranker(
+                reranker.clone(),
+                RerankPolicy {
+                    alpha: 1.0,
+                    limit: 4,
+                },
+            )
+            .unwrap(),
+    ));
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Gallery orchid archive".into()).unwrap(),
+    )
+    .unwrap();
+    let active = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("React to this orchid".into()).unwrap(),
+    )
+    .unwrap();
+    let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        previous.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            active_messages: 1,
+            ..previous.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::react(ReactRequest::new(
+        CharacterId::Crazy,
+        active,
+        Arc::clone(UserInput::new("Gallery".into()).unwrap().text()),
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    timeout(Duration::from_secs(5), reranker.started.notified())
+        .await
+        .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Timeline advanced during React ranking".into()).unwrap(),
+    )
+    .unwrap();
+    reranker.resume.notify_one();
+    let done = timeout(Duration::from_secs(5), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !matches!(
+            done.state,
+            RequestState::Finished(RequestOutcome::Success(_))
+        ),
+        "{:?}",
+        done.state
+    );
+    assert!(
+        calls.try_recv().is_err(),
+        "stale React selection leaked to LLM"
+    );
+    app.shutdown().await.unwrap();
+}
