@@ -11,6 +11,7 @@ pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, RustSettingsMigration};
 pub use model::*;
 pub use speech::*;
+pub(crate) use storage::LeasedJsonSettingsRepository;
 pub use storage::*;
 pub use transfer::{SettingsImportFormat, SettingsTransfer, SettingsTransferError};
 
