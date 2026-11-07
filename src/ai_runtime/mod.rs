@@ -13,6 +13,8 @@ mod distribution;
 pub mod hardware;
 pub mod install;
 pub mod installed_speech;
+#[cfg(target_os = "linux")]
+mod linux_worker_lifetime;
 mod layer;
 pub mod live_speech;
 pub mod managed;
@@ -251,6 +253,8 @@ impl WorkerProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        linux_worker_lifetime::require_parent_death_kill(&mut command);
         let mut child = command.spawn().map_err(AiRuntimeError::Spawn)?;
         let input = child
             .stdin
