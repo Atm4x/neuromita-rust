@@ -48,7 +48,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -465,6 +465,25 @@ pub async fn run(
                             }
                         } else if slash_command(&line, "/knowledge graph") {
                             match parse_graph_maintenance(&line) {
+                                Ok(GraphCommand::Inspect(ids)) => {
+                                    let as_of = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+                                        .unwrap_or(0);
+                                    match GraphMaintenanceApi::preview(character, &ids, as_of, GraphMaintenanceMode::Clear).await {
+                                        Ok(preview) => {
+                                            println!("Graph inspection for {character}: {} sources, {} existing derived relations. Read-only; no confirmation or mutation.", preview.entries().len(), preview.inspected_relations().len());
+                                            for item in preview.inspected_relations() {
+                                                println!("  source={} revision={} subject={} predicate={} object={}",
+                                                    item.source.0, item.source_revision,
+                                                    serde_json::to_string(&item.relation.subject).expect("string JSON"),
+                                                    serde_json::to_string(&item.relation.predicate).expect("string JSON"),
+                                                    serde_json::to_string(&item.relation.object).expect("string JSON"));
+                                            }
+                                        }
+                                        Err(error) => eprintln!("Graph: {error}"),
+                                    }
+                                }
                                 Ok(GraphCommand::Preview(mode, ids)) => {
                                     pending_graph = None;
                                     let as_of = std::time::SystemTime::now()
@@ -577,16 +596,21 @@ fn slash_command(line: &str, command: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 enum GraphCommand {
     Preview(GraphMaintenanceMode, Vec<MemoryId>),
+    Inspect(Vec<MemoryId>),
     Apply(uuid::Uuid),
 }
 
 fn parse_graph_maintenance(line: &str) -> Result<GraphCommand, &'static str> {
-    const USAGE: &str = "Используй /knowledge graph preview clear|reindex MEMORY_UUID... или /knowledge graph apply TOKEN";
+    const USAGE: &str = "Используй /knowledge graph inspect MEMORY_UUID... | preview clear|reindex MEMORY_UUID... | apply TOKEN";
     let parts = line.split_whitespace().collect::<Vec<_>>();
     match parts.as_slice() {
         ["/knowledge", "graph", "apply", token] => uuid::Uuid::parse_str(token)
             .map(GraphCommand::Apply)
             .map_err(|_| USAGE),
+        ["/knowledge", "graph", "inspect", ids @ ..] if !ids.is_empty() && ids.len() <= 256 => {
+            let parsed = parse_graph_ids(ids, USAGE)?;
+            Ok(GraphCommand::Inspect(parsed))
+        }
         ["/knowledge", "graph", "preview", mode, ids @ ..]
             if !ids.is_empty() && ids.len() <= 256 =>
         {
@@ -595,22 +619,26 @@ fn parse_graph_maintenance(line: &str) -> Result<GraphCommand, &'static str> {
                 "reindex" => GraphMaintenanceMode::Reindex,
                 _ => return Err(USAGE),
             };
-            let parsed = ids
-                .iter()
-                .map(|id| uuid::Uuid::parse_str(id).map(MemoryId).map_err(|_| USAGE))
-                .collect::<Result<Vec<_>, _>>()?;
-            if parsed
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != parsed.len()
-            {
-                return Err(USAGE);
-            }
-            Ok(GraphCommand::Preview(mode, parsed))
+            Ok(GraphCommand::Preview(mode, parse_graph_ids(ids, USAGE)?))
         }
         _ => Err(USAGE),
     }
+}
+
+fn parse_graph_ids(ids: &[&str], usage: &'static str) -> Result<Vec<MemoryId>, &'static str> {
+    let parsed = ids
+        .iter()
+        .map(|id| uuid::Uuid::parse_str(id).map(MemoryId).map_err(|_| usage))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != parsed.len()
+    {
+        return Err(usage);
+    }
+    Ok(parsed)
 }
 
 fn take_graph_preview<T>(
@@ -878,6 +906,10 @@ mod forgotten_recall_command_tests {
             Ok(GraphCommand::Preview(GraphMaintenanceMode::Clear, vec![id]))
         );
         assert_eq!(
+            parse_graph_maintenance(&format!("/knowledge graph inspect {}", id.0)),
+            Ok(GraphCommand::Inspect(vec![id]))
+        );
+        assert_eq!(
             parse_graph_maintenance(&format!("/knowledge graph preview reindex {}", id.0)),
             Ok(GraphCommand::Preview(
                 GraphMaintenanceMode::Reindex,
@@ -904,6 +936,8 @@ mod forgotten_recall_command_tests {
             "/knowledge graph preview",
             "/knowledge graph preview clear",
             "/knowledge graph preview clear not-a-uuid",
+            "/knowledge graph inspect",
+            "/knowledge graph inspect not-a-uuid",
             "/knowledge graph apply yes",
             "/knowledge graph apply",
             "/knowledge graph preview purge 00000000-0000-0000-0000-000000000001",

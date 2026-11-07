@@ -100,7 +100,18 @@ async fn live_graph_clear_is_scoped_confirmed_versioned_and_preserves_canonical_
     assert_eq!(preview.character(), CharacterId::Crazy);
     assert_eq!(preview.entries().len(), 1);
     assert_eq!(preview.entries()[0].source.record.id, id);
-    assert_eq!(preview.entries()[0].existing_relations, vec![relation]);
+    assert_eq!(
+        preview.entries()[0].existing_relations,
+        vec![relation.clone()]
+    );
+    let inspected = preview.inspected_relations();
+    assert_eq!(inspected.len(), 1);
+    assert_eq!(inspected[0].source, id);
+    assert_eq!(
+        inspected[0].source_revision,
+        indexed.snapshot.source_revision(id).unwrap()
+    );
+    assert_eq!(inspected[0].relation, relation);
 
     let cancel = CancellationToken::new();
     assert!(matches!(
@@ -143,6 +154,13 @@ async fn live_graph_clear_is_scoped_confirmed_versioned_and_preserves_canonical_
     .unwrap();
     assert!(!applied.applied.is_empty());
     assert!(applied.snapshot.extracted_relations().is_empty());
+    assert!(
+        GraphMaintenanceApi::preview(CharacterId::Crazy, &[id], 0, GraphMaintenanceMode::Clear)
+            .await
+            .unwrap()
+            .inspected_relations()
+            .is_empty()
+    );
     assert_eq!(applied.snapshot.records().len(), 1);
     assert_eq!(
         applied.snapshot.records()[0].content,
@@ -448,9 +466,18 @@ async fn configured_extractor_failure_or_stale_preview_cannot_partially_commit_b
             .extracted_relations()
             .is_empty()
     );
+    // Pick a source the fixture extractor can process. Memory IDs have random
+    // UUID ordering, so ids[0] could be "coffee" and fail before stale validation.
+    let tea_id = added
+        .snapshot
+        .records()
+        .iter()
+        .find(|record| record.content == "Mita likes tea")
+        .expect("seeded tea source")
+        .id;
     let stale = GraphMaintenanceApi::preview(
         CharacterId::Crazy,
-        &[ids[0]],
+        &[tea_id],
         0,
         GraphMaintenanceMode::Reindex,
     )
@@ -460,7 +487,7 @@ async fn configured_extractor_failure_or_stale_preview_cannot_partially_commit_b
         .edit_memories(
             crazy.memories().await.unwrap(),
             vec![MemoryCommand::Update {
-                id: ids[0],
+                id: tea_id,
                 content: "Mita likes black tea".into(),
                 priority: None,
             }],

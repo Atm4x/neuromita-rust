@@ -44,6 +44,23 @@ impl GraphMaintenancePreview {
     pub fn character(&self) -> crate::identity::CharacterId {
         self.expected.character()
     }
+
+    /// Immutable, source-revisioned relations belonging to this exact confirmed preview.
+    /// This is inspection of derived data, never a graph-store read or write.
+    pub fn inspected_relations(&self) -> Vec<crate::memory::ProvenancedRelation> {
+        self.entries
+            .iter()
+            .flat_map(|entry| {
+                entry.existing_relations.iter().cloned().map(|relation| {
+                    crate::memory::ProvenancedRelation {
+                        source: entry.source.record.id,
+                        source_revision: entry.source.revision,
+                        relation,
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Error)]

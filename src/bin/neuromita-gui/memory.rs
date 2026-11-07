@@ -11,7 +11,7 @@ use neuromita::{
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use super::{
-    runtime::Command,
+    runtime::{Command, GraphPreviewReport},
     view::{AppWindow, MemoryItem, MemoryUi},
 };
 
@@ -68,6 +68,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_graph_confirm_ready(false);
             ui.set_graph_reindex_confirmation(false);
             ui.set_graph_summary("".into());
+            ui.set_graph_details("".into());
             ui.set_search("".into());
             ui.set_offset(0);
             ui.set_next(-1);
@@ -131,6 +132,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         ui.set_graph_confirm_ready(false);
         ui.set_graph_reindex_confirmation(false);
         ui.set_graph_summary("".into());
+        ui.set_graph_details("".into());
         ui.set_graph_eligible(false);
         ui.set_recall_pending(false);
         ui.set_recall_result("".into());
@@ -330,6 +332,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         ui.set_graph_confirm_ready(false);
         ui.set_graph_reindex_confirmation(false);
         ui.set_graph_summary("".into());
+        ui.set_graph_details("".into());
         ui.set_error("".into());
         send(Command::GraphPreview(request_id, character, id, mode));
     });
@@ -397,17 +400,37 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         ui.set_graph_confirm_ready(false);
         ui.set_graph_reindex_confirmation(false);
         ui.set_graph_summary("".into());
+        ui.set_graph_details("".into());
         if let Some(id) = id {
             dispatch(Command::GraphAbort(id));
         }
     });
 }
 
+fn format_graph_relation_details(relations: &[neuromita::memory::ProvenancedRelation]) -> String {
+    if relations.is_empty() {
+        return "No derived relations for this source".to_owned();
+    }
+    let mut output = String::new();
+    for relation in relations {
+        let triple = &relation.relation;
+        output.push_str(&format!(
+            "Source {} · revision {}\n{} → {} → {}\n",
+            relation.source.0,
+            relation.source_revision,
+            serde_json::to_string(&triple.subject).expect("string JSON"),
+            serde_json::to_string(&triple.predicate).expect("string JSON"),
+            serde_json::to_string(&triple.object).expect("string JSON"),
+        ));
+    }
+    output
+}
+
 pub fn graph_previewed(
     window: &AppWindow,
     state: &EditorState,
     request_id: uuid::Uuid,
-    result: Result<usize, String>,
+    result: Result<GraphPreviewReport, String>,
 ) {
     let mut editor = state.lock().expect("memory editor mutex");
     if editor.graph_id != Some(request_id) {
@@ -434,7 +457,9 @@ pub fn graph_previewed(
         return;
     }
     match result {
-        Ok(count) => {
+        Ok(report) => {
+            let count = report.count;
+            ui.set_graph_details(format_graph_relation_details(&report.relations).into());
             let reindex = editor.graph_mode
                 == Some(neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex);
             ui.set_graph_summary(if reindex {
@@ -480,6 +505,7 @@ pub fn graph_applied(
     ui.set_graph_applying(false);
     ui.set_graph_confirm_ready(false);
     ui.set_graph_reindex_confirmation(false);
+    ui.set_graph_details("".into());
     match result {
         Ok(()) => {
             ui.set_error("".into());
@@ -495,6 +521,7 @@ pub fn graph_applied(
         }
         Err(error) => {
             ui.set_graph_summary("".into());
+            ui.set_graph_details("".into());
             ui.set_error(error.into());
         }
     }
@@ -540,6 +567,7 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
                 ui.set_graph_confirm_ready(false);
                 if pending {
                     ui.set_graph_summary("".into());
+                    ui.set_graph_details("".into());
                 }
             }
         }

@@ -770,13 +770,40 @@ fn memory_render_and_contract(window: &AppWindow) {
             graph_mode,
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear
         );
-        memory::graph_previewed(window, &state, uuid::Uuid::new_v4(), Ok(9));
+        memory::graph_previewed(
+            window,
+            &state,
+            uuid::Uuid::new_v4(),
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 9,
+                relations: Vec::new(),
+            }),
+        );
         assert!(ui.get_graph_pending());
         assert!(!ui.get_graph_confirm_ready());
-        memory::graph_previewed(window, &state, graph_request, Ok(2));
+        memory::graph_previewed(
+            window,
+            &state,
+            graph_request,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 1,
+                relations: vec![neuromita::memory::ProvenancedRelation {
+                    source: graph_memory,
+                    source_revision: 3,
+                    relation: neuromita::memory::MemoryRelation {
+                        subject: "Mita\nspoof".into(),
+                        predicate: "likes".into(),
+                        object: "tea".into(),
+                    },
+                }],
+            }),
+        );
         assert!(!ui.get_graph_pending());
         assert!(ui.get_graph_confirm_ready());
-        assert!(ui.get_graph_summary().contains("2 derived"));
+        assert!(ui.get_graph_summary().contains("1 derived"));
+        assert!(ui.get_graph_details().contains(&graph_memory.0.to_string()));
+        assert!(ui.get_graph_details().contains("revision 3"));
+        assert!(ui.get_graph_details().contains("Mita\\nspoof"));
         ui.invoke_graph_confirm();
         assert!(ui.get_graph_pending());
         assert!(!ui.get_graph_confirm_ready());
@@ -808,17 +835,34 @@ fn memory_render_and_contract(window: &AppWindow) {
             panic!("expected abort command")
         };
         assert_eq!(id, aborted_id);
-        memory::graph_previewed(window, &state, aborted_id, Ok(2));
+        memory::graph_previewed(
+            window,
+            &state,
+            aborted_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 2,
+                relations: Vec::new(),
+            }),
+        );
         assert!(!ui.get_graph_pending());
         assert!(!ui.get_graph_confirm_ready());
         assert!(ui.get_graph_summary().is_empty());
+        assert!(ui.get_graph_details().is_empty());
         ui.set_content("Изменённый текст".into());
         ui.invoke_graph_preview(0);
         let Command::GraphPreview(in_flight_id, _, _, _) = commands.borrow_mut().pop().unwrap()
         else {
             panic!("expected in-flight graph preview")
         };
-        memory::graph_previewed(window, &state, in_flight_id, Ok(1));
+        memory::graph_previewed(
+            window,
+            &state,
+            in_flight_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 1,
+                relations: Vec::new(),
+            }),
+        );
         ui.invoke_graph_confirm();
         let Command::GraphApply(confirmed_id, _) = commands.borrow_mut().pop().unwrap() else {
             panic!("expected in-flight confirmed graph apply")
@@ -867,7 +911,15 @@ fn memory_render_and_contract(window: &AppWindow) {
             reindex_mode,
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
         );
-        memory::graph_previewed(window, &state, reindex_id, Ok(3));
+        memory::graph_previewed(
+            window,
+            &state,
+            reindex_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 3,
+                relations: Vec::new(),
+            }),
+        );
         assert!(ui.get_graph_reindex_confirmation());
         assert!(ui.get_graph_summary().contains("Reindex will replace 3"));
         ui.invoke_graph_confirm();
@@ -895,7 +947,15 @@ fn memory_render_and_contract(window: &AppWindow) {
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
         );
         ui.set_graph_reindex_available(false);
-        memory::graph_previewed(window, &state, backend_lost_id, Ok(4));
+        memory::graph_previewed(
+            window,
+            &state,
+            backend_lost_id,
+            Ok(crate::runtime::GraphPreviewReport {
+                count: 4,
+                relations: Vec::new(),
+            }),
+        );
         assert!(!ui.get_graph_confirm_ready());
         assert!(!ui.get_graph_reindex_confirmation());
         assert!(ui.get_error().contains("unavailable"));

@@ -32,6 +32,7 @@ export global MemoryUi {
     in-out property <bool> graph-confirm-ready;
     in-out property <bool> graph-reindex-confirmation;
     in-out property <string> graph-summary;
+    in-out property <string> graph-details;
     callback graph-preview(int);
     callback graph-confirm();
     callback graph-cancel();
@@ -198,6 +199,18 @@ export component MemoryPanel inherits Rectangle {
                     if MemoryUi.graph-summary != "": Caption {
                         text: MemoryUi.graph-summary;
                         color: SandboxTheme.muted;
+                    }
+                    if MemoryUi.graph-details != "": ScrollView {
+                        height: 104px;
+                        content-width: self.visible-width;
+                        Text {
+                            width: parent.width;
+                            text: MemoryUi.graph-details;
+                            color: SandboxTheme.text;
+                            font-family: SandboxTheme.font-family;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
                     }
                 }
                 QuickAction {

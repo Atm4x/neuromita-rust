@@ -137,3 +137,19 @@ Failures from semantic retrieval are explicit errors; the selected mode cannot s
 - The two separate actions, **Inspect Clear** and **Inspect Reindex**, dispatch the same typed `GraphPreview(request_uuid, character, MemoryId, mode)` command. The desktop captures the canonical immutable `GraphMaintenancePreview` and retains it privately, never exposing an editable plan in Slint. A separate confirmation dispatches the already-previewed operation; mode cannot be changed between preview and acceptance. Provider errors remain visible, with no lexical substitute and no fake success.
 - A late preview, foreign selected MemoryId, character switch, revised Timeline snapshot or removed capability invalidates an **unconfirmed** plan; confirmed apply remains non-cancellable at the UI once dispatched. The canonical owner validates the source and accepts the entire reindex batch atomically. GUI binding tests cover disabled capability, exact mode, reindex preview/confirm/apply, late backend loss and old Clear compatibility.
 - The only **production** backend still missing is the AI-owned extraction adapter that explicitly pins character/model/preset at admission and validates the extraction-specific schema. This UI integration does not claim the model worker is present, that it is healthy or that #23/#50 macro acceptance is closed.
+
+## Graph relation provenance inspection (Agent A cycle 25)
+
+The existing versioned `GraphMaintenancePreview` exposes a derived, read-only
+`inspected_relations()` projection that pairs each relation with its canonical
+`MemoryId` and source revision. The trusted-local `/knowledge graph inspect ID...`
+command never creates a confirmation token or mutates Timeline. The selected
+Slint Memory Editor displays these source-anchored triples from **the same**
+preview used by confirmed Clear/Reindex. Values are JSON-quoted for unambiguous
+literal display. Pending selection UUIDs and source/character guards remain in
+place; successful mutation invalidates the shown data. The default GUI still
+has no model-backed GraphExtractor and cannot advertise production Reindex.
+
+The explicit 26-slot, non-official acceptance rubric is documented in
+[`ACCEPTANCE_MATRIX.md`](ACCEPTANCE_MATRIX.md). No macro completion is inferred
+from adding this inspection surface alone.

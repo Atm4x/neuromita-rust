@@ -95,6 +95,22 @@ pub enum Command {
     MicrophoneTest(bool, String, String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPreviewReport {
+    pub count: usize,
+    pub relations: Vec<neuromita::memory::ProvenancedRelation>,
+}
+
+impl GraphPreviewReport {
+    fn from_plan(plan: &neuromita::knowledge::maintenance::GraphMaintenancePreview) -> Self {
+        let relations = plan.inspected_relations();
+        Self {
+            count: relations.len(),
+            relations,
+        }
+    }
+}
+
 pub enum Update {
     RuntimeStatus(RuntimeSnapshot),
     SpeechSessionStatus(SpeechSessionSnapshot),
@@ -115,7 +131,7 @@ pub enum Update {
     MemoryEditError(uuid::Uuid, String),
     MemoryRecallResult(uuid::Uuid, Result<Option<String>, String>),
     GraphCapability(bool),
-    GraphPreviewResult(uuid::Uuid, Result<usize, String>),
+    GraphPreviewResult(uuid::Uuid, Result<GraphPreviewReport, String>),
     GraphApplyResult(uuid::Uuid, Result<(), String>),
     Confirmation(Option<(ConversationChange, usize)>),
     Diagnostics(String),
@@ -543,9 +559,9 @@ async fn observe(
                     };
                     match result {
                         Ok(plan) => {
-                            let count = plan.entries().iter().map(|entry| entry.existing_relations.len()).sum();
+                            let report = GraphPreviewReport::from_plan(&plan);
                             graph_pending = Some((request_id, selected, plan));
-                            publish(Update::GraphPreviewResult(request_id, Ok(count)));
+                            publish(Update::GraphPreviewResult(request_id, Ok(report)));
                         }
                         Err(error) => publish(Update::GraphPreviewResult(request_id, Err(error))),
                     }
