@@ -1,0 +1,267 @@
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
+
+// Presenter-owned decision. "Available" means a completed, correlated preflight,
+// never a Slint-side guess that an installation, removal or backend is allowed.
+export enum AiHubDecisionKind {
+    none, install, update, reinstall, uninstall, backend-preview, not-recommended, voice-hint
+}
+
+export struct AiHubDecisionSnapshot {
+    available: bool,
+    decision-id: string,
+    component-id: string,
+    component-title: string,
+    action: string,
+    kind: AiHubDecisionKind,
+    revision: int,
+    token: string,
+    can-confirm: bool,
+    can-open-backend: bool,
+    can-open-settings: bool,
+    backend-title: string,
+    hardware: string,
+    plan-items: [string],
+    dependencies: [string],
+    packages: [string],
+    message: string,
+    warning: string,
+}
+
+// Modal confirmation over the parent window. The caller must overlay this
+// component over the entire AI Hub; when closed it cannot intercept input.
+// Confirmation carries the exact decision identity/revision/token back to Core.
+// The presenter must reject stale decisions and confirm only matching preflights.
+export component AiHubOperationDialog inherits Rectangle {
+    in property <AiHubDecisionSnapshot> decision;
+    in property <bool> open: false;
+    callback confirmed(string, string, string, int, string);
+    callback dismissed(string, string, int, string);
+    callback open-backend-requested(string, int, string);
+    callback open-settings-requested(string, int, string);
+
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+    }
+    pure function title-for(kind: AiHubDecisionKind) -> string {
+        if kind == AiHubDecisionKind.uninstall {
+            return root.localized("ai-hub.dialog.uninstall", "Удаление компонента", "Remove component");
+        }
+        if kind == AiHubDecisionKind.reinstall {
+            return root.localized("ai-hub.dialog.clean-reinstall", "Чистая переустановка", "Clean reinstall");
+        }
+        if kind == AiHubDecisionKind.backend-preview {
+            return root.localized("ai-hub.dialog.backend", "Требуется системный backend", "System backend required");
+        }
+        if kind == AiHubDecisionKind.not-recommended {
+            return root.localized("ai-hub.dialog.warning", "Предупреждение о совместимости", "Compatibility warning");
+        }
+        if kind == AiHubDecisionKind.voice-hint {
+            return root.localized("ai-hub.dialog.voice-hint", "Голосовые ресурсы", "Voice assets");
+        }
+        return root.localized("ai-hub.dialog.preview", "Подтверждение операции", "Confirm operation");
+    }
+    function dismiss() {
+        if root.open && root.decision.available {
+            root.dismissed(root.decision.decision-id, root.decision.component-id,
+                root.decision.revision, root.decision.token);
+        }
+    }
+
+    visible: root.open;
+    background: #070612ce;
+    clip: true;
+    accessible-role: dialog;
+    changed open => {
+        if root.open { modal-focus.focus(); }
+    }
+
+    // This surface blocks pointer events from reaching cards behind the modal.
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.dismiss(); }
+    }
+    modal-focus := FocusScope {
+        enabled: root.open;
+        width: parent.width;
+        height: parent.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismiss();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 12px;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                panel := Rectangle {
+                    width: min(590px, max(260px, parent.width - 24px));
+                    height: min(500px, max(220px, root.height - 24px));
+                    background: SettingsTheme.popup;
+                    border-color: SettingsTheme.selected-border;
+                    border-width: 1px;
+                    border-radius: 14px;
+                    clip: true;
+
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 10px;
+                        SettingsLabel {
+                            text: root.title-for(root.decision.kind);
+                            font-size: 18px;
+                            font-weight: 800;
+                            height: 28px;
+                        }
+                        SettingsLabel {
+                            text: root.decision.component-title != "" ? root.decision.component-title : root.decision.component-id;
+                            color: SettingsTheme.muted;
+                            height: 23px;
+                        }
+                        Rectangle { height: 1px; background: SettingsTheme.border; }
+                        body-scroll := SettingsScrollView {
+                            vertical-stretch: 1;
+                            content-height: body.preferred-height;
+                            body := VerticalLayout {
+                                width: body-scroll.visible-width;
+                                padding: 2px;
+                                spacing: 9px;
+                                alignment: start;
+                                if root.decision.kind == AiHubDecisionKind.uninstall: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.remove-body",
+                                        "Компонент будет удалён. Подтвердите удаление перед отправкой команды.",
+                                        "This component will be removed. Confirm before submitting the operation.");
+                                    wrap: word-wrap; overflow: clip; height: max(34px, self.preferred-height);
+                                }
+                                if root.decision.kind == AiHubDecisionKind.reinstall: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.clean-body",
+                                        "Чистая переустановка может повторно загрузить ресурсы и заменить существующую установку.",
+                                        "A clean reinstall may re-download resources and replace the current installation.");
+                                    wrap: word-wrap; overflow: clip; height: max(34px, self.preferred-height);
+                                }
+                                if root.decision.kind == AiHubDecisionKind.backend-preview: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.backend-body",
+                                        "Для действия требуется дополнительный backend. Он станет доступным только после проверки.",
+                                        "This operation requires an additional backend. It becomes available only after verification.");
+                                    wrap: word-wrap; overflow: clip; height: max(34px, self.preferred-height);
+                                }
+                                if root.decision.kind == AiHubDecisionKind.not-recommended: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.not-recommended-body",
+                                        "Конфигурация не рекомендована. Продолжение возможно только по явному разрешению Core.",
+                                        "This configuration is not recommended. Continue only when Core explicitly permits it.");
+                                    color: SettingsTheme.danger-text;
+                                    wrap: word-wrap; overflow: clip; height: max(34px, self.preferred-height);
+                                }
+                                if root.decision.message != "": SettingsLabel {
+                                    text: root.decision.message;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                                if root.decision.warning != "": SettingsLabel {
+                                    text: root.decision.warning;
+                                    color: SettingsTheme.danger-text;
+                                    wrap: word-wrap; overflow: clip; height: max(24px, self.preferred-height);
+                                }
+                                if root.decision.backend-title != "": SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.backend-label", "Backend: ", "Backend: ") + root.decision.backend-title;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                                if root.decision.hardware != "": SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.hardware", "Оборудование: ", "Hardware: ") + root.decision.hardware;
+                                    color: SettingsTheme.muted;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                                if root.decision.plan-items.length > 0: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.plan", "Компоненты плана:", "Installation plan:");
+                                    font-weight: 700; height: 24px;
+                                }
+                                for item in root.decision.plan-items: SettingsLabel {
+                                    text: "• " + item;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                                if root.decision.dependencies.length > 0: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.dependencies", "Зависимости:", "Dependencies:");
+                                    font-weight: 700; height: 24px;
+                                }
+                                for item in root.decision.dependencies: SettingsLabel {
+                                    text: "• " + item;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                                if root.decision.packages.length > 0: SettingsLabel {
+                                    text: root.localized("ai-hub.dialog.packages", "Пакеты backend:", "Backend packages:");
+                                    font-weight: 700; height: 24px;
+                                }
+                                for item in root.decision.packages: SettingsLabel {
+                                    text: "• " + item;
+                                    wrap: word-wrap; overflow: clip; height: max(22px, self.preferred-height);
+                                }
+                            }
+                        }
+                        SettingsLabel {
+                            text: root.localized("ai-hub.dialog.admission-note",
+                                "Подтверждение лишь отправит запрос. Готовность модели проверяется отдельно.",
+                                "Confirmation only submits a request. Model readiness is checked separately.");
+                            color: SettingsTheme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            height: 32px;
+                        }
+                        HorizontalLayout {
+                            height: 37px; spacing: 8px;
+                            if root.decision.can-open-backend: ActionSurface {
+                                width: 107px; height: 34px;
+                                label: root.localized("ai-hub.dialog.open-backend", "Backend", "Backend");
+                                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                                activated => {
+                                    root.open-backend-requested(root.decision.component-id,
+                                        root.decision.revision, root.decision.token);
+                                }
+                            }
+                            if root.decision.can-open-settings: ActionSurface {
+                                width: 110px; height: 34px;
+                                label: root.localized("ai-hub.dialog.open-settings", "Настройки", "Settings");
+                                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                                activated => {
+                                    root.open-settings-requested(root.decision.component-id,
+                                        root.decision.revision, root.decision.token);
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            cancel-button := ActionSurface {
+                                width: 108px; height: 34px;
+                                label: root.localized("common.cancel", "Отмена", "Cancel");
+                                selected: true;
+                                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                                activated => { root.dismiss(); }
+                            }
+                            ActionSurface {
+                                width: 128px; height: 34px;
+                                label: root.localized("ai-hub.dialog.confirm", "Подтвердить", "Confirm");
+                                enabled: root.decision.available && root.decision.decision-id != ""
+                                    && root.decision.component-id != ""
+                                    && root.decision.can-confirm
+                                    && root.decision.kind != AiHubDecisionKind.none
+                                    && root.decision.kind != AiHubDecisionKind.voice-hint;
+                                background: self.enabled ? SettingsTheme.button-hover : SettingsTheme.input;
+                                SettingsLabel {
+                                    text: parent.label;
+                                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                                    horizontal-alignment: center;
+                                }
+                                activated => {
+                                    root.confirmed(root.decision.decision-id, root.decision.component-id,
+                                        root.decision.action, root.decision.revision, root.decision.token);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
