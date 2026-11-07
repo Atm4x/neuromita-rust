@@ -1,0 +1,38 @@
+name: Export B17 full source bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b17-source-export-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-asset-directory-durability-20261107
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export one exact branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET=refs/heads/codex/timeline-asset-directory-durability-20261107
+          EXPECTED=eb526c6ce26d1f8e3a0d326df097125c2da949b2
+          HEAD="$(git rev-parse HEAD)"
+          test "$HEAD" = "$EXPECTED"
+          git update-ref "$TARGET" "$HEAD"
+          git bundle create neuromita-b17-source.bundle "$TARGET"
+          git bundle verify neuromita-b17-source.bundle
+          sha256sum neuromita-b17-source.bundle > neuromita-b17-source.bundle.sha256
+          printf 'branch=%s\nhead=%s\n' "$TARGET" "$HEAD" > neuromita-b17-source.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-b17-full-source
+          path: |
+            neuromita-b17-source.bundle
+            neuromita-b17-source.bundle.sha256
+            neuromita-b17-source.manifest
+          retention-days: 7
+          if-no-files-found: error
