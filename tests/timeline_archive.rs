@@ -109,6 +109,33 @@ fn bytes_with_change(bytes: &[u8], change: impl FnOnce(&mut Value)) -> Vec<u8> {
 }
 
 #[test]
+fn genuine_python_archive_is_rejected_without_lossy_implicit_conversion() {
+    let fixture = include_bytes!("fixtures/python_session_archive_20261103.json");
+    let document: Value = serde_json::from_slice(fixture).unwrap();
+    assert_eq!(document["archive_version"], 1);
+    assert_eq!(document["session_id"], "session:русский");
+    assert_eq!(document["root_branch_id"], "main");
+    assert!(
+        document["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| {
+                branch["branch_id"] == "child" && branch["parent_branch_id"] == "main"
+            })
+    );
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("target"), 1024).unwrap();
+    let mut timeline = TimelineStore::new();
+    let existing = BranchId::new();
+    timeline.create_session(SessionId::new(), existing).unwrap();
+    assert!(import_memory(&mut timeline, fixture, &assets).is_err());
+    assert_eq!(timeline.branch(existing).unwrap().head_sequence, 0);
+    assert!(timeline.world(existing).unwrap().is_empty());
+    assert!(assets.inventory(&[]).unwrap().retained.is_empty());
+}
+
+#[test]
 fn memory_roundtrip_retains_branch_graph_receipt_external_id_and_assets() {
     let temp = TestDir::new();
     let first_assets = TimelineAssetStore::new(temp.path().join("origin-assets"), 1024).unwrap();
