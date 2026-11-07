@@ -184,7 +184,7 @@ export component AiHubCard inherits Rectangle {
                     || op.phase == AiHubOperationPhase.running
                     || op.phase == AiHubOperationPhase.cancelling
                     || op.phase == AiHubOperationPhase.failed);
-            height: visible ? max(20px, self.preferred-height) : 0px;
+            height: self.visible ? max(20px, self.preferred-height) : 0px;
             text: (op.phase == AiHubOperationPhase.queued ? root.localized("ai-hub.card.queued", "В очереди", "Queued")
                 : op.phase == AiHubOperationPhase.running ? root.localized("ai-hub.card.running", "Выполняется", "Running")
                 : op.phase == AiHubOperationPhase.cancelling ? root.localized("ai-hub.card.cancelling", "Отмена…", "Cancelling…")

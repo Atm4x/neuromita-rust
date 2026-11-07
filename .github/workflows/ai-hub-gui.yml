@@ -36,6 +36,15 @@ jobs:
       - name: Core tests
         run: cargo test --locked --offline
       - name: GUI tests
+        env:
+          NEUROMITA_GUI_CAPTURE_DIR: target/ai-hub-captures
         run: cargo test --locked --offline --features gui --bin neuromita-gui
+      - name: Upload AI Hub software-render captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-hub-captures
+          path: target/ai-hub-captures/aihub-*.ppm
+          if-no-files-found: ignore
       - name: Strict Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
