@@ -59,6 +59,19 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
+// Before the Windows Job Object is attached, Python runs only the isolated
+// stdlib gate (-I -S). On owner death, stdin closes and no plugin import occurs.
+// Once attached, the OS job kills the process tree if its Rust owner dies.
+#[cfg(windows)]
+const WINDOWS_GATED_WORKER_BOOTSTRAP: &str = concat!(
+    "import os,sys\n",
+    "if sys.stdin.buffer.read(1) != b'\\x01': sys.exit(71)\n",
+    "import site\nsite.main()\n",
+    "sys.path[:0] = os.environ['PYTHONPATH'].split(os.pathsep)\n",
+    "import runpy\n",
+    "runpy.run_module('neuromita_ai_sdk.host', run_name='__main__', alter_sys=True)\n",
+);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcessTopology {
     Shared,
@@ -163,6 +176,8 @@ struct RemoteError {
 
 struct WorkerProcess {
     child: Child,
+    #[cfg(windows)]
+    _job: windows_uv_job::WindowsKillOnCloseJob,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     timeout: Duration,
@@ -240,9 +255,15 @@ impl WorkerProcess {
             );
         }
 
+        #[cfg(windows)]
         command
-            .arg("-m")
-            .arg("neuromita_ai_sdk.host")
+            .arg("-I")
+            .arg("-S")
+            .arg("-c")
+            .arg(WINDOWS_GATED_WORKER_BOOTSTRAP);
+        #[cfg(not(windows))]
+        command.arg("-m").arg("neuromita_ai_sdk.host");
+        command
             .arg("--plugins-dir")
             .arg(&config.plugins_directory)
             .env("PYTHONPATH", python_path)
@@ -255,8 +276,27 @@ impl WorkerProcess {
             .kill_on_drop(true);
         #[cfg(target_os = "linux")]
         linux_worker_lifetime::require_parent_death_kill(&mut command);
+        let generation = Uuid::new_v4();
         let mut child = command.spawn().map_err(AiRuntimeError::Spawn)?;
-        let input = child
+        #[cfg(windows)]
+        let job = {
+            let outcome = child
+                .raw_handle()
+                .ok_or_else(|| std::io::Error::other("Python worker process handle unavailable"))
+                .and_then(|handle| {
+                    windows_uv_job::WindowsKillOnCloseJob::attach_worker(handle, generation)
+                });
+            match outcome {
+                Ok(job) => job,
+                Err(error) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(AiRuntimeError::Spawn(error));
+                }
+            }
+        };
+        #[allow(unused_mut)]
+        let mut input = child
             .stdin
             .take()
             .ok_or_else(|| AiRuntimeError::Protocol("stdin unavailable".into()))?;
@@ -264,12 +304,20 @@ impl WorkerProcess {
             .stdout
             .take()
             .ok_or_else(|| AiRuntimeError::Protocol("stdout unavailable".into()))?;
+        #[cfg(windows)]
+        if let Err(error) = input.write_all(&[1]).await {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(AiRuntimeError::Io(error));
+        }
         let mut worker = Self {
             child,
+            #[cfg(windows)]
+            _job: job,
             input,
             output: BufReader::new(output),
             timeout: config.request_timeout,
-            generation: Uuid::new_v4(),
+            generation,
             failed: false,
             layers: layers.to_vec(),
             _layer_leases: layer_leases,
@@ -1591,6 +1639,83 @@ mod tests {
     fn test_python() -> String {
         std::env::var("NEUROMITA_TEST_PYTHON")
             .unwrap_or_else(|_| if cfg!(windows) { "python" } else { "python3" }.to_owned())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_owner_crash_fixture() {
+        let Ok(marker) = std::env::var("NM_WINDOWS_WORKER_OWNER_MARKER") else {
+            return;
+        };
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let config = PythonHostConfig {
+            python_executable: test_python().into(),
+            sdk_root: source.clone(),
+            plugins_directory: source.join("plugins"),
+            models_directory: None,
+            request_timeout: Duration::from_secs(12),
+        };
+        let mut worker = WorkerProcess::launch(&config, &[], &[]).await.unwrap();
+        std::fs::write(marker, worker.child.id().unwrap().to_string()).unwrap();
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_terminates_real_python_worker_after_rust_owner_is_killed() {
+        use std::{
+            fs,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+            process::{Command as ProcessCommand, Stdio},
+            time::{Duration, Instant},
+        };
+        use windows_sys::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{OpenProcess, WaitForSingleObject},
+        };
+
+        const SYNCHRONIZE_PROCESS: u32 = 0x0010_0000;
+        let root = std::env::temp_dir().join(format!("nm-win-worker-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let marker = root.join("python.pid");
+        let mut owner = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ai_runtime::tests::windows_owner_crash_fixture"])
+            .env("NM_WINDOWS_WORKER_OWNER_MARKER", &marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "Rust owner did not launch its Python worker"
+            );
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "Rust owner failed to launch Python"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let pid: u32 = fs::read_to_string(&marker).unwrap().parse().unwrap();
+        let process_handle = unsafe { OpenProcess(SYNCHRONIZE_PROCESS, 0, pid) };
+        assert!(!process_handle.is_null(), "Python worker must be running");
+        let process = unsafe { OwnedHandle::from_raw_handle(process_handle.cast()) };
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) },
+            WAIT_TIMEOUT,
+            "Python worker exited before Rust owner crash"
+        );
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 10_000) },
+            WAIT_OBJECT_0,
+            "Python worker survived terminated Rust owner despite Job Object"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

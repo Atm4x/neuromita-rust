@@ -1,4 +1,4 @@
-//! Windows kernel job ownership for a directly launched uv installer.
+//! Windows kernel job ownership for uv installers and gated Python workers.
 
 use std::{
     io,
@@ -54,14 +54,29 @@ pub(super) fn job_is_gone(stage: Uuid, expected_session: u32) -> io::Result<bool
     }
 }
 
-pub(super) struct WindowsUvJob {
+pub(super) struct WindowsKillOnCloseJob {
     handle: OwnedHandle,
 }
 
-impl WindowsUvJob {
+pub(super) type WindowsUvJob = WindowsKillOnCloseJob;
+
+impl WindowsKillOnCloseJob {
     pub(super) fn attach(process: RawHandle, stage: Uuid) -> io::Result<Self> {
-        // The kernel object is deliberately not inheritable by uv or its descendants.
-        let name = name_for(stage);
+        Self::attach_named(process, name_for(stage))
+    }
+
+    pub(super) fn attach_worker(process: RawHandle, generation: Uuid) -> io::Result<Self> {
+        let name = format!("Local\\NeuroMita-AI-python-worker-{generation}")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        Self::attach_named(process, name)
+    }
+
+    fn attach_named(process: RawHandle, name: Vec<u16>) -> io::Result<Self> {
+        // No descendant inherits the owning job handle. Nested-job rejection
+        // is fatal to the caller: it must kill the still-gated child.
+
         let handle = unsafe { CreateJobObjectW(ptr::null(), name.as_ptr()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
@@ -70,7 +85,7 @@ impl WindowsUvJob {
             drop(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "uv job name collision",
+                "AI child job name collision",
             ));
         }
         let job = Self {
