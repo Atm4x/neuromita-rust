@@ -43,47 +43,55 @@ export component AiHubPage inherits Rectangle {
         else { root.settings-open = false; }
     }
     VerticalLayout {
-        padding-left: 28px; padding-right: 28px; padding-top: 24px; padding-bottom: 20px;
-        spacing: 16px;
-        HorizontalLayout { height: 56px; spacing: 14px;
-            Rectangle { width: 48px; height: 48px; border-radius: 12px; border-width: 1px; border-color: Theme.accent-border;
-                background: Theme.accent-surface;
-                HorizontalLayout { alignment: center;
-                    Text { text: "✦"; color: Theme.accent-hover; font-size: 29px; }
+        width: 100%; height: 100%;
+        padding-left: 24px; padding-right: 24px; padding-top: 20px; padding-bottom: 16px;
+        spacing: 13px;
+        HorizontalLayout { height: 52px; spacing: 14px;
+            Rectangle { width: 44px; height: 44px; border-radius: 11px; border-width: 1px; border-color: Theme.accent-border;
+                background: Theme.accent.with-alpha(0.13);
+                VerticalLayout { padding: 0px; alignment: center;
+                    HorizontalLayout { alignment: center;
+                        Icon { source: Icons.ai-hub; colorize: Theme.accent-hover; width: 24px; height: 24px; }
+                    }
                 }
             }
             VerticalLayout { spacing: 3px; horizontal-stretch: 1; alignment: center;
-                Label { text: "AI Hub"; font-size: 24px; font-weight: 800; }
+                Label { text: "AI Hub"; font-size: 22px; font-weight: 800; }
                 Label { text: "Установка, обслуживание и управление локальными AI-компонентами"; color: Theme.muted; font-size: 12px; }
             }
-            HubPill { caption: "GUI preview · без runtime"; warning: true; }
+            Rectangle { horizontal-stretch: 1; }
         }
         Rectangle { height: 1px; background: Theme.divider; }
-        ScrollView {
-            height: 47px;
-            horizontal-stretch: 1;
-            vertical-scrollbar-policy: always-off;
-            horizontal-scrollbar-policy: as-needed;
-            content-width: 748px;
-            content-height: 45px;
-            HorizontalLayout {
-                padding: 0px; spacing: 8px; height: 43px;
+        Rectangle {
+            height: 58px;
+            background: Theme.sidebar;
+            border-width: 1px; border-color: Theme.border; border-radius: 13px;
+            HorizontalLayout { padding-left: 8px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 6px;
                 for cat in [
-                    { id: "tts", title: "TTS", wide: 125px },
-                    { id: "asr", title: "ASR", wide: 125px },
-                    { id: "core", title: "Core", wide: 125px },
-                    { id: "rag", title: "RAG", wide: 125px },
-                    { id: "else", title: "Else", wide: 168px }
+                    { id: "tts", title: "TTS", subtitle: "Синтез", icon: Icons.ai-tts },
+                    { id: "asr", title: "ASR", subtitle: "Речь", icon: Icons.ai-asr },
+                    { id: "core", title: "Core", subtitle: "Ядро", icon: Icons.ai-core },
+                    { id: "rag", title: "RAG", subtitle: "Память", icon: Icons.ai-rag },
+                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else }
                 ]: ActionSurface {
-                    width: cat.wide; height: 38px;
-                    label: cat.title;
-                    selected: root.category == cat.id;
-                    border-radius: 10px;
-                    background: root.category == cat.id ? Theme.accent-surface : self.hovered ? Theme.surface-hover : Theme.panel;
-                    border-width: 1px;
-                    border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
-                    HorizontalLayout { padding: 6px; alignment: center;
-                        Label { text: cat.title; font-size: 13px; font-weight: root.category == cat.id ? 700 : 600; color: root.category == cat.id ? Theme.text : Theme.muted; }
+                    height: 44px; horizontal-stretch: 1; min-width: 120px; max-width: 10000px;
+                    label: cat.title; selected: root.category == cat.id;
+                    border-radius: 9px;
+                    background: root.category == cat.id ? Theme.accent.with-alpha(0.14) : self.hovered ? Theme.text.with-alpha(0.055) : transparent;
+                    border-width: root.category == cat.id ? 1px : 0px;
+                    border-color: Theme.accent-border;
+                    VerticalLayout { padding: 3px; spacing: 0px; alignment: center;
+                        HorizontalLayout { alignment: center; spacing: 10px;
+                            Icon { source: cat.icon; width: 19px; height: 19px; colorize: root.category == cat.id ? Theme.accent-hover : Theme.muted; }
+                            VerticalLayout { spacing: 0px; alignment: center;
+                                Label { text: cat.title; font-size: 13px; font-weight: root.category == cat.id ? 750 : 650;
+                                    color: root.category == cat.id ? Theme.text : Theme.muted; }
+                                Label { text: cat.subtitle; font-size: 10px; color: Theme.muted.with-alpha(0.85); }
+                            }
+                        }
+                        Rectangle { height: 2px; width: 70px; border-radius: 1px;
+                            background: root.category == cat.id ? Theme.accent : transparent;
+                        }
                     }
                     activated => {
                         if !root.settings-open || !root.dirty {
@@ -95,27 +103,32 @@ export component AiHubPage inherits Rectangle {
             }
         }
         if !root.settings-open: VerticalLayout {
-            spacing: 13px;
-            HorizontalLayout { height: 40px; spacing: 12px;
+            spacing: 11px;
+            HorizontalLayout { height: 38px; spacing: 12px;
                 Label { text: root.category == "tts" ? "Синтез речи" : root.category == "asr" ? "Распознавание речи" : root.category == "core" ? "Системное ядро" : root.category == "rag" ? "Поиск и память" : "Дополнительные компоненты"; font-size: 19px; font-weight: 700; horizontal-stretch: 1; }
-                Rectangle { width: 260px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.panel;
-                    HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 8px;
-                        Text { text: "⌕"; color: Theme.muted; font-size: 20px; }
-                        if root.search-text == "": Label {
-                            text: "Поиск в категории…"; color: Theme.muted; font-size: 11px;
+                Rectangle { width: 260px; height: 36px; border-radius: 9px; border-width: 1px; border-color: Theme.border; background: Theme.panel;
+                    HorizontalLayout { padding-left: 11px; padding-right: 9px; padding-top: 0px; padding-bottom: 0px; spacing: 9px;
+                        VerticalLayout { width: 16px; padding: 0px; alignment: center;
+                            Icon { source: Icons.ai-search; colorize: Theme.muted; width: 15px; height: 15px; }
                         }
-                        search := TextInput {
-                            text <=> root.search-text;
-                            single-line: true;
-                            color: Theme.text; font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
+                        Rectangle { horizontal-stretch: 1; max-width: 10000px; height: 22px; background: transparent;
+                            if root.search-text == "": Label {
+                                text: "Поиск в категории…"; color: Theme.muted; font-size: 11px;
+                                width: parent.width; height: parent.height; horizontal-alignment: left;
+                            }
+                            search := TextInput {
+                                text <=> root.search-text; single-line: true;
+                                color: Theme.text; font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
+                                width: parent.width; height: parent.height;
+                            }
                         }
                     }
                 }
             }
             HorizontalLayout { height: 32px; spacing: 8px;
-                Label { text: "Реализация"; color: Theme.muted; font-size: 11px; }
+                Label { text: "Реализация"; color: Theme.muted; font-size: 11px; width: 72px; }
                 for filter in [
                     { id: "all", label: "Все" }, { id: "nvidia", label: "NVIDIA / CUDA" },
                     { id: "onnx", label: "ONNX" }, { id: "cpu", label: "CPU" }
@@ -124,7 +137,7 @@ export component AiHubPage inherits Rectangle {
                     label: filter.label; selected: root.runtime-filter == filter.id;
                     border-radius: 12px; border-width: 1px;
                     border-color: root.runtime-filter == filter.id ? Theme.accent : Theme.border;
-                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? Theme.accent-surface : Theme.panel;
+                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? Theme.accent.with-alpha(0.13) : Theme.panel;
                     HorizontalLayout { padding: 4px; alignment: center;
                         Label { text: filter.label; font-size: 11px; color: root.runtime-filter == filter.id ? Theme.text : Theme.muted; }
                     }
@@ -144,15 +157,18 @@ export component AiHubPage inherits Rectangle {
                 ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
                     VerticalLayout {
                         padding-right: 9px; padding-top: 2px; padding-bottom: 4px;
-                        spacing: 10px; alignment: start;
-                        for model[index] in root.entries: HubModelCard {
-                            visible: root.matches(model);
-                            min-height: root.matches(model) ? 124px : 0px;
-                            preferred-height: root.matches(model) ? 124px : 0px;
-                            max-height: root.matches(model) ? 124px : 0px;
-                            horizontal-stretch: 1;
-                            entry: model;
-                            open-settings(index) => { root.open-details(index); }
+                        spacing: 0px; alignment: start;
+                        for model[index] in root.entries: VerticalLayout {
+                            min-height: root.matches(model) ? 93px : 0px;
+                            preferred-height: root.matches(model) ? 93px : 0px;
+                            max-height: root.matches(model) ? 93px : 0px;
+                            padding-bottom: root.matches(model) ? 9px : 0px;
+                            spacing: 0px;
+                            if root.matches(model): HubModelCard {
+                                horizontal-stretch: 1;
+                                entry: model;
+                                open-settings(index) => { root.open-details(index); }
+                            }
                         }
                     }
                 }
@@ -174,10 +190,12 @@ export component AiHubPage inherits Rectangle {
                 ScrollView { horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
                     VerticalLayout { padding-right: 8px; spacing: 16px; alignment: start;
                         HorizontalLayout { height: 66px; spacing: 14px;
-                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: Theme.accent-surface;
+                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: Theme.accent.with-alpha(0.13);
                                 border-width: 1px; border-color: Theme.accent-border;
-                                HorizontalLayout { alignment: center;
-                                    Icon { source: Icons.settings; width: 25px; height: 25px; colorize: Theme.accent-hover; }
+                                VerticalLayout { alignment: center;
+                                    HorizontalLayout { alignment: center;
+                                        Icon { source: Icons.settings; width: 25px; height: 25px; colorize: Theme.accent-hover; }
+                                    }
                                 }
                             }
                             VerticalLayout { spacing: 4px; alignment: center; horizontal-stretch: 1;
@@ -198,7 +216,7 @@ export component AiHubPage inherits Rectangle {
                             }
                         }
                         Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }
-                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.surface-quiet;
+                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.text.with-alpha(0.028);
                             VerticalLayout { padding: 15px; spacing: 12px;
                                 VerticalLayout { spacing: 5px;
                                     Label { text: root.selected-model.setting-one; font-size: 12px; font-weight: 600; }
@@ -233,7 +251,7 @@ export component AiHubPage inherits Rectangle {
                     HubAction { caption: "Сохранить"; primary: true; enabled: false; }
                 }
                 if root.confirm-discard: Rectangle {
-                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: Theme.unsaved-confirmation;
+                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: Theme.accent.with-alpha(0.15);
                     HorizontalLayout { padding: 14px; spacing: 16px;
                         VerticalLayout { spacing: 4px; horizontal-stretch: 1; alignment: center;
                             Label { text: "Отменить несохранённые изменения?"; font-size: 13px; font-weight: 700; }
@@ -245,7 +263,7 @@ export component AiHubPage inherits Rectangle {
                 }
             }
         }
-        HorizontalLayout { height: 76px; spacing: 10px;
+        HorizontalLayout { height: 68px; spacing: 10px;
             HubStat { caption: "Установлено"; value: "—"; hint: "Не подключено"; }
             HubStat { caption: "GPU"; value: "—"; hint: "Проверка не запускалась"; }
             HubStat { caption: "Свободно на диске"; value: "—"; hint: "Нет данных"; }

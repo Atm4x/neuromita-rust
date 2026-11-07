@@ -21,20 +21,17 @@ export component HubPill inherits Rectangle {
     in property <string> caption;
     in property <bool> accent: false;
     in property <bool> warning: false;
-    height: 25px;
+    height: 23px;
     width: max(30px, pill-label.preferred-width + 18px);
     horizontal-stretch: 0;
-    border-radius: 8px;
+    border-radius: 7px;
     border-width: 1px;
-    border-color: root.warning ? Theme.warning-outline : root.accent ? Theme.accent-border : Theme.border;
-    background: root.warning ? Theme.warning-surface : root.accent ? Theme.accent-surface : Theme.surface-soft;
+    border-color: root.warning ? Theme.warning.with-alpha(0.32) : root.accent ? Theme.accent-border : Theme.border;
+    background: root.warning ? Theme.warning.with-alpha(0.08) : root.accent ? Theme.accent.with-alpha(0.13) : Theme.text.with-alpha(0.035);
     HorizontalLayout {
-        padding-left: 9px; padding-right: 9px;
-        pill-label := Label {
-            text: root.caption;
-            font-size: 10px; font-weight: 600;
-            color: root.warning ? Theme.warning : root.accent ? Theme.accent-label : Theme.text;
-        }
+        padding-left: 9px; padding-right: 9px; padding-top: 0px; padding-bottom: 0px;
+        alignment: center;
+        pill-label := Label { text: root.caption; font-size: 10px; font-weight: 550; color: root.warning ? Theme.warning : root.accent ? Theme.accent-hover : Theme.text; }
     }
 }
 
@@ -42,69 +39,118 @@ export component HubAction inherits ActionSurface {
     in property <string> caption;
     in property <bool> primary: false;
     in property <bool> compact: false;
-    height: root.compact ? 34px : 38px;
+    height: root.compact ? 34px : 36px;
+    width: max(root.compact ? 112px : 112px, button-label.preferred-width + 32px);
     horizontal-stretch: 0;
-    border-radius: root.compact ? 9px : 10px;
+    border-radius: 9px;
     border-width: 1px;
     border-color: root.primary ? Theme.accent : Theme.border;
-    background: !root.enabled ? Theme.surface-disabled : root.primary ? (root.hovered ? Theme.accent-hover : Theme.accent) : root.hovered ? Theme.accent-surface : Theme.surface-soft;
-    HorizontalLayout {
-        padding-left: root.compact ? 13px : 18px;
-        padding-right: root.compact ? 13px : 18px;
-        Label { text: root.caption; font-size: 12px; font-weight: 650; color: root.enabled ? Theme.text : Theme.muted; }
+    background: !root.enabled ? Theme.text.with-alpha(0.035) : root.primary ? (root.hovered ? Theme.accent-hover : Theme.accent) : root.hovered ? Theme.accent.with-alpha(0.13) : Theme.text.with-alpha(0.045);
+    HorizontalLayout { alignment: center; padding-left: 14px; padding-right: 14px;
+        button-label := Label { text: root.caption; font-size: 12px; font-weight: 650; color: root.enabled ? Theme.text : Theme.muted; horizontal-alignment: center; }
     }
 }
 
 export component HubModelCard inherits Rectangle {
     in property <HubModel> entry;
     callback open-settings(int);
-    min-height: 124px;
+    preferred-height: 84px;
+    min-height: 84px;
+    max-height: 84px;
     border-radius: 14px;
     border-width: 1px;
-    border-color: root.entry.state == "ready" ? Theme.success-outline : Theme.border;
-    background: root.entry.state == "incompatible" ? Theme.surface-quiet : Theme.panel;
+    border-color: root.entry.state == "ready" ? Theme.success.with-alpha(0.20) : Theme.border;
+    background: root.entry.state == "incompatible" ? Theme.text.with-alpha(0.02) : Theme.panel;
+
     HorizontalLayout {
-        padding-left: 18px; padding-right: 16px; padding-top: 14px; padding-bottom: 14px;
+        padding-left: 18px; padding-right: 18px;
+        padding-top: 14px; padding-bottom: 14px;
         spacing: 14px;
+        alignment: stretch;
+
         VerticalLayout {
-            horizontal-stretch: 3; min-width: 205px;
-            spacing: 6px; alignment: center;
-            Label { text: root.entry.title; font-size: 15px; font-weight: 700; overflow: elide; min-width: 0px; }
-            Text { text: root.entry.description; color: Theme.muted; font-size: 11px; wrap: word-wrap; min-width: 0px; }
+            horizontal-stretch: 3;
+            min-width: 220px;
+            spacing: 4px;
+            alignment: start;
+            Label {
+                text: root.entry.title;
+                font-size: 14px; font-weight: 700;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            Text {
+                text: root.entry.description;
+                color: Theme.muted;
+                font-size: 11px;
+                wrap: word-wrap;
+                min-width: 0px;
+                max-height: 32px;
+            }
         }
+
         VerticalLayout {
-            horizontal-stretch: 2; min-width: 105px; spacing: 5px; alignment: center;
-            HorizontalLayout { spacing: 5px;
+            horizontal-stretch: 4;
+            min-width: 210px;
+            alignment: center;
+            HorizontalLayout {
+                height: 23px;
+                spacing: 6px;
+                alignment: end;
                 HubPill { caption: root.entry.backend; accent: root.entry.backend == "NVIDIA"; }
                 if root.entry.language != "": HubPill { caption: root.entry.language; }
-            }
-            if root.entry.size != "": HorizontalLayout { spacing: 5px;
-                HubPill { caption: root.entry.size; }
+                if root.entry.size != "": HubPill { caption: root.entry.size; }
             }
         }
-        VerticalLayout {
-            horizontal-stretch: 0; width: 100px; spacing: 3px; alignment: center;
+
+        if root.entry.state == "ready": VerticalLayout {
+            width: 82px;
+            alignment: center;
             Label {
-                text: root.entry.state == "ready" ? "● Установлено" : root.entry.state == "incompatible" ? "● Несовместимо" : "○ Не проверено";
-                font-size: 11px; font-weight: 600;
-                color: root.entry.state == "ready" ? Theme.success : root.entry.state == "incompatible" ? Theme.danger : Theme.muted;
+                text: "Установлено";
+                font-size: 11px; font-weight: 700;
+                color: Theme.success;
             }
-            Label { text: root.entry.state == "ready" ? "Готово" : "Требуется проверка"; font-size: 10px; color: Theme.muted; }
         }
-        VerticalLayout { width: 112px; spacing: 8px; alignment: center;
+        if root.entry.state != "ready": VerticalLayout {
+            width: 18px;
+            alignment: center;
+            HorizontalLayout {
+                height: 8px; width: 18px;
+                spacing: 0px;
+                alignment: center;
+                Rectangle {
+                    width: 8px; height: 8px; border-radius: 4px;
+                    background: root.entry.state == "incompatible" ? Theme.danger : Theme.muted;
+                }
+            }
+        }
+
+        VerticalLayout {
+            width: 112px;
+            alignment: center;
             HubAction {
-                caption: root.entry.state == "ready" ? "Установлено" : "Установить";
-                compact: true; primary: root.entry.state != "ready";
+                compact: true;
+                caption: root.entry.state == "ready" ? "Установлено" : root.entry.state == "incompatible" ? "Недоступно" : "Установить";
+                primary: root.entry.state != "ready";
                 enabled: false;
             }
         }
-        VerticalLayout { width: 36px; spacing: 0px; alignment: center;
+        VerticalLayout {
+            width: 34px;
+            alignment: center;
             ActionSurface {
                 width: 34px; height: 34px;
                 label: "Параметры модели " + root.entry.title;
-                border-width: 1px; border-color: Theme.accent-border;
-                border-radius: 9px; background: self.hovered ? Theme.accent-surface-hover : Theme.surface-hover;
-                Icon { source: Icons.settings; width: 16px; height: 16px; colorize: Theme.accent-hover; }
+                border-width: 1px; border-color: Theme.border;
+                border-radius: 9px;
+                background: self.hovered ? Theme.accent.with-alpha(0.12) : Theme.panel;
+                VerticalLayout {
+                    padding: 0px; alignment: center;
+                    HorizontalLayout { alignment: center;
+                        Icon { source: Icons.settings; width: 16px; height: 16px; colorize: Theme.accent-hover; }
+                    }
+                }
                 activated => { root.open-settings(0); }
             }
         }
@@ -115,17 +161,17 @@ export component HubStat inherits Rectangle {
     in property <string> caption;
     in property <string> value;
     in property <string> hint;
-    min-width: 110px;
+    min-width: 120px;
     horizontal-stretch: 1;
-    height: 74px;
+    height: 66px;
     background: Theme.panel;
     border-width: 1px; border-color: Theme.border;
-    border-radius: 12px;
+    border-radius: 11px;
     VerticalLayout {
-        padding-left: 14px; padding-right: 12px; padding-top: 10px; padding-bottom: 10px;
-        spacing: 2px;
+        padding-left: 13px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px;
+        spacing: 1px;
         Label { text: root.caption; font-size: 10px; color: Theme.muted; }
-        Label { text: root.value; font-size: 16px; font-weight: 700; }
+        Label { text: root.value; font-size: 14px; font-weight: 700; }
         Label { text: root.hint; font-size: 10px; color: Theme.muted; }
     }
 }

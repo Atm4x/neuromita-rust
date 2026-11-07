@@ -87,6 +87,7 @@ export component AppWindow inherits Window {
     callback releases-refresh();
     callback external-link(string);
     HorizontalLayout {
+        width: 100%; height: 100%;
         padding: 0px; spacing: 0px;
         Sidebar {
             current-page: root.page; version: root.version; ai-hub-open: root.ai-hub-open;
@@ -97,7 +98,7 @@ export component AppWindow inherits Window {
             social-selected(name) => { root.social-selected(name); }
         }
         Rectangle {
-            horizontal-stretch: 1; min-width: 0px; clip: true;
+            horizontal-stretch: 1; min-width: 0px; max-width: 10000px; clip: true;
             if root.ai-hub-open: AiHubPage { width: parent.width; height: parent.height; }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
