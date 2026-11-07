@@ -1,0 +1,38 @@
+name: Agent B44 verified patch return
+on:
+  push:
+    branches: [bridge/agent-b44-patch-20261107]
+    paths: [bridge/agent-b44.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify B44 patch and publish exact tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=79bd51cdecb63343b2c6f32613df9facfb9e4e5f
+          tree=2266c28fe7b4f936176a09062517b2f53f5752cc
+          branch=codex/timeline-b44-native-sse-preview-20261107
+          base64 -d bridge/agent-b44.patch.gz.b64 > /tmp/agent-b44.patch.gz
+          echo "b72962a98cb5f95d31a994daa98efec7fa3fabf03e0fc1e71cab1dd9330fdc14  /tmp/agent-b44.patch.gz" | sha256sum -c -
+          gzip -t /tmp/agent-b44.patch.gz
+          gzip -dc /tmp/agent-b44.patch.gz > /tmp/agent-b44.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/agent-b44.patch
+          git apply --index /tmp/agent-b44.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(timeline): clear stale tool preview on resumed media stream and certify aborts"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "branch exists: refusing overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_REMOTE_HEAD=$remote"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
