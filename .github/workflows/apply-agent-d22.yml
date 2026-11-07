@@ -1,0 +1,40 @@
+name: Apply Agent D22 verified patch
+on:
+  push:
+    branches:
+      - bridge/agent-d22-patch-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply pinned source patch and publish branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp bridge/d22.patch.gz.b64 /tmp/d22-patch.gz.b64
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          b = gzip.decompress(base64.b64decode(Path('/tmp/d22-patch.gz.b64').read_text().strip()))
+          assert hashlib.sha256(b).hexdigest() == '746875f5ce4c51dbde9303316833601304be57508757c6362333d57c22509787'
+          Path('/tmp/d22.patch').write_bytes(b)
+          PY
+          expected="7967ffb56881690a899c76bd4aa0f84c82e06f8f"
+          observed="$(git ls-remote origin refs/heads/codex/updater-verified-single-file-activation-20261107 | cut -f1)"
+          test "$observed" = "$expected"
+          git checkout -q --detach "$expected"
+          git switch -q -c codex/updater-post-exit-helper-20261107
+          git apply --check /tmp/d22.patch
+          git apply /tmp/d22.patch
+          git add docs/03-runtime/updater-helper-handoff.md src/bin/neuromita-updater.rs src/updater.rs src/updater/activation.rs src/updater/handoff.rs
+          git diff --cached --check
+          test "$(git write-tree)" = "5e8445123b27075baec469373486f754f2e6d2c2"
+          git -c user.name="NeuroMita D22" -c user.email="actions@users.noreply.github.com" commit -q -m "feat(updater): add post-exit helper with identity-bound handoff and serialized recovery"
+          git push origin HEAD:refs/heads/codex/updater-post-exit-helper-20261107
+          printf 'D22_HEAD=%s\n' "$(git rev-parse HEAD)"
