@@ -5,9 +5,9 @@ use crate::telegram_voice::{
 };
 use base64::Engine;
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, sync::Arc};
+use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::Mutex,
 };
@@ -17,6 +17,7 @@ struct Process {
     _child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    next_request_id: u64,
 }
 pub struct TelethonSession {
     process: Mutex<Process>,
@@ -33,6 +34,52 @@ fn error_code(text: &str) -> TelegramError {
         "missing_media" => TelegramError::InvalidMedia,
         "telethon_not_installed" => TelegramError::Unavailable,
         _ => TelegramError::Network,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResponseId {
+    Stale,
+    Matched,
+}
+
+fn check_response_id(response: &Value, expected: u64) -> Result<ResponseId, TelegramError> {
+    match response["request_id"].as_u64() {
+        Some(actual) if actual < expected => Ok(ResponseId::Stale),
+        Some(actual) if actual == expected => Ok(ResponseId::Matched),
+        _ => Err(TelegramError::Network),
+    }
+}
+
+/// Read one newline-delimited response without unbounded allocation. A
+/// base64-encoded 32 MiB media payload fits below this response limit.
+async fn read_bounded_line(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    max: usize,
+) -> Result<Option<Vec<u8>>, TelegramError> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(|_| TelegramError::Disconnected)?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Err(TelegramError::Disconnected)
+            };
+        }
+        let count = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if count > max.saturating_sub(line.len()) {
+            return Err(TelegramError::MediaTooLarge);
+        }
+        let complete = available[count - 1] == b'\n';
+        line.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if complete {
+            return Ok(Some(line));
+        }
     }
 }
 
@@ -55,44 +102,78 @@ impl TelethonSession {
                 _child: child,
                 stdin,
                 stdout: BufReader::new(stdout),
+                next_request_id: 0,
             }),
         }))
     }
 
-    async fn call(&self, request: Value) -> Result<Value, TelegramError> {
-        let encoded = serde_json::to_vec(&request).map_err(|_| TelegramError::Unavailable)?;
+    async fn call(&self, mut request: Value) -> Result<Value, TelegramError> {
         let mut process = self.process.lock().await;
-        process
-            .stdin
-            .write_all(&encoded)
-            .await
-            .map_err(|_| TelegramError::Disconnected)?;
-        process
-            .stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|_| TelegramError::Disconnected)?;
-        process
-            .stdin
-            .flush()
-            .await
-            .map_err(|_| TelegramError::Disconnected)?;
-        let mut reply = String::new();
-        let len = process
-            .stdout
-            .read_line(&mut reply)
-            .await
-            .map_err(|_| TelegramError::Disconnected)?;
-        if len == 0 || len > 48 * 1024 * 1024 {
-            return Err(TelegramError::Disconnected);
+        // An abandoned RPC can still return after the caller has been cancelled.
+        // Correlate every sidecar response to its request, never borrow a stale one.
+        process.next_request_id = process
+            .next_request_id
+            .checked_add(1)
+            .ok_or(TelegramError::Unavailable)?;
+        let request_id = process.next_request_id;
+        request
+            .as_object_mut()
+            .ok_or(TelegramError::Unavailable)?
+            .insert("request_id".into(), json!(request_id));
+        let encoded = serde_json::to_vec(&request).map_err(|_| TelegramError::Unavailable)?;
+        if encoded.len() > 16 * 1024 {
+            return Err(TelegramError::Unavailable);
         }
-        let response: Value = serde_json::from_str(&reply).map_err(|_| TelegramError::Network)?;
-        if response["ok"] != true {
-            return Err(error_code(
-                response["error"].as_str().unwrap_or("telegram_failure"),
-            ));
+
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            process
+                .stdin
+                .write_all(&encoded)
+                .await
+                .map_err(|_| TelegramError::Disconnected)?;
+            process
+                .stdin
+                .write_all(b"\n")
+                .await
+                .map_err(|_| TelegramError::Disconnected)?;
+            process
+                .stdin
+                .flush()
+                .await
+                .map_err(|_| TelegramError::Disconnected)?;
+            loop {
+                let line = read_bounded_line(&mut process.stdout, 48 * 1024 * 1024)
+                    .await?
+                    .ok_or(TelegramError::Disconnected)?;
+                let response: Value =
+                    serde_json::from_slice(&line).map_err(|_| TelegramError::Network)?;
+                if response["request_id"].as_u64().is_none()
+                    && response["error"] == "telethon_not_installed"
+                {
+                    return Err(TelegramError::Unavailable);
+                }
+                match check_response_id(&response, request_id)? {
+                    ResponseId::Stale => continue,
+                    ResponseId::Matched => {}
+                }
+                if response["ok"] != true {
+                    return Err(error_code(
+                        response["error"].as_str().unwrap_or("telegram_failure"),
+                    ));
+                }
+                return Ok(response["result"].clone());
+            }
+        })
+        .await;
+        match result {
+            Ok(value) => value,
+            Err(_) => {
+                // If a read timed out mid-frame, the newline stream cannot be
+                // safely reused. Terminate this session rather than mix replies.
+                let _ = process._child.start_kill();
+                Err(TelegramError::Timeout)
+            }
         }
-        Ok(response["result"].clone())
     }
 
     /// A persistent Telethon SQLite session is a credential, not ordinary settings.
@@ -232,5 +313,44 @@ mod tests {
         assert_eq!(error_code("expired_code"), TelegramError::ExpiredCode);
         assert_eq!(error_code("media_too_large"), TelegramError::MediaTooLarge);
         assert_eq!(error_code("telegram_failure"), TelegramError::Network);
+    }
+
+    #[test]
+    fn cancelled_rpc_response_cannot_be_mistaken_for_next_request() {
+        assert_eq!(
+            check_response_id(&json!({"request_id": 41}), 42).unwrap(),
+            ResponseId::Stale
+        );
+        assert_eq!(
+            check_response_id(&json!({"request_id": 42}), 42).unwrap(),
+            ResponseId::Matched
+        );
+        assert_eq!(
+            check_response_id(&json!({"request_id": 43}), 42),
+            Err(TelegramError::Network)
+        );
+        assert_eq!(
+            check_response_id(&json!({"result": {}}), 42),
+            Err(TelegramError::Network)
+        );
+    }
+
+    #[tokio::test]
+    async fn sidecar_line_has_hard_limit_and_requires_newline() {
+        let mut valid = BufReader::new(&b"{\"ok\":true}\n"[..]);
+        assert_eq!(
+            read_bounded_line(&mut valid, 32).await.unwrap(),
+            Some(b"{\"ok\":true}\n".to_vec())
+        );
+        let mut oversized = BufReader::new(&b"0123456789\n"[..]);
+        assert_eq!(
+            read_bounded_line(&mut oversized, 8).await,
+            Err(TelegramError::MediaTooLarge)
+        );
+        let mut truncated = BufReader::new(&b"partial"[..]);
+        assert_eq!(
+            read_bounded_line(&mut truncated, 32).await,
+            Err(TelegramError::Disconnected)
+        );
     }
 }
