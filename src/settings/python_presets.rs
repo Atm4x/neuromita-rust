@@ -12,7 +12,7 @@ use serde::{
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::generation::python_import::PythonPresetImport;
+use crate::generation::{StoredPresets, python_import::PythonPresetImport};
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -36,6 +36,7 @@ pub struct PythonPresetStagePreview {
     pub blocked_ids: Vec<u32>,
     pub blocked_without_id: usize,
     pub template_count: usize,
+    pub preserved_ids: Vec<u32>,
     pub python_order_not_imported: bool,
 }
 
@@ -121,6 +122,7 @@ impl PythonPresetStage {
             blocked_ids,
             blocked_without_id,
             template_count: template_ids.len(),
+            preserved_ids: Vec::new(),
             python_order_not_imported: preset_json.get("order").is_some(),
         };
         let files = if preview.blocked_count() == 0 {
@@ -150,6 +152,97 @@ impl PythonPresetStage {
             Vec::new()
         };
         Ok(Self { preview, files })
+    }
+
+    /// Merge into a new review directory, never into the running profile.
+    /// Existing bytes are snapshots supplied by the stopped application's caller.
+    pub fn merge_with_existing(
+        &self,
+        existing_catalog: Option<&[u8]>,
+        existing_credentials: Option<&[u8]>,
+    ) -> Result<Self, PythonPresetStageError> {
+        if self.preview.blocked_count() != 0 {
+            return Err(PythonPresetStageError::Blocked(
+                self.preview.blocked_count(),
+            ));
+        }
+        let staged_catalog = self.file("presets.json")?;
+        let staged_credentials = self.file("preset-credentials.json")?;
+        let imported: StoredPresets = serde_json::from_value(parse_unique_json(staged_catalog)?)
+            .map_err(|_| PythonPresetStageError::Invalid("invalid staged preset catalog".into()))?;
+        let existing: Option<StoredPresets> = existing_catalog
+            .map(|bytes| {
+                if bytes.len() > MAX_SOURCE_BYTES {
+                    return Err(PythonPresetStageError::Invalid(
+                        "existing catalog exceeds 8 MiB".into(),
+                    ));
+                }
+                serde_json::from_value(parse_unique_json(bytes)?).map_err(|_| {
+                    PythonPresetStageError::Invalid("invalid existing preset catalog".into())
+                })
+            })
+            .transpose()?;
+        let merged =
+            StoredPresets::merge_for_import(existing.as_ref(), &imported).map_err(|_| {
+                PythonPresetStageError::Invalid(
+                    "preset IDs collide with existing or retired IDs".into(),
+                )
+            })?;
+        let mut combined_secrets = parse_credentials(existing_credentials)?;
+        let new_secrets = parse_credentials(Some(staged_credentials))?;
+        for (name, secret) in new_secrets {
+            if combined_secrets.insert(name.clone(), secret).is_some() {
+                return Err(PythonPresetStageError::Invalid(
+                    "imported credential name conflicts with an existing name".into(),
+                ));
+            }
+        }
+        if merged
+            .local_credentials()
+            .iter()
+            .any(|name| !combined_secrets.contains_key(*name))
+        {
+            return Err(PythonPresetStageError::Invalid(
+                "a preset references an unavailable local credential".into(),
+            ));
+        }
+        let catalog_bytes = serde_json::to_vec_pretty(&merged).map_err(|_| {
+            PythonPresetStageError::Invalid("cannot encode merged preset catalog".into())
+        })?;
+        let credential_bytes = serde_json::to_vec_pretty(&combined_secrets).map_err(|_| {
+            PythonPresetStageError::Invalid("cannot encode merged credentials".into())
+        })?;
+        if credential_bytes.len() > 1_048_576 {
+            return Err(PythonPresetStageError::Invalid(
+                "merged credential store exceeds 1 MiB".into(),
+            ));
+        }
+        let mut files = self.files.clone();
+        for (name, bytes) in &mut files {
+            match *name {
+                "presets.json" => *bytes = catalog_bytes.clone(),
+                "preset-credentials.json" => *bytes = credential_bytes.clone(),
+                _ => {}
+            }
+        }
+        if let Some(bytes) = existing_catalog {
+            files.push(("existing-source-presets.json", bytes.to_vec()));
+        }
+        if let Some(bytes) = existing_credentials {
+            files.push(("existing-source-preset-credentials.json", bytes.to_vec()));
+        }
+        let mut preview = self.preview.clone();
+        preview.preserved_ids = existing
+            .as_ref()
+            .map_or_else(Vec::new, StoredPresets::id_values);
+        Ok(Self { preview, files })
+    }
+
+    fn file(&self, name: &str) -> Result<&[u8], PythonPresetStageError> {
+        self.files
+            .iter()
+            .find_map(|(path, bytes)| (*path == name).then_some(bytes.as_slice()))
+            .ok_or_else(|| PythonPresetStageError::Invalid("staged file missing".into()))
     }
 
     pub fn stage_new_directory(&self, destination: &Path) -> Result<(), PythonPresetStageError> {
@@ -213,6 +306,21 @@ impl PythonPresetStage {
         }
         result
     }
+}
+
+fn parse_credentials(
+    bytes: Option<&[u8]>,
+) -> Result<BTreeMap<String, String>, PythonPresetStageError> {
+    let Some(bytes) = bytes else {
+        return Ok(BTreeMap::new());
+    };
+    if bytes.len() > 1_048_576 {
+        return Err(PythonPresetStageError::Invalid(
+            "credential store exceeds 1 MiB".into(),
+        ));
+    }
+    serde_json::from_value(parse_unique_json(bytes)?)
+        .map_err(|_| PythonPresetStageError::Invalid("invalid credential store".into()))
 }
 
 fn symlink_or_exists(path: &Path) -> bool {
