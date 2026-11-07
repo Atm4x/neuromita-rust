@@ -91,13 +91,18 @@ impl PresetsPresenter {
         self.catalog.list()
     }
 
+    pub fn reorder(&self, order: &[PresetId]) -> Result<(), PresetCatalogError> {
+        self.catalog.reorder(order)
+    }
+
     pub fn snapshot(&self) -> PresetsView {
         let catalog = self.catalog.observe();
         let snapshot = catalog.borrow();
         let records = snapshot
-            .entries
+            .order
             .iter()
-            .map(|(&id, record)| {
+            .filter_map(|id| snapshot.entries.get(id).map(|record| (*id, record)))
+            .map(|(id, record)| {
                 let (
                     configured,
                     provider,
