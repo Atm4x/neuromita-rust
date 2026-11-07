@@ -201,3 +201,31 @@ storage layer and no external identifier or timestamp precision is discarded:
 the exact source values live in `SessionProvenance`. Both adapters require
 caller-supplied root and character bindings; no `cwd`, profile directory or
 implicit observer mapping is used.
+
+## Python `EventObserved` compatibility evidence (B34)
+
+`InspectedPythonArchive::disclosure_sites()` reports every validated source
+`EventObserved` without changing the archive, importing the session or granting
+native visibility. Each entry identifies its source branch, sequence, disclosure
+EventId, target EventId and recipients. `target_known_before` is calculated
+**before** applying the disclosure, with Python knowledge replay over that
+branch's inherited fork prefix and its own later events. A context reset clears
+that observer's prior knowledge. Repeated indirect disclosures may also make
+`target_known_before = true`; this flag does **not** assert first-hand witness.
+
+| Python source case | Native behavior | Reason |
+| --- | --- | --- |
+| Target unknown to recipient | Reject lossless import | Native MitaView cannot mark an old event directly observed after the fact |
+| Target already known (directly or from prior disclosure) | Reject lossless import | Dropping or remapping `EventObserved` would lose its independent identity, timestamp, receipt and source trace |
+| Disclosure repeated after `CharacterContextReset` | Reject lossless import | A reset does not permit retroactive re-acquisition of the old source event |
+| Disclosure on a fork | Reject lossless import | Visibility is branch-local; parent events after fork are not part of the child world |
+| Archive with no `EventObserved` | Continue existing supported-event conversion | All other event kinds still require their own native validation |
+
+This report is an **import-operator diagnostic**, not a per-character `MitaView`:
+it contains external identifiers that may be private. Do not publish it in chat,
+LLM context, telemetry or logs without an explicitly authorized source-data
+inspection workflow. The compatibility boundary must continue to reject the
+whole unsupported archive before staging assets or committing Timeline rows.
+A human-directed semantic migration may create a *new retelling event* witnessed
+by the intended recipient, but such a retelling cannot be declared a lossless
+translation of the historical Python receipt or a direct witness of its target.
