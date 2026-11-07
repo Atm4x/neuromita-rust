@@ -10,7 +10,9 @@ pub use crate::generation::PresetId;
 pub(crate) use migration::SettingsStartupMigration;
 pub use migration::{PythonSettingsMigration, PythonSettingsPreview, RustSettingsMigration};
 pub use model::*;
-pub use preset_activation::{PresetActivation, PresetActivationError, PresetRecovery};
+pub use preset_activation::{
+    PresetActivation, PresetActivationError, PresetRecovery, PresetStorageLease,
+};
 pub use python_presets::{PythonPresetStage, PythonPresetStageError, PythonPresetStagePreview};
 pub use speech::*;
 pub use storage::*;

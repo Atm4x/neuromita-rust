@@ -12,6 +12,7 @@ use super::python_presets::{parse_credentials, parse_unique_json};
 use crate::generation::StoredPresets;
 
 const JOURNAL: &str = ".preset-activation-journal";
+const STORAGE_LOCK: &str = ".preset-storage.lock";
 const NAMES: [&str; 2] = ["presets.json", "preset-credentials.json"];
 const SOURCES: [&str; 2] = [
     "existing-source-presets.json",
@@ -25,6 +26,8 @@ pub enum PresetActivationError {
     UnsafePath,
     #[error("preset activation requires an explicit recovery before starting the app")]
     RecoveryRequired,
+    #[error("preset storage is currently locked by another application or operation")]
+    StorageBusy,
     #[error("preset activation snapshot is invalid or no longer matches the stopped profile")]
     SnapshotConflict,
     #[error(
@@ -43,9 +46,26 @@ pub enum PresetRecovery {
     DiscardedUnprepared,
 }
 
+/// An exclusive OS lease retained by the persistent catalog's repository.
+/// All participants must use the same stable lock file; foreign applications
+/// that ignore the lease are not prevented from editing files.
+pub struct PresetStorageLease {
+    _file: fs::File,
+}
+
 pub struct PresetActivation;
 
 impl PresetActivation {
+    /// Acquire an exclusive lease for the full lifetime of a persistent catalog.
+    /// Holding the lease over catalog.open() and its subsequent writes ensures
+    /// an offline activator cannot run concurrently with a cooperating Core.
+    pub fn runtime_lease(active: &Path) -> Result<PresetStorageLease, PresetActivationError> {
+        check_dir(active)?;
+        let file = lock_storage(active)?;
+        Self::ensure_ready(active)?;
+        Ok(PresetStorageLease { _file: file })
+    }
+
     /// Call at the application composition root BEFORE opening either preset file.
     pub fn ensure_ready(active: &Path) -> Result<(), PresetActivationError> {
         match fs::symlink_metadata(active.join(JOURNAL)) {
@@ -68,6 +88,7 @@ impl PresetActivation {
     ) -> Result<(), PresetActivationError> {
         check_dir(review)?;
         check_dir(active)?;
+        let _lock = lock_storage(active)?;
         Self::ensure_ready(active)?;
         if fs::canonicalize(review)? == fs::canonicalize(active)? {
             return Err(PresetActivationError::UnsafePath);
@@ -139,7 +160,7 @@ impl PresetActivation {
         })();
         if let Err(error) = prepared {
             // No active file was touched before the durable `prepared` marker.
-            return Err(match Self::recover(active) {
+            return Err(match Self::recover_locked(active) {
                 Ok(_) => error,
                 Err(_) => PresetActivationError::RecoveryRequired,
             });
@@ -167,7 +188,7 @@ impl PresetActivation {
             Ok(())
         })();
         if let Err(error) = result {
-            return Err(match Self::recover(active) {
+            return Err(match Self::recover_locked(active) {
                 Ok(PresetRecovery::Committed) => PresetActivationError::CommittedNeedsCleanup,
                 Ok(_) => error,
                 Err(_) => PresetActivationError::RecoveryRequired,
@@ -181,6 +202,11 @@ impl PresetActivation {
     /// is rolled back; a committed transaction is left installed.
     pub fn recover(active: &Path) -> Result<PresetRecovery, PresetActivationError> {
         check_dir(active)?;
+        let _lock = lock_storage(active)?;
+        Self::recover_locked(active)
+    }
+
+    fn recover_locked(active: &Path) -> Result<PresetRecovery, PresetActivationError> {
         let journal = active.join(JOURNAL);
         match fs::symlink_metadata(&journal) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -264,6 +290,53 @@ fn validate_pair(catalog: &[u8], credentials: &[u8]) -> Result<(), PresetActivat
         return Err(PresetActivationError::SnapshotConflict);
     }
     Ok(())
+}
+
+fn lock_storage(active: &Path) -> Result<fs::File, PresetActivationError> {
+    let path = active.join(STORAGE_LOCK);
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // The persistent file is deliberately never unlinked: replacing a lock
+    // inode would allow independent processes to hold unrelated locks.
+    let file = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            options.open(&path)?
+        }
+        Ok(_) => return Err(PresetActivationError::UnsafePath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match options.create_new(true).open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    options.create_new(false);
+                    options.open(&path)?
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let named = fs::symlink_metadata(&path)?;
+    if !named.is_file() || named.file_type().is_symlink() || !file.metadata()?.is_file() {
+        return Err(PresetActivationError::UnsafePath);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        if opened.dev() != named.dev() || opened.ino() != named.ino() {
+            return Err(PresetActivationError::UnsafePath);
+        }
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(PresetActivationError::StorageBusy),
+        Err(std::fs::TryLockError::Error(error)) => Err(PresetActivationError::Io(error)),
+    }
 }
 
 fn check_dir(path: &Path) -> Result<(), PresetActivationError> {
@@ -399,6 +472,109 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn runtime_lease_excludes_second_core_and_offline_operators() {
+        let root = Root::new();
+        let first = PresetActivation::runtime_lease(root.path()).unwrap();
+        assert!(matches!(
+            PresetActivation::runtime_lease(root.path()),
+            Err(PresetActivationError::StorageBusy)
+        ));
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::StorageBusy)
+        ));
+        assert_eq!(
+            fs::metadata(root.path().join(STORAGE_LOCK)).unwrap().len(),
+            0
+        );
+        drop(first);
+        let second = PresetActivation::runtime_lease(root.path()).unwrap();
+        drop(second);
+        assert_eq!(
+            PresetActivation::recover(root.path()).unwrap(),
+            PresetRecovery::NoJournal
+        );
+        assert!(root.path().join(STORAGE_LOCK).is_file());
+    }
+
+    #[test]
+    fn exclusive_operator_lease_rejects_core_start_and_other_recovery() {
+        let root = Root::new();
+        let exclusive = lock_storage(root.path()).unwrap();
+        assert!(matches!(
+            PresetActivation::runtime_lease(root.path()),
+            Err(PresetActivationError::StorageBusy)
+        ));
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::StorageBusy)
+        ));
+        drop(exclusive);
+        let lease = PresetActivation::runtime_lease(root.path()).unwrap();
+        drop(lease);
+    }
+
+    #[test]
+    fn lock_is_cross_process_not_just_an_in_process_mutex() {
+        let root = Root::new();
+        let exclusive = lock_storage(root.path()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("settings::preset_activation::tests::preset_lease_child_fixture")
+            .arg("--nocapture")
+            .env("NEUROMITA_PRESET_LOCK_TEST_ROOT", root.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(exclusive);
+    }
+
+    #[test]
+    fn preset_lease_child_fixture() {
+        if let Some(root) = std::env::var_os("NEUROMITA_PRESET_LOCK_TEST_ROOT") {
+            assert!(matches!(
+                PresetActivation::runtime_lease(Path::new(&root)),
+                Err(PresetActivationError::StorageBusy)
+            ));
+        }
+    }
+
+    #[test]
+    fn runtime_lease_enforces_pending_journal_guard_and_recovery_still_works() {
+        let root = Root::new();
+        create_private_dir(&root.path().join(JOURNAL)).unwrap();
+        assert!(matches!(
+            PresetActivation::runtime_lease(root.path()),
+            Err(PresetActivationError::RecoveryRequired)
+        ));
+        assert_eq!(
+            PresetActivation::recover(root.path()).unwrap(),
+            PresetRecovery::DiscardedUnprepared
+        );
+        let lease = PresetActivation::runtime_lease(root.path()).unwrap();
+        drop(lease);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_lock_file_is_rejected_without_following_target() {
+        use std::os::unix::fs::symlink;
+        let root = Root::new();
+        let external = root.path().join("untouched");
+        write_private(&external, b"unrelated").unwrap();
+        symlink(&external, root.path().join(STORAGE_LOCK)).unwrap();
+        assert!(matches!(
+            PresetActivation::runtime_lease(root.path()),
+            Err(PresetActivationError::UnsafePath)
+        ));
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::UnsafePath)
+        ));
+        assert_eq!(fs::read(external).unwrap(), b"unrelated");
     }
 
     #[test]
