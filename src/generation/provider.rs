@@ -389,6 +389,7 @@ impl ResponseGenerator {
             }
             observer.stream_reset();
             depth += 1;
+            tokio::task::yield_now().await;
         };
         let (structured, variables) = match post_dsl {
             Some(program) => {

@@ -2462,4 +2462,100 @@ mod live_http_tests {
             std::fs::remove_dir_all(directory).ok();
         }
     }
+    #[tokio::test]
+    async fn native_tool_completion_yields_to_owner_cancellation_before_followup_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::watch;
+
+        struct ImmediateNativeTool(Arc<AtomicUsize>);
+        impl super::super::GenerationProvider for ImmediateNativeTool {
+            fn kind(&self) -> super::super::ProviderKind {
+                super::super::ProviderKind::Gemini
+            }
+
+            fn generate(
+                &self,
+                _: super::super::GenerationInput,
+                _: ProviderTemplate,
+            ) -> super::super::ProviderFuture<'_> {
+                let round = self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if round != 0 {
+                        std::future::pending().await
+                    }
+                    Ok(super::super::StructuredResponse {
+                        segments: vec![super::super::ResponseSegment::spoken("Thinking")],
+                        tool_call: Some(super::super::ToolCall {
+                            name: "calculator".into(),
+                            args: serde_json::from_value(json!({"expression":"2+3"})).unwrap(),
+                            native_origin: Some(
+                                super::super::structured::NativeToolOrigin::Gemini {
+                                    model_content: json!({"role":"model","parts":[]}),
+                                },
+                            ),
+                        }),
+                        ..Default::default()
+                    })
+                })
+            }
+        }
+
+        struct OwnerInvalidation(watch::Sender<bool>);
+        impl GenerationObserver for OwnerInvalidation {
+            fn tool_finished(&mut self) {
+                self.0.send(true).unwrap();
+            }
+        }
+
+        let mut timeline = TimelineStore::new();
+        let branch = BranchId::new();
+        timeline.create_session(SessionId::new(), branch).unwrap();
+        let mut source = EventDraft::new(EventKind::PlayerMessage);
+        source.actor = Some("player".into());
+        source.observers.insert(CharacterId::Crazy);
+        source.payload.insert(
+            "content".into(),
+            json!([{"type":"text","text":"calculate"}]),
+        );
+        let target = source.id;
+        timeline
+            .append(branch, 0, "input", json!({}), vec![source])
+            .unwrap();
+        let view =
+            TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None).unwrap();
+        let (_, preset) = provider_with_stream("gemini", "http://127.0.0.1:1/", true);
+        let requests = Arc::new(AtomicUsize::new(0));
+        let generator =
+            ResponseGenerator::new([Arc::new(ImmediateNativeTool(Arc::clone(&requests)))
+                as Arc<dyn super::super::GenerationProvider>])
+            .unwrap();
+        let tools = super::super::ToolSettings {
+            enabled: true,
+            calculator: true,
+            max_depth: 1,
+            ..Default::default()
+        };
+        let (changes, mut observed) = watch::channel(false);
+        let mut observer = OwnerInvalidation(changes);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                biased;
+                _ = observed.changed() => {
+                    assert!(*observed.borrow_and_update());
+                }
+                outcome = generator.generate_observed(
+                    GenerationRequest::new(context(view, branch, target), preset, None)
+                        .with_tools(tools),
+                    &mut observer,
+                ) => panic!("invalidated request completed: {outcome:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "invalidated native tool result must not start another provider request"
+        );
+    }
 }
