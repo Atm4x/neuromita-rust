@@ -90,13 +90,14 @@ fn lock_owned_revision(
         ));
     }
     let category_root = canonical_root.join("AIData").join(category);
-    if revision.parent().and_then(Path::parent) != Some(category_root.as_path()) {
+    let canonical_revision = revision.canonicalize()?;
+    if canonical_revision.parent().and_then(Path::parent) != Some(category_root.as_path()) {
         return Err(LayerError::Invalid(
             "revision must be located in the exact managed backend or overlay root".into(),
         ));
     }
     let mut cursor = revision;
-    while cursor != canonical_root {
+    while cursor != data_root {
         let metadata = std::fs::symlink_metadata(cursor)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(LayerError::Invalid(
