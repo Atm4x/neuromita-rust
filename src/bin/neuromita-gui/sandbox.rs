@@ -248,6 +248,30 @@ pub(super) fn bind_chat_actions(
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
+    window
+        .global::<ConversationUi>()
+        .on_revise(move |target, content| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+            match (
+                current_origin(&window, &revision),
+                uuid::Uuid::parse_str(&target),
+            ) {
+                (Some(origin), Ok(id)) => send(Command::Preview(
+                    origin,
+                    neuromita::presentation::ConversationChange::ReviseMessage(
+                        neuromita::timeline::EventId(id),
+                        content.to_string(),
+                    ),
+                )),
+                (None, _) => window.set_chat_error("Unknown chat character selection".into()),
+                (_, Err(error)) => window.set_chat_error(error.to_string().into()),
+            }
+        });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
     window.global::<ConversationUi>().on_confirm(move || {
         if let Some(window) = weak.upgrade()
             && let Some(origin) = current_origin(&window, &revision)
@@ -326,6 +350,8 @@ pub(super) fn bind_chat_actions(
         conversation.set_confirmation(0);
         conversation.set_diagnostics("".into());
         conversation.set_history(false);
+        conversation.set_edit_target("".into());
+        conversation.set_edit_draft("".into());
         window.set_chat_sending(false);
         window.set_chat_error("".into());
         send(Command::Select(ChatOrigin {
@@ -509,11 +535,19 @@ pub(super) fn apply_with_pager(
             let ui = window.global::<ConversationUi>();
             match preview {
                 Some((operation, count)) => {
+                    if matches!(
+                        &operation,
+                        neuromita::presentation::ConversationChange::ReviseMessage(_, _)
+                    ) {
+                        ui.set_edit_target("".into());
+                        ui.set_edit_draft("".into());
+                    }
                     ui.set_count(i32::try_from(count).unwrap_or(i32::MAX));
                     ui.set_confirmation(match operation {
                         neuromita::presentation::ConversationChange::ClearMessages => 1,
                         neuromita::presentation::ConversationChange::ResetContext => 2,
                         neuromita::presentation::ConversationChange::HideMessage(_) => 3,
+                        neuromita::presentation::ConversationChange::ReviseMessage(_, _) => 4,
                     });
                 }
                 None => ui.set_confirmation(0),

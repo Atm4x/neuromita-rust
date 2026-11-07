@@ -3402,3 +3402,92 @@ async fn conversation_history_page_is_bounded_observer_scoped_and_rejects_stale_
     assert!(!after_hide.messages.iter().any(|m| m.event_id == target));
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_single_message_revision_is_text_only_observer_scoped_and_anchor_atomic() {
+    use neuromita::{
+        presentation::{ConversationChange, ConversationError},
+        request::UserInput,
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    api.characters
+        .observe(
+            CharacterId::Crazy,
+            UserInput::new("original".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Kind, UserInput::new("private".into()).unwrap())
+        .await
+        .unwrap();
+    let original = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let target = original.messages[0].event_id;
+    let other = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    let foreign = other.messages[0].event_id;
+    assert!(matches!(
+        api.conversation
+            .preview_change(
+                CharacterId::Crazy,
+                ConversationChange::ReviseMessage(foreign, "unauthorized".into())
+            )
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    assert!(matches!(
+        api.conversation
+            .preview_change(
+                CharacterId::Crazy,
+                ConversationChange::ReviseMessage(target, "  ".into())
+            )
+            .await,
+        Err(ConversationError::InvalidMessageEdit)
+    ));
+    let stale = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            ConversationChange::ReviseMessage(target, "stale".into()),
+        )
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("newer".into()).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        api.conversation.apply_change(stale),
+        Err(ConversationError::StalePreview)
+    ));
+    let fresh = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            ConversationChange::ReviseMessage(target, "revised".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fresh.message_count(), 1);
+    api.conversation.apply_change(fresh).unwrap();
+    let updated = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(updated.messages.len(), 2);
+    assert_eq!(updated.messages[0].event_id, target);
+    assert_eq!(updated.messages[0].content, "revised");
+    assert_eq!(updated.messages[1].content, "newer");
+    let unaffected = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    assert_eq!(unaffected.messages[0].event_id, foreign);
+    assert_eq!(unaffected.messages[0].content, "private");
+    app.shutdown().await.unwrap();
+}

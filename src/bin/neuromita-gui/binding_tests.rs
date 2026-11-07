@@ -1459,3 +1459,83 @@ fn chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows() {
     );
     window.hide().unwrap();
 }
+
+#[test]
+fn chat_message_revision_callback_is_fenced_across_character_reselection() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox::bind_chat_actions,
+        view::ConversationUi,
+    };
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let output = commands.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    bind_chat_actions(
+        &window,
+        Rc::new(move |command| output.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    let event = neuromita::timeline::EventId::new();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window
+        .global::<ConversationUi>()
+        .invoke_revise(event.0.to_string().into(), "changed".into());
+    assert!(
+        matches!(&commands.borrow()[0], Command::Preview(origin, ConversationChange::ReviseMessage(id, content))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == event && content == "changed")
+    );
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    let stale = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            stale,
+            Some((
+                ConversationChange::ReviseMessage(event, "changed".into()),
+                1,
+            )),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(window.global::<ConversationUi>().get_edit_target(), "");
+    window
+        .global::<ConversationUi>()
+        .invoke_revise(event.0.to_string().into(), "current".into());
+    assert!(
+        matches!(&commands.borrow()[3], Command::Preview(origin, ConversationChange::ReviseMessage(id, content))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && *id == event && content == "current")
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            Some((
+                ConversationChange::ReviseMessage(event, "current".into()),
+                1,
+            )),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 4);
+    window.global::<ConversationUi>().invoke_confirm();
+    assert!(matches!(&commands.borrow()[4], Command::Confirm(origin)
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
+    window.hide().unwrap();
+}

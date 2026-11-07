@@ -9,6 +9,9 @@ export global ConversationUi {
     in-out property <int> count;
     in-out property <string> diagnostics;
     in-out property <bool> history;
+    in-out property <string> edit-target;
+    in-out property <string> edit-draft;
+    callback revise(string, string);
     callback preview(int);
     callback confirm();
     callback abort();
@@ -23,18 +26,26 @@ export component ConversationDialog inherits Rectangle {
         HorizontalLayout { padding: 0px; spacing: 0px; alignment: center;
             Rectangle {
                 width: min(720px, parent.width);
-                height: ConversationUi.confirmation > 0 ? 230px : min(600px, root.height - 60px);
+                height: ConversationUi.confirmation > 0 ? 230px : ConversationUi.edit-target != "" ? 310px : min(600px, root.height - 60px);
                 background: SandboxTheme.panel.with-alpha(1); border-radius: 16px; border-width: 1px; border-color: SandboxTheme.border;
                 VerticalLayout {
                     padding: 20px; spacing: 16px;
                     Caption { font-size: 19px; font-weight: 700;
-                        text: ConversationUi.confirmation == 1 ? I18n.i18n("conversation.clear.title", "Очистить видимую историю?") : ConversationUi.confirmation == 2 ? I18n.i18n("conversation.reset.title", "Сбросить контекст персонажа?") : ConversationUi.confirmation == 3 ? I18n.i18n("conversation.hide.title", "Скрыть выбранное сообщение?") : ConversationUi.history ? I18n.i18n("sandbox.history", "История") : I18n.i18n("sandbox.action.last", "Посмотреть последний запрос");
+                        text: ConversationUi.confirmation == 1 ? I18n.i18n("conversation.clear.title", "Очистить видимую историю?") : ConversationUi.confirmation == 2 ? I18n.i18n("conversation.reset.title", "Сбросить контекст персонажа?") : ConversationUi.confirmation == 3 ? I18n.i18n("conversation.hide.title", "Скрыть выбранное сообщение?") : ConversationUi.confirmation == 4 ? I18n.i18n("conversation.revise.title", "Изменить сообщение для этого персонажа?") : ConversationUi.edit-target != "" ? I18n.i18n("conversation.revise.editor", "Редактирование сообщения") : ConversationUi.history ? I18n.i18n("sandbox.history", "История") : I18n.i18n("sandbox.action.last", "Посмотреть последний запрос");
                     }
                     if ConversationUi.confirmation > 0: Text {
-                        text: ConversationUi.confirmation == 1 ? I18n.i18n("conversation.clear.body", "Сообщения будут скрыты только для этого персонажа. Исходные события сохранятся.") + " (" + ConversationUi.count + ")" : ConversationUi.confirmation == 3 ? I18n.i18n("conversation.hide.body", "Сообщение исчезнет из истории этого персонажа. Исходное событие сохранится.") : I18n.i18n("conversation.reset.body", "Начнётся новый контекст персонажа. Прежние события сохранятся; запросы со старым контекстом потеряют актуальность.");
+                        text: ConversationUi.confirmation == 1 ? I18n.i18n("conversation.clear.body", "Сообщения будут скрыты только для этого персонажа. Исходные события сохранятся.") + " (" + ConversationUi.count + ")" : ConversationUi.confirmation == 3 ? I18n.i18n("conversation.hide.body", "Сообщение исчезнет из истории этого персонажа. Исходное событие сохранится.") : ConversationUi.confirmation == 4 ? I18n.i18n("conversation.revise.body", "Текст изменится только для этого персонажа; исходное событие останется в Timeline.") : I18n.i18n("conversation.reset.body", "Начнётся новый контекст персонажа. Прежние события сохранятся; запросы со старым контекстом потеряют актуальность.");
                         color: SandboxTheme.text; font-family: SandboxTheme.font-family; font-size: 13px; wrap: word-wrap;
                     }
-                    if ConversationUi.confirmation == 0: ScrollView {
+                    if ConversationUi.confirmation == 0 && ConversationUi.edit-target != "": Rectangle {
+                        height: 150px; border-width: 1px; border-radius: 8px; border-color: SandboxTheme.border; background: SandboxTheme.input;
+                        TextInput {
+                            width: parent.width; height: parent.height;
+                            text <=> ConversationUi.edit-draft; single-line: false; wrap: word-wrap;
+                            font-family: SandboxTheme.font-family; font-size: 13px; color: SandboxTheme.text;
+                        }
+                    }
+                    if ConversationUi.confirmation == 0 && ConversationUi.edit-target == "": ScrollView {
                         content-width: self.visible-width;
                         if !ConversationUi.history: Text { text: ConversationUi.diagnostics; color: SandboxTheme.text; font-family: "Consolas"; font-size: 12px; wrap: word-wrap; }
                         if ConversationUi.history: VerticalLayout { padding: 0px; spacing: 12px; alignment: start;
@@ -46,7 +57,8 @@ export component ConversationDialog inherits Rectangle {
                     HorizontalLayout { height: 38px; spacing: 12px;
                         Rectangle { horizontal-stretch: 1; }
                         if ConversationUi.confirmation > 0: Centered { HeaderButton { text: I18n.i18n("conversation.confirm", "Подтвердить"); activated => { ConversationUi.confirm(); } } }
-                        Centered { HeaderButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { ConversationUi.abort(); ConversationUi.history = false; ConversationUi.diagnostics = ""; } } }
+                        if ConversationUi.confirmation == 0 && ConversationUi.edit-target != "": Centered { HeaderButton { text: I18n.i18n("conversation.revise.save", "Сохранить редакцию"); enabled: ConversationUi.edit-draft != ""; activated => { ConversationUi.revise(ConversationUi.edit-target, ConversationUi.edit-draft); } } }
+                        Centered { HeaderButton { text: I18n.i18n("common.dismiss", "Закрыть"); activated => { ConversationUi.abort(); ConversationUi.history = false; ConversationUi.diagnostics = ""; ConversationUi.edit-target = ""; ConversationUi.edit-draft = ""; } } }
                     }
                 }
             }

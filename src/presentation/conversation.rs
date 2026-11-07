@@ -30,13 +30,16 @@ pub enum ConversationError {
     StalePreview,
     #[error("message is not visible to the selected character at this timeline position")]
     MessageNotVisible,
+    #[error("only non-empty text-only visible messages can be revised")]
+    InvalidMessageEdit,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ConversationChange {
     ClearMessages,
     ResetContext,
     HideMessage(crate::identity::EventId),
+    ReviseMessage(crate::identity::EventId, String),
 }
 
 pub struct ConversationChangePreview {
@@ -49,7 +52,7 @@ pub struct ConversationChangePreview {
 
 impl ConversationChangePreview {
     pub fn operation(&self) -> ConversationChange {
-        self.operation
+        self.operation.clone()
     }
     pub fn message_count(&self) -> usize {
         self.targets.len()
@@ -103,12 +106,27 @@ impl ConversationPresenter {
         };
         let view = self.characters.context(character, at).await?;
         let visible = view.view.messages();
-        let targets = match operation {
+        let targets = match &operation {
             ConversationChange::HideMessage(id) => {
-                if !visible.iter().any(|message| message.event_id == id) {
+                if !visible.iter().any(|message| message.event_id == *id) {
                     return Err(ConversationError::MessageNotVisible);
                 }
-                vec![id]
+                vec![*id]
+            }
+            ConversationChange::ReviseMessage(id, content) => {
+                let message = visible
+                    .iter()
+                    .find(|message| message.event_id == *id)
+                    .ok_or(ConversationError::MessageNotVisible)?;
+                if content.trim().is_empty()
+                    || !message
+                        .fields
+                        .get("content")
+                        .is_some_and(serde_json::Value::is_string)
+                {
+                    return Err(ConversationError::InvalidMessageEdit);
+                }
+                vec![*id]
             }
             _ => visible
                 .into_iter()
@@ -160,6 +178,16 @@ impl ConversationPresenter {
             }
             ConversationChange::ResetContext => {
                 timeline.reset_character_context(preview.selection, preview.character, id)?;
+            }
+            ConversationChange::ReviseMessage(target, content) => {
+                let mut changes = serde_json::Map::new();
+                changes.insert("content".into(), serde_json::Value::String(content));
+                timeline.change_message(
+                    preview.selection,
+                    preview.character,
+                    id,
+                    crate::timeline::message_actions::MessageAction::Revise { target, changes },
+                )?;
             }
         }
         Ok(())

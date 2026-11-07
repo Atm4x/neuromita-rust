@@ -169,6 +169,7 @@ export component SandboxChat inherits Rectangle {
                         character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
                         hide-message(id) => { root.hide-message(id); }
+                        edit-message(id, text) => { ConversationUi.edit-target = id; ConversationUi.edit-draft = text; }
                     }
                 }
             }

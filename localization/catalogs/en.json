@@ -1886,5 +1886,25 @@
   "settings.ai-engine.maintenance-unavailable": {
     "source": "Обслуживание недоступно",
     "translation": "Maintenance is unavailable"
+  },
+  "conversation.revise.title": {
+    "source": "Изменить сообщение для этого персонажа?",
+    "translation": "Revise message for this character?"
+  },
+  "conversation.revise.editor": {
+    "source": "Редактирование сообщения",
+    "translation": "Edit message"
+  },
+  "conversation.revise.body": {
+    "source": "Текст изменится только для этого персонажа; исходное событие останется в Timeline.",
+    "translation": "Text will change only for this character; the original Timeline event remains intact."
+  },
+  "conversation.revise.save": {
+    "source": "Сохранить редакцию",
+    "translation": "Save revision"
+  },
+  "sandbox.message.edit": {
+    "source": "Редактировать",
+    "translation": "Edit"
   }
 }
