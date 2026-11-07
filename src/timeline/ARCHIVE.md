@@ -151,3 +151,13 @@ remain **unsupported** until their semantics are translated without broadening
 MitaView access or dropping content. The conversion errors rather than erasing
 those events. No Python archive can be committed by B28; an atomic importer and
 complete coverage of Python event kinds are still required for #9.
+
+B29 supports the confirmed Python message shape containing ordered
+`attachments: [{ type: "image_ref", asset_id, media_type, byte_size }]`
+and a text `content`: it constructs native `[Text, Image, ...]` parts in that
+order, validates each reference against the exact decoded binary manifest,
+and removes the redundant Python attachment field from the detached native
+payload. Unsupported placement, unknown keys, non-image MIME, and unrecognized
+media formats reject the entire conversion; `stage_assets()` remains the
+separate integrity-checked binary upload step. No canonical session is
+published and no Python re-export equivalence is asserted.

@@ -6,7 +6,8 @@ use super::{BoundPythonArchive, PythonArchiveError, PythonEvent};
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
     Branch, BranchId, BranchInfo, CausalLink, CausalRelation, EventDraft, EventKind, Receipt,
-    SessionId, SessionProvenance, TimelineFact, TimelineStore,
+    SessionId, SessionProvenance, TimelineAssetRef, TimelineFact, TimelineMessagePart,
+    TimelineStore,
 };
 
 /// Detached canonical facts and receipts. No Timeline/SQLite/AssetStore writes take place.
@@ -70,6 +71,20 @@ impl BoundPythonArchive<'_> {
             .iter()
             .map(|event| (event.event_id.as_str(), event))
             .collect::<HashMap<_, _>>();
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let asset_catalog = self
+            .source
+            .envelope
+            .assets
+            .iter()
+            .map(|asset| {
+                let size = STANDARD
+                    .decode(&asset.base64)
+                    .map_err(|_| PythonArchiveError::Invalid("verified asset encoding changed"))?
+                    .len();
+                Ok((asset.asset_id.as_str(), (asset.media_type.as_str(), size)))
+            })
+            .collect::<Result<HashMap<_, _>, PythonArchiveError>>()?;
         let mut drafts = HashMap::new();
         for event in &self.source.envelope.events {
             let draft = native_draft(
@@ -78,6 +93,7 @@ impl BoundPythonArchive<'_> {
                 &self.observers,
                 &branch_map,
                 &self.source.envelope.branches,
+                &asset_catalog,
             )?;
             drafts.insert(event.event_id.as_str(), draft);
         }
@@ -200,6 +216,7 @@ fn native_draft(
     observers: &BTreeMap<String, CharacterId>,
     branches: &HashMap<&str, BranchId>,
     branch_info: &[super::PythonBranch],
+    assets: &HashMap<&str, (&str, usize)>,
 ) -> Result<EventDraft, PythonArchiveError> {
     let kind = match event.kind.as_str() {
         "PlayerMessage" => EventKind::PlayerMessage,
@@ -223,24 +240,93 @@ fn native_draft(
             ));
         }
     };
-    if contains_python_media(&event.payload) {
+    let mut payload = event
+        .payload
+        .as_object()
+        .cloned()
+        .ok_or(PythonArchiveError::Invalid("event payload not an object"))?;
+    let attachments = payload.remove("attachments");
+    if contains_python_media(&Value::Object(payload.clone())) {
         return Err(PythonArchiveError::Invalid(
             "Python media requires typed native conversion",
         ));
     }
-    if matches!(
+    let is_message = matches!(
         kind,
         EventKind::PlayerMessage
             | EventKind::CharacterMessage
             | EventKind::CharacterObservation
             | EventKind::SessionNote
-    ) {
-        let content = event
-            .payload
-            .get("content")
-            .ok_or(PythonArchiveError::Invalid(
-                "Python message content missing",
-            ))?;
+    );
+    if let Some(attachments) = attachments {
+        if !is_message {
+            return Err(PythonArchiveError::Invalid(
+                "attachments on non-message event",
+            ));
+        }
+        let list = attachments
+            .as_array()
+            .filter(|list| !list.is_empty() && list.len() <= 31)
+            .ok_or(PythonArchiveError::Invalid("Python attachment count"))?;
+        let text =
+            payload
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or(PythonArchiveError::Invalid(
+                    "Python attachment text missing",
+                ))?;
+        let mut parts = vec![TimelineMessagePart::Text {
+            text: text.to_owned(),
+        }];
+        for entry in list {
+            let object = entry
+                .as_object()
+                .filter(|value| value.len() == 4)
+                .ok_or(PythonArchiveError::Invalid("Python attachment shape"))?;
+            if object.get("type").and_then(Value::as_str) != Some("image_ref") {
+                return Err(PythonArchiveError::Invalid(
+                    "unsupported Python attachment type",
+                ));
+            }
+            let external = object
+                .get("asset_id")
+                .and_then(Value::as_str)
+                .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
+            let digest = external
+                .strip_prefix("sha256:")
+                .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
+            let mime = object
+                .get("media_type")
+                .and_then(Value::as_str)
+                .ok_or(PythonArchiveError::Invalid("Python attachment MIME"))?;
+            let size = object
+                .get("byte_size")
+                .and_then(Value::as_u64)
+                .ok_or(PythonArchiveError::Invalid("Python attachment size"))?;
+            if !mime.starts_with("image/")
+                || assets
+                    .get(external)
+                    .map(|(catalog_mime, len)| *catalog_mime != mime || *len as u64 != size)
+                    .unwrap_or(true)
+            {
+                return Err(PythonArchiveError::Invalid("Python attachment mismatch"));
+            }
+            parts.push(TimelineMessagePart::Image {
+                asset: TimelineAssetRef {
+                    digest: digest.to_owned(),
+                    size,
+                    media_type: mime.to_owned(),
+                },
+            });
+        }
+        payload.insert(
+            "content".into(),
+            serde_json::to_value(parts).map_err(|_| PythonArchiveError::Encoding)?,
+        );
+    } else if is_message {
+        let content = payload.get("content").ok_or(PythonArchiveError::Invalid(
+            "Python message content missing",
+        ))?;
         let parts = crate::timeline::domain::parse_message_content(content).map_err(|_| {
             PythonArchiveError::Invalid("Python message content is not representable")
         })?;
@@ -288,11 +374,6 @@ fn native_draft(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut payload = event
-        .payload
-        .as_object()
-        .cloned()
-        .ok_or(PythonArchiveError::Invalid("event payload not an object"))?;
     if kind == EventKind::BranchCreated {
         let checkpoint = payload
             .get("checkpoint_id")

@@ -471,8 +471,9 @@ fn python_detached_conversion_preserves_native_fact_and_receipt_identity() {
 }
 
 #[test]
-fn python_detached_conversion_rejects_binary_without_silently_dropping_content() {
-    use neuromita::timeline::domain::TimelineStore;
+fn python_detached_conversion_rehydrates_python_image_attachment_as_typed_parts() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{TimelineMessagePart, TimelineStore, parse_message_content};
     let source = inspect_python_archive(include_bytes!(
         "fixtures/python_session_archive_asset_20261107.json"
     ))
@@ -480,12 +481,22 @@ fn python_detached_conversion_rejects_binary_without_silently_dropping_content()
     let bound = source
         .bind_memory(&TimelineStore::new(), &explicit_observers())
         .unwrap();
-    assert!(matches!(
-        bound.prepare_canonical(),
-        Err(PythonArchiveError::Invalid(
-            "Python media requires typed native conversion"
-        ))
-    ));
+    let prepared = bound.prepare_canonical().unwrap();
+    let source_id = source
+        .identities
+        .events
+        .iter()
+        .find(|id| id.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+        .unwrap();
+    let fact = prepared.fact(EventId(source_id.candidate_uuid)).unwrap();
+    let parts = parse_message_content(fact.draft.payload.get("content").unwrap()).unwrap();
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(&parts[0], TimelineMessagePart::Text { text } if text == "Привет"));
+    assert!(
+        matches!(&parts[1], TimelineMessagePart::Image { asset } if asset.media_type == "image/png" && asset.size == 34 && asset.digest == "aee1c651e5a199456290787d09ff5a7fa3c7e83f4715aad94dd1c6c95df13433")
+    );
+    assert!(!fact.draft.payload.contains_key("attachments"));
+    assert_eq!(prepared.receipt_count(), 2);
 }
 
 #[test]
@@ -589,6 +600,57 @@ fn python_detached_conversion_rejects_unverified_native_media_part() {
     });
     let parsed = inspect_python_archive(&source).unwrap();
     let bound = parsed
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "Python media requires typed native conversion"
+        ))
+    ));
+}
+
+#[test]
+fn python_detached_conversion_preserves_attachment_order_and_rejects_unknown_placement() {
+    use neuromita::timeline::domain::{TimelineMessagePart, TimelineStore, parse_message_content};
+    let duplicated = {
+        let mut doc: Value = serde_json::from_slice(include_bytes!(
+            "fixtures/python_session_archive_asset_20261107.json"
+        ))
+        .unwrap();
+        let attachment = doc["events"][1]["payload"]["attachments"][0].clone();
+        doc["events"][1]["payload"]["attachments"]
+            .as_array_mut()
+            .unwrap()
+            .push(attachment);
+        doc["operations"][1]["intent"]["events"][0]["payload"] =
+            doc["events"][1]["payload"].clone();
+        serde_json::to_vec(&doc).unwrap()
+    };
+    let parsed = inspect_python_archive(&duplicated).unwrap();
+    let bound = parsed
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let fact = prepared
+        .fact(neuromita::timeline::EventId(
+            parsed
+                .identities
+                .events
+                .iter()
+                .find(|id| id.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+                .unwrap()
+                .candidate_uuid,
+        ))
+        .unwrap();
+    let parts = parse_message_content(&fact.draft.payload["content"]).unwrap();
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[0], TimelineMessagePart::Text { text } if text == "Привет"));
+    assert!(matches!(&parts[1], TimelineMessagePart::Image { .. }));
+    assert_eq!(parts[1], parts[2]);
+
+    let misplaced = inspect_python_archive(&with_binary(b"image bytes")).unwrap();
+    let bound = misplaced
         .bind_memory(&TimelineStore::new(), &explicit_observers())
         .unwrap();
     assert!(matches!(
