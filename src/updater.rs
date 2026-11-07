@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub mod activation;
 pub mod handoff;
+pub mod install_policy;
 pub mod package;
 
 use crate::portable::PortableDataRoot;
