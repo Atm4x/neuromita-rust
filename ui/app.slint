@@ -298,11 +298,10 @@ export component AppWindow inherits Window {
             operation-capabilities: root.ai-hub-operation-capabilities;
             operation-decision: root.ai-hub-decision;
             refresh-requested(rev, token) => { root.ai-hub-refresh-requested(rev, token); }
-            close-requested => {
-                if !root.ai-hub-settings.dirty && root.ai-hub-settings.save-phase != AiHubSavePhase.saving {
-                    root.ai-hub-open = false;
-                }
-            }
+            // AiHubShell exclusively owns the local editor dirty guard.
+            // Its close-requested callback occurs only after Save/Discard or
+            // when there is no dirty draft; never recheck stale Core dirty.
+            close-requested => { root.ai-hub-open = false; }
         }
     }
 

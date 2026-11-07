@@ -17,6 +17,7 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_TERM_COLOR: always
+      NEUROMITA_TEST_PYTHON: python
     steps:
       - uses: actions/checkout@v4
       - name: Install native GUI dependencies
@@ -29,6 +30,10 @@ jobs:
           rustup default stable
           cargo --version
           rustc --version
+      - name: Python 3.12 for Core SDK fixtures
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Format
         run: cargo fmt --all -- --check
       - name: GUI typecheck

@@ -122,8 +122,9 @@ export component AiHubShell inherits Rectangle {
                 enabled: root.settings.save-phase != AiHubSavePhase.saving && !settings-editor.saving;
                 SettingsLabel { text: root.localized("common.close", "Закрыть", "Close"); horizontal-alignment: center; }
                 activated => {
-                    if root.active-tab == 1 { settings-editor.request-close(); }
-                    else { root.close-requested(); }
+                    // The panel stays mounted while tabs change and owns
+                    // the single Discard/Cancel navigation confirmation.
+                    settings-editor.request-close();
                 }
             }
         }
@@ -357,7 +358,7 @@ export component AiHubShell inherits Rectangle {
                             }
                         }
                     }
-                    if root.settings.dirty: SettingsLabel {
+                    if settings-editor.dirty: SettingsLabel {
                         text: root.localized("ai-hub.shell.unsaved", "Есть несохранённые изменения. Сохраните или отмените их перед закрытием.", "Unsaved changes. Save or discard before closing.");
                         color: Theme.warning; wrap: word-wrap; overflow: clip;
                     }
