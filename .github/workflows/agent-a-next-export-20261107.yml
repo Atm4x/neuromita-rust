@@ -1,0 +1,42 @@
+name: Agent A single-ref source export 20261107
+on:
+  push:
+    branches:
+      - bridge/export-agent-a-next-20261107
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch exact Agent A source ref and create full bundle
+        shell: bash
+        env:
+          SOURCE_REF: codex/knowledge-slint-forgotten-inspection-20261107
+          EXPECTED_HEAD: b989d8b73ba85d871e99ddb0c16a50459467dc49
+        run: |
+          set -euo pipefail
+          git fetch origin "+refs/heads/$SOURCE_REF:refs/heads/$SOURCE_REF"
+          test "$(git rev-parse "refs/heads/$SOURCE_REF")" = "$EXPECTED_HEAD"
+          mkdir -p export
+          git bundle create export/agent-a-source.bundle "refs/heads/$SOURCE_REF"
+          git bundle verify export/agent-a-source.bundle
+          git bundle list-heads export/agent-a-source.bundle
+          (cd export && sha256sum agent-a-source.bundle > agent-a-source.bundle.sha256)
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          p=pathlib.Path("export/agent-a-source.bundle")
+          manifest={"repo":"Atm4x/neuromita-rust","ref":"codex/knowledge-slint-forgotten-inspection-20261107","head":"b989d8b73ba85d871e99ddb0c16a50459467dc49","size":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()}
+          pathlib.Path("export/manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")
+          print(manifest)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-source-20261107
+          path: export/
+          retention-days: 3
+          if-no-files-found: error
