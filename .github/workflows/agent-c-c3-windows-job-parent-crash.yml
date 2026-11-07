@@ -1,0 +1,35 @@
+name: Agent C Windows Job closes on abrupt parent exit
+on:
+  push:
+    branches:
+      - bridge/test-agent-c171-job-parent-crash-20261107
+permissions:
+  contents: read
+jobs:
+  windows-job-crash:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/test-agent-c171-job-parent-crash-20261107
+          fetch-depth: 1
+      - name: Compile and execute exact Job Object module against parent crash
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          New-Item -ItemType Directory -Force -Path win-probe/src | Out-Null
+          @'
+          [package]
+          name = "nm_c3_windows_job_crash_probe"
+          version = "0.1.0"
+          edition = "2024"
+          [target.'cfg(windows)'.dependencies]
+          windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+          '@ | Set-Content win-probe/Cargo.toml
+          @'
+          #[path = "../../.github/agent-c-tests/c3-windows-job-crash-probe.rs"]
+          mod crash;
+          fn main() { crash::main().unwrap(); }
+          '@ | Set-Content win-probe/src/main.rs
+          rustup run 1.98.1 cargo run --manifest-path win-probe/Cargo.toml --offline
