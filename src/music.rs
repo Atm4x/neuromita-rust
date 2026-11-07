@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-const CACHE_FORMAT_VERSION: u32 = 1;
+const CACHE_FORMAT_VERSION: u32 = 2;
 const MAX_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BEATS: usize = 200_000;
 
@@ -179,6 +179,9 @@ struct CacheEnvelope {
     version: u32,
     key: BeatCacheKey,
     timeline: BeatTimeline,
+    /// Digest of the exact serialized timeline used when writing the entry.
+    /// Detects valid-JSON corruption as well as malformed content.
+    timeline_sha256: String,
 }
 
 impl BeatCache {
@@ -215,9 +218,13 @@ impl BeatCache {
         let Ok(envelope) = serde_json::from_slice::<CacheEnvelope>(&content) else {
             return Ok(CacheLookup::Corrupt);
         };
+        let valid_digest = serde_json::to_vec(&envelope.timeline)
+            .ok()
+            .is_some_and(|bytes| sha256_hex(&bytes) == envelope.timeline_sha256);
         if envelope.version != CACHE_FORMAT_VERSION
             || envelope.key != *key
             || envelope.timeline.validate().is_err()
+            || !valid_digest
         {
             return Ok(CacheLookup::Corrupt);
         }
@@ -229,10 +236,13 @@ impl BeatCache {
     pub fn store(&self, key: &BeatCacheKey, timeline: &BeatTimeline) -> Result<(), BeatCacheError> {
         let target = self.cache_path(key)?;
         timeline.validate()?;
+        let timeline_bytes =
+            serde_json::to_vec(timeline).map_err(|_| BeatCacheError::InvalidTimeline)?;
         let payload = serde_json::to_vec(&CacheEnvelope {
             version: CACHE_FORMAT_VERSION,
             key: key.clone(),
             timeline: timeline.clone(),
+            timeline_sha256: sha256_hex(&timeline_bytes),
         })
         .map_err(|_| BeatCacheError::InvalidTimeline)?;
         if payload.len() as u64 > MAX_CACHE_BYTES {
