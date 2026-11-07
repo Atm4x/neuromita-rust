@@ -46,3 +46,32 @@ must first establish a complete authoritative persisted selection snapshot,
 freeze in-process activation and settings changes, and define an atomic,
 crash-recoverable quarantine transaction under these same locks. This slice
 contains no destructive operation and no GUI Remove.
+
+## Persisted settings maintenance freeze (C3.4)
+
+`SettingsOwner::freeze_persisted` obtains an exclusive in-process maintenance
+state under the existing settings mutex, only when its current revision is
+reported durably saved. While the RAII guard remains live, all `edit`,
+`replace`, `import` and explicit `request_save` operations return
+`SettingsError::MaintenanceActive`; reads retain the stable snapshot. A pending
+or failed save is **not** a maintenance snapshot. Dropping the guard restores
+normal edits, which immediately invalidate the prior persisted proof until the
+new revision is saved. Existing API callers receive the settings-conflict error
+code rather than silently succeeding.
+
+`freeze_persisted_for_root` additionally requires an application-owned settings
+repository bound to the same canonical root as the portable
+`SettingsInstanceLease`. In-memory or ad-hoc repositories cannot impersonate a
+complete persisted selection inventory. `inspect_backend_with_frozen_settings`
+and `inspect_overlay_with_frozen_settings` combine this freeze with the earlier
+root→exclusive revision lock; the returned RAII assessment holds **both**
+until drop. Tests cover concurrent settings writers, independent repository
+rejection, pending revisions, exclusive revision locks and re-acquisition after
+drop.
+
+This is still strictly **read-only and advisory**. `ServiceSelection` remains
+supplied by the caller and is **not yet guaranteed complete**; the persisted
+speech settings record plugin choices rather than exact locked backend and
+overlay plans, so a separate verified manifest resolver is required. Activation
+coordination outside cooperating revision leases remains unproven. No token
+from this API authorizes rename, quarantine, physical delete or GUI Remove.

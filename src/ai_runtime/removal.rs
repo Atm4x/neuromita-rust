@@ -22,7 +22,7 @@ use super::{
     revision_lease::RevisionLease,
 };
 
-use crate::settings::SettingsInstanceLease;
+use crate::settings::{SettingsInstanceLease, SettingsMaintenanceGuard, SettingsOwner};
 
 #[allow(dead_code)]
 pub(crate) struct LeasedRemovalInspection<'a> {
@@ -74,6 +74,69 @@ pub(crate) fn inspect_overlay_with_root<'a>(
         assessment,
         _root_owner: root_owner,
         _revision_owner: revision_owner,
+    })
+}
+
+/// An advisory inspection while the exact persisted settings revision is
+/// frozen. Caller-provided `configured` must still be independently proven
+/// complete before a destructive transaction can even be considered.
+#[allow(dead_code)]
+pub(crate) struct FrozenRemovalInspection<'a> {
+    pub(crate) assessment: RemovalAssessment,
+    pub(crate) persisted_revision: u64,
+    _settings: SettingsMaintenanceGuard<'a>,
+    _layers: LeasedRemovalInspection<'a>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn inspect_backend_with_frozen_settings<'a>(
+    root_owner: &'a SettingsInstanceLease,
+    settings: &'a SettingsOwner,
+    data_root: &Path,
+    installer: &BackendInstaller,
+    backend: &LockedBackend,
+    configured: &[ServiceSelection],
+    running: &[ActiveWorkerLayers],
+) -> Result<FrozenRemovalInspection<'a>, LayerError> {
+    let frozen = settings
+        .freeze_persisted_for_root(root_owner)
+        .map_err(|error| {
+            LayerError::Invalid(format!("cannot freeze persisted selections: {error}"))
+        })?;
+    let inspection = inspect_backend_with_root(
+        root_owner, data_root, installer, backend, configured, running,
+    )?;
+    Ok(FrozenRemovalInspection {
+        assessment: inspection.assessment.clone(),
+        persisted_revision: frozen.snapshot().revision,
+        _settings: frozen,
+        _layers: inspection,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn inspect_overlay_with_frozen_settings<'a>(
+    root_owner: &'a SettingsInstanceLease,
+    settings: &'a SettingsOwner,
+    data_root: &Path,
+    installer: &OverlayInstaller,
+    overlay: &LockedOverlay,
+    configured: &[ServiceSelection],
+    running: &[ActiveWorkerLayers],
+) -> Result<FrozenRemovalInspection<'a>, LayerError> {
+    let frozen = settings
+        .freeze_persisted_for_root(root_owner)
+        .map_err(|error| {
+            LayerError::Invalid(format!("cannot freeze persisted selections: {error}"))
+        })?;
+    let inspection = inspect_overlay_with_root(
+        root_owner, data_root, installer, overlay, configured, running,
+    )?;
+    Ok(FrozenRemovalInspection {
+        assessment: inspection.assessment.clone(),
+        persisted_revision: frozen.snapshot().revision,
+        _settings: frozen,
+        _layers: inspection,
     })
 }
 
@@ -281,6 +344,128 @@ mod tests {
         )
         .unwrap();
         (data, backends, overlays)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_settings_and_revision_are_frozen_together() {
+        use crate::lifecycle::Lifecycle;
+        use crate::settings::{
+            AppSettings, LeasedJsonSettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsRepository, SettingsSource, SpeechSettings,
+        };
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let (root, backends, _) = managed_installers();
+        let root_owner = Arc::new(SettingsInstanceLease::acquire(&root).unwrap());
+        let repository: Arc<dyn SettingsRepository> = Arc::new(LeasedJsonSettingsRepository::new(
+            root.join("settings.json"),
+            Arc::clone(&root_owner),
+        ));
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository,
+        })
+        .await
+        .unwrap();
+        let settings = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(lifecycle.run(stop.clone()));
+        settings.flush().await.unwrap();
+
+        let chosen = backend();
+        let path = backends.installed_path(&chosen).unwrap();
+        let inspection = inspect_backend_with_frozen_settings(
+            &root_owner,
+            &settings,
+            &root,
+            &backends,
+            &chosen,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(inspection.persisted_revision, 0);
+        assert!(!inspection.assessment.has_observed_references());
+        assert_eq!(
+            settings.request_save(),
+            Err(crate::settings::SettingsError::MaintenanceActive)
+        );
+        assert!(matches!(
+            settings.edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled),
+            Err(crate::settings::SettingsError::MaintenanceActive)
+        ));
+        assert_eq!(
+            RevisionLease::shared(&path).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(inspection);
+        assert!(RevisionLease::shared(&path).is_ok());
+        settings
+            .edit::<SpeechSettings>(|speech| speech.tts.enabled = !speech.tts.enabled)
+            .unwrap();
+        assert!(matches!(
+            inspect_backend_with_frozen_settings(
+                &root_owner,
+                &settings,
+                &root,
+                &backends,
+                &chosen,
+                &[],
+                &[]
+            ),
+            Err(LayerError::Invalid(_))
+        ));
+        settings.flush().await.unwrap();
+        let inspection = inspect_backend_with_frozen_settings(
+            &root_owner,
+            &settings,
+            &root,
+            &backends,
+            &chosen,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(inspection.persisted_revision, 1);
+        drop(inspection);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        drop(settings);
+        drop(root_owner);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ad_hoc_memory_settings_cannot_vouch_for_persisted_layer_selection() {
+        use crate::settings::{
+            AppSettings, MemorySettingsRepository, SettingsConfig, SettingsLifecycle,
+            SettingsSource,
+        };
+        use std::sync::Arc;
+        let (root, backends, _) = managed_installers();
+        let root_owner = SettingsInstanceLease::acquire(&root).unwrap();
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        assert!(matches!(
+            inspect_backend_with_frozen_settings(
+                &root_owner,
+                &owner,
+                &root,
+                &backends,
+                &backend(),
+                &[],
+                &[]
+            ),
+            Err(LayerError::Invalid(_))
+        ));
+        drop(root_owner);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
