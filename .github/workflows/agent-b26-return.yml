@@ -1,0 +1,42 @@
+name: Publish Agent B26 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b26-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3c32e5582bb91a9c6b7eaa7dea89101745a33eb2
+          fetch-depth: 0
+      - name: Verify and publish B26 Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=3c32e5582bb91a9c6b7eaa7dea89101745a33eb2
+          EXPECTED=7f1babb5de0c40147a3e12dff1cd142ebceb8e10
+          SHA256=e5f7a953c1a4a88b485cc23cf20611bb0539eba1a23a607b086e76c945ce443b
+          TARGET=refs/heads/codex/timeline-python-provenance-atomic-20261107
+          git fetch origin refs/heads/bridge/agent-b26-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b26-20261107.bundle.b64 | base64 --decode > /tmp/b26.bundle
+          echo "$SHA256  /tmp/b26.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/b26.bundle
+          git fetch /tmp/b26.bundle refs/heads/codex/timeline-python-provenance-atomic-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch has unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published B26 at $IMPORTED"
