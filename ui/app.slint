@@ -4,6 +4,7 @@ import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
+import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
@@ -16,7 +17,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -41,6 +42,15 @@ export component AppWindow inherits Window {
     in property <string> onboarding-guide-image;
     in property <string> onboarding-guide-wiki-url;
     in-out property <float> onboarding-guide-zoom: 1.0;
+    in-out property <int> onboarding-guide-focus-step: 0;
+    in property <float> onboarding-guide-focus-x: 0.5;
+    in property <float> onboarding-guide-focus-y: 0.5;
+    in property <float> onboarding-guide-crop-left: 0.0;
+    in property <float> onboarding-guide-crop-top: 0.0;
+    in property <float> onboarding-guide-crop-right: 1.0;
+    in property <float> onboarding-guide-crop-bottom: 1.0;
+    in property <[GuideFocusTarget]> onboarding-guide-targets;
+    callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
@@ -227,151 +237,47 @@ export component AppWindow inherits Window {
                         activated => { root.onboarding-guide-select-level(2); }
                     }
                 }
-                Rectangle {
-                    vertical-stretch: 1; background: Theme.background; border-radius: 12px; clip: true;
-                    if root.onboarding-guide-image == "welcome" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_welcome.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
+                GuideMedia {
+                    vertical-stretch: 1;
+                    image-key: root.onboarding-guide-image;
+                    language: root.onboarding-language;
+                    description: root.onboarding-guide-title;
+                    zoom: root.onboarding-guide-zoom;
+                    crop-left: root.onboarding-guide-crop-left;
+                    crop-top: root.onboarding-guide-crop-top;
+                    crop-right: root.onboarding-guide-crop-right;
+                    crop-bottom: root.onboarding-guide-crop-bottom;
+                    steps: root.onboarding-guide-targets;
+                    focus-step: root.onboarding-guide-focus-step;
+                    focus-center-x: root.onboarding-guide-focus-x;
+                    focus-center-y: root.onboarding-guide-focus-y;
+                }
+                if root.onboarding-guide-targets.length > 0: HorizontalLayout {
+                    height: 30px; spacing: 5px;
+                    Text {
+                        text: root.onboarding-language == "ru" ? "Шаг:" : "Step:";
+                        color: Theme.muted; vertical-alignment: center; font-size: 12px;
                     }
-                    if root.onboarding-guide-image == "welcome" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_welcome1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
+                    for step in root.onboarding-guide-targets: ActionSurface {
+                        width: 30px; height: 28px;
+                        label: (root.onboarding-language == "ru" ? "Шаг " : "Step ") + step.number;
+                        selected: root.onboarding-guide-focus-step == step.number;
+                        background: root.onboarding-guide-focus-step == step.number ? Theme.selected : Theme.hover;
+                        Label {
+                            text: "" + step.number;
+                            horizontal-alignment: center;
+                        }
+                        activated => { root.onboarding-guide-select-step(step.number); }
                     }
-                    if root.onboarding-guide-image == "preset" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_preset.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "preset" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_preset1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "voice" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_voice.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "voice" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_voice1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "microphone" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_microphone.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "microphone" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_microphone1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "memory" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_memory.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "memory" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_memory1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "screen" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_screen.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "screen" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_screen1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "models" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_models.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "models" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_models1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "sandbox" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_sandbox.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "sandbox" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_sandbox1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "next" && root.onboarding-language == "ru": Image {
-                        source: @image-url("../assets/guide/guide_next.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.onboarding-guide-image == "next" && root.onboarding-language == "en": Image {
-                        source: @image-url("../assets/guide/guide_next1.png");
-                        image-fit: contain;
-                        width: parent.width * root.onboarding-guide-zoom;
-                        height: parent.height * root.onboarding-guide-zoom;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    if root.onboarding-guide-focus-step != 0: ActionSurface {
+                        width: 105px; height: 28px;
+                        label: "Clear image highlight"; background: Theme.hover;
+                        Label {
+                            text: root.onboarding-language == "ru" ? "Сбросить" : "Clear";
+                            horizontal-alignment: center;
+                        }
+                        activated => { root.onboarding-guide-select-step(0); }
                     }
                 }
                 Rectangle {
@@ -401,8 +307,8 @@ export component AppWindow inherits Window {
                         activated => { root.onboarding-guide-zoom = max(1.0, root.onboarding-guide-zoom - 0.25); }
                     }
                     ActionSurface {
-                        width: 55px; height: 38px; label: "Reset image zoom"; background: Theme.hover;
-                        Label { text: "1:1"; horizontal-alignment: center; }
+                        width: 62px; height: 38px; label: "Fit image"; background: Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Вписать" : "Fit"; horizontal-alignment: center; }
                         activated => { root.onboarding-guide-zoom = 1.0; }
                     }
                     ActionSurface {

@@ -2,6 +2,7 @@
 //! The Rust catalog is the single source of truth for displayed guide pages.
 
 pub use crate::settings::GuideLevel;
+pub mod focus;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GuidePage {
@@ -30,6 +31,14 @@ impl GuidePage {
         } else {
             self.description_en
         }
+    }
+
+    pub fn image_crop(self) -> focus::ImageCrop {
+        focus::crop(self.id)
+    }
+
+    pub fn focus_steps(self) -> &'static [focus::FocusStep] {
+        focus::steps(self.id)
     }
 
     pub fn wiki_url(self, language: &str) -> Option<String> {
@@ -479,6 +488,18 @@ mod tests {
         assert!(welcome.wiki_url("ru").unwrap().ends_with("/ru/getting-started.md"));
         assert!(welcome.wiki_url("en").unwrap().ends_with("/en/getting-started.md"));
         assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
+    }
+
+    #[test]
+    fn focus_catalog_is_attached_to_page_identity() {
+        let page = page(GuideLevel::Advanced, 2).unwrap();
+        assert_eq!(page.id, "voiceover");
+        assert_eq!(page.focus_steps().len(), 16);
+        assert_eq!(page.image_crop(), focus::ImageCrop::FULL);
+        let rag = page(GuideLevel::Full, 4).unwrap();
+        assert_eq!(rag.id, "memoryrag");
+        assert_eq!(rag.focus_steps().len(), 7);
+        assert!(rag.image_crop().top > 0.0);
     }
 
     #[test]

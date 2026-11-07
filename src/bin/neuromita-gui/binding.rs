@@ -10,7 +10,10 @@ use super::{
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
-    view::{AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem},
+    view::{
+        AppWindow, ComponentCard, GuideFocusTarget, I18n, LauncherMenuAction, LocaleOption,
+        PageId, ReleaseItem,
+    },
     voice::VoicePreviewMode,
 };
 
@@ -145,6 +148,13 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         if let Some(window) = guide_window.upgrade() {
             update_guide(&window, index);
         }
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_select_step(move |number| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        set_guide_focus(&window, number);
     });
     let guide_window = window.as_weak();
     let guide_runtime = desktop.clone();
@@ -291,6 +301,31 @@ pub(super) fn sync_guide_level(
     update_guide(window, destination as i32);
 }
 
+fn set_guide_focus(window: &AppWindow, number: i32) {
+    use neuromita::onboarding::guide::{self, GuideLevel};
+
+    let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+    let Some(page) = guide::page(level, window.get_onboarding_guide_page() as usize) else {
+        return;
+    };
+    let chosen = u8::try_from(number).ok().and_then(|number| {
+        page.focus_steps().iter().find(|target| target.number == number)
+    });
+    match chosen {
+        Some(step) => {
+            window.set_onboarding_guide_focus_step(i32::from(step.number));
+            window.set_onboarding_guide_focus_x(step.rect.left + step.rect.width / 2.0);
+            window.set_onboarding_guide_focus_y(step.rect.top + step.rect.height / 2.0);
+            window.set_onboarding_guide_zoom(window.get_onboarding_guide_zoom().max(1.35));
+        }
+        None => {
+            window.set_onboarding_guide_focus_step(0);
+            window.set_onboarding_guide_focus_x(0.5);
+            window.set_onboarding_guide_focus_y(0.5);
+        }
+    }
+}
+
 fn update_guide(window: &AppWindow, requested_index: i32) {
     use neuromita::onboarding::guide::{self, GuideLevel};
 
@@ -301,6 +336,9 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
     let language = window.get_onboarding_language();
     if window.get_onboarding_guide_page() != index {
         window.set_onboarding_guide_zoom(1.0);
+        window.set_onboarding_guide_focus_step(0);
+        window.set_onboarding_guide_focus_x(0.5);
+        window.set_onboarding_guide_focus_y(0.5);
     }
     window.set_onboarding_guide_count(count as i32);
     window.set_onboarding_guide_page(index);
@@ -308,6 +346,23 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
     window.set_onboarding_guide_description(page.description(&language).into());
     window.set_onboarding_guide_image(page.image_key.into());
     window.set_onboarding_guide_wiki_url(page.wiki_url(&language).unwrap_or_default().into());
+    let crop = page.image_crop();
+    window.set_onboarding_guide_crop_left(crop.left);
+    window.set_onboarding_guide_crop_top(crop.top);
+    window.set_onboarding_guide_crop_right(crop.right);
+    window.set_onboarding_guide_crop_bottom(crop.bottom);
+    let targets = page
+        .focus_steps()
+        .iter()
+        .map(|step| GuideFocusTarget {
+            number: i32::from(step.number),
+            left: step.rect.left,
+            top: step.rect.top,
+            width: step.rect.width,
+            height: step.rect.height,
+        })
+        .collect::<Vec<_>>();
+    window.set_onboarding_guide_targets(ModelRc::new(VecModel::from(targets)));
 }
 
 fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
