@@ -1,0 +1,52 @@
+name: Agent C exact settings root lease import and native proof
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-settings-instance-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-settings-instance-20261107
+          fetch-depth: 0
+      - name: Verify exact Git bundle and publish new stacked C branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=edf2ebd9ec352f9709f27ad364c69307a34dd08c
+          HEAD=733250ceacdb8630c2ed6e6c15008cf9e0763ce7
+          TARGET=codex/ai-platform-hub-c3-settings-lifecycle-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-settings-instance.bundle.b64 >/tmp/c3-settings-instance.bundle
+          echo '547a66b6e8354012cdf83c4726e73524419cee655e8bc8a756455749d3918182  /tmp/c3-settings-instance.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-settings-instance.bundle
+          git fetch --no-tags /tmp/c3-settings-instance.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-settings-lifecycle-20261107
+          fetch-depth: 1
+      - name: Rust 1.98.1 native settings instance and process crash ownership
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::instance_lease::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib app::settings_instance_tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::storage::tests::offline_import_and_maintenance_refuse_running_owner -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --test settings_cli -- --nocapture
