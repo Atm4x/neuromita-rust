@@ -1,0 +1,19 @@
+# Portable character knowledge — atomic memory + user variables
+
+The `neuromita-character-knowledge` v1 archive is a **limited, user-scoped administrative transfer**, not a full session backup. It embeds one versioned `neuromita-retained-memory-records` archive and one `neuromita-user-character-variables` archive as separate JSON strings. Their existing strict parsers remain responsible for validating record identity, protection, TTL, Forgotten/Deleted state, duplicate MemoryId, variable name uniqueness and exclusion of computed state. The outer SHA-256 covers the exact serialized inner strings plus the declared source and format. It detects accidental corruption; **it is not a signature or authentication**. The origin is informational; the destination is always selected explicitly.
+
+The live `PortableTransferApi` reads a single `CharacterPortableSnapshot` through the canonical `CharacterHandle`, rather than independently capturing memory and variables at different Timeline heads. A preview rejects foreign/mismatched source identities, unsupported format/version, unknown fields, damaged checksums, all duplicate or conflicting record identities, invalid variables and size limits. Preview is read-only and captures the exact selected branch/head, character, context epoch, records and variables. It cannot be serialized and amended by a client before application.
+
+The confirmed import sends **one** typed `CharacterHandle::import_portable` operation to its existing actor. Within **one Timeline mutex acquisition**, the current authoritative projections are rechecked, both change sets are resolved without writes, and one `TimelineRepository::append_guarded` persists the `CharacterMemoryChanged` and `CharacterVariablesChanged` events in the **same event batch and storage transaction**. An error in either domain before append leaves neither changed; a guarded repository failure prevents partial batch persistence. Empty replay emits no events. The original memory UUIDs and variable values are retained exactly. An import can be cancelled only before dispatch; once the owner accepts the batch, it is a single atomic commit, not two independently cancellable operations.
+
+Commands in the local CLI:
+
+- `/knowledge portable export PATH`
+- `/knowledge portable preview PATH`
+- `/knowledge portable apply TOKEN`
+
+The preview displays the selected character, imported/new memory and variable counts, and Timeline anchor; only the exact one-use session-local token authorizes apply. The export path is published by the existing same-directory write+fsync, atomic no-clobber routine, and is never overwritten. The import is add-only: a matching record/value is a no-op, a conflicting ID/key aborts the entire operation. Cross-character transfer is explicit and does not copy generation secrets, presets, derived state or graph relations.
+
+**Out of scope:** SessionArchive, Timeline message history/branches/receipts, user assets, game/unity state, settings, all-character bundles, more than 256 retained memories and 64 user variables, and any distributed transaction across the authoritative Agent B SessionArchive owner and the character owner. Importing history by synthesizing events or inserting SQLite rows is forbidden. The next step for #50 D4 is to integrate an agreed SessionArchive owner-facing preflight/commit protocol and an honest combined recovery policy; merely concatenating two independently committed imports cannot satisfy all-or-nothing restoration of history.
+
+Focused verification: `tests/portable_transfer.rs` exercises one-batch Timeline head delta, cancel/foreign and stale previews, corruption and nested duplicate-key rejection, cross-character isolation, replay no-op, conflicting variables and SQLite reopen. Existing independent `memory_transfer` and `variable_transfer` suites must remain green. The `ACCEPTANCE_MATRIX.md` records D4 as partially implemented, **not PASS**.

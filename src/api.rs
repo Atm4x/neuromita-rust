@@ -402,6 +402,80 @@ impl MemoryTransferApi {
 
 /// Trusted-local, explicitly confirmed transfer of user-defined character variables.
 /// Computed state and Timeline history are not transferred.
+pub struct PortableTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PortableTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("composite import preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::portable_transfer::PortableTransferError),
+}
+
+impl PortableTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, PortableTransferApiError> {
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.portable_snapshot().await?;
+        let bytes = crate::knowledge::portable_transfer::export_portable(&snapshot)?;
+        let fresh = owner.portable_snapshot().await?;
+        if snapshot.memory.anchor() != fresh.memory.anchor()
+            || !snapshot.memory.matches_version(&fresh.memory)
+            || snapshot.variables.values() != fresh.variables.values()
+        {
+            return Err(PortableTransferApiError::Transfer(
+                crate::knowledge::portable_transfer::PortableTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::portable_transfer::PortableImportPreview, PortableTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.portable_snapshot().await?;
+        crate::knowledge::portable_transfer::preview_portable_import(snapshot, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::portable_transfer::PortableImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::CharacterPortableResult, PortableTransferApiError> {
+        if preview.target_character() != target {
+            return Err(PortableTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| PortableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(PortableTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::portable_transfer::apply_portable_import(
+            &owner, preview, confirmed, cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
 pub struct VariableTransferApi;
 
 #[derive(Debug, thiserror::Error)]

@@ -72,6 +72,10 @@ pub struct MemoryImportPreview {
 }
 
 impl MemoryImportPreview {
+    pub(crate) fn into_parts(self) -> (CharacterMemorySnapshot, Vec<MemoryCommand>) {
+        (self.expected, self.commands)
+    }
+
     pub fn source_character(&self) -> CharacterId {
         self.source
     }

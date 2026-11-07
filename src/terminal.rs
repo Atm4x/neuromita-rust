@@ -8,7 +8,7 @@ use std::{
 use neuromita::{
     api::{
         ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi,
-        MemoryTransferApi, VariableTransferApi,
+        MemoryTransferApi, PortableTransferApi, VariableTransferApi,
     },
     character::CharacterId,
     games::{
@@ -19,6 +19,7 @@ use neuromita::{
         forgotten_recall::RecallSelector,
         maintenance::{GraphMaintenanceMode, GraphMaintenancePreview},
         memory_transfer::{MAX_ARCHIVE_BYTES, MemoryImportPreview},
+        portable_transfer::{MAX_PORTABLE_ARCHIVE_BYTES, PortableImportPreview},
         retrieval_fusion::FusionMode,
         semantic_memory::EmbeddingCachePreview,
         variable_transfer::VariableImportPreview,
@@ -53,7 +54,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -357,6 +358,8 @@ pub async fn run(
     let mut pending_memory_import: Option<(uuid::Uuid, CharacterId, MemoryImportPreview)> = None;
     let mut pending_variable_import: Option<(uuid::Uuid, CharacterId, VariableImportPreview)> =
         None;
+    let mut pending_portable_import: Option<(uuid::Uuid, CharacterId, PortableImportPreview)> =
+        None;
     let mut eof = options.message.is_some();
     let mut lines = if eof { None } else { Some(input()) };
     if let Some(message) = options.message {
@@ -421,7 +424,7 @@ pub async fn run(
                         if line == "/quit" { return Ok(()); }
                         if let Some(value) = line.strip_prefix("/character ") {
                             match CharacterId::parse(value) {
-                                Some(id) => { character = id; pending_graph = None; pending_memory_import = None; pending_variable_import = None; println!("Character: {id}"); }
+                                Some(id) => { character = id; pending_graph = None; pending_memory_import = None; pending_variable_import = None; pending_portable_import = None; println!("Character: {id}"); }
                                 None => eprintln!("Unknown character"),
                             }
                         } else if let Some(value) = line.strip_prefix("/cancel ") {
@@ -550,6 +553,46 @@ pub async fn run(
                                     }
                                 }
                                 Err(error) => eprintln!("Variable transfer: {error}"),
+                            }
+                        } else if slash_command(&line, "/knowledge portable") {
+                            match parse_portable_transfer(&line) {
+                                Ok(MemoryTransferCommand::Export(path)) => {
+                                    match PortableTransferApi::export(character).await {
+                                        Ok(bytes) => match write_no_clobber_export(&path, &bytes) {
+                                            Ok(ExportPublication::Durable) => println!("Portable archive: {} bytes published to {path}. Scope: retained MemoryRecord + canonical user variables; NOT History/SessionArchive.", bytes.len()),
+                                            Ok(ExportPublication::PublishedDurabilityUnconfirmed(warning)) => eprintln!("Portable archive published to {path}, but durability uncertain: {warning}"),
+                                            Err(error) => eprintln!("Portable export not published: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Portable export: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Preview(path)) => {
+                                    pending_portable_import = None;
+                                    match read_scoped_archive(&path, MAX_PORTABLE_ARCHIVE_BYTES) {
+                                        Ok(bytes) => match PortableTransferApi::preview_import(character, &bytes).await {
+                                            Ok(plan) => {
+                                                let token = uuid::Uuid::new_v4();
+                                                println!("Portable import: source={}, target={}, memory={} incoming/{} new, variables={} incoming/{} new, anchor={:?}. A SINGLE atomic guarded transaction, excluding History. Confirm with /knowledge portable apply {token}",
+                                                    plan.source_character(), plan.target_character(), plan.incoming_memories(), plan.new_memories(), plan.incoming_variables(), plan.new_variables(), plan.target_anchor());
+                                                pending_portable_import = Some((token, character, plan));
+                                            }
+                                            Err(error) => eprintln!("Portable import preview: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Portable import preview: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Apply(token)) => {
+                                    match take_scoped_preview(&mut pending_portable_import, character, token, "Portable") {
+                                        Ok(plan) => match PortableTransferApi::apply_confirmed(
+                                            character, plan, true, &tokio_util::sync::CancellationToken::new()
+                                        ).await {
+                                            Ok(result) => println!("Portable import: atomically inserted {} memories and {} variables; History unchanged.", result.applied_memories, result.applied_variables),
+                                            Err(error) => eprintln!("Portable import: {error}; request a new preview."),
+                                        },
+                                        Err(error) => eprintln!("Portable import: {error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("Portable transfer: {error}"),
                             }
                         } else if slash_command(&line, "/knowledge graph") {
                             match parse_graph_maintenance(&line) {
@@ -724,6 +767,24 @@ fn parse_variable_transfer(line: &str) -> Result<MemoryTransferCommand, &'static
     }
 }
 
+fn parse_portable_transfer(line: &str) -> Result<MemoryTransferCommand, &'static str> {
+    const USAGE: &str = "Используй /knowledge portable export PATH | preview PATH | apply TOKEN";
+    let rest = line.strip_prefix("/knowledge portable ").ok_or(USAGE)?;
+    let (operation, value) = rest.split_once(char::is_whitespace).ok_or(USAGE)?;
+    let value = unquote(value.trim());
+    if value.is_empty() {
+        return Err(USAGE);
+    }
+    match operation {
+        "export" => Ok(MemoryTransferCommand::Export(value.to_owned())),
+        "preview" => Ok(MemoryTransferCommand::Preview(value.to_owned())),
+        "apply" if !value.chars().any(char::is_whitespace) => uuid::Uuid::parse_str(value)
+            .map(MemoryTransferCommand::Apply)
+            .map_err(|_| USAGE),
+        _ => Err(USAGE),
+    }
+}
+
 fn read_scoped_archive(path: &str, limit: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -753,8 +814,8 @@ fn write_no_clobber_export_with_preflight(
     bytes: &[u8],
     before_publish: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<ExportPublication> {
-    if bytes.len() > MAX_ARCHIVE_BYTES {
-        return Err(invalid("memory export exceeds bounded byte limit"));
+    if bytes.len() > MAX_PORTABLE_ARCHIVE_BYTES {
+        return Err(invalid("archive export exceeds bounded byte limit"));
     }
     let parent = path
         .parent()
@@ -1128,6 +1189,33 @@ mod forgotten_recall_command_tests {
             parse_history_generation_mode("/rag\tgeneration fusion"),
             Ok(Some(HistoryGenerationMode::Fusion))
         );
+    }
+
+    #[test]
+    fn portable_transfer_cli_requires_explicit_scoped_confirmation() {
+        let token = uuid::Uuid::new_v4();
+        assert_eq!(
+            parse_portable_transfer("/knowledge portable export bundle.json"),
+            Ok(MemoryTransferCommand::Export("bundle.json".into()))
+        );
+        assert_eq!(
+            parse_portable_transfer("/knowledge portable preview \"scope archive.json\""),
+            Ok(MemoryTransferCommand::Preview("scope archive.json".into()))
+        );
+        assert_eq!(
+            parse_portable_transfer(&format!("/knowledge portable apply {token}")),
+            Ok(MemoryTransferCommand::Apply(token))
+        );
+        for bad in [
+            "/knowledge portable",
+            "/knowledge portable preview",
+            "/knowledge portable apply yes",
+            "/knowledge portable apply 00000000-0000-0000-0000-000000000000 extra",
+            "/knowledge portable purge all",
+        ] {
+            assert!(parse_portable_transfer(bad).is_err());
+            assert!(slash_command(bad, "/knowledge portable"));
+        }
     }
 
     #[test]

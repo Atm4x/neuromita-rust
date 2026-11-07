@@ -2,7 +2,7 @@
 
 **Статус:** рабочая реконструкция 26 сегментов на основе Cycle 15–25 и актуальных GitHub issues, **не официальный список GitHub**. Исходные шкалы `5/7`, `4/7`, `4/7`, `3/5` в прежних handoff **не имели опубликованного соответствия «номер сегмента → критерий»**. Поэтому эта таблица задаёт прозрачную интерпретацию *впредь*, а не притворяется историческим источником. Изменение формулировки/веса критерия требует отдельной записи в отчёте; число PR/LOC/зелёных unit-тестов не является доказательством закрытия макрокритерия.
 
-Обозначения: **PASS** — подтверждённый функциональный срез; **PARTIAL** — работает не во всех требуемых пользовательских сценариях; **OPEN** — нет полной проверяемой реализации. Итог 16 PASS, 3 PARTIAL, 7 OPEN. Все 10 не полностью закрытых сегментов ещё требуют работы. Эти сегменты различны по стоимости и могут иметь общие зависимости.
+Обозначения: **PASS** — подтверждённый функциональный срез; **PARTIAL** — работает не во всех требуемых пользовательских сценариях; **OPEN** — нет полной проверяемой реализации. Итог 16 PASS, 4 PARTIAL, 6 OPEN после Cycle29; до него было 16 PASS, 3 PARTIAL, 7 OPEN. Все 10 не полностью закрытых сегментов ещё требуют работы. D4 переоценён из OPEN в PARTIAL по уже работающему single-transaction memory+variables, а не объявлен завершённым. Эти сегменты различны по стоимости и могут иметь общие зависимости.
 
 ## #21 Memory — 5 PASS, 1 PARTIAL, 1 OPEN
 
@@ -40,15 +40,15 @@
 | G6 | Полное подтверждённое Python ingestion/GC/type backfill/merge lifecycle | OPEN | Нет end-to-end AI processing и приёмки обработки entity aliases/GC |
 | G7 | Наблюдаемый пользовательский graph browser, полный provenance/accepted-output и обработка ошибок | OPEN | Cycle 25 добавляет источник-ориентированный inspection в Slint/CLI, но это не полный графовый canvas/UI/accepted-output parity |
 
-## #50 Data Maintenance — 3 PASS, 0 PARTIAL, 2 OPEN
+## #50 Data Maintenance — 3 PASS, 1 PARTIAL, 1 OPEN
 
 | Сегмент | Проверяемое поведение | Статус | Ограничение/доказательство |
 |---|---|---|---|
 | D1 | Выбор/просмотр/редактирование канонической памяти, stale state | PASS | Memory Editor/Presenter/API |
 | D2 | Preview + подтверждённая очистка derived embedding cache | PASS | #198, bounded cache preview/revision checks |
 | D3 | Preview + подтверждённая очистка source-scoped graph relations; reindex capability path | PASS | #213/#220/#225/#229. Реальная AI-инференция отдельно G5 |
-| D4 | User-scoped export/import с версиями формата, duplicate IDs, mapping, preview и повтором | OPEN | Cycles26–27: **retained MemoryRecord-only** v1/v2 exact-ID перенос, v2 SHA-256 checksum (legacy v1 accepted), crash-safe no-clobber file publication, preview/confirmed CLI/API и SQLite reopen; **не переносит** Timeline history, variables или ручной Graph; ограничение 256 записей/1 MiB. Cycle28: **отдельный** v1 перенос только user-defined canonical CharacterVariables (SHA-256, строгая валидация, preview, confirmed atomic append, SQLite reopen), см. `VARIABLE_TRANSFER.md`; нет атомарности между двумя архивами. Полный `world-db-export`/SessionArchive не поддержан, см. `MEMORY_TRANSFER.md` |
-| D5 | Recovery/partial failure/cancellation/reopen пользовательского набора, включая malformed archives | OPEN | Cycles26–27 подтверждают cancellation, bad JSON, conflicting IDs, checksum tampering, concurrent no-clobber and fail-before-publication cleanup, SQLite reopen **только MemoryRecord**. Cycle28 отдельно проверяет variable duplicate keys, corruption, foreign target, cancel, stale-write/SQLite reopen; глобальная атомарность Memory + variables не реализована. Общая матрица всех таблиц, частичных IO сбоев и широкого reindex отсутствует |
+| D4 | User-scoped export/import с версиями формата, duplicate IDs, mapping, preview и повтором | PARTIAL | Cycles26–27: **retained MemoryRecord-only** v1/v2 exact-ID перенос, v2 SHA-256 checksum (legacy v1 accepted), crash-safe no-clobber file publication, preview/confirmed CLI/API и SQLite reopen; **не переносит** Timeline history, variables или ручной Graph; ограничение 256 записей/1 MiB. Cycle28: **отдельный** v1 перенос только user-defined canonical CharacterVariables (SHA-256, строгая валидация, preview, confirmed atomic append, SQLite reopen), см. `VARIABLE_TRANSFER.md`; Cycle29 объединил retained MemoryRecord + user variables в **один** проверяемый envelope с **одним** version-guarded `append_guarded` через CharacterHandle (атомарность двух доменов, SQLite reopen), см. `PORTABLE_TRANSFER.md`. История/SessionArchive и полный `world-db-export` **всё ещё не поддержаны**; D4 пока не PASS. |
+| D5 | Recovery/partial failure/cancellation/reopen пользовательского набора, включая malformed archives | OPEN | Cycles26–27 подтверждают cancellation, bad JSON, conflicting IDs, checksum tampering, concurrent no-clobber and fail-before-publication cleanup, SQLite reopen **только MemoryRecord**. Cycle28 отдельно проверяет variable duplicate keys, corruption, foreign target, cancel, stale-write/SQLite reopen; с Cycle29 атомарность Memory + variables подтверждена одной транзакцией, но History/SessionArchive всё ещё отсутствуют. Общая матрица всех таблиц, частичных IO сбоев и широкого reindex отсутствует |
 
 ## Приоритет по зависимостям (не по числу незакрытых клеток)
 

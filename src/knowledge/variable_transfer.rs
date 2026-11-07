@@ -104,6 +104,10 @@ pub struct VariableImportPreview {
 }
 
 impl VariableImportPreview {
+    pub(crate) fn into_parts(self) -> (CharacterVariablesSnapshot, BTreeMap<String, Value>) {
+        (self.expected, self.added)
+    }
+
     pub fn target_character(&self) -> CharacterId {
         self.expected.character()
     }

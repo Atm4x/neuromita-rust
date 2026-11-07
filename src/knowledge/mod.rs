@@ -11,6 +11,7 @@ pub mod history_window;
 pub mod maintenance;
 pub mod memory_context;
 pub mod memory_transfer;
+pub mod portable_transfer;
 pub mod reranking;
 pub mod retrieval_fusion;
 pub mod semantic_memory;
