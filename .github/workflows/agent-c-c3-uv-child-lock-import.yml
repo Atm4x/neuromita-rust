@@ -1,0 +1,39 @@
+name: Agent C uv inherited staging lock bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-uv-child-lock-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-uv-child-lock-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact C3 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=3053afe08e70d2a705276e3323d0512ff0647b35
+          HEAD=e2e6f9147d25ffab9891fe8d238b416576262b8a
+          SOURCE=codex/ai-platform-hub-c3-uv-child-lock-20261107
+          TARGET=codex/ai-platform-hub-c3-uv-child-lock-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-uv-child-lock-20261107.bundle.b64 > /tmp/agent-c-uv.bundle
+          echo 'b3083770c3388b0ef83e4fdc6974e7099e42a732fbf0c8ae8f0ef0e1bace4960  /tmp/agent-c-uv.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-uv.bundle
+          git fetch --no-tags /tmp/agent-c-uv.bundle "refs/heads/$SOURCE:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Target changed unexpectedly: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
