@@ -401,3 +401,140 @@ fn append_checked_validates_assets_in_revisions_and_session_notes() {
     );
     assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn asset_object_symlink_is_not_a_valid_blob_even_with_correct_digest() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let reference = store
+        .import("image/png", Cursor::new(b"private-file"))
+        .unwrap();
+    let object = temp
+        .path()
+        .join("assets/objects")
+        .join(&reference.digest[..2])
+        .join(&reference.digest);
+    let mut timeline = TimelineStore::new();
+    let branch = BranchId::new();
+    timeline.create_session(SessionId::new(), branch).unwrap();
+    let message = attachment(&reference, &[CharacterId::Crazy]);
+    let id = message.id;
+    store
+        .append_checked(
+            &mut timeline,
+            branch,
+            0,
+            "initial",
+            json!({}),
+            vec![message],
+        )
+        .unwrap();
+    let view =
+        TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None).unwrap();
+    let outside = temp.path().join("outside-file");
+    fs::write(&outside, b"private-file").unwrap();
+    fs::remove_file(&object).unwrap();
+    symlink(&outside, &object).unwrap();
+    assert!(matches!(
+        store.verify(&reference),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    assert!(matches!(
+        store.read_visible(&view, id, &reference),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    assert!(
+        store
+            .append_checked(
+                &mut timeline,
+                branch,
+                1,
+                "symlinked-ref",
+                json!({}),
+                vec![attachment(&reference, &[CharacterId::Crazy])],
+            )
+            .is_err()
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
+    assert!(matches!(
+        store.import("image/png", Cursor::new(b"private-file")),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    fs::remove_file(&object).unwrap();
+    assert_eq!(
+        store
+            .import("image/png", Cursor::new(b"private-file"))
+            .unwrap(),
+        reference
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn staging_and_object_directory_symlinks_are_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let root = temp.path().join("assets");
+    let store = TimelineAssetStore::new(&root, 1024).unwrap();
+    let reference = store.import("image/png", Cursor::new(b"blob")).unwrap();
+    let staging = root.join("staging");
+    let other = temp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    fs::remove_dir(&staging).unwrap();
+    symlink(&other, &staging).unwrap();
+    assert!(matches!(
+        store.import("image/png", Cursor::new(b"next")),
+        Err(TimelineAssetError::InvalidReference)
+    ));
+    fs::remove_file(&staging).unwrap();
+    let shard = root.join("objects").join(&reference.digest[..2]);
+    let object = shard.join(&reference.digest);
+    fs::remove_file(&object).unwrap();
+    fs::remove_dir(&shard).unwrap();
+    symlink(&other, &shard).unwrap();
+    assert!(matches!(
+        store.verify(&reference),
+        Err(TimelineAssetError::InvalidReference)
+    ));
+    assert!(matches!(
+        store.import("image/png", Cursor::new(b"blob")),
+        Err(TimelineAssetError::InvalidReference)
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_asset_root_is_rejected_at_creation() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let real = temp.path().join("actual");
+    fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("root-link");
+    symlink(&real, &link).unwrap();
+    assert!(matches!(
+        TimelineAssetStore::new(&link, 1024),
+        Err(TimelineAssetError::InvalidReference)
+    ));
+}
+
+#[test]
+fn an_absent_shard_reports_missing_not_io_failure() {
+    let temp = TempDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let reference = store.import("image/png", Cursor::new(b"data")).unwrap();
+    let shard = temp
+        .path()
+        .join("assets/objects")
+        .join(&reference.digest[..2]);
+    fs::remove_file(shard.join(&reference.digest)).unwrap();
+    fs::remove_dir(shard).unwrap();
+    assert!(matches!(
+        store.verify(&reference),
+        Err(TimelineAssetError::Missing)
+    ));
+}
