@@ -10,7 +10,7 @@ import { AiHubDecisionKind } from "dialogs.slint";
 // 0 offline, 1 incompatible, 2 uninstall confirm, 3 backend preview,
 // 4 queued+running/double-click, 5 cancelling, 6 failure/log persistence,
 // 7 obsolete completion/new op, 8 success 100% != model-ready,
-// 9 not-recommended warning, 10 metadata-only voice hint, 11 logs unavailable.
+// 9 not-recommended warning, 10 metadata-only voice hint, 11 logs unavailable,\n// 12 clean reinstall confirmation.
 // Backend cancel/submit callbacks intentionally have no side effects.
 export component AiHubOperationsFixture inherits Window {
     title: "AI Hub UI operations · isolated fixture";
@@ -29,14 +29,14 @@ export component AiHubOperationsFixture inherits Window {
                 activated => { root.scene = max(0, root.scene - 1); }
             }
             SettingsLabel {
-                text: "Fixture " + root.scene + " / 11 — demo data only";
+                text: "Fixture " + root.scene + " / 12 — demo data only";
                 horizontal-stretch: 1;
                 horizontal-alignment: center;
                 font-size: 14px;
             }
             ActionSurface {
                 label: "Next"; width: 100px; height: 34px;
-                enabled: root.scene < 11;
+                enabled: root.scene < 12;
                 SettingsLabel { text: parent.label; horizontal-alignment: center; }
                 activated => { root.scene = min(11, root.scene + 1); }
             }
@@ -81,6 +81,11 @@ export component AiHubOperationsFixture inherits Window {
                 action: "install", kind: AiHubDecisionKind.not-recommended,
                 revision: root.scene + 1, token: "fixture-session", can-confirm: true,
                 warning: "Fixture: GPU does not meet recommended memory"
+            } : root.scene == 12 ? {
+                available: true, decision-id: "clean-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                action: "reinstall", kind: AiHubDecisionKind.reinstall,
+                revision: root.scene + 1, token: "fixture-session", can-confirm: true
             } : root.scene == 10 ? {
                 available: true, decision-id: "hint-1",
                 component-id: "fixture.component", component-title: "Fixture component",
@@ -89,6 +94,12 @@ export component AiHubOperationsFixture inherits Window {
                 message: "Fixture metadata-only voice assets hint"
             } : {};
             operations: root.scene == 4 ? [
+                { operation-id: "requested-4", component-id: "fixture.a", action: "install",
+                    stage: AiHubOperationStage.requested, revision: 4, token: "fixture-session" },
+                { operation-id: "preparing-4", component-id: "fixture.b", action: "install",
+                    stage: AiHubOperationStage.preparing, revision: 4, token: "fixture-session" },
+                { operation-id: "admitted-4", component-id: "fixture.c", action: "install",
+                    stage: AiHubOperationStage.admitted, revision: 4, token: "fixture-session" },
                 { operation-id: "queued-4", component-id: "fixture.component", action: "install",
                     stage: AiHubOperationStage.queued, revision: 4, token: "fixture-session",
                     can-cancel-queued: true, detail: "Waiting for admission" },
