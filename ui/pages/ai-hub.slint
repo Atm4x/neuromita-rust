@@ -16,22 +16,13 @@ export component AiHubPage inherits Rectangle {
     private property <string> field-one: "";
     private property <string> field-two: "";
     private property <HubModel> selected-model;
-    private property <[HubModel]> entries: [
-        { id: "edge-rvc", category: "tts", title: "Edge TTS + RVC", description: "Синтез речи Edge TTS и преобразование голоса с помощью RVC.", backend: "CPU", language: "RU / EN", size: "RVC assets", state: "unknown", location: "AIData/Models", setting-one: "Голос TTS", setting-one-value: "Выбирается плагином", setting-two: "Смещение тона RVC", setting-two-value: "2" },
-        { id: "fish-speech", category: "tts", title: "Fish Speech+", description: "Нейросетевой синтез речи; параметры компиляции зависят от установленной модели.", backend: "NVIDIA", language: "Multi", size: "VRAM", state: "unknown", location: "AIData/Models", setting-one: "Вычислительное устройство", setting-one-value: "CUDA", setting-two: "Компиляция", setting-two-value: "Проверить после установки" },
-        { id: "silero", category: "tts", title: "Silero TTS", description: "Локальный движок синтеза с выбором языка и диктора.", backend: "CPU", language: "RU", size: "ONNX", state: "unknown", location: "AIData/Models", setting-one: "Диктор", setting-one-value: "Из схемы плагина", setting-two: "Язык", setting-two-value: "ru" },
-        { id: "whisper", category: "asr", title: "Whisper", description: "Распознавание речи с локальной моделью и настройкой вычислительного устройства.", backend: "NVIDIA", language: "Multi", size: "Model", state: "unknown", location: "AIData/Models", setting-one: "Устройство", setting-one-value: "Определяется системой", setting-two: "Язык", setting-two-value: "auto" },
-        { id: "whisper-onnx", category: "asr", title: "Whisper ONNX", description: "Вариант распознавания речи на ONNX Runtime.", backend: "ONNX", language: "Multi", size: "ONNX", state: "unknown", location: "AIData/Models", setting-one: "Устройство", setting-one-value: "CPU", setting-two: "Язык", setting-two-value: "auto" },
-        { id: "backend", category: "core", title: "Python AI Runtime", description: "Управляемый интерпретатор Python, SDK и окружения для AI-плагинов.", backend: "CPU", language: "", size: "SDK", state: "unknown", location: "AIData/sdk", setting-one: "Версия SDK", setting-one-value: "API v1", setting-two: "Интерпретатор", setting-two-value: "CPython 3.12" },
-        { id: "rag-emb", category: "rag", title: "Embeddings", description: "Векторные представления для поиска и долговременной памяти.", backend: "ONNX", language: "Multi", size: "RAG", state: "unknown", location: "AIData/Models", setting-one: "Модель эмбеддингов", setting-one-value: "Не выбрана", setting-two: "Устройство", setting-two-value: "CPU" },
-        { id: "rag-rerank", category: "rag", title: "Reranker", description: "Повторная сортировка результатов семантического поиска.", backend: "CPU", language: "Multi", size: "RAG", state: "unknown", location: "AIData/Models", setting-one: "Модель ранжирования", setting-one-value: "Не выбрана", setting-two: "Лимит результатов", setting-two-value: "10" },
-        { id: "beats", category: "else", title: "Beat synchronization", description: "Дополнительный компонент синхронизации движений и аудио.", backend: "CPU", language: "", size: "Extras", state: "unknown", location: "AIData/Models", setting-one: "Режим", setting-one-value: "Автоматический", setting-two: "Чувствительность", setting-two-value: "По умолчанию" },
-        { id: "voices", category: "else", title: "Голоса персонажей", description: "Независимые от TTS движков профили и голосовые ресурсы персонажей.", backend: "CPU", language: "", size: "Voices", state: "unknown", location: "AIData/Models", setting-one: "Профиль", setting-one-value: "Выберите голос", setting-two: "Вариант", setting-two-value: "Из каталога" },
-        { id: "dependencies", category: "else", title: "Зависимости", description: "Системные библиотеки и окружения для устанавливаемых AI-компонентов.", backend: "CPU", language: "", size: "Deps", state: "unknown", location: "AIData", setting-one: "Окружение", setting-one-value: "Системное", setting-two: "Версия", setting-two-value: "Определяется при проверке" }
-    ];
+    in property <[HubModel]> entries;
     pure function matches(item: HubModel) -> bool {
-        return item.category == root.category
-            && (root.runtime-filter == "all" || item.backend.to-lowercase() == root.runtime-filter || item.backend == "CPU")
+        return (item.category == root.category
+                || (root.category == "core" && item.category == "backend")
+                || (root.category == "else" && (item.category == "voices" || item.category == "extras"
+                    || item.category == "beats" || item.category == "deps" || item.category == "dependency")))
+            && (root.runtime-filter == "all" || item.backend.to-lowercase() == root.runtime-filter)
             && (root.search-text == "" || item.title.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.title.to-lowercase()
                 || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
                 || item.backend.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.backend.to-lowercase());
@@ -56,7 +47,7 @@ export component AiHubPage inherits Rectangle {
         spacing: 16px;
         HorizontalLayout { height: 56px; spacing: 14px;
             Rectangle { width: 48px; height: 48px; border-radius: 12px; border-width: 1px; border-color: Theme.accent-border;
-                background: #b74b7d25;
+                background: Theme.accent-surface;
                 HorizontalLayout { alignment: center;
                     Text { text: "✦"; color: Theme.accent-hover; font-size: 29px; }
                 }
@@ -88,7 +79,7 @@ export component AiHubPage inherits Rectangle {
                     label: cat.title;
                     selected: root.category == cat.id;
                     border-radius: 10px;
-                    background: root.category == cat.id ? #b74b7d30 : self.hovered ? #ffffff0e : Theme.panel;
+                    background: root.category == cat.id ? Theme.accent-surface : self.hovered ? Theme.surface-hover : Theme.panel;
                     border-width: 1px;
                     border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
                     HorizontalLayout { padding: 6px; alignment: center;
@@ -110,6 +101,9 @@ export component AiHubPage inherits Rectangle {
                 Rectangle { width: 260px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.panel;
                     HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 8px;
                         Text { text: "⌕"; color: Theme.muted; font-size: 20px; }
+                        if root.search-text == "": Label {
+                            text: "Поиск в категории…"; color: Theme.muted; font-size: 11px;
+                        }
                         search := TextInput {
                             text <=> root.search-text;
                             single-line: true;
@@ -130,7 +124,7 @@ export component AiHubPage inherits Rectangle {
                     label: filter.label; selected: root.runtime-filter == filter.id;
                     border-radius: 12px; border-width: 1px;
                     border-color: root.runtime-filter == filter.id ? Theme.accent : Theme.border;
-                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? #b74b7d24 : Theme.panel;
+                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? Theme.accent-surface : Theme.panel;
                     HorizontalLayout { padding: 4px; alignment: center;
                         Label { text: filter.label; font-size: 11px; color: root.runtime-filter == filter.id ? Theme.text : Theme.muted; }
                     }
@@ -139,7 +133,14 @@ export component AiHubPage inherits Rectangle {
                 Rectangle { horizontal-stretch: 1; }
                 HubAction { caption: "Обновить список"; compact: true; enabled: false; }
             }
-            Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
+            if root.entries.length == 0: Rectangle {
+                vertical-stretch: 1; background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 14px;
+                VerticalLayout { alignment: center; padding: 24px; spacing: 10px;
+                    Label { text: "Каталог моделей пока не подключён"; font-size: 17px; font-weight: 700; horizontal-alignment: center; }
+                    Label { text: "AI Hub ожидает данные каталога; действия установки и настройки временно недоступны."; font-size: 12px; color: Theme.muted; horizontal-alignment: center; wrap: word-wrap; }
+                }
+            }
+            if root.entries.length > 0: Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
                 ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
                     VerticalLayout {
                         padding-right: 9px; padding-top: 2px; padding-bottom: 4px;
@@ -170,7 +171,7 @@ export component AiHubPage inherits Rectangle {
                 ScrollView { horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
                     VerticalLayout { padding-right: 8px; spacing: 16px; alignment: start;
                         HorizontalLayout { height: 66px; spacing: 14px;
-                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: #b74b7d24;
+                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: Theme.accent-surface;
                                 border-width: 1px; border-color: Theme.accent-border;
                                 HorizontalLayout { alignment: center;
                                     Icon { source: Icons.settings; width: 25px; height: 25px; colorize: Theme.accent-hover; }
@@ -187,14 +188,14 @@ export component AiHubPage inherits Rectangle {
                             if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
                             HubPill { caption: root.selected-model.state == "ready" ? "Установлено" : "Статус не проверен"; }
                         }
-                        Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: #ffffff08; height: 66px;
+                        Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.hover; height: 66px;
                             VerticalLayout { padding: 12px; spacing: 6px;
                                 Label { text: "Расположение на диске (типовой каталог)"; color: Theme.muted; font-size: 10px; }
                                 Label { text: root.selected-model.location; font-size: 12px; font-weight: 600; }
                             }
                         }
                         Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }
-                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: #ffffff05;
+                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.surface-quiet;
                             VerticalLayout { padding: 15px; spacing: 12px;
                                 VerticalLayout { spacing: 5px;
                                     Label { text: root.selected-model.setting-one; font-size: 12px; font-weight: 600; }
@@ -229,7 +230,7 @@ export component AiHubPage inherits Rectangle {
                     HubAction { caption: "Сохранить"; primary: true; enabled: false; }
                 }
                 if root.confirm-discard: Rectangle {
-                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: #301728;
+                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: Theme.unsaved-confirmation;
                     HorizontalLayout { padding: 14px; spacing: 16px;
                         VerticalLayout { spacing: 4px; horizontal-stretch: 1; alignment: center;
                             Label { text: "Отменить несохранённые изменения?"; font-size: 13px; font-weight: 700; }

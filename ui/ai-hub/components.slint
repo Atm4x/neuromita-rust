@@ -22,17 +22,18 @@ export component HubPill inherits Rectangle {
     in property <bool> accent: false;
     in property <bool> warning: false;
     height: 25px;
+    width: max(30px, pill-label.preferred-width + 18px);
     horizontal-stretch: 0;
     border-radius: 8px;
     border-width: 1px;
-    border-color: root.warning ? #a86c44 : root.accent ? Theme.accent-border : Theme.border;
-    background: root.warning ? #ffcf7d16 : root.accent ? #b74b7d24 : #ffffff0a;
+    border-color: root.warning ? Theme.warning-outline : root.accent ? Theme.accent-border : Theme.border;
+    background: root.warning ? Theme.warning-surface : root.accent ? Theme.accent-surface : Theme.surface-soft;
     HorizontalLayout {
         padding-left: 9px; padding-right: 9px;
-        Label {
+        pill-label := Label {
             text: root.caption;
             font-size: 10px; font-weight: 600;
-            color: root.warning ? Theme.warning : root.accent ? #eab4d0 : Theme.text;
+            color: root.warning ? Theme.warning : root.accent ? Theme.accent-label : Theme.text;
         }
     }
 }
@@ -46,7 +47,7 @@ export component HubAction inherits ActionSurface {
     border-radius: root.compact ? 9px : 10px;
     border-width: 1px;
     border-color: root.primary ? Theme.accent : Theme.border;
-    background: !root.enabled ? #ffffff07 : root.primary ? (root.hovered ? Theme.accent-hover : Theme.accent) : root.hovered ? #b74b7d24 : #ffffff0a;
+    background: !root.enabled ? Theme.surface-disabled : root.primary ? (root.hovered ? Theme.accent-hover : Theme.accent) : root.hovered ? Theme.accent-surface : Theme.surface-soft;
     HorizontalLayout {
         padding-left: root.compact ? 13px : 18px;
         padding-right: root.compact ? 13px : 18px;
@@ -60,8 +61,8 @@ export component HubModelCard inherits Rectangle {
     min-height: 124px;
     border-radius: 14px;
     border-width: 1px;
-    border-color: root.entry.state == "ready" ? #7fe38c36 : Theme.border;
-    background: root.entry.state == "incompatible" ? #ffffff05 : Theme.panel;
+    border-color: root.entry.state == "ready" ? Theme.success-outline : Theme.border;
+    background: root.entry.state == "incompatible" ? Theme.surface-quiet : Theme.panel;
     HorizontalLayout {
         padding-left: 18px; padding-right: 16px; padding-top: 14px; padding-bottom: 14px;
         spacing: 14px;
@@ -86,7 +87,7 @@ export component HubModelCard inherits Rectangle {
             Label {
                 text: root.entry.state == "ready" ? "● Установлено" : root.entry.state == "incompatible" ? "● Несовместимо" : "○ Не проверено";
                 font-size: 11px; font-weight: 600;
-                color: root.entry.state == "ready" ? #7fe38c : root.entry.state == "incompatible" ? #ff7b7b : Theme.muted;
+                color: root.entry.state == "ready" ? Theme.success : root.entry.state == "incompatible" ? Theme.danger : Theme.muted;
             }
             Label { text: root.entry.state == "ready" ? "Готово" : "Требуется проверка"; font-size: 10px; color: Theme.muted; }
         }
@@ -102,7 +103,7 @@ export component HubModelCard inherits Rectangle {
                 width: 34px; height: 34px;
                 label: "Параметры модели " + root.entry.title;
                 border-width: 1px; border-color: Theme.accent-border;
-                border-radius: 9px; background: self.hovered ? #b74b7d33 : #ffffff0e;
+                border-radius: 9px; background: self.hovered ? Theme.accent-surface-hover : Theme.surface-hover;
                 Icon { source: Icons.settings; width: 16px; height: 16px; colorize: Theme.accent-hover; }
                 activated => { root.open-settings(0); }
             }
