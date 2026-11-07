@@ -24,12 +24,10 @@ jobs:
           name = "nm_c3_windows_job_crash_probe"
           version = "0.1.0"
           edition = "2024"
+          [[bin]]
+          name = "nm_c3_windows_job_crash_probe"
+          path = "../.github/agent-c-tests/c3-windows-job-crash-probe.rs"
           [target.'cfg(windows)'.dependencies]
           windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
           '@ | Set-Content win-probe/Cargo.toml
-          @'
-          #[path = "../../.github/agent-c-tests/c3-windows-job-crash-probe.rs"]
-          mod crash;
-          fn main() { crash::main().unwrap(); }
-          '@ | Set-Content win-probe/src/main.rs
           rustup run 1.98.1 cargo run --manifest-path win-probe/Cargo.toml --offline
