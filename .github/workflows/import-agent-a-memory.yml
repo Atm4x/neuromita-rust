@@ -72,7 +72,7 @@ jobs:
           PY
           git cat-file -e "$BASE^{commit}"
           git bundle verify /tmp/agent-a-explicit-recall-selection.bundle
-          git fetch --no-tags /tmp/agent-a-explicit-recall-selection.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          git fetch --no-tags /tmp/agent-a-explicit-recall-selection.bundle "refs/heads/codex/knowledge-forgotten-rag-scope-20261107:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
