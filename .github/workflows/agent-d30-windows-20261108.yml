@@ -1,0 +1,38 @@
+name: Agent D30 pinned Windows source-review acceptance
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d30-windows-ci-20261108
+permissions:
+  contents: read
+jobs:
+  windows-native-review:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D30 commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e e456a207111de30ed4aa64101b128134a4738b55^{commit}
+          test "$(git rev-parse e456a207111de30ed4aa64101b128134a4738b55^{tree})" = 6e18a7dcc3d4d0bf1d49f528cdbc81cab3327655
+          git checkout --detach e456a207111de30ed4aa64101b128134a4738b55
+          test "$(git rev-parse HEAD)" = e456a207111de30ed4aa64101b128134a4738b55
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native Windows exact-review and recovery tests
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo test --locked --offline --test python_preset_preferences -- --test-threads=8
+          cargo test --locked --offline --test python_settings_import -- --test-threads=8
+          cargo test --locked --offline --test preset_storage_lock -- --test-threads=8
+          cargo test --locked --offline --lib settings::preset_activation::tests -- --test-threads=8
+          cargo check --locked --offline --example activate_python_presets
