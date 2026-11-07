@@ -140,3 +140,40 @@ fn invalid_persisted_order_is_explicitly_rejected() {
         );
     }
 }
+
+#[test]
+fn single_step_moves_are_persisted_and_do_not_publish_on_boundaries() {
+    let dir = TestDir::new();
+    let catalog = open(&dir);
+    let a = catalog.create(record("first")).unwrap();
+    let b = catalog.create(record("second")).unwrap();
+    let c = catalog.create(record("third")).unwrap();
+    let revision = catalog.observe().borrow().revision;
+    catalog.move_one(b, -1).unwrap();
+    assert_eq!(ids(&catalog), [b, a, c]);
+    assert_eq!(catalog.observe().borrow().revision, revision + 1);
+    let bytes = std::fs::read(dir.0.join("presets.json")).unwrap();
+    catalog.move_one(b, -1).unwrap();
+    catalog.move_one(c, 1).unwrap();
+    assert_eq!(catalog.observe().borrow().revision, revision + 1);
+    assert_eq!(std::fs::read(dir.0.join("presets.json")).unwrap(), bytes);
+    catalog.move_one(a, 1).unwrap();
+    assert_eq!(ids(&catalog), [b, c, a]);
+    assert_eq!(catalog.observe().borrow().revision, revision + 2);
+    drop(catalog);
+    assert_eq!(ids(&open(&dir)), [b, c, a]);
+}
+
+#[test]
+fn rejected_single_step_moves_leave_catalog_and_disk_unchanged() {
+    let dir = TestDir::new();
+    let catalog = open(&dir);
+    let first = catalog.create(record("first")).unwrap();
+    let before = std::fs::read(dir.0.join("presets.json")).unwrap();
+    let revision = catalog.observe().borrow().revision;
+    for (id, step) in [(first, 0), (first, 2), (first, -7), (PresetId(999), 1)] {
+        assert!(catalog.move_one(id, step).is_err());
+    }
+    assert_eq!(catalog.observe().borrow().revision, revision);
+    assert_eq!(std::fs::read(dir.0.join("presets.json")).unwrap(), before);
+}

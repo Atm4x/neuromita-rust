@@ -702,6 +702,37 @@ impl PresetCatalog {
         Ok(())
     }
 
+    /// Move a persisted user preset one position inside a single catalog transaction.
+    pub fn move_one(&self, id: PresetId, step: i32) -> Result<(), PresetCatalogError> {
+        if step != -1 && step != 1 {
+            return Err(PresetCatalogError::Invalid(
+                "preset move direction must be -1 or 1".into(),
+            ));
+        }
+        let mut state = self.state.write().expect("preset catalog poisoned");
+        if state.runtime.contains_key(&id) {
+            return Err(PresetCatalogError::RuntimeOnly(id));
+        }
+        let mut order = state.stored.effective_order();
+        let position = order
+            .iter()
+            .position(|candidate| *candidate == id)
+            .ok_or(PresetCatalogError::NotFound(id))?;
+        let destination = if step < 0 {
+            position.checked_sub(1)
+        } else {
+            (position + 1 < order.len()).then_some(position + 1)
+        };
+        let Some(destination) = destination else {
+            return Ok(());
+        };
+        order.swap(position, destination);
+        let next = state.stored.clone().with_order(&order)?;
+        self.persist(&next)?;
+        self.publish(&mut state, next);
+        Ok(())
+    }
+
     pub fn configured(&self, id: PresetId) -> Result<bool, PresetCatalogError> {
         let state = self.state.read().expect("preset catalog poisoned");
         if state.runtime.contains_key(&id) {
