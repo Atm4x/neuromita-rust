@@ -429,3 +429,172 @@ fn python_provenance_keeps_exact_time_and_observer_identity_without_history_copy
         serde_json::from_slice(&json).unwrap();
     assert_eq!(restored, provenance);
 }
+
+#[test]
+fn python_detached_conversion_preserves_native_fact_and_receipt_identity() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{EventKind, TimelineStore};
+    let source = inspect_python_archive(PYTHON_ARCHIVE).unwrap();
+    let destination = TimelineStore::new();
+    let bound = source
+        .bind_memory(&destination, &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    assert_eq!(prepared.session_id(), bound.native_session());
+    assert_eq!(prepared.receipt_count(), 2);
+    let player = source
+        .identities
+        .events
+        .iter()
+        .find(|e| e.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+        .unwrap();
+    let fact = prepared.fact(EventId(player.candidate_uuid)).unwrap();
+    assert_eq!(fact.draft.kind, EventKind::PlayerMessage);
+    assert_eq!(
+        fact.draft.external_message_id.as_deref(),
+        Some("message:παράδειγμα")
+    );
+    assert_eq!(fact.draft.actor.as_deref(), Some("Player"));
+    assert!(
+        fact.draft
+            .observers
+            .contains(&neuromita::character::CharacterId::Crazy)
+    );
+    assert_eq!(fact.draft.payload["content"], json!("Привет"));
+    assert_eq!(fact.draft.occurred_at_unix_ms, 1794032924733);
+    assert_eq!(prepared.provenance(), &bound.provenance());
+    assert!(
+        destination
+            .session_provenance(bound.native_session())
+            .is_none()
+    );
+}
+
+#[test]
+fn python_detached_conversion_rejects_binary_without_silently_dropping_content() {
+    use neuromita::timeline::domain::TimelineStore;
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "Python media requires typed native conversion"
+        ))
+    ));
+}
+
+#[test]
+fn python_detached_conversion_rejects_event_observed_disclosure() {
+    use neuromita::timeline::domain::TimelineStore;
+    let modified = alter(|doc| {
+        doc["branches"][0]["head_sequence"] = json!(4);
+        let observation = json!({
+            "event_id":"observation:new", "session_id":"session:русский",
+            "branch_id":"child", "sequence":4, "kind":"EventObserved",
+            "payload":{}, "actor_id":null, "observers":["A"],
+            "links":[["observes", "59bcbaeb163b57fb939cc4589b16d8c4"]],
+            "occurred_at":"2026-11-07T06:28:44.739655+00:00", "schema_version":1
+        });
+        doc["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(observation.clone());
+        doc["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id":"child", "key":"observe", "event_ids":["observation:new"],
+            "intent": {"command":{},"events":[{
+                "event_id":"observation:new","kind":"EventObserved", "payload":{},
+                "actor_id":null,"observers":["A"], "schema_version":1,
+                "links":[["observes","59bcbaeb163b57fb939cc4589b16d8c4"]]
+            }]}
+        }));
+    });
+    let source = inspect_python_archive(&modified).unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "Python event semantics not representable in Rust"
+        ))
+    ));
+}
+
+#[test]
+fn python_detached_conversion_maps_character_reply_across_a_fork() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{CausalRelation, EventKind, TimelineStore};
+    let modified = alter(|doc| {
+        doc["branches"][0]["head_sequence"] = json!(4);
+        let reply = json!({
+            "event_id": "reply:character", "session_id":"session:русский",
+            "branch_id":"child", "sequence":4, "kind":"CharacterMessage",
+            "payload":{"content":"Ответ","message_id":"answer:1"},
+            "actor_id":"A", "observers":["A"],
+            "links":[["reply_to","59bcbaeb163b57fb939cc4589b16d8c4"]],
+            "occurred_at":"2026-11-07T06:28:44.740555+00:00", "schema_version":1
+        });
+        doc["events"].as_array_mut().unwrap().push(reply);
+        doc["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id":"child", "key":"reply", "event_ids":["reply:character"],
+            "intent": {"command":{}, "events":[{
+                "event_id":"reply:character", "kind":"CharacterMessage",
+                "payload":{"content":"Ответ","message_id":"answer:1"},
+                "actor_id":"A","observers":["A"],"schema_version":1,
+                "links":[["reply_to","59bcbaeb163b57fb939cc4589b16d8c4"]]
+            }]}
+        }));
+    });
+    let source = inspect_python_archive(&modified).unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    assert_eq!(prepared.receipt_count(), 3);
+    let source_id = source
+        .identities
+        .events
+        .iter()
+        .find(|id| id.source == "reply:character")
+        .unwrap();
+    let fact = prepared.fact(EventId(source_id.candidate_uuid)).unwrap();
+    assert_eq!(fact.draft.kind, EventKind::CharacterMessage);
+    assert_eq!(fact.draft.actor.as_deref(), Some("Crazy"));
+    assert_eq!(fact.draft.links[0].relation, CausalRelation::ReplyTo);
+    let target = source
+        .identities
+        .events
+        .iter()
+        .find(|id| id.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+        .unwrap();
+    assert_eq!(fact.draft.links[0].event_id, EventId(target.candidate_uuid));
+}
+
+#[test]
+fn python_detached_conversion_rejects_unverified_native_media_part() {
+    use neuromita::timeline::domain::TimelineStore;
+    let source = alter(|doc| {
+        doc["events"][1]["payload"]["content"] = json!([{
+            "type":"image", "asset":{
+                "digest":"0".repeat(64), "size":16, "media_type":"image/png"
+            }
+        }]);
+        doc["operations"][1]["intent"]["events"][0]["payload"] =
+            doc["events"][1]["payload"].clone();
+    });
+    let parsed = inspect_python_archive(&source).unwrap();
+    let bound = parsed
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "Python media requires typed native conversion"
+        ))
+    ));
+}
