@@ -142,6 +142,17 @@ pub(super) fn reject_symlinked_layer_components(destination: &Path) -> Result<()
     Ok(())
 }
 
+pub(super) fn reject_unsafe_layer_receipt(marker: &Path) -> Result<(), LayerError> {
+    match std::fs::symlink_metadata(marker) {
+        Ok(metadata) if !metadata.is_file() || metadata.len() > 131_072 => {
+            Err(LayerError::Conflict)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LayerError::Io(error)),
+    }
+}
+
 fn safe_marker_target(root: &Path, target: &Path) -> bool {
     let Ok(relative) = target.strip_prefix(root) else {
         return false;
@@ -190,7 +201,9 @@ impl LayerInstaller<'_> {
         if !destination.exists() {
             return Ok(false);
         }
-        let data = tokio::fs::read(destination.join(marker))
+        let marker_path = destination.join(marker);
+        reject_unsafe_layer_receipt(&marker_path)?;
+        let data = tokio::fs::read(marker_path)
             .await
             .map_err(|_| LayerError::Conflict)?;
         let saved: T = serde_json::from_slice(&data).map_err(|_| LayerError::Conflict)?;
