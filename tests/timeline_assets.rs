@@ -561,3 +561,68 @@ fn an_absent_shard_reports_missing_not_io_failure() {
         Err(TimelineAssetError::Missing)
     ));
 }
+
+#[test]
+fn verification_streams_multi_chunk_content_and_still_rejects_same_length_corruption() {
+    let temp = TempDir::new();
+    let root = temp.path().join("assets");
+    let payload: Vec<u8> = (0..(5 * 64 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let store = TimelineAssetStore::new(&root, payload.len() as u64).unwrap();
+    let reference = store.import("audio/wav", Cursor::new(&payload)).unwrap();
+    store.verify(&reference).unwrap();
+
+    let mut timeline = TimelineStore::new();
+    let branch = BranchId::new();
+    timeline.create_session(SessionId::new(), branch).unwrap();
+    let mut message = EventDraft::new(EventKind::PlayerMessage);
+    message.actor = Some("player".into());
+    message.observers.insert(CharacterId::Crazy);
+    message.payload.insert(
+        "content".into(),
+        json!([{"type":"audio", "asset":reference}]),
+    );
+    let event_id = message.id;
+    store
+        .append_checked(&mut timeline, branch, 0, "audio", json!({}), vec![message])
+        .unwrap();
+    let view =
+        TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        store.read_visible(&view, event_id, &reference).unwrap(),
+        payload
+    );
+
+    let object = root
+        .join("objects")
+        .join(&reference.digest[..2])
+        .join(&reference.digest);
+    let mut corrupted = payload;
+    corrupted[4 * 64 * 1024 + 5] ^= 0x80;
+    fs::write(&object, &corrupted).unwrap();
+    assert!(matches!(
+        store.verify(&reference),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    assert!(matches!(
+        store.read_visible(&view, event_id, &reference),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    assert!(matches!(
+        store.inventory(std::slice::from_ref(&reference)),
+        Err(TimelineAssetError::Corrupt)
+    ));
+    assert!(matches!(
+        store.append_checked(
+            &mut timeline,
+            branch,
+            1,
+            "corrupt",
+            json!({}),
+            vec![attachment(&reference, &[CharacterId::Crazy])],
+        ),
+        Err(_)
+    ));
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
+}
