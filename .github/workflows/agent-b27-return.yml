@@ -1,0 +1,42 @@
+name: Publish Agent B27 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b27-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7f1babb5de0c40147a3e12dff1cd142ebceb8e10
+          fetch-depth: 0
+      - name: Verify and publish B27 Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7f1babb5de0c40147a3e12dff1cd142ebceb8e10
+          EXPECTED=6691355751178a71f140c4a9f68eb89e7ddd91fc
+          SHA256=5c9e5f56d23f8d5f76212918736bea16eed6fbedcbcbd144d15cd248420cc306
+          TARGET=refs/heads/codex/timeline-python-provenance-identity-20261107
+          git fetch origin refs/heads/bridge/agent-b27-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b27-20261107.bundle.b64 | base64 --decode > /tmp/b27.bundle
+          echo "$SHA256  /tmp/b27.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/b27.bundle
+          git fetch /tmp/b27.bundle refs/heads/codex/timeline-python-provenance-identity-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination branch unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published B27 at $IMPORTED"
