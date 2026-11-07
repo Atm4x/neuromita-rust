@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
+    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 
@@ -40,7 +40,7 @@ fn main() -> io::Result<()> {
         thread::sleep(Duration::from_millis(25));
     }
     let pid: u32 = fs::read_to_string(&ready)?.parse().unwrap();
-    let handle = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     assert!(!handle.is_null(), "cannot open child process handle");
     let child = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
     assert_eq!(
