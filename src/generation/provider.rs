@@ -270,6 +270,19 @@ impl ResponseGenerator {
         request: GenerationRequest,
         observer: &mut dyn GenerationObserver,
     ) -> Result<ProposedResponse, GenerationError> {
+        let captured = &request.context;
+        if captured.anchor.branch_id != captured.view.branch.0
+            || captured.anchor.through != captured.view.through
+            || captured.character_id != captured.view.observer()
+            || captured.turn.selection.branch_id != captured.view.branch
+            || captured.turn.context_head != captured.view.through
+            || captured.turn.character != captured.character_id
+        {
+            return Err(GenerationError::Response(
+                "generation view, character and Timeline turn have different captured anchors"
+                    .into(),
+            ));
+        }
         let template = request.preset.template().clone();
         let post_dsl = request.post_dsl;
         let context_variables = request.context.variables.clone();

@@ -2050,4 +2050,416 @@ mod live_http_tests {
             std::fs::remove_dir_all(directory).ok();
         }
     }
+    async fn capture_history_sse_body(
+        provider_name: &str,
+        view: MitaView,
+        branch: BranchId,
+        target: EventId,
+        assets: Arc<TimelineAssetStore>,
+    ) -> Value {
+        use tokio::time::timeout;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let dialect = provider_name.to_owned();
+        let server = tokio::spawn(async move {
+            let (socket, _) = timeout(Duration::from_secs(3), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let events = match dialect.as_str() {
+                "gemini" => vec![
+                    json!({"candidates":[{"content":{"role":"model","parts":[{"text":"{\"segments\":[{\"text\":\"ack\"}]}"}]},"finishReason":"STOP"}]}),
+                ],
+                "responses" => vec![
+                    json!({"type":"response.output_text.delta","delta":"{\"segments\":[{\"text\":\"ack\"}]}"}),
+                    json!({"type":"response.completed","response":{"status":"completed"}}),
+                ],
+                _ => vec![
+                    json!({"choices":[{"index":0,"delta":{"content":"{\"segments\":[{\"text\":\"ack\"}]}"},"finish_reason":"stop"}]}),
+                ],
+            };
+            let mut response = events
+                .iter()
+                .map(|event| format!("data: {event}\r\n\r\n"))
+                .collect::<String>();
+            if dialect == "chat" {
+                response.push_str("data: [DONE]\r\n\r\n");
+            }
+            reader.get_mut().write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            ).as_bytes()).await.unwrap();
+            for chunk in response.as_bytes().chunks(13) {
+                reader.get_mut().write_all(chunk).await.unwrap();
+            }
+            body
+        });
+        let (provider, preset) = provider_with_stream(provider_name, &endpoint, true);
+        let generator = ResponseGenerator::new([provider]).unwrap();
+        let mut observation = StreamObserve::default();
+        let reply = timeout(
+            Duration::from_secs(5),
+            generator.generate_observed(
+                GenerationRequest::new(context(view, branch, target), preset, None)
+                    .with_assets(Some(assets)),
+                &mut observation,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reply.text().as_ref(), "ack", "{provider_name}");
+        assert_eq!(observation.requests.len(), 1, "{provider_name}");
+        assert!(observation.failures.is_empty(), "{provider_name}");
+        assert_eq!(observation.replies.len(), 1, "{provider_name}");
+        let body = timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        let wire = body.to_string();
+        if wire.contains("aGlzdG9yeS1") {
+            assert_eq!(
+                observation.requests[0].payload_json.as_ref(),
+                "[REDACTED MULTIMODAL ATTACHMENTS]",
+                "{provider_name}: observer must redact media-bearing bodies"
+            );
+        }
+        assert!(
+            observation.requests[0]
+                .prompt
+                .iter()
+                .all(|message| !message.text.contains("other-character-confidential")),
+            "{provider_name}: private text leaked to the observer prompt"
+        );
+        for secret in [
+            "aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk=",
+            "aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ==",
+            "aGlzdG9yeS1raW5kLXByaXZhdGU=",
+        ] {
+            assert!(
+                !observation.requests[0].payload_json.contains(secret),
+                "{provider_name}: media bytes leaked to observer"
+            );
+            assert!(
+                !observation.deltas.join("").contains(secret),
+                "{provider_name}: media bytes leaked to streaming callback"
+            );
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn live_sse_historical_edit_hide_reset_and_fork_preserve_exact_media_snapshot() {
+        let directory = std::env::temp_dir().join(format!("nm-sse-history-{}", Uuid::new_v4()));
+        let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 2048).unwrap());
+        let original = assets
+            .import("image/png", Cursor::new(b"history-original-binary"))
+            .unwrap();
+        let revised = assets
+            .import("image/png", Cursor::new(b"history-revised-binary"))
+            .unwrap();
+        let private = assets
+            .import("image/png", Cursor::new(b"history-kind-private"))
+            .unwrap();
+        let mut timeline = TimelineStore::new();
+        let main = BranchId::new();
+        timeline.create_session(SessionId::new(), main).unwrap();
+
+        let mut foreign = EventDraft::new(EventKind::PlayerMessage);
+        foreign.actor = Some("player".into());
+        foreign.observers.insert(CharacterId::Kind);
+        foreign.payload.insert(
+            "content".into(),
+            json!([
+                {"type":"text","text":"other-character-confidential"},
+                {"type":"image","asset":private}
+            ]),
+        );
+        timeline
+            .append(main, 0, "foreign", json!({}), vec![foreign])
+            .unwrap();
+
+        let mut original_message = EventDraft::new(EventKind::PlayerMessage);
+        original_message.actor = Some("player".into());
+        original_message.observers.insert(CharacterId::Crazy);
+        original_message.payload.insert(
+            "content".into(),
+            json!([
+                {"type":"text","text":"original-prefix"},
+                {"type":"image","asset":original},
+                {"type":"text","text":"original-suffix"}
+            ]),
+        );
+        let source_id = original_message.id;
+        timeline
+            .append(main, 1, "media", json!({}), vec![original_message])
+            .unwrap();
+        let before_edit =
+            TimelineMessageQueries::capture(&timeline, main, CharacterId::Crazy, Some(2)).unwrap();
+
+        let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+        checkpoint.payload.insert("snapshot".into(), json!({}));
+        let checkpoint_id = checkpoint.id;
+        timeline
+            .append(main, 2, "checkpoint", json!({}), vec![checkpoint])
+            .unwrap();
+        let sibling = BranchId::new();
+        timeline.fork(main, checkpoint_id, sibling).unwrap();
+        let on_sibling =
+            TimelineMessageQueries::capture(&timeline, sibling, CharacterId::Crazy, None).unwrap();
+
+        let mut edit = EventDraft::new(EventKind::MessageRevised);
+        edit.observers.insert(CharacterId::Crazy);
+        edit.payload
+            .insert("event_id".into(), json!(source_id.0.to_string()));
+        edit.payload.insert(
+            "message".into(),
+            json!({"content":[
+                {"type":"text","text":"revised-prefix"},
+                {"type":"image","asset":revised},
+                {"type":"text","text":"revised-suffix"}
+            ]}),
+        );
+        timeline
+            .append(main, 3, "revised", json!({}), vec![edit])
+            .unwrap();
+        let after_edit =
+            TimelineMessageQueries::capture(&timeline, main, CharacterId::Crazy, None).unwrap();
+
+        let mut hide = EventDraft::new(EventKind::MessageHidden);
+        hide.observers.insert(CharacterId::Crazy);
+        hide.payload
+            .insert("event_ids".into(), json!([source_id.0.to_string()]));
+        timeline
+            .append(main, 4, "hidden", json!({}), vec![hide])
+            .unwrap();
+        let mut safe_reply = EventDraft::new(EventKind::PlayerMessage);
+        safe_reply.actor = Some("player".into());
+        safe_reply.observers.insert(CharacterId::Crazy);
+        safe_reply
+            .payload
+            .insert("content".into(), json!("safe-new-question"));
+        let safe_id = safe_reply.id;
+        timeline
+            .append(main, 5, "safe", json!({}), vec![safe_reply])
+            .unwrap();
+        let after_hide =
+            TimelineMessageQueries::capture(&timeline, main, CharacterId::Crazy, None).unwrap();
+
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Crazy);
+        reset.payload.insert("reason".into(), json!("testing"));
+        timeline
+            .append(main, 6, "reset", json!({}), vec![reset])
+            .unwrap();
+        let mut after_reset_message = EventDraft::new(EventKind::PlayerMessage);
+        after_reset_message.actor = Some("player".into());
+        after_reset_message.observers.insert(CharacterId::Crazy);
+        after_reset_message
+            .payload
+            .insert("content".into(), json!("post-reset-question"));
+        let reset_id = after_reset_message.id;
+        timeline
+            .append(main, 7, "post-reset", json!({}), vec![after_reset_message])
+            .unwrap();
+        let after_reset =
+            TimelineMessageQueries::capture(&timeline, main, CharacterId::Crazy, None).unwrap();
+        let head = timeline.branch(main).unwrap().head_sequence;
+
+        for provider_name in ["gemini", "chat", "responses"] {
+            for (label, branch, target, view, expected, excluded) in [
+                (
+                    "historical",
+                    main,
+                    source_id,
+                    before_edit.clone(),
+                    Some("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk="),
+                    Some("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ=="),
+                ),
+                (
+                    "edited",
+                    main,
+                    source_id,
+                    after_edit.clone(),
+                    Some("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ=="),
+                    Some("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk="),
+                ),
+                (
+                    "fork sibling",
+                    sibling,
+                    source_id,
+                    on_sibling.clone(),
+                    Some("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk="),
+                    Some("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ=="),
+                ),
+                ("hidden", main, safe_id, after_hide.clone(), None, None),
+                ("reset", main, reset_id, after_reset.clone(), None, None),
+            ] {
+                let bytes = capture_history_sse_body(
+                    provider_name,
+                    view,
+                    branch,
+                    target,
+                    Arc::clone(&assets),
+                )
+                .await;
+                let serialized = bytes.to_string();
+                assert_eq!(
+                    serialized
+                        .matches("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk=")
+                        .count()
+                        + serialized
+                            .matches("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ==")
+                            .count(),
+                    if expected.is_some() { 1 } else { 0 },
+                    "{provider_name}/{label}: media duplication or leakage"
+                );
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        serialized.matches(expected).count(),
+                        1,
+                        "{provider_name}/{label}: selected image missing"
+                    );
+                }
+                if let Some(excluded) = excluded {
+                    assert!(
+                        !serialized.contains(excluded),
+                        "{provider_name}/{label}: other revision leaked"
+                    );
+                }
+                assert!(
+                    !serialized.contains("aGlzdG9yeS1raW5kLXByaXZhdGU="),
+                    "{provider_name}/{label}: foreign image leaked"
+                );
+                assert!(
+                    !serialized.contains("other-character-confidential"),
+                    "{provider_name}/{label}: foreign text leaked"
+                );
+                if label == "edited" {
+                    assert!(
+                        serialized.find("revised-prefix")
+                            < serialized.find("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ==")
+                    );
+                    assert!(
+                        serialized.find("aGlzdG9yeS1yZXZpc2VkLWJpbmFyeQ==")
+                            < serialized.find("revised-suffix")
+                    );
+                    assert!(!serialized.contains("original-prefix"));
+                }
+                if label == "historical" || label == "fork sibling" {
+                    assert!(
+                        serialized.find("original-prefix")
+                            < serialized.find("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk=")
+                    );
+                    assert!(
+                        serialized.find("aGlzdG9yeS1vcmlnaW5hbC1iaW5hcnk=")
+                            < serialized.find("original-suffix")
+                    );
+                    assert!(!serialized.contains("revised-prefix"));
+                }
+                if label == "hidden" || label == "reset" {
+                    assert!(
+                        !serialized.contains("original-prefix")
+                            && !serialized.contains("revised-prefix"),
+                        "{provider_name}/{label}: hidden text leaked"
+                    );
+                }
+            }
+        }
+        assert_eq!(timeline.branch(main).unwrap().head_sequence, head);
+        std::fs::remove_dir_all(directory).ok();
+    }
+    #[tokio::test]
+    async fn live_media_rejects_inconsistent_captured_context_before_provider_http() {
+        use tokio::time::timeout;
+
+        for provider_name in ["gemini", "chat", "responses"] {
+            let directory = std::env::temp_dir().join(format!("nm-anchor-{}", Uuid::new_v4()));
+            let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+            let image = assets
+                .import("image/png", Cursor::new(b"anchor-protected"))
+                .unwrap();
+            let mut timeline = TimelineStore::new();
+            let branch = BranchId::new();
+            timeline.create_session(SessionId::new(), branch).unwrap();
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft
+                .payload
+                .insert("content".into(), json!([{"type":"image","asset":image}]));
+            let target = draft.id;
+            timeline
+                .append(branch, 0, "anchor-fixture", json!({}), vec![draft])
+                .unwrap();
+            let view = TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None)
+                .unwrap();
+
+            for mismatch in [
+                "anchor-through",
+                "anchor-branch",
+                "turn-through",
+                "turn-branch",
+                "turn-character",
+                "observer",
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+                let (provider, preset) = provider_with_stream(provider_name, &endpoint, true);
+                let generator = ResponseGenerator::new([provider]).unwrap();
+                let mut invalid = context(view.clone(), branch, target);
+                match mismatch {
+                    "anchor-through" => invalid.anchor.through += 1,
+                    "anchor-branch" => invalid.anchor.branch_id = BranchId::new().0,
+                    "turn-through" => invalid.turn.context_head += 1,
+                    "turn-branch" => invalid.turn.selection.branch_id = BranchId::new(),
+                    "turn-character" => invalid.turn.character = CharacterId::Kind,
+                    "observer" => invalid.character_id = CharacterId::Kind,
+                    _ => unreachable!(),
+                }
+                let mut observation = StreamObserve::default();
+                let outcome = timeout(
+                    Duration::from_millis(400),
+                    generator.generate_observed(
+                        GenerationRequest::new(invalid, preset, None)
+                            .with_assets(Some(Arc::clone(&assets))),
+                        &mut observation,
+                    ),
+                )
+                .await;
+                assert!(
+                    matches!(outcome, Ok(Err(GenerationError::Response(_)))),
+                    "{provider_name}/{mismatch}: inconsistent context must fail before HTTP: {outcome:?}"
+                );
+                assert!(
+                    observation.requests.is_empty(),
+                    "{provider_name}/{mismatch}"
+                );
+                assert!(observation.replies.is_empty(), "{provider_name}/{mismatch}");
+                assert!(
+                    timeout(Duration::from_millis(75), listener.accept())
+                        .await
+                        .is_err(),
+                    "{provider_name}/{mismatch}: inconsistent context caused HTTP transmission"
+                );
+            }
+            std::fs::remove_dir_all(directory).ok();
+        }
+    }
 }
