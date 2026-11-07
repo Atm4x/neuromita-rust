@@ -57,6 +57,17 @@ pub fn recall_forgotten(
     memories: &CharacterMemories,
     selector: RecallSelector,
 ) -> Result<ForgottenRecall, RecallError> {
+    recall_forgotten_records(character, anchor, &memories.all(), selector)
+}
+
+/// Operate directly on the immutable owner-projected records without rebuilding
+/// another mutable CharacterMemories instance or altering source revisions.
+pub(super) fn recall_forgotten_records(
+    character: CharacterId,
+    anchor: ContextAnchor,
+    records: &[MemoryRecord],
+    selector: RecallSelector,
+) -> Result<ForgottenRecall, RecallError> {
     let facts = match selector {
         RecallSelector::Ids(ids) => {
             if ids.is_empty() || ids.len() > MAX_RECALL_RESULTS {
@@ -68,7 +79,10 @@ pub fn recall_forgotten(
                     if !seen.insert(id) {
                         return Err(RecallError::DuplicateId);
                     }
-                    let record = memories.get(id).ok_or(RecallError::IneligibleId)?;
+                    let record = records
+                        .iter()
+                        .find(|record| record.id == id)
+                        .ok_or(RecallError::IneligibleId)?;
                     if record.kind != MemoryKind::Fact || record.state != MemoryState::Forgotten {
                         return Err(RecallError::IneligibleId);
                     }
@@ -87,14 +101,16 @@ pub fn recall_forgotten(
             if query_tokens.is_empty() {
                 return Err(RecallError::InvalidQuery);
             }
-            let mut ranked = memories
-                .forgotten()
-                .into_iter()
+            let mut ranked = records
+                .iter()
+                .filter(|record| {
+                    record.kind == MemoryKind::Fact && record.state == MemoryState::Forgotten
+                })
                 .filter_map(|record| {
                     let matching_tokens =
                         tokens(&record.content).intersection(&query_tokens).count();
-                    (matching_tokens > 0).then_some(RecalledFact {
-                        record,
+                    (matching_tokens > 0).then(|| RecalledFact {
+                        record: record.clone(),
                         matching_tokens,
                     })
                 })
