@@ -1,0 +1,42 @@
+name: Publish Agent B14 retention bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b14-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 07d7f2e7bba1314ff5df2a73a28b37110875a42c
+          fetch-depth: 0
+      - name: Validate SHA and publish B14
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=07d7f2e7bba1314ff5df2a73a28b37110875a42c
+          EXPECTED=3df58f720eee864f261c47665fcb6a509ab43efe
+          DIGEST=9793d8dffe75a2f27a245a1e8118741c7cbc590d885db96def3b7d0f17c4152b
+          TARGET=refs/heads/codex/timeline-asset-retention-manifest-20261107
+          git fetch origin refs/heads/bridge/agent-b14-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b14-20261107.bundle.b64 | base64 --decode > /tmp/agent-b14.bundle
+          echo "$DIGEST  /tmp/agent-b14.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b14.bundle
+          git fetch /tmp/agent-b14.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Unexpected pre-existing B14 destination SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
