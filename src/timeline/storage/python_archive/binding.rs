@@ -23,6 +23,40 @@ impl<'a> BoundPythonArchive<'a> {
     pub fn native_session(&self) -> SessionId {
         SessionId(self.source.identities.session.candidate_uuid)
     }
+
+    /// Stage the verified Python binary closure in the canonical content-addressed
+    /// AssetStore. Files are deduplicated; no session is published. Failed later
+    /// Timeline transactions can leave only harmless unreferenced assets.
+    pub fn stage_assets(
+        &self,
+        destination: &crate::timeline::storage::assets::TimelineAssetStore,
+    ) -> Result<BTreeMap<String, crate::timeline::domain::TimelineAssetRef>, PythonArchiveError>
+    {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use std::io::Cursor;
+        let mut uploaded = BTreeMap::new();
+        for asset in &self.source.envelope.assets {
+            let data = STANDARD
+                .decode(&asset.base64)
+                .map_err(|_| PythonArchiveError::Invalid("verified asset could not be decoded"))?;
+            let source_size = data.len() as u64;
+            let reference = destination
+                .import(&asset.media_type, Cursor::new(data))
+                .map_err(|_| PythonArchiveError::Invalid("asset staging failed"))?;
+            if asset.asset_id.strip_prefix("sha256:") != Some(reference.digest.as_str())
+                || asset.media_type != reference.media_type
+                || reference.size != source_size
+            {
+                return Err(PythonArchiveError::Invalid(
+                    "staged asset identity mismatch",
+                ));
+            }
+            if uploaded.insert(asset.asset_id.clone(), reference).is_some() {
+                return Err(PythonArchiveError::Invalid("duplicate staged binary"));
+            }
+        }
+        Ok(uploaded)
+    }
 }
 
 impl InspectedPythonArchive {

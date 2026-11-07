@@ -82,3 +82,17 @@ revalidate the mappings and collision set **inside the same destination write
 transaction**, and must persist the original source identities and exact
 microsecond timestamps atomically with canonical events. Neither the current
 SQLite storage nor the in-memory store is mutated by this step.
+
+## Pre-publication Python binary staging (B25)
+
+After a successful source preflight and exact observer binding,
+`BoundPythonArchive::stage_assets(&TimelineAssetStore)` copies only the
+verified archive's binary closure into the already injected, canonical
+content-addressed storage. External `sha256:<hex>` IDs are checked against the
+returned native digest, size and media type, with idempotent import. No native
+session, event, receipt, or identity mapping is committed by this method.
+A subsequent failed transaction can leave orphan content-addressed blobs;
+read-only orphan inventory is allowed, destructive GC is not. Callers must not
+show these binaries as attached to a canonical event until the later Timeline
+transaction succeeds. This API does not make Python SessionArchive directly
+importable into native Memory or SQLite.
