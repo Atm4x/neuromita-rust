@@ -1,0 +1,54 @@
+name: Agent C revision lease verified import and Windows regression
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-revision-leases-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-revision-leases-20261107
+          fetch-depth: 0
+      - name: Verify bundle and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=d005036e5762467fa8386da4fb50ef09eca2aa11
+          HEAD=2781acae3f2b6e0aa2477b38a32a177c1678e721
+          TARGET=codex/ai-platform-hub-c3-revision-leases-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-revision-leases.bundle.b64 > /tmp/agent-c-revision.bundle
+          echo '54aa65c8e3cffc4a7deccadb877385a4da0f277ba1ba686f2192efa2063365ef  /tmp/agent-c-revision.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-revision.bundle
+          git fetch --no-tags /tmp/agent-c-revision.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "unexpected existing branch: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows-revision-lease:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-revision-leases-20261107
+          fetch-depth: 1
+      - name: Rust 1.98.1 Windows revision ownership
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib revision_lease -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib removal_inventory_records_actual_worker_layers_and_denies_busy_observation -- --nocapture
