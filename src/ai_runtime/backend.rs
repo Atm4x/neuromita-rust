@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     layer::{
-        LayerError, LayerInstaller, reject_symlinked_layer_components, valid_segment, validate_lock,
+        LayerError, LayerInstaller, reject_symlinked_layer_components, reject_unsafe_layer_receipt,
+        valid_segment, validate_lock,
     },
     overlay::LockedPackage,
 };
@@ -151,14 +152,7 @@ pub fn load_installed_backend(
     let path = backends_directory.join(kind.directory()).join(revision);
     reject_symlinked_layer_components(&path)?;
     let marker = path.join(".neuromita-backend.json");
-    if marker.is_symlink() {
-        return Err(LayerError::Conflict);
-    }
-    if let Ok(stat) = std::fs::metadata(&marker)
-        && (!stat.is_file() || stat.len() > 131_072)
-    {
-        return Err(LayerError::Conflict);
-    }
+    reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             LayerError::NotInstalled(path.display().to_string())

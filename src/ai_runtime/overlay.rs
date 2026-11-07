@@ -5,7 +5,8 @@ use std::{path::PathBuf, time::Duration};
 use serde::{Deserialize, Serialize};
 
 use super::layer::{
-    LayerError, LayerInstaller, reject_symlinked_layer_components, valid_segment, validate_lock,
+    LayerError, LayerInstaller, reject_symlinked_layer_components, reject_unsafe_layer_receipt,
+    valid_segment, validate_lock,
 };
 
 pub type OverlayError = LayerError;
@@ -107,14 +108,7 @@ pub fn load_installed_overlay(
     let path = overlays_directory.join(plugin_id).join(revision);
     reject_symlinked_layer_components(&path)?;
     let marker = path.join(".neuromita-overlay.json");
-    if path.is_symlink() || marker.is_symlink() {
-        return Err(LayerError::Conflict);
-    }
-    if let Ok(stat) = std::fs::metadata(&marker)
-        && (!stat.is_file() || stat.len() > 131_072)
-    {
-        return Err(LayerError::Conflict);
-    }
+    reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             LayerError::NotInstalled(path.display().to_string())
@@ -241,6 +235,55 @@ mod tests {
         assert!(load_installed_overlay(&overlay_root, "mock_tts", "rev1").is_err());
         std::fs::remove_file(&overlay_root).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn installed_layer_rejects_symlinked_and_oversized_receipts() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("nm-layer-marker-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        std::fs::write(&uv, "fake").unwrap();
+        std::fs::write(&python, "fake").unwrap();
+        let installer = OverlayInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            overlays_directory: root.join("overlays"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(5),
+        };
+        let spec = plan();
+        let revision = installer.install(&spec).await.unwrap();
+        let marker = revision.join(".neuromita-overlay.json");
+        let foreign = root.join("foreign-receipt.json");
+        std::fs::write(&foreign, serde_json::to_vec(&spec).unwrap()).unwrap();
+        std::fs::remove_file(&marker).unwrap();
+        symlink(&foreign, &marker).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+        assert!(matches!(
+            installer.install(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+
+        std::fs::remove_file(&marker).unwrap();
+        let mut oversized = serde_json::to_vec(&spec).unwrap();
+        oversized.extend(vec![b' '; 131_073]);
+        std::fs::write(&marker, oversized).unwrap();
+        assert!(matches!(
+            installer.installed(&spec).await,
+            Err(LayerError::Conflict)
+        ));
+
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::write(&marker, serde_json::to_vec(&spec).unwrap()).unwrap();
+        assert!(installer.installed(&spec).await.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
