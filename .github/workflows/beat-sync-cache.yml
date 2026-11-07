@@ -38,6 +38,6 @@ jobs:
       - name: Run GameLink TCP Beat Sync fixture
         run: cargo test --locked --offline --test game_beat_sync
       - name: Full offline Rust suite
-        run: cargo test --locked --offline
+        run: cargo test --locked --offline -- --test-threads=1
       - name: Strict Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
