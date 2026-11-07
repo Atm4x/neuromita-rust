@@ -253,6 +253,7 @@ export component AiHubOperationRow inherits Rectangle {
 // "Confirm" is the sole mutating-operation submission intent.
 export component AiHubOperationsPanel inherits Rectangle {
     in property <bool> connected: false;
+    in property <bool> embed-decision-dialog: true;
     in property <string> component-id;
     in property <string> component-title;
     in property <bool> supported: false;
@@ -464,7 +465,7 @@ export component AiHubOperationsPanel inherits Rectangle {
         width: parent.width;
         height: parent.height;
         decision: root.decision;
-        open: root.decision-visible;
+        open: root.decision-visible && root.embed-decision-dialog;
         confirmed(decision-id, component, action, rev, tok) => {
             root.confirm-requested(decision-id, component, action, rev, tok);
         }

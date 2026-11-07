@@ -8,7 +8,7 @@ import { AiHubCard } from "cards.slint";
 import { AiHubSettingsPanel } from "settings-panel.slint";
 import { AiHubOperationsPanel, AiHubOperationSnapshot, AiHubOperationCapabilities } from "operations.slint";
 import { AiHubQueuePopup } from "operations-popup.slint";
-import { AiHubDecisionSnapshot } from "dialogs.slint";
+import { AiHubDecisionSnapshot, AiHubOperationDialog } from "dialogs.slint";
 import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase, AiHubTruth, AiHubSettingValue } from "contract.slint";
 
 // GUI-only workspace. Agent 2 owns cards, agent 3 owns the schema editor,
@@ -302,6 +302,7 @@ export component AiHubShell inherits Rectangle {
                                     token: root.operation-target.token;
                                     capabilities: root.operation-capabilities;
                                     decision: root.operation-decision;
+                                    embed-decision-dialog: false;
                                     operations: root.operation-snapshots;
                                     prepare-requested(id, action, rev, tok) => { root.operation-prepare-requested(id, action, rev, tok); }
                                     confirm-requested(id, component, action, rev, tok) => {
@@ -352,6 +353,23 @@ export component AiHubShell inherits Rectangle {
         }
     }
 
+    // Modal confirmation belongs to the whole AI Hub surface rather than
+    // the scrollable per-component operations panel.
+    AiHubOperationDialog {
+        width: parent.width; height: parent.height;
+        decision: root.operation-decision;
+        open: root.operation-adapter-connected
+            && root.operation-decision.available
+            && root.operation-decision.decision-id != ""
+            && root.operation-decision.component-id == root.operation-target.component-id
+            && root.operation-decision.token == root.operation-target.token;
+        confirmed(id, component, action, rev, tok) => {
+            root.operation-confirm-requested(id, component, action, rev, tok);
+        }
+        dismissed(id, component, rev, tok) => {
+            root.operation-dismiss-requested(id, component, rev, tok);
+        }
+    }
     AiHubQueuePopup {
         width: parent.width; height: parent.height;
         open: root.queue-open;

@@ -49,3 +49,7 @@ The catalog's existing `AiHubCatalogState`, component/readiness, settings, and o
 ## Dependencies, next work
 
 Core-owned dynamic metadata/status in #59, installation/preflight in #42 and #61, running worker readiness/status in #24. Required: wire existing Core snapshots to the added AppWindow properties and callbacks (including exact component-id, revision, token, operation-id), reject stale callbacks in presenter, produce authoritative action admissions, and then run complete GUI acceptance. Only after those checks can issue #37 be considered for closure.
+
+## Modal scope refinement
+
+The integration mounts the correlated operation confirmation at the full AI Hub overlay level. The operations panel retains its embedded dialog for standalone fixtures, but the production shell disables that embedded instance to avoid duplicate or clipped confirmations. No operation is enabled without an authoritative connected adapter.
