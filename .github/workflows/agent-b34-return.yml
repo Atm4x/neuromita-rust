@@ -1,0 +1,42 @@
+name: Publish Agent B34 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b34-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2cd6c1ac13845809ae18d36d00cb77db5facedd6
+          fetch-depth: 0
+      - name: Verify and import B34 without force push
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=2cd6c1ac13845809ae18d36d00cb77db5facedd6
+          EXPECTED=3b6e53822925d5627a3cfe4f23bf234a26832856
+          SHA256=b841518438ba263db5b878774ee7bd9a905a4b1bd078bbf1b7e5cd986fed6c7b
+          TARGET=refs/heads/codex/timeline-python-disclosure-audit-20261107
+          git fetch origin refs/heads/bridge/agent-b34-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b34-20261107.bundle.b64 | base64 --decode > /tmp/agent-b34.bundle
+          echo "$SHA256  /tmp/agent-b34.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b34.bundle
+          git fetch /tmp/agent-b34.bundle refs/heads/codex/timeline-python-disclosure-audit-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Ref exists at unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
