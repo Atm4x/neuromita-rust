@@ -200,6 +200,46 @@ impl HistorySearchApi {
     }
 }
 
+/// Trusted-local knowledge cache inspection and confirmed derived-data clear.
+/// The API does not authenticate remote clients and must not be exported there.
+pub struct KnowledgeCacheApi;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum KnowledgeCacheApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("semantic embedding cache is not configured")]
+    BackendUnavailable,
+    #[error(transparent)]
+    Clear(#[from] crate::knowledge::KnowledgeCacheClearError),
+}
+
+impl KnowledgeCacheApi {
+    /// A preview can be displayed to a local user without leaking vector content.
+    pub fn preview()
+    -> Result<crate::knowledge::semantic_memory::EmbeddingCachePreview, KnowledgeCacheApiError>
+    {
+        let bindings = runtime::current().map_err(|_| KnowledgeCacheApiError::Unavailable)?;
+        bindings
+            .knowledge
+            .preview_embedding_cache_clear()
+            .ok_or(KnowledgeCacheApiError::BackendUnavailable)
+    }
+
+    /// Clear only after an explicit confirmation tied to the original preview.
+    /// The canonical Timeline is never mutated by this operation.
+    pub fn clear_confirmed(
+        preview: &crate::knowledge::semantic_memory::EmbeddingCachePreview,
+        confirmed: bool,
+    ) -> Result<usize, KnowledgeCacheApiError> {
+        let bindings = runtime::current().map_err(|_| KnowledgeCacheApiError::Unavailable)?;
+        bindings
+            .knowledge
+            .clear_embedding_cache_confirmed(preview, confirmed)
+            .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

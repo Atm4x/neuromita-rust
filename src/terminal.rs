@@ -6,13 +6,16 @@ use std::{
 };
 
 use neuromita::{
-    api::{ChatApi, HistoricalRecallApi, HistorySearchApi},
+    api::{ChatApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi},
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
         seabattle::{Coordinate, Orientation, Side},
     },
-    knowledge::{forgotten_recall::RecallSelector, retrieval_fusion::FusionMode},
+    knowledge::{
+        forgotten_recall::RecallSelector, retrieval_fusion::FusionMode,
+        semantic_memory::EmbeddingCachePreview,
+    },
     memory::MemoryId,
     presentation::ChatPresenter,
     request::{
@@ -42,7 +45,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -341,6 +344,7 @@ pub async fn run(
     let mut printed: HashMap<RequestId, u64> = HashMap::new();
     let mut pending = HashSet::new();
     let mut failed = false;
+    let mut pending_cache_clear: Option<(uuid::Uuid, EmbeddingCachePreview)> = None;
     let mut eof = options.message.is_some();
     let mut lines = if eof { None } else { Some(input()) };
     if let Some(message) = options.message {
@@ -449,6 +453,38 @@ pub async fn run(
                                 },
                                 Err(error) => eprintln!("{error}"),
                             }
+                        } else if slash_command(&line, "/knowledge") {
+                            match parse_cache_maintenance(&line) {
+                                Ok(CacheMaintenanceCommand::Preview) => {
+                                    pending_cache_clear = None;
+                                    match KnowledgeCacheApi::preview() {
+                                        Ok(preview) => {
+                                            let token = uuid::Uuid::new_v4();
+                                            println!(
+                                                "Кэш: {} записей; пространство {} / {} / {} ({}D); по персонажам: {:?}.\nДля подтверждённой очистки: /knowledge cache clear {token}",
+                                                preview.total_entries,
+                                                preview.space.backend,
+                                                preview.space.model,
+                                                preview.space.protocol,
+                                                preview.space.dimensions,
+                                                preview.entries_by_character
+                                            );
+                                            pending_cache_clear = Some((token, preview));
+                                        }
+                                        Err(error) => eprintln!("Knowledge: {error}"),
+                                    }
+                                }
+                                Ok(CacheMaintenanceCommand::Clear(token)) => {
+                                    match take_cache_clear_preview(&mut pending_cache_clear, token) {
+                                        Ok(preview) => match KnowledgeCacheApi::clear_confirmed(&preview, true) {
+                                            Ok(cleared) => println!("Очищено {cleared} производных embedding-записей. Timeline и память не изменены."),
+                                            Err(error) => eprintln!("Knowledge: {error}; запросите новый preview."),
+                                        },
+                                        Err(error) => eprintln!("{error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("{error}"),
+                            }
                         } else if line == "/dataset status" {
                             println!("{}", dataset_status(dataset));
                         } else if let Some(value) = line.strip_prefix("/diagnostics") {
@@ -483,6 +519,36 @@ pub async fn run(
 fn slash_command(line: &str, command: &str) -> bool {
     line.strip_prefix(command)
         .is_some_and(|tail| tail.is_empty() || tail.chars().next().is_some_and(char::is_whitespace))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CacheMaintenanceCommand {
+    Preview,
+    Clear(uuid::Uuid),
+}
+
+fn parse_cache_maintenance(line: &str) -> Result<CacheMaintenanceCommand, &'static str> {
+    const USAGE: &str = "Используй /knowledge cache preview, затем /knowledge cache clear TOKEN";
+    match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["/knowledge", "cache", "preview"] => Ok(CacheMaintenanceCommand::Preview),
+        ["/knowledge", "cache", "clear", token] => uuid::Uuid::parse_str(token)
+            .map(CacheMaintenanceCommand::Clear)
+            .map_err(|_| USAGE),
+        _ => Err(USAGE),
+    }
+}
+
+fn take_cache_clear_preview(
+    pending: &mut Option<(uuid::Uuid, EmbeddingCachePreview)>,
+    token: uuid::Uuid,
+) -> Result<EmbeddingCachePreview, &'static str> {
+    let Some((expected, _)) = pending else {
+        return Err("Нет ожидающего подтверждения; выполните /knowledge cache preview");
+    };
+    if *expected != token {
+        return Err("Неверный токен подтверждения; кэш не изменён");
+    }
+    Ok(pending.take().expect("matched pending preview").1)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -589,6 +655,62 @@ mod forgotten_recall_command_tests {
             Ok(HistoryCommand::Fusion("green tea"))
         );
         assert!(parse_history_search("/rag history-vector").is_err());
+    }
+
+    #[test]
+    fn cache_clear_requires_opaque_preview_token_and_exact_explicit_command() {
+        assert_eq!(
+            parse_cache_maintenance("/knowledge cache preview"),
+            Ok(CacheMaintenanceCommand::Preview)
+        );
+        let token = uuid::Uuid::new_v4();
+        assert_eq!(
+            parse_cache_maintenance(&format!("/knowledge cache clear {token}")),
+            Ok(CacheMaintenanceCommand::Clear(token))
+        );
+        for malformed in [
+            "/knowledge",
+            "/knowledge cache",
+            "/knowledge cache clear",
+            "/knowledge cache clear yes",
+            "/knowledge cache preview extra",
+            "/knowledge cache clear 00000000-0000-0000-0000-000000000001 extra",
+        ] {
+            assert!(slash_command(malformed, "/knowledge"));
+            assert!(parse_cache_maintenance(malformed).is_err());
+        }
+        struct FakeEmbedding(neuromita::knowledge::embedding::EmbeddingSpace);
+        impl neuromita::knowledge::embedding::EmbeddingProvider for FakeEmbedding {
+            fn space(&self) -> &neuromita::knowledge::embedding::EmbeddingSpace {
+                &self.0
+            }
+            fn embed(
+                &self,
+                _: neuromita::knowledge::embedding::EmbeddingPurpose,
+                _: String,
+            ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+                '_,
+                neuromita::knowledge::embedding::Embedding,
+            > {
+                Box::pin(async { unreachable!("preview must not use inference") })
+            }
+        }
+        let retriever = neuromita::knowledge::semantic_memory::SemanticMemoryRetriever::new(
+            Arc::new(FakeEmbedding(
+                neuromita::knowledge::embedding::EmbeddingSpace::new("test", "model", "v1", 2)
+                    .unwrap(),
+            )),
+            16,
+        )
+        .unwrap();
+        let preview = retriever.preview_cache_clear();
+        let mut pending = Some((token, preview));
+        assert!(take_cache_clear_preview(&mut pending, uuid::Uuid::new_v4()).is_err());
+        assert!(pending.is_some());
+        let taken = take_cache_clear_preview(&mut pending, token).unwrap();
+        assert!(pending.is_none());
+        assert_eq!(taken.total_entries, 0);
+        assert!(take_cache_clear_preview(&mut pending, token).is_err());
     }
 
     #[test]
