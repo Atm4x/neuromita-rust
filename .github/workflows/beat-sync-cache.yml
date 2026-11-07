@@ -11,7 +11,7 @@ on:
       - .github/workflows/beat-sync-cache.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   beat-cache:
@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
       - name: Install Linux native audio headers
         run: |
           sudo apt-get update -qq
@@ -26,9 +28,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Format Rust files and publish formatting if needed
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet -- src/music.rs src/music/ tests/beat_sync_runtime.rs tests/beat_sync_cache.rs; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src/music.rs src/music/ tests/beat_sync_runtime.rs tests/beat_sync_cache.rs
+            git commit -m 'style(music): rustfmt on native Beat Sync runtime'
+            git push origin HEAD:codex/beat-sync-cache-29
+          fi
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Beat Sync cache acceptance tests
         run: cargo test --locked --offline --test beat_sync_cache
+      - name: Run real WAV and runtime delivery fixtures
+        run: cargo test --locked --offline --test beat_sync_runtime
       - name: Strict Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
