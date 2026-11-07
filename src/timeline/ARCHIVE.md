@@ -247,3 +247,16 @@ native converter preserves such JSON payloads without inventing text, while
 still rejecting unverified Python media embedded in arbitrary payload fields.
 These targeted parity guarantees do **not** make `EventObserved` importable;
 its independent identity and retroactive visibility semantics remain blocked.
+
+## Python asset MIME canonicality (B39)
+
+Python `TimelineAsset.create()` normalizes media type spelling and maps
+`image/jpg` to `image/jpeg`, while `TimelineAsset.validate()` rejects a
+stored asset whose declared MIME differs from that canonical spelling.
+The Rust Python-archive preflight applies the same canonicality constraint
+*before* publication, even when the attacker recomputes a matching
+SHA-256 asset ID and updates every receipt/reference. The first character
+of each MIME component must be an ASCII lowercase letter or digit;
+`image/jpg` cannot be used as an on-disk alias. Valid extensions such as
+`image/vnd.example` remain allowed. This does not enable unsupported
+image codecs or alter native AssetStore MIME rules.

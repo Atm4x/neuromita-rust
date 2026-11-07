@@ -13,8 +13,14 @@ pub(super) fn validate_assets(envelope: &PythonEnvelope) -> Result<(), PythonArc
             .media_type
             .split_once('/')
             .ok_or(PythonArchiveError::Invalid("invalid asset MIME"))?;
-        if major.is_empty()
-            || minor.is_empty()
+        let starts_alphanumeric = |part: &str| {
+            part.as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        };
+        if !starts_alphanumeric(major)
+            || !starts_alphanumeric(minor)
+            || asset.media_type == "image/jpg"
             || asset.media_type.len() > 127
             || !major.bytes().chain(minor.bytes()).all(|ch| {
                 ch.is_ascii_lowercase() || ch.is_ascii_digit() || b"!#$&^_.+-".contains(&ch)
