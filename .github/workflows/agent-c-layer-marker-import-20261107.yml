@@ -1,0 +1,84 @@
+name: Agent C shared installed layer marker safety import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-layer-marker-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-backend-receipt-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=101e8e4c604e08c2f3d93fd60a51797a662e704d
+          HEAD=77f2a66ce68e38d2f459793379062e59da690547
+          TARGET=codex/ai-platform-hub-c3-layer-marker-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-layer-marker.bundle
+          IyB2MiBnaXQgYnVuZGxlCi0xMDFlOGU0YzYwNGUwOGMyZjNkOTNmZDYwYTUxNzk3YTY2MmU3MDRk
+          IGZpeChhaSk6IHZhbGlkYXRlIG1hbmFnZWQgYmFja2VuZCByZWNlaXB0IHBhdGggYmVmb3JlIGFj
+          dGl2YXRpb24KNzdmMmE2NmNlNjhlMzhkMmY0NTk3OTMzNzkwNjJlNTlkYTY5MDU0NyByZWZzL2hl
+          YWRzL2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1jMy1sYXllci1tYXJrZXItMjAyNjExMDcKClBBQ0sA
+          AAACAAAACp4TeJytzl1OwzAMB/D3nMKPTIgqX01bhCYQz3AHJ3G2TF1TpSnaOD3eHfCTbcm/v1sl
+          gl7pFJX1yQ7GO2NDmkyfgtTovcWYLJphVArFipWWBkoqGskGJy3JMehk4mRSdBJ7NUwDOqdpkDYK
+          3Nu5VPimvZav3BA+To/7T3jDR/MS3veN6tYtpdI637tTbufdd6Fcj8CSlUpO2sCz5BK8vebW6L88
+          kfLtCfPhFSpdKDSgG+MLzsAvlx928i9FmPHOkZUC5bVt4CkxzjMniT9DT2Xj+QPXI7zsqpfZxNMH
+          flSqb34/TkEyanicATkAxv//Bf8FsKABFK0wleVBvNPogc2kU+X8LZ95iAXWk7QBuRQ8H9XnP7de
+          Bxf4nVzUoBRPsZOk2JOBAn5bDR0F/gFUabQug0iDbezsNqQx0uS5yByNAXicAR4A4f/wAvACkH8U
+          o6Ot0b+KA0atieYu7HoZsltKpRKRk93rtQ82/QPXjdCJa6InceHBoKAHnMtZ2Ez8eHicAT0Awv/u
+          HLQdkNAvbGF5ZXItcmVjZWlwdC1zYWZldHktYzMubWQABd2ykQVCZNU9RLOOZfRIrU0w9HeRLhex
+          0J4NDgAZu75feJxdVMGO2zgMvecrCOxhZ4AkRdvLYm7dOXW3aA9tzwkjM7Y2siRIdFL36/sky+nM
+          AjlElsj3+PjIP+ijz8rOSUeOZ0mUxIiNSld2tmO1wdPDh1680jO9oef3j5vNt0EoD5wQc/xUgtYc
+          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
+          BUNDLE
+          echo 'd5c9e3936ac94cd9f338d6c9cf679072a8f45d81cf865530f39bfb635a1d8613  /tmp/agent-c-layer-marker.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-layer-marker.bundle
+          git fetch --no-tags /tmp/agent-c-layer-marker.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected existing ref: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
