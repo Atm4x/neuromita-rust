@@ -1,0 +1,67 @@
+name: Agent D30 checked patch import and Windows acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d30-source-export-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    outputs:
+      published: ${{ steps.apply.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ace68913a8c2bfdd5378e8755042d3672c1dc823
+          fetch-depth: 0
+      - id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ace68913a8c2bfdd5378e8755042d3672c1dc823
+          HEAD_EXPECTED=4108f48ec55bf1a2a55b0961c5cf781d5493bb80
+          TREE_EXPECTED=13f15a1616587f4aaef451fc0691bc2721f925ba
+          SOURCE_REF=refs/remotes/origin/bridge/agent-d30-source-export-20261107
+          PAYLOAD=.github/bridge/agent-d30-patch.xz.b64
+          git fetch --no-tags origin "refs/heads/bridge/agent-d30-source-export-20261107:$SOURCE_REF"
+          if ! git cat-file -e "$SOURCE_REF:$PAYLOAD" 2>/dev/null; then
+            echo "Patch has not been uploaded yet"
+            exit 0
+          fi
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git show "$SOURCE_REF:$PAYLOAD" | base64 --decode > "$RUNNER_TEMP/agent-d30.patch.xz"
+          echo "0efbee389d57e294e51f4c5c7a21cb82a4ee166e521f08a9dbd4dc60bd96c540  $RUNNER_TEMP/agent-d30.patch.xz" | sha256sum -c -
+          xzcat "$RUNNER_TEMP/agent-d30.patch.xz" | git apply --index
+          git config user.name "Agent D"
+          git config user.email "agent-d@local.invalid"
+          GIT_AUTHOR_DATE="2026-11-07T21:40:00+00:00" GIT_COMMITTER_DATE="2026-11-07T21:40:00+00:00" git commit -m "fix(settings): bind unmapped approval to exact skipped Python keys"
+          test "$(git rev-parse HEAD)" = "$HEAD_EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE_EXPECTED"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          git diff --check "$BASE" HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/bridge/agent-d30-reviewed-candidate-20261107
+          echo "published=true" >> "$GITHUB_OUTPUT"
+  windows-acceptance:
+    needs: import
+    if: needs.import.outputs.published == 'true'
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4108f48ec55bf1a2a55b0961c5cf781d5493bb80
+      - name: Install pinned Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustc --version
+      - name: Native Windows settings migration and lock tests
+        shell: pwsh
+        run: |
+          cargo test --locked --offline --test python_settings_import --test python_preset_three_file --test settings_cli --test preset_storage_lock
+          cargo test --locked --offline --lib settings::preset_activation::tests -- --test-threads=1
+          cargo test --locked --offline --lib settings::storage::tests -- --test-threads=1
