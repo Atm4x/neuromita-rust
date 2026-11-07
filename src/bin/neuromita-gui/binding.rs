@@ -350,9 +350,16 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     });
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
+    let update_checker = super::update_check::UpdateChecker::default();
+    let update_window = window.as_weak();
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
+            LauncherAction::CheckUpdates => {
+                if let Some(window) = update_window.upgrade() {
+                    update_checker.check(&window);
+                }
+            }
             LauncherAction::OpenUnityFolder => {
                 let notice = launcher_for_action.borrow().open_location();
                 handler(ShellCommand::LauncherFeedback(notice));

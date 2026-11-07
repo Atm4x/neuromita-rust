@@ -136,6 +136,8 @@ export component HomePage inherits Rectangle {
     in property <bool> backend-selected;
     in property <bool> client-selected;
     in property <bool> game-running;
+    in property <bool> update-check-loading;
+    in property <string> update-check-status;
     callback toggle-backend();
     callback toggle-client();
     callback play();
@@ -165,6 +167,21 @@ export component HomePage inherits Rectangle {
                 StatusCard { model: root.client; icon: Icons.unity; icon-color: #f0f0f0; icon-size: 34px; checked: root.client-selected; toggled => { root.toggle-client(); } }
             }
             PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
+            if root.update-check-status != "": Rectangle {
+                height: 57px;
+                min-width: 0px;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: 10px;
+                Label {
+                    x: 12px; y: 5px; width: parent.width - 24px; height: parent.height - 10px;
+                    text: root.update-check-status;
+                    color: root.update-check-loading ? Theme.accent-hover : Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
         }
         VerticalLayout {
             min-width: 0px; preferred-width: 0px; horizontal-stretch: 2;

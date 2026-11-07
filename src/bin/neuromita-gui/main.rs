@@ -11,6 +11,7 @@ mod runtime;
 mod sandbox;
 mod settings;
 mod speech_status;
+mod update_check;
 mod voice;
 mod wiki;
 

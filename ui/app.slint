@@ -91,6 +91,8 @@ export component AppWindow inherits Window {
     in property <bool> game-running;
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
+    in property <bool> update-check-loading: false;
+    in property <string> update-check-status;
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
     in property <int> chat-clients;
@@ -152,6 +154,8 @@ export component AppWindow inherits Window {
                 backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
                 client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
                 releases: root.releases;
+                update-check-status: root.update-check-status;
+                update-check-loading: root.update-check-loading;
                 backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }

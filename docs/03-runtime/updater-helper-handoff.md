@@ -17,3 +17,24 @@ After the parent exits, the helper removes its handoff marker, acquires the inst
 - The `.neuromita-update.lock` protects cooperating application updater operations, not arbitrary modifications by a malicious actor with write access to the installation. `UserData` remains untouched by installation-file replacement except for the explicit status JSON.
 
 **Issue #44 remains OPEN.** This is an independently testable helper lifecycle slice, not complete Python updater parity or a Windows installation certificate.
+
+## D23: read-only graphical release check
+
+The Home launcher menu's **Check Updates** action now performs a real asynchronous
+`GithubUpdateCatalog::latest_release()` query against the existing Python/Unity
+release repository `Atm4x/NeuroMita`. It reports the **published** tag and
+presence of exact `PythonBuild-{tag}.zip` / `UnityBuild-{tag}.zip` asset names
+without claiming that those archives are installed, newer than the local
+installation, or directly applicable by the Rust single-file updater.
+Concurrent requests are rejected while a check is in flight; the result remains
+visible on Home and the network request never runs on the Slint event thread.
+Failure is reported as failure, not an empty list of updates. Archive bytes are
+**not downloaded, staged or applied** by this check.
+
+The current Rust single-file activator accepts a verified raw executable that
+matches the installed target. The historical release distribution provides
+ZIP packages for distinct Python and Unity components instead. No GUI path
+relabels a ZIP as an executable or launches the helper for these archives.
+The core/Unity installed-version comparison, publisher trust and full ZIP
+installer/rollback are still required for user-visible update eligibility.
+Until those exist, the action is a release inspection, not an install button.
