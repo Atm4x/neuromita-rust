@@ -40,6 +40,10 @@ impl GraphMaintenancePreview {
     pub fn mode(&self) -> GraphMaintenanceMode {
         self.mode
     }
+
+    pub fn character(&self) -> crate::identity::CharacterId {
+        self.expected.character()
+    }
 }
 
 #[derive(Debug, Error)]

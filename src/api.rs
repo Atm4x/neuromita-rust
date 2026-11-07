@@ -257,6 +257,68 @@ impl KnowledgeCacheApi {
     }
 }
 
+/// Explicit local graph maintenance against the canonical character memory owner.
+/// The caller is responsible for local-user authorization; no remote route is exposed.
+pub struct GraphMaintenanceApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum GraphMaintenanceApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("graph preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Maintenance(#[from] crate::knowledge::maintenance::GraphMaintenanceError),
+}
+
+impl GraphMaintenanceApi {
+    /// Capture a read-only preview of exact source IDs at a caller-supplied clock time.
+    pub async fn preview(
+        character: CharacterId,
+        ids: &[crate::memory::MemoryId],
+        as_of_unix_ms: u64,
+        mode: crate::knowledge::maintenance::GraphMaintenanceMode,
+    ) -> Result<crate::knowledge::maintenance::GraphMaintenancePreview, GraphMaintenanceApiError>
+    {
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(GraphMaintenanceApiError::CharacterUnavailable)?;
+        let snapshot = owner.memories().await?;
+        crate::knowledge::maintenance::preview_graph_maintenance(snapshot, ids, as_of_unix_ms, mode)
+            .map_err(Into::into)
+    }
+
+    /// Apply one confirmed, version-checked batch. Reindex is explicitly
+    /// unavailable until a production GraphExtractor is connected; never
+    /// silently synthesize relations or replace it with lexical heuristics.
+    pub async fn apply_confirmed(
+        character: CharacterId,
+        plan: crate::knowledge::maintenance::GraphMaintenancePreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::MemoryEditResult, GraphMaintenanceApiError> {
+        if plan.character() != character {
+            return Err(GraphMaintenanceApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| GraphMaintenanceApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(GraphMaintenanceApiError::CharacterUnavailable)?;
+        crate::knowledge::maintenance::apply_graph_maintenance(
+            &owner, plan, None, confirmed, cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

@@ -6,14 +6,16 @@ use std::{
 };
 
 use neuromita::{
-    api::{ChatApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi},
+    api::{ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi},
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
         seabattle::{Coordinate, Orientation, Side},
     },
     knowledge::{
-        forgotten_recall::RecallSelector, retrieval_fusion::FusionMode,
+        forgotten_recall::RecallSelector,
+        maintenance::{GraphMaintenanceMode, GraphMaintenancePreview},
+        retrieval_fusion::FusionMode,
         semantic_memory::EmbeddingCachePreview,
     },
     memory::MemoryId,
@@ -46,7 +48,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -346,6 +348,7 @@ pub async fn run(
     let mut pending = HashSet::new();
     let mut failed = false;
     let mut pending_cache_clear: Option<(uuid::Uuid, EmbeddingCachePreview)> = None;
+    let mut pending_graph: Option<(uuid::Uuid, CharacterId, GraphMaintenancePreview)> = None;
     let mut eof = options.message.is_some();
     let mut lines = if eof { None } else { Some(input()) };
     if let Some(message) = options.message {
@@ -410,7 +413,7 @@ pub async fn run(
                         if line == "/quit" { return Ok(()); }
                         if let Some(value) = line.strip_prefix("/character ") {
                             match CharacterId::parse(value) {
-                                Some(id) => { character = id; println!("Character: {id}"); }
+                                Some(id) => { character = id; pending_graph = None; println!("Character: {id}"); }
                                 None => eprintln!("Unknown character"),
                             }
                         } else if let Some(value) = line.strip_prefix("/cancel ") {
@@ -459,6 +462,48 @@ pub async fn run(
                                     }
                                 },
                                 Err(error) => eprintln!("{error}"),
+                            }
+                        } else if slash_command(&line, "/knowledge graph") {
+                            match parse_graph_maintenance(&line) {
+                                Ok(GraphCommand::Preview(mode, ids)) => {
+                                    pending_graph = None;
+                                    let as_of = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+                                        .unwrap_or(0);
+                                    match GraphMaintenanceApi::preview(character, &ids, as_of, mode).await {
+                                        Ok(preview) => {
+                                            let token = uuid::Uuid::new_v4();
+                                            println!("Graph {:?}: {} выбранных источников, {} существующих связей. Scope: персонаж {character}. Источники:", mode, preview.entries().len(), preview.entries().iter().map(|item| item.existing_relations.len()).sum::<usize>());
+                                            for item in preview.entries() {
+                                                println!("  {}: {} связей", item.source.record.id.0, item.existing_relations.len());
+                                            }
+                                            if mode == GraphMaintenanceMode::Reindex {
+                                                println!("Reindex: производственный GraphExtractor пока не подключён; apply вернёт BackendUnavailable, без подмены извлечения.");
+                                            }
+                                            println!("Подтвердить одним действием: /knowledge graph apply {token}");
+                                            pending_graph = Some((token, character, preview));
+                                        }
+                                        Err(error) => eprintln!("Graph: {error}"),
+                                    }
+                                }
+                                Ok(GraphCommand::Apply(token)) => {
+                                    match take_graph_preview(&mut pending_graph, character, token) {
+                                        Ok(plan) => {
+                                            match GraphMaintenanceApi::apply_confirmed(
+                                                character,
+                                                plan,
+                                                true,
+                                                &tokio_util::sync::CancellationToken::new(),
+                                            ).await {
+                                                Ok(result) => println!("Graph: атомарно применено {} изменений. Канонические факты сохранены.", result.applied.len()),
+                                                Err(error) => eprintln!("Graph: {error}; для повтора требуется новый preview."),
+                                            }
+                                        }
+                                        Err(error) => eprintln!("Graph: {error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("Graph: {error}"),
                             }
                         } else if slash_command(&line, "/knowledge") {
                             match parse_cache_maintenance(&line) {
@@ -526,6 +571,62 @@ pub async fn run(
 fn slash_command(line: &str, command: &str) -> bool {
     line.strip_prefix(command)
         .is_some_and(|tail| tail.is_empty() || tail.chars().next().is_some_and(char::is_whitespace))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GraphCommand {
+    Preview(GraphMaintenanceMode, Vec<MemoryId>),
+    Apply(uuid::Uuid),
+}
+
+fn parse_graph_maintenance(line: &str) -> Result<GraphCommand, &'static str> {
+    const USAGE: &str = "Используй /knowledge graph preview clear|reindex MEMORY_UUID... или /knowledge graph apply TOKEN";
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["/knowledge", "graph", "apply", token] => uuid::Uuid::parse_str(token)
+            .map(GraphCommand::Apply)
+            .map_err(|_| USAGE),
+        ["/knowledge", "graph", "preview", mode, ids @ ..]
+            if !ids.is_empty() && ids.len() <= 256 =>
+        {
+            let mode = match *mode {
+                "clear" => GraphMaintenanceMode::Clear,
+                "reindex" => GraphMaintenanceMode::Reindex,
+                _ => return Err(USAGE),
+            };
+            let parsed = ids
+                .iter()
+                .map(|id| uuid::Uuid::parse_str(id).map(MemoryId).map_err(|_| USAGE))
+                .collect::<Result<Vec<_>, _>>()?;
+            if parsed
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != parsed.len()
+            {
+                return Err(USAGE);
+            }
+            Ok(GraphCommand::Preview(mode, parsed))
+        }
+        _ => Err(USAGE),
+    }
+}
+
+fn take_graph_preview<T>(
+    pending: &mut Option<(uuid::Uuid, CharacterId, T)>,
+    character: CharacterId,
+    token: uuid::Uuid,
+) -> Result<T, &'static str> {
+    match pending.as_ref() {
+        Some((expected, owner, _)) if *expected == token && *owner == character => {
+            Ok(pending.take().expect("matched graph preview").2)
+        }
+        Some((_, owner, _)) if *owner != character => {
+            Err("Graph preview принадлежит другому персонажу")
+        }
+        Some(_) => Err("Неверный токен Graph; данные не изменены"),
+        None => Err("Нет ожидающего Graph preview"),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -765,6 +866,50 @@ mod forgotten_recall_command_tests {
             parse_history_generation_mode("/rag\tgeneration fusion"),
             Ok(Some(HistoryGenerationMode::Fusion))
         );
+    }
+
+    #[test]
+    fn graph_command_requires_explicit_unique_ids_and_token() {
+        let id = MemoryId::new();
+        let token = uuid::Uuid::new_v4();
+        assert_eq!(
+            parse_graph_maintenance(&format!("/knowledge graph preview clear {}", id.0)),
+            Ok(GraphCommand::Preview(GraphMaintenanceMode::Clear, vec![id]))
+        );
+        assert_eq!(
+            parse_graph_maintenance(&format!("/knowledge graph preview reindex {}", id.0)),
+            Ok(GraphCommand::Preview(
+                GraphMaintenanceMode::Reindex,
+                vec![id]
+            ))
+        );
+        assert_eq!(
+            parse_graph_maintenance(&format!("/knowledge graph apply {token}")),
+            Ok(GraphCommand::Apply(token))
+        );
+        let mut pending = Some((token, CharacterId::Crazy, "graph preview"));
+        assert!(take_graph_preview(&mut pending, CharacterId::Kind, token).is_err());
+        assert!(pending.is_some());
+        assert!(
+            take_graph_preview(&mut pending, CharacterId::Crazy, uuid::Uuid::new_v4()).is_err()
+        );
+        assert!(pending.is_some());
+        assert_eq!(
+            take_graph_preview(&mut pending, CharacterId::Crazy, token).unwrap(),
+            "graph preview"
+        );
+        assert!(take_graph_preview(&mut pending, CharacterId::Crazy, token).is_err());
+        for invalid in [
+            "/knowledge graph preview",
+            "/knowledge graph preview clear",
+            "/knowledge graph preview clear not-a-uuid",
+            "/knowledge graph apply yes",
+            "/knowledge graph apply",
+            "/knowledge graph preview purge 00000000-0000-0000-0000-000000000001",
+            &format!("/knowledge graph preview clear {} {}", id.0, id.0),
+        ] {
+            assert!(parse_graph_maintenance(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
