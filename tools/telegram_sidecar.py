@@ -33,17 +33,30 @@ async def handle(req):
     if op == "connect":
         if client is not None:
             await client.disconnect()
+        # A reconnect must never reuse a code hash or authorization state from
+        # the previous phone/account, including after a failed connection.
+        client = None
+        phone = None
+        phone_code_hash = None
+        authorized = False
         api_id = int(req["api_id"])
         api_hash = str(req["api_hash"])
-        phone = str(req["phone"])
+        requested_phone = str(req["phone"])
         session = str(req["session"])
-        if not (api_id > 0 and api_hash and phone and session):
+        if not (api_id > 0 and api_hash and requested_phone and session):
             raise ValueError("invalid_credentials")
         if os.name == "posix":
             os.umask(0o077)
-        client = TelegramClient(session, api_id, api_hash)
-        await asyncio.wait_for(client.connect(), 30)
-        authorized = await client.is_user_authorized()
+        candidate = TelegramClient(session, api_id, api_hash)
+        try:
+            await asyncio.wait_for(candidate.connect(), 30)
+            is_authorized = bool(await candidate.is_user_authorized())
+        except Exception:
+            await candidate.disconnect()
+            raise
+        client = candidate
+        phone = requested_phone
+        authorized = is_authorized
         return {"authorized": authorized}
     if client is None:
         raise RuntimeError("not_connected")
@@ -76,8 +89,13 @@ async def handle(req):
         authorized = bool(await client.is_user_authorized())
         return {"authorized": authorized, "connected": client.is_connected()}
     if op == "disconnect":
-        await client.disconnect()
-        authorized = False
+        try:
+            await client.disconnect()
+        finally:
+            client = None
+            phone = None
+            phone_code_hash = None
+            authorized = False
         return {"disconnected": True}
     if not authorized or not client.is_connected():
         raise RuntimeError("unauthorized")
@@ -130,6 +148,7 @@ async def respond(line):
         req = json.loads(line)
         request_id = req.get("request_id") if isinstance(req, dict) else None
         if not isinstance(request_id, int) or isinstance(request_id, bool) or request_id < 1:
+            request_id = None
             raise ValueError("invalid_request_id")
         result = await handle(req)
         return {"ok": True, "request_id": request_id, "result": result}
