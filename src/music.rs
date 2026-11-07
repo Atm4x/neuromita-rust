@@ -272,25 +272,21 @@ impl BeatCache {
     pub fn analyze_or_reuse<F, E>(
         &self,
         audio: &[u8],
-        backend: BeatBackend,
-        backend_revision: &str,
-        decoder_revision: &str,
-        analysis_settings_revision: &str,
-        min_confidence: f32,
+        request: BeatAnalysisRequest<'_>,
         producer: F,
     ) -> Result<BeatAnalysisOutcome, BeatPipelineError<E>>
     where
         F: FnOnce(&[u8]) -> Result<BeatTimeline, E>,
     {
-        if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+        if !request.min_confidence.is_finite() || !(0.0..=1.0).contains(&request.min_confidence) {
             return Err(BeatPipelineError::Cache(BeatCacheError::InvalidThreshold));
         }
         let key = BeatCacheKey::for_audio_bytes(
             audio,
-            backend,
-            backend_revision,
-            decoder_revision,
-            analysis_settings_revision,
+            request.backend,
+            request.backend_revision,
+            request.decoder_revision,
+            request.analysis_settings_revision,
         );
         key.validate().map_err(BeatPipelineError::Cache)?;
         let mut cache_warning = None;
@@ -299,7 +295,7 @@ impl BeatCache {
             Ok(CacheLookup::Hit(timeline)) => {
                 return Ok(BeatAnalysisOutcome {
                     timeline: timeline
-                        .with_min_confidence(min_confidence)
+                        .with_min_confidence(request.min_confidence)
                         .map_err(BeatPipelineError::Cache)?,
                     origin: BeatResultOrigin::Cache,
                     corrupt_cache: false,
@@ -315,7 +311,7 @@ impl BeatCache {
         }
         let raw = producer(audio).map_err(BeatPipelineError::Analyzer)?;
         let filtered = raw
-            .with_min_confidence(min_confidence)
+            .with_min_confidence(request.min_confidence)
             .map_err(BeatPipelineError::Cache)?;
         if let Err(error) = self.store(&key, &raw) {
             cache_warning = Some(error);
@@ -352,4 +348,15 @@ pub struct BeatAnalysisOutcome {
 pub enum BeatPipelineError<E> {
     Cache(BeatCacheError),
     Analyzer(E),
+}
+
+/// Identity and presentation threshold for one beat analysis request.
+/// Revisions must cover any fallback backend and model selected by the producer.
+#[derive(Debug, Clone, Copy)]
+pub struct BeatAnalysisRequest<'a> {
+    pub backend: BeatBackend,
+    pub backend_revision: &'a str,
+    pub decoder_revision: &'a str,
+    pub analysis_settings_revision: &'a str,
+    pub min_confidence: f32,
 }
