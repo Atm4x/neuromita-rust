@@ -1,0 +1,16 @@
+# C3: Ownership-guarded staging recovery
+
+Scope: `LayerInstaller`, shared by backend and overlay installation (issue #42). This is not an installation registry, persistent schema, PID lease, or a change to portable-root ownership.
+
+Every new installation reserves a unique, canonical `.staging-<UUID>` directory with an adjacent `.staging-<UUID>.lock` file. The owner acquires an OS-exclusive file lock **before** making its staging directory visible and keeps the file handle open across the uv process and any asynchronous waits. The installed revision is published by the existing synchronous rename; the private lock file never enters that revision. On cancellation or ordinary failure, the RAII cleanup owns the handle until removal finishes.
+
+Before a subsequent installation under the same managed parent, a blocking worker scans only canonical UUID staging **directories**. It considers a directory reclaimable only if its adjacent lock is a zero-length regular file and an exclusive `try_lock()` succeeds. The lock remains held until the directory is removed. If deletion fails, the lock file stays in place for a future recovery attempt. Stages with a live owner, noncanonical names, absent/unsafe lock files, or symlink directory entries are not removed. Legacy stages without ownership proof are deliberately preserved. A crash between creating the lock file and creating the directory may leave a tiny standalone lock file; the scanner intentionally does not delete lock-only entries to avoid a creator/collector race.
+
+A Linux regression runs two **separate** Python processes holding `flock()` on distinct staging owners. One process is killed while the other remains live. A subsequent Rust `LayerInstaller::publish()` reclaims only the dead owner's stage, retains the active stage, and preserves an unowned legacy stage. After terminating the surviving owner, another installation reclaims its stage. Regular revision publication leaves no sibling lock, and both revisions remain readable. Existing uv cancellation, timeout, shared/backend and overlay tests still cover normal cleanup and immutable publication.
+
+## Limits
+
+- Reclamation is triggered by a *new installation that needs staging*, not an unconditional startup sweep or background timer. There is no age-based deletion and no PID-only liveness inference.
+- The lock represents the application installer owner. On platforms where an abruptly killed application leaves its **uv subprocess** running, the child may no longer hold the parent's lock. An OS-specific child-process ownership/termination proof is still required before claiming full process-tree-safe crash recovery. This slice certifies competing **live application owners**, not orphaned uv descendants.
+- Advisory file locks depend on the filesystem and operating system implementing interprocess locking. The managed parent is assumed to be an application-controlled local directory, not a concurrently hostile tree with arbitrary entry replacement. No claim of adversarial filesystem-TOCTOU hardening or network-filesystem lock correctness.
+- Exact no-replace revision publication under hostile concurrent replacement and shared-dependency uninstall remain independent #42 acceptance items.
