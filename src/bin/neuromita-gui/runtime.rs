@@ -38,6 +38,15 @@ pub enum ToolOption {
     WebReader,
 }
 
+#[path = "chat_fence.rs"]
+pub mod chat_fence;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatOrigin {
+    pub character: CharacterId,
+    pub selection_revision: u64,
+}
+
 pub enum Command {
     RefreshReleases,
     MemorySelect(CharacterId),
@@ -74,9 +83,9 @@ pub enum Command {
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
-    Select(CharacterId),
-    Send(String),
-    AttachFile(String, String),
+    Select(ChatOrigin),
+    Send(ChatOrigin, String),
+    AttachFile(ChatOrigin, String, String),
     Cancel(RequestId),
     Refresh,
     Volume(u8),
@@ -119,10 +128,11 @@ pub enum Update {
     Stopped,
     Connecting,
     Connected(String),
-    Snapshot(Box<ConversationSnapshot>),
-    Sent(String),
-    FileAttached(String, String),
+    Snapshot(ChatOrigin, Box<ConversationSnapshot>),
+    Sent(ChatOrigin, String),
+    FileAttached(ChatOrigin, String, String),
     Error(String),
+    ChatError(ChatOrigin, String),
 }
 
 pub struct DesktopRuntime {
@@ -368,6 +378,7 @@ async fn observe(
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
     let mut pending: Option<ConversationChangePreview> = None;
     let mut character = CharacterId::Crazy;
+    let mut selection_revision = 0;
     let mut debug_character = CharacterId::Crazy;
     let mut requests = presenter.observe_requests();
     let mut settings = presenter.observe_settings().map_err(|e| e.to_string())?;
@@ -410,8 +421,20 @@ async fn observe(
             }
             publish(character_debug_snapshot(administration, debug_character).await);
             match presenter.snapshot(character).await {
-                Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
-                Err(error) => publish(Update::Error(error.to_string())),
+                Ok(snapshot) => publish(Update::Snapshot(
+                    ChatOrigin {
+                        character,
+                        selection_revision,
+                    },
+                    Box::new(snapshot),
+                )),
+                Err(error) => publish(Update::ChatError(
+                    ChatOrigin {
+                        character,
+                        selection_revision,
+                    },
+                    error.to_string(),
+                )),
             }
             publish(Update::RuntimeStatus(administration.ai_runtime.snapshot()));
             publish(Update::SpeechSessionStatus(
@@ -522,13 +545,33 @@ async fn observe(
                     };
                     publish(Update::Diagnostics(text));
                 },
-                Some(Command::Select(id)) => { character = id; pending = None; publish(Update::Confirmation(None)); },
+                Some(Command::Select(origin)) => { character = origin.character; selection_revision = origin.selection_revision; pending = None; publish(Update::Confirmation(None)); },
                 Some(Command::Refresh) => {},
-                Some(Command::Send(text)) => match presenter.reply(character, text.clone()) {
-                    Ok(_) => publish(Update::Sent(text)),
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::Send(origin, text)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        publish(Update::ChatError(origin, "Chat selection changed before send".into()));
+                    } else {
+                        match presenter.reply(origin.character, text.clone()) {
+                            Ok(_) => publish(Update::Sent(origin, text)),
+                            Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                        }
+                    }
                 },
-                Some(Command::AttachFile(text, source)) => {
+                Some(Command::AttachFile(origin, text, source)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        publish(Update::ChatError(origin, "Chat selection changed before attachment".into()));
+                        continue;
+                    }
                     let result = (|| -> Result<(), String> {
                         use neuromita::timeline::{
                             file_attachments::{compose_local_file_message, import_local_file},
@@ -539,15 +582,15 @@ async fn observe(
                             .map_err(|error| error.to_string())?;
                         let part = import_local_file(&assets, std::path::Path::new(&source))
                             .map_err(|error| error.to_string())?;
-                        let message = compose_local_file_message(character, text.clone(), part)
+                        let message = compose_local_file_message(origin.character, text.clone(), part)
                             .map_err(|error| error.to_string())?;
                         app.publish_attached_conversation_message(selection, message, &assets)
                             .map_err(|error| error.to_string())?;
                         Ok(())
                     })();
                     match result {
-                        Ok(()) => publish(Update::FileAttached(text, source)),
-                        Err(error) => publish(Update::Error(error)),
+                        Ok(()) => publish(Update::FileAttached(origin, text, source)),
+                        Err(error) => publish(Update::ChatError(origin, error)),
                     }
                 },
                 Some(Command::Cancel(id)) => match presenter.cancel(id) {

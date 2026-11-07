@@ -423,6 +423,108 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.window().take_snapshot().unwrap();
     settings_render_and_bindings(&window);
     memory_render_and_contract(&window);
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    use super::super::runtime::{ChatOrigin, Command, Update};
+    use neuromita::character::CharacterId;
+    let first = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_attach("identical draft".into(), "/test/identical.png".into());
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(
+        window.get_chat_character(),
+        CharacterId::Kind.index() as i32
+    );
+    window.set_chat_draft("identical draft".into());
+    window.set_chat_attachment_path("/test/identical.png".into());
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            first,
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_draft(),
+        "identical draft",
+        "late A completion must not clear B draft"
+    );
+    assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
+    window.set_chat_error("B error".into());
+    super::super::sandbox::apply(
+        &window,
+        Update::ChatError(first, "A error".into()),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_error(),
+        "B error",
+        "stale file failure must not overwrite B error"
+    );
+    window.invoke_chat_attach("B draft".into(), "/test/b.png".into());
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(
+        window.get_chat_character(),
+        CharacterId::Crazy.index() as i32
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            first,
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(
+        window.get_chat_draft(),
+        "identical draft",
+        "reselected A is a distinct selection"
+    );
+    assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
+    super::super::sandbox::apply(
+        &window,
+        Update::FileAttached(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            "identical draft".into(),
+            "/test/identical.png".into(),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "");
+    assert_eq!(window.get_chat_attachment_path(), "");
+    let recorded = commands.borrow();
+    assert!(matches!(&recorded[0], Command::AttachFile(origin, _, _) if *origin == first));
+    assert!(
+        matches!(&recorded[1], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(
+        matches!(&recorded[2], Command::AttachFile(origin, _, _) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    assert!(
+        matches!(&recorded[3], Command::Select(origin) if origin.character == CharacterId::Crazy && origin.selection_revision == 2)
+    );
     window.hide().unwrap();
 }
 

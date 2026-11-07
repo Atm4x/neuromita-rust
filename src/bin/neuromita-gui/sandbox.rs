@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use neuromita::{
@@ -12,7 +16,7 @@ use neuromita::{
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
-    runtime::{Command, DesktopRuntime, Update},
+    runtime::{ChatOrigin, Command, DesktopRuntime, Update},
     view::{
         AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
         MemoryUi, SettingsUi,
@@ -29,9 +33,14 @@ pub fn attach(
     let editor = memory_editor.clone();
     window.set_chat_model_input(model.clone().unwrap_or_default().into());
     let weak = window.as_weak();
+    let selection_revision = Arc::new(AtomicU64::new(0));
+    let update_revision = selection_revision.clone();
     let runtime = DesktopRuntime::spawn(directory, model, move |update| {
         let editor = editor.clone();
-        let _ = weak.upgrade_in_event_loop(move |window| apply(&window, update, &editor));
+        let update_revision = update_revision.clone();
+        let _ = weak.upgrade_in_event_loop(move |window| {
+            apply(&window, update, &editor, &update_revision);
+        });
     })?;
     let weak = window.as_weak();
     let commands = runtime.commands.clone();
@@ -84,29 +93,7 @@ pub fn attach(
         .global::<ConversationUi>()
         .on_trace(move || send(Command::Diagnostics));
 
-    let send = dispatch.clone();
-    let weak = window.as_weak();
-    window.on_chat_send(move |text| {
-        if let Some(window) = weak.upgrade() {
-            window.set_chat_sending(true);
-        }
-        send(Command::Send(text.into()));
-    });
-    let send = dispatch.clone();
-    let weak = window.as_weak();
-    window.on_chat_attach(move |text, path| {
-        if let Some(window) = weak.upgrade() {
-            window.set_chat_sending(true);
-        }
-        send(Command::AttachFile(text.into(), path.into()));
-    });
-    let send = dispatch.clone();
-    window.on_chat_select_character(move |id| {
-        let Some(character) = CharacterId::from_index(id) else {
-            return;
-        };
-        send(Command::Select(character));
-    });
+    bind_chat_actions(window, dispatch.clone(), selection_revision);
     let send = dispatch.clone();
     let weak = window.as_weak();
     window.on_chat_cancel(move |id| match uuid::Uuid::parse_str(&id) {
@@ -133,6 +120,80 @@ pub fn attach(
     Ok(runtime)
 }
 
+pub(super) fn bind_chat_actions(
+    window: &AppWindow,
+    dispatch: std::rc::Rc<dyn Fn(Command)>,
+    selection_revision: Arc<AtomicU64>,
+) {
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_send(move |text| {
+        if let Some(window) = weak.upgrade() {
+            if let Some(origin) = current_origin(&window, &revision) {
+                window.set_chat_sending(true);
+                send(Command::Send(origin, text.into()));
+            } else {
+                window.set_chat_error("Unknown chat character selection".into());
+            }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_attach(move |text, path| {
+        if let Some(window) = weak.upgrade() {
+            if let Some(origin) = current_origin(&window, &revision) {
+                window.set_chat_sending(true);
+                send(Command::AttachFile(origin, text.into(), path.into()));
+            } else {
+                window.set_chat_error("Unknown chat character selection".into());
+            }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_select_character(move |id| {
+        let Some(character) = CharacterId::from_index(id) else {
+            return;
+        };
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Ok(previous) = revision.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_add(1)
+        }) else {
+            window.set_chat_error("Chat selection revision exhausted".into());
+            return;
+        };
+        window.set_chat_character(id);
+        let next = previous + 1;
+        window.set_chat_sending(false);
+        window.set_chat_error("".into());
+        send(Command::Select(ChatOrigin {
+            character,
+            selection_revision: next,
+        }));
+    });
+}
+
+fn current_origin(window: &AppWindow, revision: &AtomicU64) -> Option<ChatOrigin> {
+    Some(ChatOrigin {
+        character: CharacterId::from_index(window.get_chat_character())?,
+        selection_revision: revision.load(Ordering::Acquire),
+    })
+}
+
+fn matches_origin(window: &AppWindow, origin: ChatOrigin, revision: &AtomicU64) -> bool {
+    super::runtime::chat_fence::accepts(
+        origin.character.index() as i32,
+        origin.selection_revision,
+        window.get_chat_character(),
+        revision.load(Ordering::Acquire),
+    )
+}
+
 pub(super) fn render_catalog(
     window: &AppWindow,
     catalog: Vec<neuromita::character::CharacterDefinition>,
@@ -155,7 +216,12 @@ pub(super) fn render_catalog(
         .set_entries(ModelRc::new(VecModel::from(entries)));
 }
 
-fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
+pub(super) fn apply(
+    window: &AppWindow,
+    update: Update,
+    memory_editor: &super::memory::EditorState,
+    revision: &AtomicU64,
+) {
     match update {
         Update::RecognizedText {
             text,
@@ -288,22 +354,36 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             window.set_core_connected(true);
             window.set_chat_address(address.into());
         }
-        Update::Snapshot(snapshot) => render(window, &snapshot),
-        Update::Sent(text) => {
-            window.set_chat_sending(false);
-            window.set_chat_error("".into());
-            if window.get_chat_draft() == text {
-                window.set_chat_draft("".into());
+        Update::Snapshot(origin, snapshot) => {
+            if matches_origin(window, origin, revision) {
+                render(window, &snapshot);
             }
         }
-        Update::FileAttached(text, path) => {
-            window.set_chat_sending(false);
-            window.set_chat_error("".into());
-            if window.get_chat_draft() == text {
-                window.set_chat_draft("".into());
+        Update::Sent(origin, text) => {
+            if matches_origin(window, origin, revision) {
+                window.set_chat_sending(false);
+                window.set_chat_error("".into());
+                if window.get_chat_draft() == text {
+                    window.set_chat_draft("".into());
+                }
             }
-            if window.get_chat_attachment_path() == path {
-                window.set_chat_attachment_path("".into());
+        }
+        Update::FileAttached(origin, text, path) => {
+            if matches_origin(window, origin, revision) {
+                window.set_chat_sending(false);
+                window.set_chat_error("".into());
+                if window.get_chat_draft() == text {
+                    window.set_chat_draft("".into());
+                }
+                if window.get_chat_attachment_path() == path {
+                    window.set_chat_attachment_path("".into());
+                }
+            }
+        }
+        Update::ChatError(origin, error) => {
+            if matches_origin(window, origin, revision) {
+                window.set_chat_sending(false);
+                window.set_chat_error(error.into());
             }
         }
         Update::Error(error) => {
