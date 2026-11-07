@@ -429,6 +429,20 @@ enum GameCommand {
     },
     Ping {},
     GetGameSettings {},
+    GetMusicBeats {
+        request_id: Uuid,
+        audio_path: String,
+        #[serde(default)]
+        track_name: String,
+        #[serde(default)]
+        stream: bool,
+        #[serde(default = "default_beat_confidence")]
+        min_confidence: f32,
+        backend: BeatBackend,
+    },
+    CancelMusicBeats {
+        request_id: Uuid,
+    },
     PublishMessage {
         event_id: Uuid,
         occurred_at_unix_ms: u64,
@@ -484,6 +498,8 @@ enum GameCommand {
         error: Option<String>,
     },
 }
+fn default_beat_confidence() -> f32 { 0.2 }
+
 #[derive(Deserialize)]
 struct Frame {
     command_id: Uuid,
@@ -821,6 +837,87 @@ async fn client(
                             match handle {
                                 Some(h)=>tx.send(json!({"type":"cancel_ack","command_id":id,"request_id":request_id,"result":format!("{:?}",h.cancel())})).await.map_err(io::Error::other)?,
                                 None=>tx.send(error(Some(id),"ownership_denied","request is not owned by game session")).await.map_err(io::Error::other)?,
+                            }
+                        }
+                        GameCommand::GetMusicBeats { request_id, audio_path, track_name, stream, min_confidence, backend } => {
+                            let Some(service) = &beats else {
+                                tx.send(error(Some(id),"beat_disabled","Beat Sync is not configured")).await.map_err(io::Error::other)?;
+                                continue;
+                            };
+                            if !service.enabled {
+                                tx.send(error(Some(id),"beat_disabled","Beat Sync is disabled")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+                                tx.send(error(Some(id),"invalid_confidence","min_confidence must be within [0,1]")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let path = match service.resolve_source(&audio_path) {
+                                Ok(path) => path,
+                                Err(reason) => {
+                                    tx.send(error(Some(id),"music_source_denied",reason)).await.map_err(io::Error::other)?;
+                                    continue;
+                                }
+                            };
+                            if let Err(reason) = sessions.can_record(session, config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let permit = match service.permits.clone().try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    tx.send(error(Some(id),"beat_busy","maximum concurrent beat jobs reached")).await.map_err(io::Error::other)?;
+                                    continue;
+                                }
+                            };
+                            let ack = json!({"type":"music_beats_accepted","command_id":id,"request_id":request_id});
+                            if let Err(reason) = sessions.record(session,id,fingerprint,Receipt::Ack(ack.clone()),config.max_requests_per_session) {
+                                tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
+                                continue;
+                            }
+                            let token = connection_stop.child_token();
+                            beat_jobs.lock().expect("beat jobs poisoned").insert(request_id, token.clone());
+                            tx.send(ack).await.map_err(io::Error::other)?;
+                            let jobs = Arc::clone(&beat_jobs);
+                            let runtime = Arc::clone(service);
+                            let output = tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let _permit = permit;
+                                let media = BeatRuntime::read_source(&path);
+                                match media {
+                                    Ok(bytes) => {
+                                        let job = MusicJob {
+                                            request_id: &request_id.to_string(),
+                                            track_name: &track_name,
+                                            audio_path: &audio_path,
+                                            stream,
+                                            min_confidence,
+                                            backend,
+                                            enabled: true,
+                                        };
+                                        let _ = runtime.runtime.run(&bytes, &job, &|| token.is_cancelled(), |frame| {
+                                            if output.blocking_send(frame).is_err() { token.cancel(); }
+                                        });
+                                    }
+                                    Err(reason) => {
+                                        let frame = json!({"type":"music_beats_error","body":{
+                                            "track_name":track_name,"audio_path":audio_path,
+                                            "request_id":request_id,"error":reason.to_string()
+                                        }});
+                                        let _ = output.blocking_send(frame);
+                                    }
+                                }
+                                jobs.lock().expect("beat jobs poisoned").remove(&request_id);
+                            });
+                        }
+                        GameCommand::CancelMusicBeats { request_id } => {
+                            let token = beat_jobs.lock().expect("beat jobs poisoned").get(&request_id).cloned();
+                            match token {
+                                Some(token) => {
+                                    token.cancel();
+                                    tx.send(json!({"type":"music_beats_cancel_ack","command_id":id,"request_id":request_id})).await.map_err(io::Error::other)?;
+                                }
+                                None => tx.send(error(Some(id),"ownership_denied","unknown or completed beat job")).await.map_err(io::Error::other)?,
                             }
                         }
                         GameCommand::GetGameSettings {} => {
