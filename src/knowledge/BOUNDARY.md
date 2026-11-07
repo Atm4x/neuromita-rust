@@ -153,3 +153,14 @@ has no model-backed GraphExtractor and cannot advertise production Reindex.
 The explicit 26-slot, non-official acceptance rubric is documented in
 [`ACCEPTANCE_MATRIX.md`](ACCEPTANCE_MATRIX.md). No macro completion is inferred
 from adding this inspection surface alone.
+
+## Retained MemoryRecord transfer (Cycle 26)
+
+The bounded, trusted-local `MemoryTransferApi` and `/knowledge memory` CLI
+now support explicit **record-only** JSON v1 export, dry-run validation,
+character mapping and confirmed atomic exact-ID import via `CharacterHandle`.
+The canonical Timeline remains the only writable owner; repeated identical
+records are no-ops, incompatible IDs fail closed, and SQLite reopen is tested.
+**This is not a complete World.db or SessionArchive transfer:** history,
+variables, graph relations, settings and assets are excluded by format.
+Details and remaining D4/D5 requirements: [`MEMORY_TRANSFER.md`](MEMORY_TRANSFER.md).

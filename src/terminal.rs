@@ -6,7 +6,10 @@ use std::{
 };
 
 use neuromita::{
-    api::{ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi},
+    api::{
+        ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi,
+        MemoryTransferApi,
+    },
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
@@ -15,6 +18,7 @@ use neuromita::{
     knowledge::{
         forgotten_recall::RecallSelector,
         maintenance::{GraphMaintenanceMode, GraphMaintenancePreview},
+        memory_transfer::{MAX_ARCHIVE_BYTES, MemoryImportPreview},
         retrieval_fusion::FusionMode,
         semantic_memory::EmbeddingCachePreview,
     },
@@ -48,7 +52,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -349,6 +353,7 @@ pub async fn run(
     let mut failed = false;
     let mut pending_cache_clear: Option<(uuid::Uuid, EmbeddingCachePreview)> = None;
     let mut pending_graph: Option<(uuid::Uuid, CharacterId, GraphMaintenancePreview)> = None;
+    let mut pending_memory_import: Option<(uuid::Uuid, CharacterId, MemoryImportPreview)> = None;
     let mut eof = options.message.is_some();
     let mut lines = if eof { None } else { Some(input()) };
     if let Some(message) = options.message {
@@ -413,7 +418,7 @@ pub async fn run(
                         if line == "/quit" { return Ok(()); }
                         if let Some(value) = line.strip_prefix("/character ") {
                             match CharacterId::parse(value) {
-                                Some(id) => { character = id; pending_graph = None; println!("Character: {id}"); }
+                                Some(id) => { character = id; pending_graph = None; pending_memory_import = None; println!("Character: {id}"); }
                                 None => eprintln!("Unknown character"),
                             }
                         } else if let Some(value) = line.strip_prefix("/cancel ") {
@@ -462,6 +467,45 @@ pub async fn run(
                                     }
                                 },
                                 Err(error) => eprintln!("{error}"),
+                            }
+                        } else if slash_command(&line, "/knowledge memory") {
+                            match parse_memory_transfer(&line) {
+                                Ok(MemoryTransferCommand::Export(path)) => {
+                                    match MemoryTransferApi::export(character).await {
+                                        Ok(bytes) => match write_memory_export(&path, &bytes) {
+                                            Ok(()) => println!("Memory records for {character}: {} bytes saved to {path}. Scope: retained MemoryRecord only; NOT history, variables, or graph.", bytes.len()),
+                                            Err(error) => eprintln!("Memory export: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Memory export: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Preview(path)) => {
+                                    pending_memory_import = None;
+                                    match read_memory_import(&path) {
+                                        Ok(bytes) => match MemoryTransferApi::preview_import(character, &bytes).await {
+                                            Ok(plan) => {
+                                                let token = uuid::Uuid::new_v4();
+                                                println!("Memory import preview: source={}, explicit target={}, incoming={}, new={}, identical={}, branch/head={:?}. Only retained MemoryRecord. To confirm: /knowledge memory apply {token}",
+                                                    plan.source_character(), plan.target_character(), plan.incoming_records(), plan.new_records(), plan.identical_records(), plan.target_anchor());
+                                                pending_memory_import = Some((token, character, plan));
+                                            }
+                                            Err(error) => eprintln!("Memory import preview: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Memory import preview: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Apply(token)) => {
+                                    match take_graph_preview(&mut pending_memory_import, character, token) {
+                                        Ok(plan) => match MemoryTransferApi::apply_confirmed(
+                                            character, plan, true, &tokio_util::sync::CancellationToken::new()
+                                        ).await {
+                                            Ok(result) => println!("Memory import: atomically inserted {} exact records; canonical records retained, unchanged duplicates not rewritten.", result.applied.len()),
+                                            Err(error) => eprintln!("Memory import: {error}; request a new preview."),
+                                        },
+                                        Err(error) => eprintln!("Memory import: {error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("Memory transfer: {error}"),
                             }
                         } else if slash_command(&line, "/knowledge graph") {
                             match parse_graph_maintenance(&line) {
@@ -591,6 +635,52 @@ pub async fn run(
 fn slash_command(line: &str, command: &str) -> bool {
     line.strip_prefix(command)
         .is_some_and(|tail| tail.is_empty() || tail.chars().next().is_some_and(char::is_whitespace))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MemoryTransferCommand {
+    Export(String),
+    Preview(String),
+    Apply(uuid::Uuid),
+}
+
+fn parse_memory_transfer(line: &str) -> Result<MemoryTransferCommand, &'static str> {
+    const USAGE: &str = "Используй /knowledge memory export PATH | preview PATH | apply TOKEN";
+    let rest = line.strip_prefix("/knowledge memory ").ok_or(USAGE)?;
+    let (operation, value) = rest.split_once(char::is_whitespace).ok_or(USAGE)?;
+    let value = unquote(value.trim());
+    if value.is_empty() {
+        return Err(USAGE);
+    }
+    match operation {
+        "export" => Ok(MemoryTransferCommand::Export(value.to_owned())),
+        "preview" => Ok(MemoryTransferCommand::Preview(value.to_owned())),
+        "apply" if !value.chars().any(char::is_whitespace) => uuid::Uuid::parse_str(value)
+            .map(MemoryTransferCommand::Apply)
+            .map_err(|_| USAGE),
+        _ => Err(USAGE),
+    }
+}
+
+fn read_memory_import(path: &str) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((MAX_ARCHIVE_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(invalid("memory archive exceeds bounded byte limit"));
+    }
+    Ok(bytes)
+}
+
+fn write_memory_export(path: &str, bytes: &[u8]) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -895,6 +985,55 @@ mod forgotten_recall_command_tests {
             parse_history_generation_mode("/rag\tgeneration fusion"),
             Ok(Some(HistoryGenerationMode::Fusion))
         );
+    }
+
+    #[test]
+    fn memory_transfer_requires_exact_local_confirm_token_and_no_overwrite_file() {
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            parse_memory_transfer("/knowledge memory export backup.json"),
+            Ok(MemoryTransferCommand::Export("backup.json".into()))
+        );
+        assert_eq!(
+            parse_memory_transfer("/knowledge memory preview \"with spaces.json\""),
+            Ok(MemoryTransferCommand::Preview("with spaces.json".into()))
+        );
+        assert_eq!(
+            parse_memory_transfer(&format!("/knowledge memory apply {id}")),
+            Ok(MemoryTransferCommand::Apply(id))
+        );
+        for command in [
+            "/knowledge memory",
+            "/knowledge memory export",
+            "/knowledge memory preview",
+            "/knowledge memory apply",
+            "/knowledge memory apply yes",
+            "/knowledge memory apply 00000000-0000-0000-0000-000000000000 extra",
+            "/knowledge memory purge all",
+        ] {
+            assert!(
+                parse_memory_transfer(command).is_err(),
+                "accepted {command}"
+            );
+            assert!(slash_command(command, "/knowledge memory"));
+        }
+        let path = std::env::temp_dir().join(format!("memory-export-test-{id}.json"));
+        let path = path.to_str().unwrap();
+        write_memory_export(path, b"validated export").unwrap();
+        assert!(write_memory_export(path, b"must not replace").is_err());
+        assert_eq!(read_memory_import(path).unwrap(), b"validated export");
+        std::fs::remove_file(path).unwrap();
+        let mut pending = Some((id, CharacterId::Crazy, "preview"));
+        assert!(take_graph_preview(&mut pending, CharacterId::Kind, id).is_err());
+        assert!(pending.is_some());
+        assert!(
+            take_graph_preview(&mut pending, CharacterId::Crazy, uuid::Uuid::new_v4()).is_err()
+        );
+        assert_eq!(
+            take_graph_preview(&mut pending, CharacterId::Crazy, id).unwrap(),
+            "preview"
+        );
+        assert!(take_graph_preview(&mut pending, CharacterId::Crazy, id).is_err());
     }
 
     #[test]

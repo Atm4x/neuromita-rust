@@ -329,6 +329,77 @@ impl GraphMaintenanceApi {
     }
 }
 
+/// Trusted-local, bounded retained-memory-record transfer. This is not a
+/// SessionArchive or a World.db export, and must not be exposed as an unauthenticated route.
+pub struct MemoryTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("transfer preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::memory_transfer::MemoryTransferError),
+}
+
+impl MemoryTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, MemoryTransferApiError> {
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.memories().await?;
+        let bytes = crate::knowledge::memory_transfer::export_memory(&snapshot)?;
+        let fresh = owner.memories().await?;
+        if snapshot.anchor() != fresh.anchor() || !snapshot.matches_version(&fresh) {
+            return Err(MemoryTransferApiError::Transfer(
+                crate::knowledge::memory_transfer::MemoryTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::memory_transfer::MemoryImportPreview, MemoryTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        let expected = owner.memories().await?;
+        crate::knowledge::memory_transfer::preview_memory_import(expected, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::memory_transfer::MemoryImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::MemoryEditResult, MemoryTransferApiError> {
+        if preview.target_character() != target {
+            return Err(MemoryTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| MemoryTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(MemoryTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::memory_transfer::apply_memory_import(&owner, preview, confirmed, cancel)
+            .await
+            .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

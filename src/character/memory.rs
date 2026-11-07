@@ -163,6 +163,11 @@ pub enum MemoryCommand {
         priority: MemoryPriority,
         content: String,
     },
+    /// Trusted-local, exact-identity insertion from a versioned MemoryRecord archive.
+    /// Never modifies an existing ID; an identical record is an idempotent no-op.
+    ImportRecord {
+        record: MemoryRecord,
+    },
     SeedFromPrompt {
         priority: MemoryPriority,
         content: String,
@@ -697,6 +702,17 @@ impl CharacterMemories {
                         *priority,
                         content.clone(),
                     ));
+                    next.apply_committed(&change)?;
+                    changes.push(change);
+                }
+                MemoryCommand::ImportRecord { record } => {
+                    if let Some(existing) = next.get(record.id) {
+                        if existing == record {
+                            continue;
+                        }
+                        return Err("import memory id conflicts with an existing record");
+                    }
+                    let change = MemoryChange::Upsert(record.clone());
                     next.apply_committed(&change)?;
                     changes.push(change);
                 }
