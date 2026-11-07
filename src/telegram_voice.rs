@@ -8,7 +8,7 @@ use std::{collections::VecDeque, future::Future, pin::Pin, sync::Arc, time::Dura
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time::{Instant, sleep, timeout},
 };
 
@@ -316,6 +316,29 @@ impl TelegramVoiceService {
         }
     }
 }
+/// Core receives this stable provider once; the GUI may install an explicitly
+/// authorized Telegram session without replacing character-owned runtime state.
+#[derive(Default)]
+pub struct DynamicTelegramVoice {
+    current: RwLock<Option<Arc<dyn VoiceProvider>>>,
+}
+impl DynamicTelegramVoice {
+    pub async fn install(&self, provider: Arc<dyn VoiceProvider>) {
+        *self.current.write().await = Some(provider);
+    }
+    pub async fn clear(&self) {
+        *self.current.write().await = None;
+    }
+}
+impl VoiceProvider for DynamicTelegramVoice {
+    fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
+        Box::pin(async move {
+            let provider = self.current.read().await.clone().ok_or(VoiceError::Unavailable)?;
+            provider.synthesize(text, options).await
+        })
+    }
+}
+
 impl VoiceProvider for TelegramVoiceService {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
