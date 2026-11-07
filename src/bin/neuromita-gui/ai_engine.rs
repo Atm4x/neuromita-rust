@@ -140,10 +140,10 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory) {
 
 // Component-level readiness must be correlated with the exact Core-issued
 // active plugin, never inferred from any other model's worker lifecycle.
-fn status_gates(
-    status: Option<&ServiceRuntimeStatus>,
+fn status_gates<'a>(
+    status: Option<&'a ServiceRuntimeStatus>,
     component_id: &str,
-) -> (AiHubTruth, AiHubTruth, AiHubLoadPhase, Option<&str>) {
+) -> (AiHubTruth, AiHubTruth, AiHubLoadPhase, Option<&'a str>) {
     let Some(status) = status else {
         return (
             AiHubTruth::Unknown,
