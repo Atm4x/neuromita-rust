@@ -342,8 +342,8 @@ export component AppWindow inherits Window {
                             x: 10px; y: 8px; width: parent.width - 20px;
                             height: self.preferred-height;
                             text: root.onboarding-guide-description-rich;
-                            color: Theme.muted; link-color: Theme.accent-hover;
-                            font-size: 13px; wrap: word-wrap;
+                            default-color: Theme.muted; link-color: Theme.accent-hover;
+                            default-font-size: 13px;
                             link-clicked(url) => { root.onboarding-guide-link-activated(url); }
                         }
                     }
