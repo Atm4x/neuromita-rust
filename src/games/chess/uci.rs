@@ -166,7 +166,9 @@ impl UciEngine {
         };
         // AsyncReadExt::take bounds even an unterminated line.
         let mut output = BufReader::new(stdout.take(MAX_OUTPUT_BYTES)).lines();
-        let result = self.exchange(&mut input, &mut output, position, cancelled).await;
+        let result = self
+            .exchange(&mut input, &mut output, position, cancelled)
+            .await;
         // A blocked/broken child is reaped regardless of protocol result.
         let _ = timeout(REAP_GRACE, input.write_all(b"quit\n")).await;
         drop(input);
@@ -183,23 +185,48 @@ impl UciEngine {
     ) -> Result<String, UciError> {
         send(input, "uci", cancelled).await?;
         let mut seen = 0;
-        read_until(output, "uciok", "handshake",
-            Instant::now() + self.config.startup_timeout, &mut seen, cancelled).await?;
+        read_until(
+            output,
+            "uciok",
+            "handshake",
+            Instant::now() + self.config.startup_timeout,
+            &mut seen,
+            cancelled,
+        )
+        .await?;
         for (name, value) in &self.config.options {
-            send(input, &format!("setoption name {name} value {value}"), cancelled).await?;
+            send(
+                input,
+                &format!("setoption name {name} value {value}"),
+                cancelled,
+            )
+            .await?;
         }
         send(input, "isready", cancelled).await?;
-        read_until(output, "readyok", "readiness",
-            Instant::now() + self.config.startup_timeout, &mut seen, cancelled).await?;
+        read_until(
+            output,
+            "readyok",
+            "readiness",
+            Instant::now() + self.config.startup_timeout,
+            &mut seen,
+            cancelled,
+        )
+        .await?;
         send(input, "ucinewgame", cancelled).await?;
         send(input, &position.command(), cancelled).await?;
-        send(input, &format!("go movetime {}", self.config.move_time.as_millis()),
-            cancelled).await?;
+        send(
+            input,
+            &format!("go movetime {}", self.config.move_time.as_millis()),
+            cancelled,
+        )
+        .await?;
         let deadline = Instant::now() + self.config.search_timeout;
         loop {
             let line = next_line(output, "search", deadline, &mut seen, cancelled).await?;
             if let Some(rest) = line.strip_prefix("bestmove ") {
-                let mv = rest.split_ascii_whitespace().next()
+                let mv = rest
+                    .split_ascii_whitespace()
+                    .next()
                     .ok_or(UciError::Protocol("empty bestmove"))?;
                 if mv == "0000" || mv == "(none)" {
                     return Err(UciError::Protocol("engine has no playable move"));
@@ -247,7 +274,8 @@ async fn next_line<R: AsyncBufRead + Unpin>(
         _ = cancelled.cancelled() => return Err(UciError::Cancelled),
         read = timeout_at(deadline, output.next_line()) => read,
     };
-    let line = read.map_err(|_| UciError::Timeout(stage))??
+    let line = read
+        .map_err(|_| UciError::Timeout(stage))??
         .ok_or(UciError::Protocol("engine closed stdout"))?;
     *seen += 1;
     Ok(line.trim().to_owned())
@@ -323,7 +351,10 @@ mod tests {
     }
 
     fn position() -> UciPosition {
-        UciPosition { root_fen: START.into(), moves: vec!["e2e4".into()] }
+        UciPosition {
+            root_fen: START.into(),
+            moves: vec!["e2e4".into()],
+        }
     }
 
     #[test]
@@ -332,31 +363,42 @@ mod tests {
             assert!(!uci_move_shape(input));
         }
         assert!(uci_move_shape("e7e8q"));
-        assert!(UciPosition { root_fen: "bad fen".into(), moves: vec![] }
-            .validate().is_err());
+        assert!(
+            UciPosition {
+                root_fen: "bad fen".into(),
+                moves: vec![]
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[tokio::test]
     async fn real_child_handshake_and_bestmove() {
         let move_ = UciEngine::new(config("ok"))
-            .best_move(&position(), &CancellationToken::new()).await.unwrap();
+            .best_move(&position(), &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(move_, "e2e4");
     }
 
     #[tokio::test]
     async fn rejects_malformed_or_noisy_child() {
         let bad = UciEngine::new(config("bad"))
-            .best_move(&position(), &CancellationToken::new()).await;
+            .best_move(&position(), &CancellationToken::new())
+            .await;
         assert!(matches!(bad, Err(UciError::Protocol(_))));
         let noisy = UciEngine::new(config("noisy"))
-            .best_move(&position(), &CancellationToken::new()).await;
+            .best_move(&position(), &CancellationToken::new())
+            .await;
         assert!(matches!(noisy, Err(UciError::Protocol(_))));
     }
 
     #[tokio::test]
     async fn times_out_hung_child_and_reaps_it() {
         let result = UciEngine::new(config("hang"))
-            .best_move(&position(), &CancellationToken::new()).await;
+            .best_move(&position(), &CancellationToken::new())
+            .await;
         assert!(matches!(result, Err(UciError::Timeout("search"))));
     }
 
@@ -364,15 +406,17 @@ mod tests {
     async fn cancellation_is_explicit() {
         let token = CancellationToken::new();
         token.cancel();
-        let result = UciEngine::new(config("ok")).best_move(&position(), &token).await;
+        let result = UciEngine::new(config("ok"))
+            .best_move(&position(), &token)
+            .await;
         assert!(matches!(result, Err(UciError::Cancelled)));
     }
 
     #[tokio::test]
     async fn missing_engine_is_reported() {
-        let result = UciEngine::new(UciConfig::new(
-            "neuromita-uci-definitely-not-installed-777"
-        )).best_move(&position(), &CancellationToken::new()).await;
+        let result = UciEngine::new(UciConfig::new("neuromita-uci-definitely-not-installed-777"))
+            .best_move(&position(), &CancellationToken::new())
+            .await;
         assert!(matches!(result, Err(UciError::Spawn(_))));
     }
 }
