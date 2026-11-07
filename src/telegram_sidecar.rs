@@ -20,7 +20,7 @@ struct Process {
     next_request_id: u64,
 }
 pub struct TelethonSession {
-    process: Mutex<Process>,
+    process: Arc<Mutex<Process>>,
 }
 
 fn error_code(text: &str) -> TelegramError {
@@ -101,17 +101,30 @@ impl TelethonSession {
         let stdin = child.stdin.take().ok_or(TelegramError::Unavailable)?;
         let stdout = child.stdout.take().ok_or(TelegramError::Unavailable)?;
         Ok(Arc::new(Self {
-            process: Mutex::new(Process {
+            process: Arc::new(Mutex::new(Process {
                 _child: child,
                 stdin,
                 stdout: BufReader::new(stdout),
                 next_request_id: 0,
-            }),
+            })),
         }))
     }
 
-    async fn call(&self, mut request: Value) -> Result<Value, TelegramError> {
-        let mut process = self.process.lock().await;
+    async fn call(&self, request: Value) -> Result<Value, TelegramError> {
+        // An RPC must finish draining its sidecar frame even when the caller's
+        // generation task is dropped. Otherwise the next RPC could see the
+        // tail of a partially consumed response. The owned worker is bounded.
+        let process = Arc::clone(&self.process);
+        tokio::spawn(async move { Self::call_held(process, request).await })
+            .await
+            .map_err(|_| TelegramError::Disconnected)?
+    }
+
+    async fn call_held(
+        process: Arc<Mutex<Process>>,
+        mut request: Value,
+    ) -> Result<Value, TelegramError> {
+        let mut process = process.lock().await;
         // An abandoned RPC can still return after the caller has been cancelled.
         // Correlate every sidecar response to its request, never borrow a stale one.
         process.next_request_id = process
@@ -145,9 +158,15 @@ impl TelethonSession {
                 .await
                 .map_err(|_| TelegramError::Disconnected)?;
             loop {
-                let line = read_bounded_line(&mut process.stdout, 48 * 1024 * 1024)
-                    .await?
-                    .ok_or(TelegramError::Disconnected)?;
+                let line = match read_bounded_line(&mut process.stdout, 48 * 1024 * 1024).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => return Err(TelegramError::Disconnected),
+                    Err(TelegramError::MediaTooLarge) => {
+                        let _ = process._child.start_kill();
+                        return Err(TelegramError::MediaTooLarge);
+                    }
+                    Err(error) => return Err(error),
+                };
                 let response: Value =
                     serde_json::from_slice(&line).map_err(|_| TelegramError::Network)?;
                 if response["request_id"].as_u64().is_none()
