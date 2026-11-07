@@ -236,10 +236,9 @@ export component AiHubSettingsPanel inherits Rectangle {
         let current = root.draft-values[index].value;
         if current.is-float() {
             let step = hint.key == key && hint.step > 0 ? hint.step : 1.0;
-            let next = current.to-float() + direction * step;
-            if hint.key == key && hint.bounded {
-                next = clamp(next, hint.minimum, hint.maximum);
-            }
+            let proposed = current.to-float() + direction * step;
+            let next = hint.key == key && hint.bounded
+                ? clamp(proposed, hint.minimum, hint.maximum) : proposed;
             root.edit-value(index, key, "" + next);
         }
     }
@@ -397,14 +396,16 @@ export component AiHubSettingsPanel inherits Rectangle {
                     text: root.tr("Для этого компонента нет схемы настроек.", "This component has no settings schema.");
                     color: SettingsTheme.muted; wrap: word-wrap;
                 }
-                if root.load-phase == AiHubLoadPhase.loaded && root.active-schema.length > 0: form-scroll := SettingsScrollView {
+                if root.load-phase == AiHubLoadPhase.loaded
+                    && (root.active-schema.length > 0 || root.active-id == "tts:medium+"
+                        || root.active-id == "tts:medium+low"): form-scroll := SettingsScrollView {
                     vertical-stretch: 1;
                     content-height: form-content.preferred-height;
                     form-content := VerticalLayout {
                         width: form-scroll.visible-width;
                         spacing: 12px; padding: 2px;
                         alignment: start;
-                        for field[index] in root.active-schema: Rectangle {
+                        for field[index] in root.active-schema: field-frame := Rectangle {
                             property <bool> choices-open: false;
                             property <bool> editable: root.can-edit(index, field);
                             property <bool> unsupported: root.hints[index].key == field.key && root.hints[index].unknown-type;
@@ -475,7 +476,6 @@ export component AiHubSettingsPanel inherits Rectangle {
                                         text: root.draft-values[index].value;
                                         input-type: root.hints[index].key == field.key && root.hints[index].secret
                                             ? InputType.password
-                                            : field.kind == AiHubSettingKind.integer ? InputType.number
                                             : field.kind == AiHubSettingKind.decimal ? InputType.decimal : InputType.text;
                                         edited(value) => { root.edit-value(index, field.key, value); }
                                     }
@@ -505,8 +505,8 @@ export component AiHubSettingsPanel inherits Rectangle {
                                     text: field.description;
                                     color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap;
                                 }
-                                if self.validation-message != "": SettingsLabel {
-                                    text: self.validation-message;
+                                if field-frame.validation-message != "": SettingsLabel {
+                                    text: field-frame.validation-message;
                                     color: SettingsTheme.error-text; font-size: 11px; wrap: word-wrap;
                                 }
                             }
@@ -529,7 +529,8 @@ export component AiHubSettingsPanel inherits Rectangle {
                                     wrap: word-wrap; color: SettingsTheme.muted;
                                 }
                                 if root.compilation.runtime-data-present: SettingsLabel {
-                                    text: root.compilation.target-status + "  " + root.compilation.cache-summary;
+                                    text: root.compilation.target-status + "  " + root.compilation.cache-summary
+                                        + "  " + root.compilation.metadata-state;
                                     color: SettingsTheme.muted; wrap: word-wrap;
                                 }
                                 if root.compilation.error != "": SettingsLabel {
