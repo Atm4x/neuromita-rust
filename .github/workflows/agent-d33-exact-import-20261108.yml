@@ -30,7 +30,7 @@ jobs:
           git checkout --detach "$BASE"
           git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d33.patch
           test "$(git rev-parse HEAD)" = "$HEAD"
-          test "$(git rev-parse HEAD^{tree}")" = "$TREE"
+          test "$(git rev-parse HEAD^{tree})"" = "$TREE"
           test "$(git rev-parse HEAD^)" = "$BASE"
           test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
           git fsck --full
