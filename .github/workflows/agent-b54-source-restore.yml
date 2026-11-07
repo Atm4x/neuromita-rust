@@ -1,0 +1,35 @@
+name: Agent B54 source-only local reconstruction
+on:
+  push:
+    branches: [bridge/agent-b54-restore-source-20261108]
+    paths: [bridge/agent-b54-source-trigger.txt]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare exact verified source-only diff B42 to B53
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=63148ad3a5948bf987129edd788690aab83dca68
+          head=f31fbb7eab78a42dd7704fcb51193fefb0597a99
+          tree=b62fc0d411618a88f219bce060dcf89cd3101dbb
+          git cat-file -e "$base^{commit}"
+          git cat-file -e "$head^{commit}"
+          test "$(git rev-parse "$head^{tree}")" = "$tree"
+          mkdir -p /tmp/b54s
+          git diff --binary "$base" "$head" >/tmp/b54s/B42-to-B53.patch
+          sha256sum /tmp/b54s/B42-to-B53.patch > /tmp/b54s/SHA256
+          printf "%s\n" "$base" "$head" "$tree" > /tmp/b54s/REFS.txt
+          du -h /tmp/b54s/B42-to-B53.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-b54-source-patch
+          path: /tmp/b54s/
+          retention-days: 1
+          compression-level: 6
