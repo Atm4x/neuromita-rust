@@ -3,6 +3,7 @@
 //! This module does not infer beat timing or start an AI worker. Producers own
 //! analysis; callers must derive the source hash from the *same immutable input*
 //! they pass to the selected analyzer.
+pub mod batch;
 pub mod dsp;
 pub mod runtime;
 pub mod wav;
