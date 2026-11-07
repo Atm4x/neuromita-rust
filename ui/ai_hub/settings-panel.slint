@@ -95,7 +95,13 @@ export component AiHubSettingsPanel inherits Rectangle {
         return (c.installed == AiHubTruth.yes || c.can-open-settings)
             && (root.category == "all" || c.category == root.category
                 || (root.category == "extras" && c.category == "beats")
-                || (root.category == "deps" && c.category == "dependency"));
+                || (root.category == "deps" && c.category == "dependency")
+                || (root.category == "other"
+                    && c.category != "tts" && c.category != "voices"
+                    && c.category != "asr" && c.category != "rag"
+                    && c.category != "extras" && c.category != "beats"
+                    && c.category != "backend" && c.category != "deps"
+                    && c.category != "dependency"));
     }
 
     pure function can-edit(index: int, field: AiHubSettingField) -> bool {
@@ -578,7 +584,10 @@ export component AiHubSettingsPanel inherits Rectangle {
                         }
                     }
                 }
-                Rectangle { vertical-stretch: 1; background: transparent; }
+                Rectangle {
+                    vertical-stretch: root.load-phase == AiHubLoadPhase.loaded ? 0 : 1;
+                    background: transparent;
+                }
                 HorizontalLayout {
                     height: 42px; spacing: 9px;
                     SettingsLabel {
