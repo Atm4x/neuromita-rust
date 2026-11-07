@@ -67,7 +67,9 @@ pub struct FfmpegTelegramDecoder {
 
 impl FfmpegTelegramDecoder {
     pub fn new(executable: impl Into<std::path::PathBuf>) -> Self {
-        Self { executable: executable.into() }
+        Self {
+            executable: executable.into(),
+        }
     }
 }
 
@@ -83,9 +85,24 @@ impl TelegramDecoder for FfmpegTelegramDecoder {
             // -t bounds output duration to 120 seconds (~21 MiB at 44.1 kHz stereo PCM16).
             let mut child = Command::new(&self.executable)
                 .args([
-                    "-nostdin", "-hide_banner", "-loglevel", "error",
-                    "-i", "pipe:0", "-t", "120", "-vn", "-ac", "2",
-                    "-ar", "44100", "-c:a", "pcm_s16le", "-f", "wav", "pipe:1",
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    "pipe:0",
+                    "-t",
+                    "120",
+                    "-vn",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    "44100",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-f",
+                    "wav",
+                    "pipe:1",
                 ])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -99,17 +116,26 @@ impl TelegramDecoder for FfmpegTelegramDecoder {
                 drop(stdin);
                 result
             });
-            let output = child.wait_with_output().await.map_err(|_| TelegramError::DecodeFailed)?;
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|_| TelegramError::DecodeFailed)?;
             let write_result = write.await.map_err(|_| TelegramError::DecodeFailed)?;
             if !output.status.success() || write_result.is_err() {
                 return Err(TelegramError::DecodeFailed);
             }
             let wav = output.stdout;
-            if wav.len() < 44 || wav.len() > 24 * 1024 * 1024
-                || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {
+            if wav.len() < 44
+                || wav.len() > 24 * 1024 * 1024
+                || &wav[0..4] != b"RIFF"
+                || &wav[8..12] != b"WAVE"
+            {
                 return Err(TelegramError::InvalidMedia);
             }
-            Ok(AudioArtifact { format: AudioFormat::Wave, bytes: Arc::from(wav) })
+            Ok(AudioArtifact {
+                format: AudioFormat::Wave,
+                bytes: Arc::from(wav),
+            })
         })
     }
 }
@@ -153,7 +179,11 @@ struct Conversation {
 impl Conversation {
     // Bot commands and text both count against Telegram's rolling send budget.
     fn permitted_at(&mut self, now: Instant, interval: Duration) -> Instant {
-        while self.send_times.front().is_some_and(|t| *t + Duration::from_secs(60) <= now) {
+        while self
+            .send_times
+            .front()
+            .is_some_and(|t| *t + Duration::from_secs(60) <= now)
+        {
             self.send_times.pop_front();
         }
         let mut due = now;
@@ -168,7 +198,11 @@ impl Conversation {
         due
     }
     fn record_send(&mut self, at: Instant) {
-        while self.send_times.front().is_some_and(|t| *t + Duration::from_secs(60) <= at) {
+        while self
+            .send_times
+            .front()
+            .is_some_and(|t| *t + Duration::from_secs(60) <= at)
+        {
             self.send_times.pop_front();
         }
         self.last_send = Some(at);
