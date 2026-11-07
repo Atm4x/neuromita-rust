@@ -13,7 +13,10 @@ pub use model::*;
 pub use preset_activation::{
     PresetActivation, PresetActivationError, PresetRecovery, PresetStorageLease,
 };
-pub use python_presets::{PythonPresetStage, PythonPresetStageError, PythonPresetStagePreview};
+pub use python_presets::{
+    PythonPresetPreferencesReview, PythonPresetStage, PythonPresetStageError,
+    PythonPresetStagePreview,
+};
 pub use speech::*;
 pub use storage::*;
 pub use transfer::{SettingsImportFormat, SettingsTransfer, SettingsTransferError};
