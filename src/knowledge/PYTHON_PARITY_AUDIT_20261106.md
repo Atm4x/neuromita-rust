@@ -50,8 +50,53 @@ real app/ChatApi/owner read path. Unknown slash commands cannot silently
 become LLM inputs.
 
 **Still open:** automatic user-configured history-source composition in
-Reply/React/Initiate; FTS5 query mode and ranking, vector-history embedding
-and cache reuse, documents and sentence-level retrieval, model-switch/index
-recovery, reranking across all sources and strict Python output parity.
+Reply/React/Initiate; FTS5 query mode and ranking, documents and
+sentence-level retrieval, persistent history-index recovery, reranking across
+all sources and strict Python output parity.
 The default Rust generation policy is unchanged. Neither the new history
 keyword adapter nor test pass is evidence of full issue #22 acceptance.
+
+## Explicit Timeline History vector/fusion search (2026-11-07, Agent A cycle 17)
+
+The production Python source `5f3d061f523d9abefa6a264bb2953048a935fa65`
+implements vector history retrieval under the configured `RAG_VECTOR_SEARCH_ENABLED`
+mode, distinct from keyword/FTS. Rust now exposes a **separately selected**
+`KnowledgeRetrieval::search_history_semantic`/`HistorySearchApi::inspect_semantic`
+using the already running application's `SemanticMemoryRetriever` provider and its
+single bounded derived embedding cache. The source is always a captured,
+character-owned `MitaView`; no persistent FTS, document database, global history
+index or second mutable event store is introduced. Cache keys include source type,
+EventId/MemoryId, character, normalized searchable excerpt and the **entire**
+`EmbeddingSpace` (`backend`, `model`, `protocol`, `dimensions`). Memory and History
+IDs cannot collide even when their underlying UUIDs match. Revisions re-embed,
+while hidden/reset/foreign events are not admitted by the current projection.
+A selected History search scans up to 1024 currently visible messages, using
+at most 4000 Unicode characters from each message. Larger candidate corpora
+fail with `CorpusLimit` rather than silently truncating/vector-fallback.
+This transient projection is **not** a persistent index: an absent derived cache
+entry is recomputed through the configured provider; there is no applicable
+`MissingIndex` response unless a persisted index is introduced later.
+
+`Embedding::new` retains the full provider/model/protocol/dimension identity;
+retrieval now rejects same-dimensional model-space mismatches before publishing
+any vectors to cache. Query and document batch shape, finite values, provider
+transport failures and zero vectors are independently validated. A configured
+semantic mode never silently switches to keyword on error; a local app using
+lexical-only KnowledgeRetrieval returns `BackendUnavailable`. Explicit
+`FusionMode::VectorOnly` or `Union` share existing source-bound evidence and
+ranking. `HistorySearchResult` includes model space and operation cost in
+semantic mode, and provenance of each original message remains branch/prefix
+scoped. After all awaits, local `HistorySearchApi` verifies the live owner
+snapshot and rejects out-of-date results (`StaleSelection`). The CLI exposes
+`/rag history-vector QUERY` and `/rag history-fusion QUERY` as local read-only
+commands alongside the original `/rag history QUERY`.
+
+The Python vector default is **disabled**, so Rust does not enable this path
+for ordinary Reply/React/Initiate or change current prompt inclusion. Differences
+remaining: FTS5, actual historical-active-window selection, longer-corpus
+indexing/streaming, query-tail expansion, reranker parity, provider/wiring user
+settings, documents/sentences and end-to-end generation acceptance. No remote
+authentication is implied by the local inspection API. See
+`tests/rag_history_vector.rs`, `tests/rag_history_api.rs` and
+`tests/semantic_retrieval.rs` for deterministic provider, cache, visibility and
+asynchronous-stale evidence.

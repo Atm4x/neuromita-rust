@@ -110,11 +110,49 @@ pub enum HistorySearchApiError {
     StaleSelection,
 }
 
+enum HistorySearchSelection {
+    Keyword,
+    Semantic {
+        fusion: crate::knowledge::retrieval_fusion::FusionMode,
+        minimum_cosine: Option<f64>,
+    },
+}
+
 impl HistorySearchApi {
     /// Only invoke from an explicitly authorized local UI or equivalent boundary.
     pub async fn inspect(
         character: CharacterId,
         query: &str,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(character, query, HistorySearchSelection::Keyword).await
+    }
+
+    /// Explicit semantic History mode; requires the application's configured
+    /// embedding provider. No lexical fallback if that provider is unavailable.
+    /// This is a local trusted-user API, not an authenticated remote endpoint.
+    pub async fn inspect_semantic(
+        character: CharacterId,
+        query: &str,
+        fusion: crate::knowledge::retrieval_fusion::FusionMode,
+        minimum_cosine: Option<f64>,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(
+            character,
+            query,
+            HistorySearchSelection::Semantic {
+                fusion,
+                minimum_cosine,
+            },
+        )
+        .await
+    }
+
+    async fn inspect_selected(
+        character: CharacterId,
+        query: &str,
+        selection: HistorySearchSelection,
     ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
     {
         let bindings = runtime::current().map_err(|_| HistorySearchApiError::Unavailable)?;
@@ -130,12 +168,30 @@ impl HistorySearchApi {
         {
             return Err(HistorySearchApiError::StaleSelection);
         }
-        let selected = crate::knowledge::history_retrieval::search_history(
-            character,
-            &context.view,
-            query,
-            Default::default(),
-        )?;
+        let selected = match selection {
+            HistorySearchSelection::Keyword => crate::knowledge::history_retrieval::search_history(
+                character,
+                &context.view,
+                query,
+                Default::default(),
+            )?,
+            HistorySearchSelection::Semantic {
+                fusion,
+                minimum_cosine,
+            } => {
+                bindings
+                    .knowledge
+                    .search_history_semantic(
+                        character,
+                        &context.view,
+                        query,
+                        Default::default(),
+                        fusion,
+                        minimum_cosine,
+                    )
+                    .await?
+            }
+        };
         let fresh = owner.memories().await?;
         if captured.anchor() != fresh.anchor() || !captured.matches_version(&fresh) {
             return Err(HistorySearchApiError::StaleSelection);

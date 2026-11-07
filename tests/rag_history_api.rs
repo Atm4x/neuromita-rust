@@ -1,4 +1,8 @@
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use neuromita::{
     UserInput,
@@ -10,8 +14,18 @@ use neuromita::{
         ProviderKind, ProviderTemplate, ResponseGenerator,
         gemini::{GeminiTemplate, GenerationSettings},
     },
-    knowledge::history_retrieval::HistorySearchStatus,
+    knowledge::{
+        KnowledgeRetrieval,
+        embedding::{
+            Embedding, EmbeddingFuture, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace,
+        },
+        history_retrieval::{HistorySearchError, HistorySearchStatus},
+        retrieval_fusion::FusionMode,
+        semantic_memory::SemanticMemoryRetriever,
+    },
 };
+
+static API_RUNTIME_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct DisabledProvider;
 impl GenerationProvider for DisabledProvider {
@@ -23,8 +37,7 @@ impl GenerationProvider for DisabledProvider {
     }
 }
 
-#[tokio::test]
-async fn local_history_api_reads_live_scoped_timeline_and_cannot_generate() {
+fn application_config(knowledge: KnowledgeRetrieval) -> ApplicationConfig {
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(
         GeminiTemplate::google(
             "fixture",
@@ -34,7 +47,7 @@ async fn local_history_api_reads_live_scoped_timeline_and_cannot_generate() {
         .unwrap(),
     ));
     let capacity = |size| NonZeroUsize::new(size).unwrap();
-    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+    let mut config = ApplicationConfig::minimal(
         preset,
         ResponseGenerator::new([Arc::new(DisabledProvider) as Arc<dyn GenerationProvider>])
             .unwrap(),
@@ -46,9 +59,17 @@ async fn local_history_api_reads_live_scoped_timeline_and_cannot_generate() {
             retained_finished: capacity(8),
         },
         "127.0.0.1:0".parse().unwrap(),
-    ))
-    .await
-    .unwrap();
+    );
+    config.knowledge = knowledge;
+    config
+}
+
+#[tokio::test]
+async fn local_history_api_reads_live_scoped_timeline_and_cannot_generate() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let app = ApplicationLifecycle::start(application_config(KnowledgeRetrieval::lexical()))
+        .await
+        .unwrap();
     let before = HistorySearchApi::inspect(CharacterId::Crazy, "jasmine")
         .await
         .unwrap();
@@ -78,4 +99,112 @@ async fn local_history_api_reads_live_scoped_timeline_and_cannot_generate() {
         HistorySearchApi::inspect(CharacterId::Crazy, "jasmine").await,
         Err(HistorySearchApiError::Unavailable)
     ));
+}
+
+struct PausedEmbedding {
+    space: EmbeddingSpace,
+    first_query_started: Arc<tokio::sync::Notify>,
+    first_query_resume: Arc<tokio::sync::Notify>,
+    pause_once: Mutex<bool>,
+}
+
+impl PausedEmbedding {
+    fn new() -> Self {
+        Self {
+            space: EmbeddingSpace::new("fixture", "paused", "v1", 2).unwrap(),
+            first_query_started: Arc::new(tokio::sync::Notify::new()),
+            first_query_resume: Arc::new(tokio::sync::Notify::new()),
+            pause_once: Mutex::new(true),
+        }
+    }
+}
+
+impl EmbeddingProvider for PausedEmbedding {
+    fn space(&self) -> &EmbeddingSpace {
+        &self.space
+    }
+    fn embed(&self, purpose: EmbeddingPurpose, _text: String) -> EmbeddingFuture<'_, Embedding> {
+        Box::pin(async move {
+            let pause = purpose == EmbeddingPurpose::Query && {
+                let mut once = self.pause_once.lock().unwrap();
+                std::mem::take(&mut *once)
+            };
+            if pause {
+                self.first_query_started.notify_one();
+                self.first_query_resume.notified().await;
+            }
+            Embedding::new(vec![1.0, 0.0], &self.space)
+        })
+    }
+}
+
+#[tokio::test]
+async fn local_semantic_history_returns_backend_unavailable_without_keyword_fallback() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let app = ApplicationLifecycle::start(application_config(KnowledgeRetrieval::lexical()))
+        .await
+        .unwrap();
+    ChatApi::publish_message(CharacterId::Crazy, UserInput::new("tea".into()).unwrap()).unwrap();
+    assert!(matches!(
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::Union, None)
+            .await,
+        Err(HistorySearchApiError::Search(
+            HistorySearchError::BackendUnavailable
+        ))
+    ));
+    assert_eq!(
+        HistorySearchApi::inspect(CharacterId::Crazy, "tea")
+            .await
+            .unwrap()
+            .hits
+            .len(),
+        1
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_semantic_history_revalidates_timeline_after_await() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let fixture = Arc::new(PausedEmbedding::new());
+    let retriever = Arc::new(SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap());
+    let app =
+        ApplicationLifecycle::start(application_config(KnowledgeRetrieval::semantic(retriever)))
+            .await
+            .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("tea in kitchen".into()).unwrap(),
+    )
+    .unwrap();
+    let search = tokio::spawn(async {
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::VectorOnly, None)
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.first_query_started.notified(),
+    )
+    .await
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("new private text".into()).unwrap(),
+    )
+    .unwrap();
+    fixture.first_query_resume.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), search)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        Err(HistorySearchApiError::StaleSelection)
+    ));
+    let refreshed =
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::VectorOnly, None)
+            .await
+            .unwrap();
+    assert_eq!(refreshed.hits.len(), 2);
+    app.shutdown().await.unwrap();
 }

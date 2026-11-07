@@ -16,16 +16,23 @@ use super::{
 };
 use crate::{
     identity::CharacterId,
+    identity::EventId,
     memory::{CharacterMemories, MemoryKind, MemoryState},
-    timeline::domain::{MemoryId, MemoryRecord},
+    timeline::domain::{MemoryId, MemoryRecord, ProjectedMessage},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
     character: CharacterId,
     space: EmbeddingSpace,
-    id: MemoryId,
+    id: CachedSourceId,
     content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CachedSourceId {
+    Memory(MemoryId),
+    History(EventId),
 }
 
 struct EmbeddingCache {
@@ -354,22 +361,36 @@ impl SemanticMemoryRetriever {
         .await
     }
 
-    async fn retrieve_admitted_with_fusion(
+    /// The same derived cache and provider serves both canonical memory and
+    /// currently visible Timeline history. History membership is never cached.
+    pub(crate) async fn score_history_messages(
         &self,
         character: CharacterId,
-        memories: Vec<MemoryRecord>,
+        messages: &[ProjectedMessage],
         query: &str,
-        filter: SemanticRetrievalFilter,
-        mode: FusionMode,
-        include_forgotten: bool,
-    ) -> Result<RetrievedMemory, EmbeddingError> {
-        let filter = filter.validate()?;
-        let config = FusionConfig {
-            mode,
-            limit: 1024,
-            minimum_graph: 0,
-        };
-        fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
+    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost), EmbeddingError> {
+        let sources = messages
+            .iter()
+            .map(|message| {
+                (
+                    CachedSourceId::History(message.event_id),
+                    message.content.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.score_canonical_documents(character, &sources, query)
+            .await
+    }
+
+    /// Only source identity + content + immutable model-space enter this cache.
+    /// No Timeline membership, branch visibility, or historical access survives
+    /// between calls; each caller must supply its freshly captured projection.
+    async fn score_canonical_documents(
+        &self,
+        character: CharacterId,
+        sources: &[(CachedSourceId, &str)],
+        query: &str,
+    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost), EmbeddingError> {
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -377,26 +398,30 @@ impl SemanticMemoryRetriever {
             embedded_characters: 0,
             cache_hits: 0,
         };
-        if memories.is_empty() {
-            return Ok(RetrievedMemory {
-                rendered: None,
-                selected_ids: Vec::new(),
-                matches: Vec::new(),
-                space,
-                status: RetrievalStatus::EmptyCorpus,
-                cost,
-            });
+        if sources.is_empty() {
+            return Ok((space, Vec::new(), cost));
         }
-        let keys: Vec<_> = memories
+        if sources.len() > 1024 {
+            return Err(EmbeddingError::Configuration(
+                "semantic source exceeds bounded per-query capacity".into(),
+            ));
+        }
+        let query = query.chars().take(2048).collect::<String>();
+        if query.trim().is_empty() {
+            return Err(EmbeddingError::Configuration(
+                "semantic query is empty".into(),
+            ));
+        }
+        let keys = sources
             .iter()
-            .map(|memory| CacheKey {
+            .map(|(id, content)| CacheKey {
                 character,
                 space: space.clone(),
-                id: memory.id,
-                content: memory.content.clone(),
+                id: id.clone(),
+                content: (*content).to_string(),
             })
-            .collect();
-        let mut vectors: Vec<Option<Embedding>> = vec![None; memories.len()];
+            .collect::<Vec<_>>();
+        let mut vectors: Vec<Option<Embedding>> = vec![None; sources.len()];
         let mut missing = Vec::new();
         let invalidation_epoch;
         {
@@ -414,12 +439,6 @@ impl SemanticMemoryRetriever {
                 }
             }
         }
-        let query = query.chars().take(2048).collect::<String>();
-        if query.trim().is_empty() {
-            return Err(EmbeddingError::Configuration(
-                "semantic query is empty".into(),
-            ));
-        }
         let query_vector = self
             .provider
             .embed(EmbeddingPurpose::Query, query.clone())
@@ -427,15 +446,16 @@ impl SemanticMemoryRetriever {
         cost.embedded_characters += query.chars().count();
         cost.embedding_requests += 1;
         cost.embedded_texts += 1;
+        query_vector.ensure_space(&space)?;
         if query_vector.values.len() != space.dimensions
-            || query_vector.values.iter().any(|v| !v.is_finite())
+            || query_vector.values.iter().any(|value| !value.is_finite())
         {
             return Err(EmbeddingError::Response("invalid query embedding".into()));
         }
         if !missing.is_empty() {
             let texts = missing
                 .iter()
-                .map(|&i| memories[i].content.clone())
+                .map(|&index| sources[index].1.to_string())
                 .collect::<Vec<_>>();
             cost.embedded_characters +=
                 texts.iter().map(|text| text.chars().count()).sum::<usize>();
@@ -447,12 +467,20 @@ impl SemanticMemoryRetriever {
                     "document embedding count mismatch".into(),
                 ));
             }
+            for vector in &fresh {
+                vector.ensure_space(&space)?;
+            }
             if fresh.iter().any(|vector| {
                 vector.values.len() != space.dimensions
-                    || vector.values.iter().any(|v| !v.is_finite())
+                    || vector.values.iter().any(|value| !value.is_finite())
             }) {
                 return Err(EmbeddingError::Response(
                     "invalid document embedding".into(),
+                ));
+            }
+            if self.provider.space() != &space {
+                return Err(EmbeddingError::Configuration(
+                    "embedding space changed during retrieval".into(),
                 ));
             }
             let mut cache = self
@@ -466,18 +494,67 @@ impl SemanticMemoryRetriever {
                 }
             }
         }
-        let mut ranked = memories
-            .iter()
-            .zip(vectors.iter())
-            .map(|(m, v)| {
-                (
-                    m,
-                    v.as_ref()
+        if self.provider.space() != &space {
+            return Err(EmbeddingError::Configuration(
+                "embedding space changed during retrieval".into(),
+            ));
+        }
+        Ok((
+            space,
+            vectors
+                .iter()
+                .map(|vector| {
+                    vector
+                        .as_ref()
                         .expect("filled embedding")
-                        .similarity(&query_vector),
-                )
-            })
+                        .similarity(&query_vector)
+                })
+                .collect(),
+            cost,
+        ))
+    }
+
+    async fn retrieve_admitted_with_fusion(
+        &self,
+        character: CharacterId,
+        memories: Vec<MemoryRecord>,
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+        include_forgotten: bool,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let filter = filter.validate()?;
+        let config = FusionConfig {
+            mode,
+            limit: 1024,
+            minimum_graph: 0,
+        };
+        fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
+        if memories.is_empty() {
+            let space = self.provider.space().clone();
+            let cost = RetrievalCost {
+                embedding_requests: 0,
+                embedded_texts: 0,
+                embedded_characters: 0,
+                cache_hits: 0,
+            };
+            return Ok(RetrievedMemory {
+                rendered: None,
+                selected_ids: Vec::new(),
+                matches: Vec::new(),
+                space,
+                status: RetrievalStatus::EmptyCorpus,
+                cost,
+            });
+        }
+        let sources = memories
+            .iter()
+            .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
             .collect::<Vec<_>>();
+        let (space, similarities, cost) = self
+            .score_canonical_documents(character, &sources, &query)
+            .await?;
+        let mut ranked = memories.iter().zip(similarities).collect::<Vec<_>>();
         ranked.sort_by(|(a, ascore), (b, bscore)| {
             bscore
                 .total_cmp(ascore)

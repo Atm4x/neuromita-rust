@@ -244,7 +244,7 @@ impl EmbeddingProvider for InvalidEmbeddingFixture {
             } else {
                 3
             };
-            let space = EmbeddingSpace::new("fixture", "wrong", "v1", dimensions).unwrap();
+            let space = EmbeddingSpace::new("fixture", "bad-batch", "v1", dimensions).unwrap();
             Embedding::new(vec![1.0; dimensions], &space)
         })
     }
@@ -257,7 +257,8 @@ impl EmbeddingProvider for InvalidEmbeddingFixture {
                 .enumerate()
                 .map(|(index, _)| {
                     let dimensions = if index + 1 == texts.len() { 2 } else { 3 };
-                    let space = EmbeddingSpace::new("fixture", "wrong", "v1", dimensions).unwrap();
+                    let space =
+                        EmbeddingSpace::new("fixture", "bad-batch", "v1", dimensions).unwrap();
                     Embedding::new(vec![1.0; dimensions], &space).unwrap()
                 })
                 .collect())
@@ -278,7 +279,7 @@ async fn invalid_document_batch_is_rejected_before_any_cache_entry_is_published(
             retriever
                 .retrieve(CharacterId::Crazy, &records, "search")
                 .await,
-            Err(EmbeddingError::Response(_))
+            Err(EmbeddingError::ModelSpaceMismatch { .. })
         ));
     }
     assert_eq!(*provider.document_batch_size.lock().unwrap(), vec![2, 2]);
@@ -295,7 +296,10 @@ async fn invalid_query_vector_must_not_start_document_indexing() {
             "search",
         )
         .await;
-    assert!(matches!(result, Err(EmbeddingError::Response(_))));
+    assert!(matches!(
+        result,
+        Err(EmbeddingError::ModelSpaceMismatch { .. })
+    ));
     assert!(provider.document_batch_size.lock().unwrap().is_empty());
 }
 
