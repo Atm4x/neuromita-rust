@@ -1,0 +1,42 @@
+name: Import Agent B29 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b29-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4e533ffbe39bfc3f57a051167a41116e5d2f75b5
+          fetch-depth: 0
+      - name: Verify and publish B29 fast-forward branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=4e533ffbe39bfc3f57a051167a41116e5d2f75b5
+          EXPECTED=758afc8c0d4300574da1023e46c0b36ab7f4bc8f
+          SHA256=43d3c74fbaee04c100aa90e56e39b393bb0ec116bde91c9d6371c037f8baea25
+          TARGET=refs/heads/codex/timeline-python-image-attachments-20261107
+          git fetch origin refs/heads/bridge/agent-b29-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b29-20261107.bundle.b64 | base64 --decode > /tmp/b29.bundle
+          echo "$SHA256  /tmp/b29.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/b29.bundle
+          git fetch /tmp/b29.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Unexpected existing ref: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
