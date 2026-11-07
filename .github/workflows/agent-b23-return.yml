@@ -1,0 +1,43 @@
+name: Publish Agent B23 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b23-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4fda95ebe4379ccd649cd08c184bd042e1fa0e0e
+          fetch-depth: 0
+      - name: Verify and publish B23 exact Git commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=4fda95ebe4379ccd649cd08c184bd042e1fa0e0e
+          EXPECTED=34c7502f45989f9a7f59a6d8ebcee6ce4c0c3f1d
+          HASH=175821e37a0b33fe82ab9ed89ba91e8ba9be9d1fed53f117be090326cbe8ba48
+          TARGET=refs/heads/codex/timeline-python-asset-parity-20261107
+          SOURCE=refs/heads/bridge/agent-b23-return-20261107
+          git fetch origin "$SOURCE"
+          git show FETCH_HEAD:.bridge/agent-b23-20261107.bundle.b64 | base64 --decode > /tmp/b23.bundle
+          echo "$HASH  /tmp/b23.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/b23.bundle
+          git fetch /tmp/b23.bundle "$TARGET"
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Ref exists at another SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
