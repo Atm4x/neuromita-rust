@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::timeline::domain::{Branch, Receipt};
 use crate::timeline::domain::{
-    BranchId, BranchInfo, EventDraft, EventKind, SessionId, TimelineAssetRef, TimelineError,
-    TimelineFact, TimelineStore, canonical_message_content, parse_message_content,
+    BranchId, BranchInfo, EventDraft, EventKind, SessionId, SessionProvenance, TimelineAssetRef,
+    TimelineError, TimelineFact, TimelineStore, canonical_message_content, parse_message_content,
 };
 
 #[cfg(feature = "sqlite-system")]
@@ -29,6 +29,14 @@ const MAX_BRANCHES: usize = 256;
 const MAX_FACTS: usize = 100_000;
 const MAX_SINGLE_BINARY: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_BINARY: u64 = 64 * 1024 * 1024;
+
+type ArchiveBinaries = Vec<(TimelineAssetRef, Vec<u8>)>;
+type PreparedImport = (
+    SessionId,
+    Vec<Branch>,
+    ArchiveBinaries,
+    Option<SessionProvenance>,
+);
 
 #[derive(Debug, Error)]
 pub enum SessionArchiveError {
@@ -54,6 +62,8 @@ struct Envelope {
     created_at_utc: String,
     branches: Vec<ArchivedBranch>,
     assets: Vec<ArchivedAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provenance: Option<SessionProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,7 +304,7 @@ fn validate_receipts(branch: &ArchivedBranch) -> Result<(), SessionArchiveError>
 
 fn validate_envelope(
     envelope: &Envelope,
-) -> Result<(Vec<Branch>, Vec<(TimelineAssetRef, Vec<u8>)>), SessionArchiveError> {
+) -> Result<(Vec<Branch>, ArchiveBinaries), SessionArchiveError> {
     if envelope.format != FORMAT || envelope.version != VERSION {
         return Err(SessionArchiveError::Invalid(
             "unknown archive format or version",
@@ -420,6 +430,12 @@ fn validate_envelope(
         }
     }
     TimelineStore::validate_archive_receipts(&ordered)?;
+    if let Some(provenance) = &envelope.provenance {
+        TimelineStore::load_persisted_with_provenance(
+            ordered.clone(),
+            vec![(envelope.session_id, provenance.clone())],
+        )?;
+    }
     if archive_timestamp(&ordered)? != envelope.created_at_utc {
         return Err(SessionArchiveError::Invalid(
             "inconsistent archive timestamp",
@@ -445,7 +461,7 @@ pub fn retention_manifest_memory(
         .collect::<Vec<_>>();
     let mut retained = collect_references(&local)?;
     for archive in retained_archives {
-        let (_, _, binaries) = prepare_import(archive)?;
+        let (_, _, binaries, _) = prepare_import(archive)?;
         for (reference, _) in binaries {
             if retained
                 .insert(reference.digest.clone(), reference.clone())
@@ -539,6 +555,7 @@ pub fn export_memory(
         created_at_utc: timestamp,
         branches,
         assets: archive_assets,
+        provenance: store.session_provenance(session).cloned(),
     };
     validate_envelope(&envelope)?;
     let bytes = serde_json::to_vec(&envelope)
@@ -549,16 +566,14 @@ pub fn export_memory(
     Ok(bytes)
 }
 
-fn prepare_import(
-    bytes: &[u8],
-) -> Result<(SessionId, Vec<Branch>, Vec<(TimelineAssetRef, Vec<u8>)>), SessionArchiveError> {
+fn prepare_import(bytes: &[u8]) -> Result<PreparedImport, SessionArchiveError> {
     if bytes.len() > MAX_ARCHIVE_BYTES {
         return Err(SessionArchiveError::Invalid("archive byte limit"));
     }
     let archive = serde_json::from_slice::<Envelope>(bytes)
         .map_err(|_| SessionArchiveError::Invalid("archive JSON or unknown field"))?;
     let (branches, assets) = validate_envelope(&archive)?;
-    Ok((archive.session_id, branches, assets))
+    Ok((archive.session_id, branches, assets, archive.provenance))
 }
 
 fn import_assets(
@@ -582,7 +597,7 @@ pub fn import_memory(
     bytes: &[u8],
     assets: &TimelineAssetStore,
 ) -> Result<SessionId, SessionArchiveError> {
-    let (session, branches, binaries) = prepare_import(bytes)?;
+    let (session, branches, binaries, provenance) = prepare_import(bytes)?;
     if store
         .persisted_branches()
         .iter()
@@ -591,7 +606,7 @@ pub fn import_memory(
         return Err(SessionArchiveError::Conflict);
     }
     import_assets(binaries, assets)?;
-    store.install_archive_branches(branches)?;
+    store.install_archive_branches_with_provenance(branches, provenance)?;
     Ok(session)
 }
 
@@ -610,7 +625,7 @@ pub fn import_sqlite(
     bytes: &[u8],
     assets: &TimelineAssetStore,
 ) -> Result<SessionId, SessionArchiveError> {
-    let (session, branches, binaries) = prepare_import(bytes)?;
+    let (session, branches, binaries, provenance) = prepare_import(bytes)?;
     if store
         .archive_snapshot()?
         .persisted_branches()
@@ -620,6 +635,6 @@ pub fn import_sqlite(
         return Err(SessionArchiveError::Conflict);
     }
     import_assets(binaries, assets)?;
-    store.archive_install(branches)?;
+    store.archive_install_with_provenance(branches, provenance)?;
     Ok(session)
 }

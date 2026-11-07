@@ -1,6 +1,8 @@
 use super::{InspectedPythonArchive, PythonArchiveError, PythonIdentityPlan};
 use crate::identity::CharacterId;
-use crate::timeline::domain::{SessionId, TimelineStore};
+use crate::timeline::domain::{
+    ExternalEventProvenance, ExternalSessionSource, SessionId, SessionProvenance, TimelineStore,
+};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[cfg(feature = "sqlite-system")]
@@ -22,6 +24,37 @@ impl<'a> BoundPythonArchive<'a> {
 
     pub fn native_session(&self) -> SessionId {
         SessionId(self.source.identities.session.candidate_uuid)
+    }
+
+    /// Detached session-owned metadata for the future atomic native import.
+    /// Event payloads are intentionally not duplicated here.
+    pub fn provenance(&self) -> SessionProvenance {
+        let identities = &self.source.identities;
+        SessionProvenance {
+            source: ExternalSessionSource::PythonSessionArchive,
+            external_session_id: identities.session.source.clone(),
+            external_branches: identities
+                .branches
+                .iter()
+                .map(|id| (id.candidate_uuid, id.source.clone()))
+                .collect(),
+            external_events: identities
+                .events
+                .iter()
+                .map(|id| {
+                    let time = &self.source.event_times[&id.source];
+                    (
+                        id.candidate_uuid,
+                        ExternalEventProvenance {
+                            external_event_id: id.source.clone(),
+                            occurred_at_iso8601: time.source_iso8601.clone(),
+                            occurred_at_unix_us: time.unix_microseconds,
+                        },
+                    )
+                })
+                .collect(),
+            observer_bindings: self.observers.clone(),
+        }
     }
 
     /// Stage the verified Python binary closure in the canonical content-addressed

@@ -7,6 +7,7 @@ pub(crate) use index::WorldLookup;
 mod messages;
 mod model;
 mod projection;
+mod provenance;
 mod replies;
 mod repository;
 mod request_evidence;
@@ -28,6 +29,7 @@ pub use model::{
     KnownEvent, SessionId, TimelineError, TimelineFact,
 };
 pub use projection::{character_view, knows, present_characters};
+pub use provenance::{ExternalEventProvenance, ExternalSessionSource, SessionProvenance};
 pub use request_evidence::RequestEvidence;
 pub use store::TimelineStore;
 pub(crate) use store::{Branch, Receipt};

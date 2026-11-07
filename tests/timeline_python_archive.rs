@@ -395,3 +395,37 @@ fn python_import_stages_real_archive_asset_into_existing_content_store() {
     }
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn python_provenance_keeps_exact_time_and_observer_identity_without_history_copy() {
+    use neuromita::timeline::domain::{ExternalSessionSource, TimelineStore};
+    let source = inspect_python_archive(PYTHON_ARCHIVE).unwrap();
+    let binding = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let provenance = binding.provenance();
+    assert_eq!(
+        provenance.source,
+        ExternalSessionSource::PythonSessionArchive
+    );
+    assert_eq!(provenance.external_session_id, "session:русский");
+    assert_eq!(provenance.external_branches.len(), 2);
+    assert_eq!(provenance.external_events.len(), 3);
+    assert_eq!(provenance.observer_bindings, explicit_observers());
+    let original = &provenance.external_events[&source
+        .identities
+        .events
+        .iter()
+        .find(|id| id.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+        .unwrap()
+        .candidate_uuid];
+    assert_eq!(
+        original.occurred_at_iso8601,
+        "2026-11-07T06:28:44.733917+00:00"
+    );
+    assert_eq!(original.occurred_at_unix_us % 1000, 917);
+    let json = serde_json::to_vec(&provenance).unwrap();
+    let restored: neuromita::timeline::domain::SessionProvenance =
+        serde_json::from_slice(&json).unwrap();
+    assert_eq!(restored, provenance);
+}
