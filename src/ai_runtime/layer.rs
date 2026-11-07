@@ -3,6 +3,7 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 
@@ -155,6 +156,14 @@ impl StagingCleanup {
         })
     }
 
+    fn child_stdin(&self) -> Result<Stdio, LayerError> {
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or_else(|| LayerError::Invalid("staging owner unavailable".into()))?;
+        Ok(Stdio::from(owner.try_clone()?))
+    }
+
     fn disarm(&mut self) {
         self.published = true;
         remove_stage_lock(&self.lock_path);
@@ -170,10 +179,18 @@ impl Drop for StagingCleanup {
         let lock_path = std::mem::take(&mut self.lock_path);
         let owner = self.owner.take();
         let cleanup = move || {
-            if remove_abandoned_staging(&path) {
-                remove_stage_lock(&lock_path);
-            }
             drop(owner);
+            for _ in 0..40 {
+                if let Some(reclaimed_owner) = open_stage_owner(&lock_path) {
+                    if remove_abandoned_staging(&path) {
+                        remove_stage_lock(&lock_path);
+                    }
+                    drop(reclaimed_owner);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            tracing::warn!(path = %path.display(), "staging remains owned by running installer child");
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn_blocking(cleanup);
@@ -367,7 +384,7 @@ impl LayerInstaller<'_> {
         tokio::fs::create_dir_all(self.cache_directory).await?;
         let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
         let mut cleanup = StagingCleanup::new(staging.clone())?;
-        let result = async {
+        async {
             if !packages.is_empty() {
                 let mut cmd = Command::new(self.uv_executable);
                 cmd.args([
@@ -383,6 +400,7 @@ impl LayerInstaller<'_> {
                 .arg(&staging)
                 .env("UV_CACHE_DIR", self.cache_directory)
                 .env_remove("VIRTUAL_ENV")
+                .stdin(cleanup.child_stdin()?)
                 .kill_on_drop(true);
                 for package in packages {
                     cmd.arg(format!("{}=={}", package.name, package.version));
@@ -454,17 +472,188 @@ impl LayerInstaller<'_> {
             }
             Ok(destination.to_owned())
         }
-        .await;
-        if result.is_err() && tokio::fs::remove_dir_all(&staging).await.is_ok() {
-            cleanup.disarm();
-        }
-        result
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uv_child_survives_installer_parent_crash_fixture() {
+        let Ok(root) = std::env::var("NEUROMITA_C3_PARENT_FIXTURE_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let uv = root.join("uv");
+        let python = root.join("python");
+        let cache = root.join("cache");
+        let installer = LayerInstaller {
+            uv_executable: &uv,
+            python_executable: &python,
+            cache_directory: &cache,
+            timeout: Duration::from_secs(60),
+        };
+        let packages = vec![LockedPackage {
+            name: "mockpkg".into(),
+            version: "1.0.0".into(),
+        }];
+        installer
+            .publish(
+                &root.join("layers").join("crashed"),
+                ".receipt.json",
+                &serde_json::json!({"revision": "crashed"}),
+                &packages,
+                &[],
+            )
+            .await
+            .unwrap();
+        panic!("mock uv must remain blocked until parent is killed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn surviving_uv_child_prevents_orphan_reclamation_after_parent_is_killed() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            process::{Child, Command as StdCommand},
+        };
+
+        struct ProcessGuard(Child);
+        impl Drop for ProcessGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        struct ReleaseGuard(PathBuf);
+        impl Drop for ReleaseGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, "release");
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("nm-staging-uv-survival-{}", Uuid::new_v4()));
+        let layers = root.join("layers");
+        std::fs::create_dir_all(&layers).unwrap();
+        let uv = root.join("uv");
+        let python = root.join("python");
+        std::fs::write(&python, "test Python executable").unwrap();
+        std::fs::write(
+            &uv,
+            r#"#!/usr/bin/env python3
+import os, pathlib, sys, time
+stage = pathlib.Path(sys.argv[sys.argv.index('--target') + 1])
+root = stage.parent.parent
+(root / 'uv-ready').write_text(str(os.getpid()) + '\n' + str(stage))
+while not (root / 'uv-release').exists():
+    time.sleep(0.02)
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&uv).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&uv, perms).unwrap();
+
+        let _release_guard = ReleaseGuard(root.join("uv-release"));
+        let child = StdCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ai_runtime::layer::tests::uv_child_survives_installer_parent_crash_fixture",
+                "--nocapture",
+            ])
+            .env("NEUROMITA_C3_PARENT_FIXTURE_ROOT", &root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut parent = ProcessGuard(child);
+        let ready = root.join("uv-ready");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !ready.is_file() {
+                assert!(
+                    parent.0.try_wait().unwrap().is_none(),
+                    "installer parent exited unexpectedly"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("uv must start before killing installer parent");
+        let data = std::fs::read_to_string(&ready).unwrap();
+        let (pid, staging) = data.split_once('\n').unwrap();
+        let pid: u32 = pid.parse().unwrap();
+        let staging = PathBuf::from(staging);
+        assert!(staging.parent() == Some(layers.as_path()));
+        assert!(staging.is_dir());
+        let lock = staging_lock_path(&staging);
+        assert!(lock.is_file());
+
+        parent.0.kill().unwrap();
+        parent.0.wait().unwrap();
+        assert!(
+            PathBuf::from(format!("/proc/{pid}")).exists(),
+            "uv child must survive its parent"
+        );
+        assert!(
+            open_stage_owner(&lock).is_none(),
+            "uv must inherit the owner's OS lock"
+        );
+
+        let cache = root.join("cache");
+        let installer = LayerInstaller {
+            uv_executable: &uv,
+            python_executable: &python,
+            cache_directory: &cache,
+            timeout: Duration::from_secs(5),
+        };
+        let first = layers.join("healthy1");
+        installer
+            .publish(
+                &first,
+                ".receipt.json",
+                &serde_json::json!({"revision": 1}),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            staging.is_dir(),
+            "live orphan uv staging must not be reclaimed"
+        );
+        assert!(open_stage_owner(&lock).is_none());
+
+        std::fs::write(root.join("uv-release"), "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while open_stage_owner(&lock).is_none() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("uv must release inherited ownership after exiting");
+
+        let second = layers.join("healthy2");
+        installer
+            .publish(
+                &second,
+                ".receipt.json",
+                &serde_json::json!({"revision": 2}),
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !staging.exists(),
+            "staging must become reclaimable after uv exit"
+        );
+        assert!(!lock.exists());
+        assert!(first.is_dir() && second.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

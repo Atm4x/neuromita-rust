@@ -491,7 +491,13 @@ exec sleep 120
             timed_out.install(&pending).await,
             Err(LayerError::Timeout)
         ));
-        assert!(staging_paths().is_empty());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !staging_paths().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed-out uv staging should be cleaned after child exit");
         assert!(installer.installed(&stable).await.unwrap());
 
         tokio::fs::write(
