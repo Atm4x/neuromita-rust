@@ -1,0 +1,54 @@
+name: Agent C Windows orphan witness verified import and acceptance
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-windows-orphan-witness-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-windows-orphan-witness-20261107
+          fetch-depth: 0
+      - name: Verify exact incremental bundle and publish commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=029aea0b82b1fda57c8ed55821c8da7304d631b6
+          HEAD=f2393720671c17b37dc9335ffaa9d46f66e0e139
+          TARGET=codex/ai-platform-hub-c3-windows-orphan-witness-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-windows-orphan-witness.bundle.b64 > /tmp/c3-orphan.bundle
+          echo '1bc15c31e3a85bf73a4f0e215531ce46039e991cb6482f8f9a57230cd5ec1dd4  /tmp/c3-orphan.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-orphan.bundle
+          git fetch --no-tags /tmp/c3-orphan.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected remote ref $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-windows-orphan-witness-20261107
+          fetch-depth: 1
+      - name: Windows Rust 1.98.1 orphan witness acceptance
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_reclaims_only_closed_named_jobs_with_verified_witness -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_cancelled_uv_job_releases_staging_only_after_child_shutdown -- --nocapture
