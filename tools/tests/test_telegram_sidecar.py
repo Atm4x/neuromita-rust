@@ -166,6 +166,23 @@ class TelegramSidecarTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_expired_session_is_not_accepted_for_voice_requests(self):
+        async def scenario():
+            s = self.sidecar
+            await self.call(1, "connect", api_id=1234, api_hash="fake",
+                            phone="+1000000000", session="/tmp/mock-tg-session")
+            await self.call(2, "request_code")
+            await self.call(3, "sign_in", code="valid-code")
+            s.client.authorized = False  # Simulate Telegram revoking the session.
+            status = await self.call(4, "status")
+            self.assertEqual(status["result"],
+                             {"authorized": False, "connected": True})
+            voice = await self.call(5, "send", peer="@silero_voice_bot",
+                                    text="should not be sent")
+            self.assertEqual(voice["error"], "unauthorized")
+
+        asyncio.run(scenario())
+
     def test_reconnect_does_not_reuse_a_previous_account_code(self):
         async def scenario():
             s = self.sidecar
