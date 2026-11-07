@@ -1,0 +1,36 @@
+name: Agent D33 pinned native Windows schema-loss regression
+on:
+  push:
+    branches: [codex/bridge-agent-d33-windows-20261108]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D33 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e 2261bd8caf42a0ffd658fbbc44c50eaaf999e8af^{commit}
+          test "$(git rev-parse 2261bd8caf42a0ffd658fbbc44c50eaaf999e8af^{tree})" = 7334f9837510e51f0d20c48eadd4a4944bc57fc0
+          git checkout --detach 2261bd8caf42a0ffd658fbbc44c50eaaf999e8af
+          test "$(git rev-parse HEAD)" = 2261bd8caf42a0ffd658fbbc44c50eaaf999e8af
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows native staging, settings and recovery
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_preset_staging -- --test-threads=8
+          cargo test --locked --offline --test python_preset_preferences -- --test-threads=8
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo test --locked --offline --test python_settings_import -- --test-threads=8
+          cargo check --locked --offline --all-targets
