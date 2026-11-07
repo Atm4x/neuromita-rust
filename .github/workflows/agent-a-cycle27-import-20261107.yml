@@ -1,0 +1,44 @@
+name: Agent A cycle27 verified portable-memory integrity bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-a-cycle27-20261107
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Agent A objects and fast-forward only feature branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BLOB: b914fe94e2b12c381c10b5fc88752612078bb982
+          BUNDLE_SHA256: dccc8e355da4c62b245b87129f5dae1904e81cad42600016d148051e9c11ce72
+          START_SHA: 792ee93fc29e9526c3d5cf9f291cd96993e0eb3a
+          HEAD_SHA: 48c3c2212963a524bc4f1617431e6532b3b1d551
+          FEATURE_REF: codex/knowledge-memory-transfer-durable-20261107
+          BASE_REF: codex/knowledge-portable-memory-transfer-20261107
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/blobs/$SOURCE_BLOB" \
+            | jq -r '.content' | base64 --decode > agent-a-cycle27-return.bundle
+          printf '%s  %s\n' "$BUNDLE_SHA256" agent-a-cycle27-return.bundle | sha256sum -c -
+          test "$(stat -c%s agent-a-cycle27-return.bundle)" = 8417
+          git fetch origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          test "$(git rev-parse "refs/remotes/origin/$BASE_REF")" = "$START_SHA"
+          git bundle verify agent-a-cycle27-return.bundle
+          git fetch ./agent-a-cycle27-return.bundle "refs/heads/$FEATURE_REF:refs/heads/$FEATURE_REF"
+          test "$(git rev-parse "refs/heads/$FEATURE_REF")" = "$HEAD_SHA"
+          git merge-base --is-ancestor "$START_SHA" "$HEAD_SHA"
+          git fsck --full
+          git push origin "refs/heads/$FEATURE_REF:refs/heads/$FEATURE_REF"
+          git fetch origin "+refs/heads/$FEATURE_REF:refs/remotes/origin/$FEATURE_REF"
+          test "$(git rev-parse "refs/remotes/origin/$FEATURE_REF")" = "$HEAD_SHA"
+          echo "PUBLISHED ORIGINAL HEAD $HEAD_SHA"
