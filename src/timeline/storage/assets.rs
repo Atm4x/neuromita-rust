@@ -224,20 +224,30 @@ impl TimelineAssetStore {
             media_type: media_type.to_owned(),
         };
         let destination = self.path_for(&reference)?;
-        fs::create_dir_all(destination.parent().expect("asset has parent"))?;
+        let objects = self.directory.join("objects");
+        let shard = destination.parent().expect("asset has parent");
+        fs::create_dir_all(&objects)?;
+        real_directory(&objects)?;
+        fs::create_dir_all(shard)?;
         self.check_object_directories(&destination)?;
+        // A new objects/ or shard/ directory also needs its parent entry
+        // persisted before a canonical Timeline event can reference the blob.
+        // Repeat the sync even for concurrent duplicate imports: another
+        // writer may have linked the file but not yet synced the directory.
+        #[cfg(unix)]
+        {
+            File::open(&self.directory)?.sync_all()?;
+            File::open(&objects)?.sync_all()?;
+        }
         match fs::hard_link(&staged.path, &destination) {
-            Ok(()) => {
-                // The file is durable before the link becomes visible. A crash
-                // before the Timeline append only produces an unreferenced blob.
-                #[cfg(unix)]
-                File::open(destination.parent().expect("asset has parent"))?.sync_all()?;
-            }
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 self.verify(&reference)?;
             }
             Err(error) => return Err(error.into()),
         }
+        #[cfg(unix)]
+        File::open(shard)?.sync_all()?;
         Ok(reference)
     }
 

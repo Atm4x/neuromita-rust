@@ -508,6 +508,29 @@ fn staging_and_object_directory_symlinks_are_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn import_rejects_symlinked_objects_before_creating_external_shards() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let safe = TimelineAssetStore::new(temp.path().join("safe"), 1024).unwrap();
+    let reference = safe
+        .import("image/png", Cursor::new(b"untrusted source"))
+        .unwrap();
+    let root = temp.path().join("assets");
+    let store = TimelineAssetStore::new(&root, 1024).unwrap();
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, root.join("objects")).unwrap();
+
+    assert!(matches!(
+        store.import("image/png", Cursor::new(b"untrusted source")),
+        Err(TimelineAssetError::InvalidReference)
+    ));
+    assert!(!outside.join(&reference.digest[..2]).exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn symlinked_asset_root_is_rejected_at_creation() {
     use std::os::unix::fs::symlink;
 
