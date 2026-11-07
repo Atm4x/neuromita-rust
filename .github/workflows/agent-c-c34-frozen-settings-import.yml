@@ -1,0 +1,53 @@
+name: Agent C C3.4 exact frozen settings inspection import and native proof
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c34-settings-freeze-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c34-settings-freeze-20261107
+          fetch-depth: 0
+      - name: Verify exact Git object and publish stacked C3.4 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=8e53b036826eaafd01f648ca9525e0c71229c2be
+          HEAD=9bb6d51c9b590fbcf7af34659f937dde420ff918
+          TARGET=codex/ai-platform-hub-c34-frozen-settings-inspection-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c34-frozen-settings.bundle.b64 > /tmp/c34.bundle
+          echo '5120037fde7c2d15ca961ee7320c674c88c83a94de917662a526720dbce19466  /tmp/c34.bundle' | sha256sum -c -
+          git bundle verify /tmp/c34.bundle
+          git fetch --no-tags /tmp/c34.bundle "HEAD:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c34-frozen-settings-inspection-20261107
+      - name: Native Windows Rust 1.98.1 settings and removal inspection tests
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::tests::maintenance_ -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::removal::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::storage::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
