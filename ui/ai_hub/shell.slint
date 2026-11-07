@@ -4,7 +4,8 @@ import { ActionSurface } from "../components/controls.slint";
 import { SettingsTheme } from "../settings/theme.slint";
 import { SettingsLabel, SettingsField } from "../settings/form-controls.slint";
 import { SettingsScrollView } from "../settings/scroll-view.slint";
-import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase } from "contract.slint";
+import { AiHubCard } from "cards.slint";
+import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase, AiHubTruth } from "contract.slint";
 
 // GUI-only workspace. Agent 2 owns cards, agent 3 owns the schema editor,
 // agent 4 owns operation/queue widgets. No backend intents are emitted here.
@@ -60,6 +61,10 @@ export component AiHubShell inherits Rectangle {
                 || root.search-match(component.backend, root.search-text)
                 || root.search-match(component.compatibility, root.search-text)
                 || root.search-match(component.error, root.search-text));
+    }
+    // Sort supported + inference-ready first without changing the source model.
+    pure function card-rank(component: AiHubComponent) -> int {
+        return !component.supported ? 2 : component.model-ready == AiHubTruth.yes ? 0 : 1;
     }
     background: SettingsTheme.workspace;
     border-radius: 16px;
@@ -217,30 +222,23 @@ export component AiHubShell inherits Rectangle {
                                         : root.localized("ai-hub.shell.empty", "Компоненты не обнаружены.", "No components discovered.");
                                     color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
                                 }
-                                if root.catalog.available && root.components.length > 0: VerticalLayout {
-                                    padding: 0px; spacing: 8px;
-                                    SettingsLabel {
-                                        text: root.active-tab == 0
-                                            ? root.localized("ai-hub.shell.cards-placeholder", "Компоненты каталога (карточки подключит следующий агент)", "Catalog components (cards will be added by the next agent)")
-                                            : root.localized("ai-hub.shell.settings-placeholder", "Параметры компонентов (редактор подключит следующий агент)", "Component settings (editor will be added by the next agent)");
-                                        color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
-                                    }
-                                    for component in root.components: Rectangle {
-                                        visible: root.show-component(component);
-                                        height: root.show-component(component) ? 48px : 0px;
-                                        background: SettingsTheme.field;
-                                        border-width: 1px; border-color: SettingsTheme.field-border;
-                                        border-radius: 9px;
-                                        HorizontalLayout {
-                                            padding-left: 12px; padding-right: 12px; spacing: 9px;
-                                            SettingsLabel { text: component.title; horizontal-stretch: 1; }
-                                            SettingsLabel { text: component.backend; color: SettingsTheme.muted; }
-                                            SettingsLabel {
-                                                text: component.compatibility;
-                                                color: component.supported ? SettingsTheme.muted : SettingsTheme.error-text;
+                                if root.catalog.available && root.components.length > 0 && root.active-tab == 0: VerticalLayout {
+                                    padding: 0px; spacing: 0px; alignment: start;
+                                    for rank in [0, 1, 2]: VerticalLayout {
+                                        padding: 0px; spacing: 8px; alignment: start;
+                                        for component in root.components: AiHubCard {
+                                            component: component;
+                                            operations: root.operations;
+                                            card-visible: root.show-component(component) && root.card-rank(component) == rank;
+                                            action-requested(id, verb, revision, token) => {
+                                                root.component-action-requested(id, verb, revision, token);
                                             }
                                         }
                                     }
+                                }
+                                if root.catalog.available && root.components.length > 0 && root.active-tab == 1: SettingsLabel {
+                                    text: root.localized("ai-hub.shell.settings-placeholder", "Параметры компонентов (редактор подключит следующий агент)", "Component settings (editor will be added by the next agent)");
+                                    color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
                                 }
                             }
                         }
