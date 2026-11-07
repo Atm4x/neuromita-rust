@@ -104,7 +104,47 @@ async fn real_uv_installs_and_reuses_a_verified_managed_cpython() {
     };
 
     assert!(uv.probe().await.unwrap().is_none());
-    let managed = bootstrap.prepare().await.unwrap();
+    let managed = match bootstrap.prepare().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let install_root = uv.data_directory.join("bootstrap/python");
+            for arguments in [
+                vec!["python", "dir"],
+                vec!["python", "list", "--only-installed", "--managed-python"],
+                vec![
+                    "python",
+                    "find",
+                    "--managed-python",
+                    "--no-python-downloads",
+                    "3.12.10",
+                ],
+            ] {
+                let output = Command::new(uv.uv_executable())
+                    .args(&arguments)
+                    .env("UV_PYTHON_INSTALL_DIR", &install_root)
+                    .env("UV_CACHE_DIR", uv.data_directory.join("cache/uv"))
+                    .env("UV_PYTHON_PREFERENCE", "only-managed")
+                    .env("UV_NO_CONFIG", "1")
+                    .output()
+                    .await
+                    .unwrap();
+                eprintln!(
+                    "diagnostic {:?}: status={} stdout={} stderr={}",
+                    arguments,
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let entries: Vec<_> = std::fs::read_dir(&install_root)
+                .map(|read| {
+                    read.filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            panic!("managed bootstrap failed: {error:?}; installed entries={entries:?}");
+        }
+    };
     assert_eq!(managed.uv_executable, uv.uv_executable());
     assert!(
         managed
