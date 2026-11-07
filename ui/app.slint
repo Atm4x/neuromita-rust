@@ -12,13 +12,14 @@ import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPres
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
+import { WikiReader, WikiArticleEntry } from "pages/wiki.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry }
+export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 
@@ -45,7 +46,19 @@ export component AppWindow inherits Window {
     in property <styled-text> onboarding-guide-description-rich;
     callback onboarding-guide-link-activated(string);
     in property <string> onboarding-guide-image;
-    in property <string> onboarding-guide-wiki-url;
+    in property <string> onboarding-guide-wiki-target;
+    in property <[WikiArticleEntry]> wiki-articles;
+    in property <string> wiki-current-article;
+    in property <string> wiki-current-title;
+    in property <styled-text> wiki-article-text;
+    in property <string> wiki-language: "ru";
+    in property <bool> wiki-can-back: false;
+    in property <bool> wiki-can-forward: false;
+    callback wiki-open-article(string);
+    callback wiki-open-link(string);
+    callback wiki-back();
+    callback wiki-forward();
+    callback wiki-change-language(string);
     in-out property <float> onboarding-guide-zoom: 1.0;
     in-out property <int> onboarding-guide-sizing-mode: 0;
     in-out property <length> onboarding-guide-pan-x: 0px;
@@ -170,7 +183,7 @@ export component AppWindow inherits Window {
             if root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
-                wiki => { root.navigate(PageId.wiki); }
+                wiki => { root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
                 guide => {
                     root.onboarding-guide-select-image-mode(0);
                     root.onboarding-guide-select-step(0);
@@ -178,6 +191,21 @@ export component AppWindow inherits Window {
                     root.onboarding-guide-navigate(0);
                 }
                 language-selected(code) => { root.language-selected(code); }
+            }
+            if root.page == PageId.wiki: WikiReader {
+                width: parent.width; height: parent.height;
+                articles: root.wiki-articles;
+                current-article: root.wiki-current-article;
+                current-title: root.wiki-current-title;
+                article-text: root.wiki-article-text;
+                language: root.wiki-language;
+                can-back: root.wiki-can-back;
+                can-forward: root.wiki-can-forward;
+                open-article(id) => { root.wiki-open-article(id); }
+                open-link(url) => { root.wiki-open-link(url); }
+                back => { root.wiki-back(); }
+                forward => { root.wiki-forward(); }
+                change-language(code) => { root.wiki-change-language(code); }
             }
             if root.page == PageId.releases: ReleasesPage {
                 width: parent.width; height: parent.height;
@@ -190,7 +218,7 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; version: root.version;
                 open-url(url) => { root.external-link(url); }
             }
-            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings: PlaceholderPage {
+            if root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings && root.page != PageId.wiki: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
@@ -352,9 +380,9 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     ActionSurface {
                         width: 145px; height: 38px; label: "Documentation"; background: Theme.hover;
-                        visible: root.onboarding-guide-wiki-url != "";
+                        visible: root.onboarding-guide-wiki-target != "";
                         Label { text: "Wiki / Help"; horizontal-alignment: center; }
-                        activated => { root.external-link(root.onboarding-guide-wiki-url); }
+                        activated => { root.onboarding-guide-visible = false; root.wiki-open-article(root.onboarding-guide-wiki-target); root.navigate(PageId.wiki); }
                     }
                     ActionSurface {
                         width: 38px; height: 38px; label: "Zoom out";

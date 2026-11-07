@@ -60,6 +60,8 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         neuromita::onboarding::selected_guide_level(&options.data_directory)?.index(),
     );
     update_guide(&window, 0);
+    let wiki_history = Rc::new(RefCell::new(super::wiki::WikiHistory::new(initial_code)));
+    super::wiki::render(&window, &wiki_history.borrow());
     let desktop = Rc::new(RefCell::new(None));
     if !requires_consent {
         *desktop.borrow_mut() = Some(super::sandbox::attach(
@@ -142,6 +144,72 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         };
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_open_article(move |id| {
+        let Some(window) = wiki_window.upgrade() else {
+            return;
+        };
+        let mut history = wiki_controller.borrow_mut();
+        if history.open(&id) {
+            super::wiki::render(&window, &history);
+        } else {
+            window.set_notice(format!("Unknown Wiki article: {id}").into());
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_back(move || {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            history.back();
+            super::wiki::render(&window, &history);
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_forward(move || {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            history.forward();
+            super::wiki::render(&window, &history);
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_change_language(move |code| {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            if history.set_language(&code) {
+                super::wiki::render(&window, &history);
+            }
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_open_link(move |url| {
+        use neuromita::onboarding::wiki::{self, WikiLink};
+        let Some(window) = wiki_window.upgrade() else {
+            return;
+        };
+        match wiki::resolve_link(&url) {
+            Ok(WikiLink::Article { id, anchor }) => {
+                let mut history = wiki_controller.borrow_mut();
+                history.open(id);
+                super::wiki::render(&window, &history);
+                if anchor.is_some() {
+                    window.set_notice("Wiki anchors are not yet supported".into());
+                }
+            }
+            Ok(WikiLink::AppHome) => window.invoke_navigate(PageId::Home),
+            Ok(WikiLink::AppSandbox) => window.invoke_navigate(PageId::Sandbox),
+            Ok(WikiLink::AppSettings) => window.invoke_navigate(PageId::Settings),
+            Ok(WikiLink::External(link)) => window.invoke_external_link(link.into()),
+            Err(error) => {
+                window.set_notice(format!("Wiki link unsupported: {error:?}").into());
+            }
+        }
     });
     let guide_window = window.as_weak();
     window.on_onboarding_guide_navigate(move |index| {
@@ -383,7 +451,7 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
             .expect("static Guide description Markdown must be valid"),
     );
     window.set_onboarding_guide_image(page.image_key.into());
-    window.set_onboarding_guide_wiki_url(page.wiki_url(&language).unwrap_or_default().into());
+    window.set_onboarding_guide_wiki_target(page.wiki_target.unwrap_or_default().into());
     let crop = page.image_crop();
     window.set_onboarding_guide_crop_left(crop.left);
     window.set_onboarding_guide_crop_top(crop.top);

@@ -12,6 +12,7 @@ mod sandbox;
 mod settings;
 mod speech_status;
 mod voice;
+mod wiki;
 
 mod view {
     slint::include_modules!();

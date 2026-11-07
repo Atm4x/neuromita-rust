@@ -1,4 +1,5 @@
 pub mod guide;
+pub mod wiki;
 
 use std::{io, path::Path};
 
