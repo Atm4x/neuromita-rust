@@ -134,3 +134,20 @@ when constructing the detached Memory candidate or inside the SQLite write
 transaction and covers the metadata of existing sessions. This prevents
 ambiguous re-import of one Python source under a different native identity;
 it does not replace the final importer’s collision checks.
+
+## Python canonical conversion preflight (B28)
+
+`BoundPythonArchive::prepare_canonical()` constructs detached Rust `EventDraft`,
+`TimelineFact` and operation `Receipt` values from the already validated Python
+source, preserving the source IDs through the deterministic mapping and exact
+microsecond timestamps in `SessionProvenance`. It applies explicit observer
+bindings and rewrites causal references and fork checkpoint/parent IDs to native
+UUIDs. It does not mutate Memory, SQLite or the AssetStore. The entire detached
+result must satisfy native receipt replay and provenance validation.
+
+This is a deliberately restricted compatibility boundary: Python
+`EventObserved` disclosure, message presentation mutations and media references
+remain **unsupported** until their semantics are translated without broadening
+MitaView access or dropping content. The conversion errors rather than erasing
+those events. No Python archive can be committed by B28; an atomic importer and
+complete coverage of Python event kinds are still required for #9.

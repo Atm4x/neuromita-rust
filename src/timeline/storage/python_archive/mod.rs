@@ -148,6 +148,8 @@ struct PythonAsset {
 
 mod assets;
 mod binding;
+mod conversion;
+pub use conversion::PreparedPythonCanonical;
 mod validation;
 use assets::validate_assets;
 pub use binding::BoundPythonArchive;
