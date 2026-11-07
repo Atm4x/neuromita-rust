@@ -18,7 +18,7 @@ jobs:
           persist-credentials: false
       - name: Verify exact D19 SHA
         shell: bash
-        run: test "$(git rev-parse HEAD)" = "3af9cdbb532ce9c8c6fe638b1da0f91a6c88e58f"
+        run: test "$(git rev-parse HEAD)" = "dac3e0b1f9ec9aa9b96dd54696061b2f4086f9d1"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
