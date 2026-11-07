@@ -1126,6 +1126,89 @@ mod tests {
     }
 
     #[test]
+    fn receipt_write_failure_rolls_back_all_portable_facts_indexes_and_head() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Fact before failed receipt");
+        let mut variables = EventDraft::new(EventKind::CharacterVariablesChanged);
+        variables.actor = Some(CharacterId::Crazy.to_string());
+        variables.observers.insert(CharacterId::Crazy);
+        variables
+            .payload
+            .insert("variables".into(), json!({"user_locale": "ru"}));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        conn.exec(
+            "CREATE TRIGGER reject_portable_receipt \
+             BEFORE INSERT ON timeline_receipts \
+             WHEN NEW.operation_key = 'portable-receipt-retry' \
+             BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END",
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.append(
+                branch,
+                0,
+                "portable-receipt-retry",
+                json!({}),
+                vec![memory.clone(), variables.clone()],
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        for table in [
+            "timeline_events",
+            "timeline_fact_keys",
+            "timeline_observers",
+            "timeline_acquisitions",
+            "timeline_receipts",
+        ] {
+            assert!(
+                conn.query(&format!("SELECT 1 FROM {table}"), &[])
+                    .unwrap()
+                    .is_empty(),
+                "{table} was not rolled back"
+            );
+        }
+        drop(repo);
+        assert_eq!(
+            SqliteTimelineRepository::open(&db.0)
+                .unwrap()
+                .branch(branch)
+                .unwrap()
+                .head_sequence,
+            0
+        );
+        conn.exec("DROP TRIGGER reject_portable_receipt").unwrap();
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        let committed = reopened
+            .append(
+                branch,
+                0,
+                "portable-receipt-retry",
+                json!({}),
+                vec![memory, variables],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, 2);
+        drop(reopened);
+        let final_repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(final_repo.world(branch).unwrap(), committed);
+        assert_eq!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn reopen_existing_session_does_not_change_timeline_revision() {
         let db = TestDb::new();
         let session = SessionId::new();
