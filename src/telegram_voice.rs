@@ -177,6 +177,7 @@ struct Conversation {
     last_send: Option<Instant>,
     send_times: VecDeque<Instant>,
     speaker: Option<String>,
+    bot_initialized: bool,
 }
 
 impl Conversation {
@@ -235,6 +236,7 @@ impl TelegramVoiceService {
                 last_send: None,
                 send_times: VecDeque::new(),
                 speaker: None,
+                bot_initialized: false,
             }),
         })
     }
@@ -256,6 +258,17 @@ impl TelegramVoiceService {
         let mut state = self.conversation.lock().await;
         self.transport.ready().await?;
         let mut watermark = self.transport.latest(&self.config.peer).await?;
+        if !state.bot_initialized {
+            // These commands are specific to the audited Silero bot protocol.
+            if self.config.peer.eq_ignore_ascii_case("@silero_voice_bot") {
+                watermark = watermark.max(self.send(&mut state, "/start").await?);
+                watermark = watermark.max(self.send(&mut state, "/mp3").await?);
+            }
+            state.bot_initialized = true;
+        }
+        if self.config.peer.eq_ignore_ascii_case("@CrazyMitaAIbot") {
+            watermark = watermark.max(self.send(&mut state, "/voice").await?);
+        }
         let speaker = speaker.trim();
         if !speaker.is_empty() {
             let command = format!("/speaker {speaker}");
@@ -430,6 +443,7 @@ mod tests {
             last_send: None,
             send_times: VecDeque::new(),
             speaker: None,
+            bot_initialized: false,
         };
         for n in 0..20 {
             state.record_send(start + Duration::from_millis(n));
@@ -483,7 +497,7 @@ mod tests {
         service.speak("second", "mita").await.unwrap();
         assert_eq!(
             *fake.sent.lock().await,
-            vec!["/speaker mita", "first", "second"]
+            vec!["/start", "/mp3", "/speaker mita", "first", "second"]
         );
     }
 }
