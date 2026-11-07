@@ -33,5 +33,11 @@ jobs:
         run: cargo test --locked --offline telegram_
       - name: Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Install Python 3.12 for asset-generation fixtures
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Full unit and integration suite
+        env:
+          NEUROMITA_TEST_PYTHON: python3.12
         run: cargo test --locked --offline
