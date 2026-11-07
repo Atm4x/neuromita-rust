@@ -342,6 +342,43 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn simultaneous_identical_layer_installers_reuse_one_revision() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("nm-backend-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let uv = root.join("uv");
+        let entered = root.join("entered");
+        let script = format!(
+            "#!/bin/sh\ntarget=''\nprev=''\nfor arg do if [ \"$prev\" = --target ]; then target=\"$arg\"; fi; prev=\"$arg\"; done\nprintf 'started\\n' >> '{}'\nwhile [ \"$(wc -l < '{}')\" -lt 2 ]; do sleep 0.02; done\nmkdir -p \"$target/onnxruntime_directml-1.22.0.dist-info\"\nprintf 'Name: onnxruntime-directml\\nVersion: 1.22.0\\n' > \"$target/onnxruntime_directml-1.22.0.dist-info/METADATA\"\n",
+            entered.display(),
+            entered.display()
+        );
+        std::fs::write(&uv, script).unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let python = root.join("python");
+        std::fs::write(&python, "fake").unwrap();
+        let installer = BackendInstaller {
+            uv_executable: uv,
+            python_executable: python,
+            backends_directory: root.join("backends"),
+            cache_directory: root.join("cache"),
+            timeout: Duration::from_secs(8),
+        };
+        let spec = plan();
+        let (first, second) = tokio::time::timeout(Duration::from_secs(12), async {
+            tokio::join!(installer.install(&spec), installer.install(&spec))
+        })
+        .await
+        .expect("both concurrent installs should finish");
+        let first = first.unwrap();
+        assert_eq!(first, second.unwrap());
+        assert!(installer.installed(&spec).await.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn backend_is_published_immutably_without_modifying_overlay() {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("nm-backend-{}", Uuid::new_v4()));

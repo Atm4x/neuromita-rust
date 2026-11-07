@@ -311,10 +311,34 @@ impl LayerInstaller<'_> {
                 serde_json::to_vec_pretty(plan).map_err(|e| LayerError::Invalid(e.to_string()))?;
             tokio::fs::write(staging.join(marker), bytes).await?;
             if destination.exists() {
+                if self
+                    .installed(destination, marker, plan, packages, actions)
+                    .await?
+                {
+                    return Ok(destination.to_owned());
+                }
                 return Err(LayerError::Conflict);
             }
-            std::fs::rename(&staging, destination)?;
-            cleanup.disarm();
+            match std::fs::rename(&staging, destination) {
+                Ok(()) => {
+                    cleanup.disarm();
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                    ) =>
+                {
+                    if self
+                        .installed(destination, marker, plan, packages, actions)
+                        .await?
+                    {
+                        return Ok(destination.to_owned());
+                    }
+                    return Err(LayerError::Conflict);
+                }
+                Err(error) => return Err(LayerError::Io(error)),
+            }
             Ok(destination.to_owned())
         }
         .await;
