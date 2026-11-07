@@ -6,7 +6,7 @@ use std::{
 };
 
 use neuromita::{
-    api::{ChatApi, HistoricalRecallApi},
+    api::{ChatApi, HistoricalRecallApi, HistorySearchApi},
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
@@ -42,7 +42,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -416,7 +416,7 @@ pub async fn run(
                                 }
                                 Err(_) => eprintln!("Invalid request UUID"),
                             }
-                        } else if line == "/recall" || line.starts_with("/recall ") {
+                        } else if slash_command(&line, "/recall") {
                             match parse_forgotten_recall(&line) {
                                 Ok((selector, query)) => {
                                     match HistoricalRecallApi::inspect(character, selector, &query).await {
@@ -425,6 +425,21 @@ pub async fn run(
                                         Err(error) => eprintln!("Recall: {error}"),
                                     }
                                 }
+                                Err(error) => eprintln!("{error}"),
+                            }
+                        } else if slash_command(&line, "/rag") {
+                            match parse_history_search(&line) {
+                                Ok(query) => match HistorySearchApi::inspect(character, query).await {
+                                    Ok(result) => {
+                                        if result.hits.is_empty() {
+                                            println!("История: {:?}.", result.status);
+                                        }
+                                        for hit in result.hits {
+                                            println!("[HISTORY {}] {}", hit.key.id, hit.content);
+                                        }
+                                    }
+                                    Err(error) => eprintln!("History: {error}"),
+                                },
                                 Err(error) => eprintln!("{error}"),
                             }
                         } else if line == "/dataset status" {
@@ -443,6 +458,8 @@ pub async fn run(
                                 Ok(text) => println!("{text}"),
                                 Err(error) => eprintln!("{error}"),
                             }
+                        } else if line.starts_with('/') {
+                            eprintln!("Неизвестная управляющая команда.");
                         } else {
                             match presenter.reply(character, line) {
                                 Ok(handle) => { println!("Accepted: {}", handle.id()); pending.insert(handle.id()); }
@@ -454,6 +471,22 @@ pub async fn run(
             }
         }
     }
+}
+
+fn slash_command(line: &str, command: &str) -> bool {
+    line.strip_prefix(command)
+        .is_some_and(|tail| tail.is_empty() || tail.chars().next().is_some_and(char::is_whitespace))
+}
+
+fn parse_history_search(line: &str) -> Result<&str, &'static str> {
+    let query = line
+        .strip_prefix("/rag history ")
+        .ok_or("Используй /rag history QUERY")?
+        .trim();
+    if query.is_empty() || query.chars().count() > 2048 {
+        return Err("Используй /rag history QUERY");
+    }
+    Ok(query)
 }
 
 fn parse_forgotten_recall(line: &str) -> Result<(RecallSelector, String), &'static str> {
@@ -502,6 +535,25 @@ mod forgotten_recall_command_tests {
             parse_forgotten_recall(&format!("/recall forgotten id {id} | player")).unwrap();
         assert_eq!(selector, RecallSelector::Ids(vec![MemoryId(id)]));
         assert_eq!(query, "player");
+    }
+
+    #[test]
+    fn malformed_slash_prefixes_are_control_commands_not_chat_messages() {
+        for command in [
+            "/recall",
+            "/recall forgotten",
+            "/recall\tforgotten search | tea",
+        ] {
+            assert!(slash_command(command, "/recall"));
+            assert!(parse_forgotten_recall(command).is_err());
+        }
+        assert!(!slash_command("/recaller", "/recall"));
+        assert!(slash_command("/rag\thistory tea", "/rag"));
+        assert!(parse_history_search("/rag\thistory tea").is_err());
+        assert_eq!(
+            parse_history_search("/rag history green tea"),
+            Ok("green tea")
+        );
     }
 
     #[test]

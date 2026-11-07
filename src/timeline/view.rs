@@ -70,6 +70,7 @@ impl ContextEntry {
 pub struct MitaView {
     pub branch: BranchId,
     pub through: u64,
+    character: CharacterId,
     projection: CharacterMessageProjection,
     world: CharacterWorldProjection,
 }
@@ -100,9 +101,14 @@ impl MitaView {
         Self {
             branch,
             through,
+            character,
             projection,
             world,
         }
+    }
+
+    pub fn character(&self) -> CharacterId {
+        self.character
     }
 
     pub fn count(&self) -> usize {
@@ -188,6 +194,7 @@ impl TimelineMessageQueries {
         Ok(MitaView {
             branch,
             through: head,
+            character,
             projection,
             world,
         })
