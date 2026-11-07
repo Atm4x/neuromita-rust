@@ -1,0 +1,36 @@
+name: Export Agent D17 pinned source
+on:
+  push:
+    branches:
+      - bridge/agent-d17-source-export-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-contents-20261107
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source revision and export
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=54b3d605ac73963081fde22ea70326edafb60bc5
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          git update-ref refs/heads/agent-d17-pinned-export "$EXPECTED"
+          git bundle create neuromita-d17-pinned.bundle refs/heads/agent-d17-pinned-export
+          git bundle verify neuromita-d17-pinned.bundle
+          sha256sum neuromita-d17-pinned.bundle > neuromita-d17-pinned.bundle.sha256
+          printf 'branch=codex/onboarding-guide-contents-20261107\nhead=%s\n' "$EXPECTED" > neuromita-d17-pinned.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuromita-d17-pinned-source
+          path: |
+            neuromita-d17-pinned.bundle
+            neuromita-d17-pinned.bundle.sha256
+            neuromita-d17-pinned.manifest
+          retention-days: 7
+          if-no-files-found: error
