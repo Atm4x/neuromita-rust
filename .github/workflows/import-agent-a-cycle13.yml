@@ -12,21 +12,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify exact source bundle and publish original commit
+      - name: Verify and fast-forward Agent A live-owner recall PR
         shell: bash
         run: |
           set -euo pipefail
-          BASE=0b049901e6b7d82b866bacca0bcd8790bda55c69
-          TARGET=4892032b30732bd22152110efeed6f99d12908cb
+          BASE=4892032b30732bd22152110efeed6f99d12908cb
+          TARGET=a240d507233bf04036b83515d629891f033a94aa
           BRANCH=codex/knowledge-live-recall-action-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-live-recall.bundle.sha256
-          git bundle verify .bridge/agent-a-live-recall.bundle
-          git fetch --no-tags .bridge/agent-a-live-recall.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-recall-orchestration.bundle.sha256
+          git bundle verify .bridge/agent-a-recall-orchestration.bundle
+          git fetch --no-tags .bridge/agent-a-recall-orchestration.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target branch exists; refusing overwrite"
-            exit 1
-          fi
+          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+          test "$CURRENT" = "$BASE"
           git push origin "$TARGET:refs/heads/$BRANCH"
