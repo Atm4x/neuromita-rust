@@ -4,6 +4,7 @@ use crate::{
     character::CharacterId,
     game_context::GameRuntimeContext,
     identity::EventId,
+    music::{BeatBackend, BeatCache, runtime::{BeatRuntime, MusicJob}},
     request::{
         InitiateRequest, ReactRequest, ReplyRequest, RequestHandle, RequestOutcome, RequestSource,
         RequestState,
@@ -23,6 +24,7 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -532,13 +534,69 @@ fn request_frame(snapshot: &crate::request::RequestSnapshot, session_id: Uuid) -
     frame
 }
 
+/// Opt-in Beat Sync scope for a game session. No arbitrary file paths can be
+/// opened outside the canonical music root. Default GameLink has no Beat Sync.
+#[derive(Clone)]
+pub struct GameBeatConfig {
+    pub media_root: PathBuf,
+    pub cache_root: PathBuf,
+    pub enabled: bool,
+}
+
+struct GameBeatService {
+    media_root: PathBuf,
+    runtime: BeatRuntime,
+    enabled: bool,
+    permits: Arc<Semaphore>,
+}
+
+impl GameBeatService {
+    fn new(config: GameBeatConfig) -> io::Result<Self> {
+        let root = std::fs::canonicalize(config.media_root)?;
+        if !root.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "music root is not a directory"));
+        }
+        Ok(Self {
+            media_root: root,
+            runtime: BeatRuntime::new(BeatCache::new(config.cache_root)),
+            enabled: config.enabled,
+            permits: Arc::new(Semaphore::new(2)),
+        })
+    }
+    fn resolve_source(&self, source: &str) -> io::Result<PathBuf> {
+        let path = Path::new(source);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.media_root.join(path)
+        };
+        let resolved = std::fs::canonicalize(candidate)?;
+        if !resolved.starts_with(&self.media_root)
+            || !resolved.is_file()
+            || resolved.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case("wav"))
+        {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "music source is not an allowed WAV"));
+        }
+        Ok(resolved)
+    }
+}
+
 pub struct GameLinkLifecycle {
     listener: TcpListener,
     config: GameLinkConfig,
     sessions: Arc<Sessions>,
+    beats: Option<Arc<GameBeatService>>,
 }
 impl GameLinkLifecycle {
     pub async fn bind(config: GameLinkConfig) -> io::Result<(Self, GameLinkHandle)> {
+        Self::bind_with_beats(config, None).await
+    }
+
+    pub async fn bind_with_beats(
+        config: GameLinkConfig,
+        music: Option<GameBeatConfig>,
+    ) -> io::Result<(Self, GameLinkHandle)> {
+        let beats = music.map(GameBeatService::new).transpose()?.map(Arc::new);
         if !config.bind.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -552,6 +610,7 @@ impl GameLinkLifecycle {
                 listener,
                 config,
                 sessions: Arc::new(Sessions::default()),
+                beats,
             },
             GameLinkHandle { address },
         ))
@@ -584,7 +643,8 @@ impl GameLinkLifecycle {
                     let api = Arc::clone(&api);
                     let config = self.config;
                     let connection_stop = stop.child_token();
-                    connections.spawn(async move { let _permit = permit; let _ = client(stream,config,sessions,api,connection_stop).await; });
+                    let beats = self.beats.clone();
+                    connections.spawn(async move { let _permit = permit; let _ = client(stream,config,sessions,api,connection_stop,beats).await; });
                 }
             }
         }
@@ -600,8 +660,10 @@ async fn client(
     sessions: Arc<Sessions>,
     api: Arc<ApiBindings>,
     stop: CancellationToken,
+    beats: Option<Arc<GameBeatService>>,
 ) -> io::Result<()> {
     let connection = Uuid::new_v4();
+    let beat_jobs = Arc::new(Mutex::new(HashMap::<Uuid, CancellationToken>::new()));
     let (read, mut write) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<Value>(config.outbound_capacity.max(1));
     let connection_stop = stop.child_token();
@@ -866,6 +928,10 @@ async fn client(
         }
         Ok::<(),io::Error>(())
     }.await;
+    for token in beat_jobs.lock().expect("beat jobs poisoned").values() {
+        token.cancel();
+    }
+    connection_stop.cancel();
     if let Some(session) = session_id {
         sessions.clear(session, connection);
     }
