@@ -24,7 +24,25 @@ jobs:
           base=a182c77686926482cd5d946f4c30d681eb405fee
           tree=9b76d9b37c7b65e824e4cd6e0a2c8c28fa16da87
           branch=codex/timeline-b48-chat-asr-cancel-20261107
-          base64 -d bridge/agent-b48.patch.gz.b64 > /tmp/b48.patch.gz
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          from pathlib import Path
+          raw = Path("bridge/agent-b48.patch.gz.b64").read_text().strip()
+          expected = "fe7aaebe6108583a858259e24fdf784c057093585c7153ecf3c20350777143d6"
+          candidates = {}
+          for i in range(len(raw)):
+              try:
+                  decoded = base64.b64decode(raw[:i] + raw[i + 1:], validate=True)
+              except ValueError:
+                  continue
+              if hashlib.sha256(decoded).hexdigest() == expected:
+                  candidates[decoded] = i
+          if len(candidates) != 1:
+              raise SystemExit("Cannot uniquely recover the SHA-256-pinned compressed source patch")
+          Path("/tmp/b48.patch.gz").write_bytes(next(iter(candidates)))
+          print("Recovered exactly the pinned source patch from one transport character duplication")
+          PY
           echo "fe7aaebe6108583a858259e24fdf784c057093585c7153ecf3c20350777143d6  /tmp/b48.patch.gz" | sha256sum -c -
           gzip -t /tmp/b48.patch.gz
           gzip -dc /tmp/b48.patch.gz > /tmp/b48.patch
