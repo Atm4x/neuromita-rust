@@ -141,6 +141,7 @@ export component SandboxChat inherits Rectangle {
     callback attach(string, string);
     callback cancel(string);
     callback hide-message(string);
+    callback copy-message(string);
     callback refresh();
     callback load-older();
     background: #0e101ff7; border-color: SandboxTheme.border; border-width: 1px; border-radius: 20px;
@@ -169,6 +170,7 @@ export component SandboxChat inherits Rectangle {
                         character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
                         hide-message(id) => { root.hide-message(id); }
+                        copy-message(text) => { root.copy-message(text); }
                         edit-message(id, text) => { ConversationUi.edit-target = id; ConversationUi.edit-draft = text; }
                     }
                 }

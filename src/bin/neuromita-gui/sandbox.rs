@@ -39,6 +39,11 @@ pub(super) struct HistoryPager {
 }
 
 impl HistoryPager {
+    #[cfg(test)]
+    pub(super) fn visible(&self) -> usize {
+        self.visible
+    }
+
     fn reset(&mut self) {
         self.owner = None;
         self.at = None;
@@ -55,13 +60,23 @@ impl HistoryPager {
         selection: TimelineSelection,
         total: usize,
     ) {
-        if self.owner != Some(owner) || self.at != Some(at) || self.selection != Some(selection) {
+        let same_selection = self.owner == Some(owner)
+            && self.selection == Some(selection)
+            && self
+                .at
+                .is_some_and(|previous| previous.branch_id == at.branch_id);
+        if !same_selection {
             self.reset();
-            self.owner = Some(owner);
-            self.at = Some(at);
-            self.selection = Some(selection);
             self.visible = total.min(HISTORY_PAGE_SIZE);
+        } else if self.at != Some(at) || self.total != total {
+            self.pending = None;
+            self.visible = self
+                .visible
+                .saturating_add(total.saturating_sub(self.total));
         }
+        self.owner = Some(owner);
+        self.at = Some(at);
+        self.selection = Some(selection);
         self.total = total;
         self.visible = self.visible.min(self.total);
     }
@@ -230,6 +245,18 @@ pub(super) fn bind_chat_actions(
     dispatch: std::rc::Rc<dyn Fn(Command)>,
     selection_revision: Arc<AtomicU64>,
 ) {
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_copy_message(move |text| {
+        if let Some(window) = weak.upgrade()
+            && current_origin(&window, &revision).is_some()
+            && !text.is_empty()
+        {
+            let conversation = window.global::<ConversationUi>();
+            conversation.set_copy_text(text);
+            conversation.set_copy_open(true);
+        }
+    });
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
@@ -352,6 +379,8 @@ pub(super) fn bind_chat_actions(
         conversation.set_history(false);
         conversation.set_edit_target("".into());
         conversation.set_edit_draft("".into());
+        conversation.set_copy_open(false);
+        conversation.set_copy_text("".into());
         window.set_chat_sending(false);
         window.set_chat_error("".into());
         send(Command::Select(ChatOrigin {

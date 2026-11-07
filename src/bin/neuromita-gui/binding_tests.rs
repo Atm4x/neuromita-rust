@@ -1369,6 +1369,20 @@ fn chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows() {
     pager
         .lock()
         .unwrap()
+        .observe(origin, loading_at, selected, 206);
+    assert_eq!(
+        pager.lock().unwrap().visible(),
+        206,
+        "a new accepted reply must retain loaded older rows and include the new row"
+    );
+    assert!(
+        pager.lock().unwrap().request(origin).is_none(),
+        "a live reply must not re-request pages already mounted"
+    );
+    *pager.lock().unwrap() = HistoryPager::default();
+    pager
+        .lock()
+        .unwrap()
         .observe(origin, loading_at, selected, 205);
     let (late_ticket, _, _, _) = pager.lock().unwrap().request(origin).unwrap();
     pager
@@ -1537,5 +1551,51 @@ fn chat_message_revision_callback_is_fenced_across_character_reselection() {
     window.global::<ConversationUi>().invoke_confirm();
     assert!(matches!(&commands.borrow()[4], Command::Confirm(origin)
         if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_copy_selection_dialog_scopes_text_to_active_character() {
+    use super::super::{runtime::Command, sandbox::bind_chat_actions, view::ConversationUi};
+    use neuromita::character::CharacterId;
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let commands = Rc::new(RefCell::new(Vec::<Command>::new()));
+    let collected = Rc::clone(&commands);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_copy_message("visible text A".into());
+    assert!(window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "visible text A"
+    );
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert!(!window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(window.global::<ConversationUi>().get_copy_text(), "");
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    assert_eq!(revision.load(std::sync::atomic::Ordering::Acquire), 2);
+    assert!(!window.global::<ConversationUi>().get_copy_open());
+
+    window.invoke_chat_copy_message("new selection text".into());
+    assert!(window.global::<ConversationUi>().get_copy_open());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "new selection text"
+    );
+    window.invoke_chat_copy_message("".into());
+    assert_eq!(
+        window.global::<ConversationUi>().get_copy_text(),
+        "new selection text"
+    );
+    assert_eq!(commands.borrow().len(), 2, "copy must not mutate Timeline");
     window.hide().unwrap();
 }

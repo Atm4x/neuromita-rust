@@ -69,3 +69,24 @@ This only closes older-page load and late-page fencing. Copy/edit/regenerate/ret
 A persisted message's **Edit** control opens a local text editor tied to its immutable Timeline `EventId`. The save action prepares `ConversationChange::ReviseMessage(event_id, content)` for the currently selected character and requires explicit confirmation. It refuses a foreign/invisible message, empty replacement, or a non-text (including mixed media) canonical `content` representation rather than discarding assets. As with B51 hide, pending preview is scoped to `ChatOrigin(character, selection_revision)`; the presenter pins the exact `ContextAnchor` and `TimelineSelection`, and the existing atomic `SessionTimeline::change_message` emits an observer-specific `MessageRevised` event on confirm. The original event and another character's history remain unchanged. Selecting A→B→A clears the editor and rejects old confirmation.
 
 This does **not** implement PyQt's delete-from-here flow or automatic regeneration of subsequent responses. A single-message revision is a distinct timeline semantics, not a replay of the original reply. Copy selection/all, retry, regenerate and request/response context still remain separate work.
+
+## Rust Slint B54: live-head history continuity and selection-copy panel
+
+The `HistoryPager` retains the number of loaded canonical rows when a new Timeline
+head is accepted **within the same character and selection generation**. A newly
+visible reply expands the mounted tail by the number of new canonical messages,
+so the oldest loaded page is not silently dropped on the next live refresh. The
+canonical `ConversationSnapshot` still rebuilds the visible projection from the
+current MitaView; an edit or hide reprojects the current window rather than
+replaying stale saved rows. Any head/total change cancels the pending older-page
+ticket. Character reselection, including A→B→A, or branch generation changes
+still reset the page window to the latest 200 rows.
+
+Each nonempty message text now exposes a **select and copy** action that opens a
+read-only Slint `TextInput` containing the visible text from the selected bubble.
+Users can select a substring and use the native `Ctrl+C` shortcut, or `Ctrl+A`
+followed by `Ctrl+C` to copy all text. This is deliberately a keyboard-driven
+copy surface, **not** an instantaneous platform clipboard write and not a claim
+that attached binary media or request diagnostics are copied. It has no backend
+command and cannot append Timeline facts. Switching characters closes the
+copy surface and discards its text; it is never stored as independent history.
