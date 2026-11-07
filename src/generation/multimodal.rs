@@ -46,6 +46,8 @@ pub enum MultimodalError {
     Unsupported,
     #[error("provider media payload exceeds the configured limit")]
     TooLarge,
+    #[error("provider media payload is empty")]
+    EmptyMedia,
     #[error("selected Timeline message is not visible in the generation snapshot")]
     MissingVisibleEvent,
 }
@@ -94,6 +96,9 @@ impl MediaBudget {
         event: EventId,
         reference: &crate::timeline::domain::TimelineAssetRef,
     ) -> Result<String, MultimodalError> {
+        if reference.size == 0 {
+            return Err(MultimodalError::EmptyMedia);
+        }
         if reference.size > MAX_PART_BYTES {
             return Err(MultimodalError::TooLarge);
         }

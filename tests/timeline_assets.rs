@@ -206,6 +206,34 @@ fn failed_or_oversize_upload_never_publishes_blob_or_leaks_staging() {
 }
 
 #[test]
+fn zero_length_asset_has_stable_identity_and_detects_corruption() {
+    let temp = TempDir::new();
+    let store = TimelineAssetStore::new(temp.path(), 512).unwrap();
+    let reference = store.import("image/png", Cursor::new([])).unwrap();
+    assert_eq!(reference.size, 0);
+    assert_eq!(
+        reference.digest,
+        "2fc71eb81c7c43a48949f2651c3ec36ec27684aec96e4601a3e69a894156f534"
+    );
+    store.verify(&reference).unwrap();
+    assert_eq!(
+        store.import("image/png", Cursor::new([])).unwrap(),
+        reference
+    );
+    let physical = temp
+        .path()
+        .join("objects")
+        .join(&reference.digest[..2])
+        .join(&reference.digest);
+    assert_eq!(fs::metadata(&physical).unwrap().len(), 0);
+    fs::write(&physical, b"modified").unwrap();
+    assert!(matches!(
+        store.verify(&reference),
+        Err(TimelineAssetError::Corrupt)
+    ));
+}
+
+#[test]
 fn malformed_references_cannot_escape_root() {
     let temp = TempDir::new();
     let store = TimelineAssetStore::new(temp.path(), 100).unwrap();

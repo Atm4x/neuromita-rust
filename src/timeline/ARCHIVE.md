@@ -270,3 +270,14 @@ ordered `TimelineMessagePart::Image`, without inventing an empty text part.
 Both source layouts use the same SHA-256/MIME/length verification. Combining
 a direct image reference with a second `attachments` array remains ambiguous
 and is rejected; arbitrary nested media objects are not silently accepted.
+
+## Zero-length binary parity (B41)
+
+The canonical Python `TimelineAsset.create` accepts empty byte strings and
+computes their identity as SHA-256 of `media_type + NUL`, even when the
+associated `image_ref.byte_size` is zero. Native TimelineAssetStore and
+SessionArchive preserve such verified blobs and do not fabricate a byte or
+replace the reference. Validation is content-addressed, so a nonempty
+replacement at the same path is rejected. Provider-specific media decoding
+remains a separate boundary: accepting an opaque archive blob is not a
+claim that an empty PNG can be decoded or sent to a model.

@@ -96,7 +96,6 @@ impl TimelineAssetRef {
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             || !valid_media_type(&self.media_type)
-            || self.size == 0
         {
             return Err(TimelineAssetError::InvalidReference);
         }
@@ -217,9 +216,6 @@ impl TimelineAssetStore {
             }
             hasher.update(&buffer[..length]);
             file.write_all(&buffer[..length])?;
-        }
-        if size == 0 {
-            return Err(TimelineAssetError::InvalidReference);
         }
         file.sync_all()?;
         drop(file);
