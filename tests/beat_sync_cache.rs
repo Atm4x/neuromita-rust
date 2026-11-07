@@ -250,9 +250,8 @@ fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
     let tmp = TempDirectory::new();
     let cache = BeatCache::new(&tmp.0);
     let input = b"immutable-audio-fixture";
-    let request = BeatCacheKey::for_audio_bytes(
-        input, BeatBackend::Dsp, "v1", "wav-v1", "analysis-v1",
-    );
+    let request =
+        BeatCacheKey::for_audio_bytes(input, BeatBackend::Dsp, "v1", "wav-v1", "analysis-v1");
     cache.store(&request, &fixture()).unwrap();
     let path = fs::read_dir(cache.root())
         .unwrap()
@@ -263,7 +262,11 @@ fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
     fs::write(path, b"broken").unwrap();
     let outcome = cache
         .analyze_or_reuse(
-            input, BeatBackend::Dsp, "v1", "wav-v1", "analysis-v1",
+            input,
+            BeatBackend::Dsp,
+            "v1",
+            "wav-v1",
+            "analysis-v1",
             0.0,
             |_| Ok::<BeatTimeline, ()>(fixture()),
         )
@@ -279,7 +282,11 @@ fn invalid_threshold_never_invokes_analyzer() {
     let tmp = TempDirectory::new();
     let cache = BeatCache::new(&tmp.0);
     let result = cache.analyze_or_reuse(
-        b"fixture", BeatBackend::Dsp, "v1", "wav-v1", "analysis-v1",
+        b"fixture",
+        BeatBackend::Dsp,
+        "v1",
+        "wav-v1",
+        "analysis-v1",
         f32::NAN,
         |_| -> Result<BeatTimeline, ()> {
             panic!("analyzer must not be called with an invalid threshold")
