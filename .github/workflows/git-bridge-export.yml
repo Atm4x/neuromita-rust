@@ -37,7 +37,7 @@ jobs:
           printf 'repository=%s\nref=refs/heads/main\nsha=%s\n' "${GITHUB_REPOSITORY}" "${MAIN_SHA}" > repository.bundle.manifest
           git bundle list-heads repository.bundle >> repository.bundle.manifest
 
-          git clone --quiet repository.bundle "${RUNNER_TEMP}/bridge-clone"
+          git clone --quiet --branch main repository.bundle "${RUNNER_TEMP}/bridge-clone"
           test "$(git -C "${RUNNER_TEMP}/bridge-clone" rev-parse HEAD)" = "${MAIN_SHA}"
           git -C "${RUNNER_TEMP}/bridge-clone" fsck --full
           du -h repository.bundle
