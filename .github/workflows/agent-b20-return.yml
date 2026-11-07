@@ -1,0 +1,43 @@
+name: Publish Agent B20 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b20-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cf941822a8da5c26363dd5617079ecafe88cf286
+          fetch-depth: 0
+      - name: Import verified B20 commit and publish isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=cf941822a8da5c26363dd5617079ecafe88cf286
+          EXPECTED=55ecb2fe9aa62f66a653f48b93e3e255b30d50d7
+          CHECKSUM=b310cc8db54ff9e9d1a5bd1d9099124930aada73a68911a87c853df75ea28ce0
+          SOURCE=refs/heads/codex/timeline-revision-canonical-content-20261107
+          TARGET=refs/heads/codex/timeline-revision-canonical-content-20261107
+          git fetch origin refs/heads/bridge/agent-b20-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b20-20261107.bundle.b64 | base64 --decode > /tmp/agent-b20.bundle
+          echo "$CHECKSUM  /tmp/agent-b20.bundle" | sha256sum -c -
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b20.bundle
+          git fetch /tmp/agent-b20.bundle "$SOURCE"
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination ref unexpectedly exists at $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
