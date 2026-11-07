@@ -1,0 +1,41 @@
+name: Agent D30 exact-commit bridge import
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d30-import-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import and verify exactly pinned D30 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ace68913a8c2bfdd5378e8755042d3672c1dc823
+          HEAD=e456a207111de30ed4aa64101b128134a4738b55
+          TREE=6e18a7dcc3d4d0bf1d49f528cdbc81cab3327655
+          BRANCH=codex/python-settings-exact-review-20261108
+          base64 --decode .git-bridge/d30-verified.patch.xz.b64 > /tmp/d30.patch.xz
+          echo "02c6dc02b3da4719c378e5466c4dcab568613d950f8dac14cc478c4cf93e940e  /tmp/d30.patch.xz" | sha256sum --check
+          xz --decompress --stdout /tmp/d30.patch.xz > /tmp/d30.patch
+          git fetch --no-tags origin refs/heads/codex/python-settings-lock-race-20261107
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          export GIT_COMMITTER_NAME="Agent D"
+          export GIT_COMMITTER_EMAIL="agent-d@local.invalid"
+          export GIT_COMMITTER_DATE="@1794087310 +0000"
+          git -c user.name="Agent D" -c user.email="agent-d@local.invalid" am --committer-date-is-author-date /tmp/d30.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git fsck --full
+          git diff --check "$BASE" "$HEAD"
+          git push origin "$HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
