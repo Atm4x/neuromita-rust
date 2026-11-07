@@ -1,30 +1,7 @@
 //! Historical Python Guide page content, read-only import at Python revision 5f3d061f.
 //! The Rust catalog is the single source of truth for displayed guide pages.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuideLevel {
-    Basic,
-    Advanced,
-    Full,
-}
-
-impl GuideLevel {
-    pub fn from_index(index: i32) -> Self {
-        match index {
-            1 => Self::Advanced,
-            2 => Self::Full,
-            _ => Self::Basic,
-        }
-    }
-
-    pub const fn index(self) -> i32 {
-        match self {
-            Self::Basic => 0,
-            Self::Advanced => 1,
-            Self::Full => 2,
-        }
-    }
-}
+pub use crate::settings::GuideLevel;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GuidePage {
@@ -53,6 +30,19 @@ impl GuidePage {
         } else {
             self.description_en
         }
+    }
+
+    pub fn wiki_url(self, language: &str) -> Option<String> {
+        let language = if language.eq_ignore_ascii_case("ru") {
+            "ru"
+        } else {
+            "en"
+        };
+        self.wiki_target.map(|target| {
+            format!(
+                "https://github.com/Atm4x/NeuroMita/blob/5f3d061f523d9abefa6a264bb2953048a935fa65/docs/wiki/{language}/{target}"
+            )
+        })
     }
 }
 
@@ -481,6 +471,14 @@ mod tests {
             assert!(ru.is_file(), "missing {}", ru.display());
             assert!(en.is_file(), "missing {}", en.display());
         }
+    }
+
+    #[test]
+    fn wiki_links_resolve_to_the_page_document_and_language() {
+        let welcome = page(GuideLevel::Basic, 0).unwrap();
+        assert!(welcome.wiki_url("ru").unwrap().ends_with("/ru/getting-started.md"));
+        assert!(welcome.wiki_url("en").unwrap().ends_with("/en/getting-started.md"));
+        assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
     }
 
     #[test]

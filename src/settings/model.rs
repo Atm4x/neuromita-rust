@@ -261,10 +261,39 @@ impl RemindersSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuideLevel {
+    #[default]
+    Basic,
+    Advanced,
+    Full,
+}
+
+impl GuideLevel {
+    pub fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::Advanced,
+            2 => Self::Full,
+            _ => Self::Basic,
+        }
+    }
+
+    pub const fn index(self) -> i32 {
+        match self {
+            Self::Basic => 0,
+            Self::Advanced => 1,
+            Self::Full => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingSettings {
     pub eula_accepted: bool,
+    #[serde(default)]
+    pub guide_level: GuideLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,6 +428,31 @@ pub struct SectionSnapshot<T> {
 #[cfg(test)]
 mod structured_display_tests {
     use super::*;
+
+    #[test]
+    fn historical_onboarding_without_guide_level_defaults_to_basic() {
+        let mut value = serde_json::to_value(AppSettings::initial_profile()).unwrap();
+        value["onboarding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_level");
+        let decoded: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.onboarding.guide_level, GuideLevel::Basic);
+        for level in [GuideLevel::Basic, GuideLevel::Advanced, GuideLevel::Full] {
+            let mut saved = decoded.clone();
+            saved.onboarding.guide_level = level;
+            let serialized = serde_json::to_value(&saved).unwrap();
+            let restored: AppSettings = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored.onboarding.guide_level, level);
+        }
+    }
+
+    #[test]
+    fn invalid_persisted_guide_level_is_rejected() {
+        let mut value = serde_json::to_value(AppSettings::initial_profile()).unwrap();
+        value["onboarding"]["guide_level"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<AppSettings>(value).is_err());
+    }
 
     #[test]
     fn historical_settings_without_structured_display_default_to_off() {

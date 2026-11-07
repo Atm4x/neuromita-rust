@@ -249,6 +249,10 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             super::settings::render_character_debug(window, character, &fields, error.as_deref());
         }
         Update::Administration(snapshot) => {
+            super::binding::sync_guide_level(
+                window,
+                snapshot.settings.values.onboarding.guide_level,
+            );
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);
             super::asr::render(window, &snapshot.settings.values.speech.asr);
