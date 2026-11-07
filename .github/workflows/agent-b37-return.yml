@@ -1,0 +1,42 @@
+name: Import and publish Agent B37 verified source bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b37-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f10461c4c8f7a80cee2748bfcd1e718426992da2
+          fetch-depth: 0
+      - name: Verify incremental objects and publish only B37
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=f10461c4c8f7a80cee2748bfcd1e718426992da2
+          HEAD=e5fee6f3d15311689bffd1a6c0bce77479f38126
+          SHA256=ca8d6b46510b4817bb6db028e009f44349d1748d2c55792165859726127465ed
+          TARGET=refs/heads/codex/timeline-python-contentless-messages-20261107
+          git fetch origin refs/heads/bridge/agent-b37-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b37-20261107.bundle.b64 | base64 --decode > /tmp/agent-b37.bundle
+          echo "$SHA256  /tmp/agent-b37.bundle" | sha256sum --check
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git bundle verify /tmp/agent-b37.bundle
+          git fetch /tmp/agent-b37.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$HEAD" ]]; then
+            echo "destination branch has unexpected HEAD: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$HEAD"
+          if [[ "$REMOTE" != "$HEAD" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "B37 exact HEAD verified: $IMPORTED"
