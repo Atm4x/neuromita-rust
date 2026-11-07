@@ -1,0 +1,34 @@
+name: Agent C C3 canonical removal preflight fast-forward
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-removal-canonical-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-removal-canonical-20261107
+          fetch-depth: 0
+      - name: Verify and fast-forward exact PR183 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7a62a3af79c0e420775f335a7f2f21887cd5fb5c
+          HEAD=d005036e5762467fa8386da4fb50ef09eca2aa11
+          TARGET=codex/ai-platform-hub-c3-removal-preflight-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-removal-canonical.bundle.b64 > /tmp/removal-canonical.bundle
+          echo 'b431542787e1b50c5e8841e60f315832890d1d457fbc0d145ef627ed4c2934e9  /tmp/removal-canonical.bundle' | sha256sum -c -
+          git bundle verify /tmp/removal-canonical.bundle
+          git fetch --no-tags /tmp/removal-canonical.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$CURRENT" = "$BASE"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
