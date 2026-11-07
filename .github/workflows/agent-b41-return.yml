@@ -1,0 +1,42 @@
+name: Publish Agent B41 verified incremental Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b41-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 83edc228d3ee0179a9712c19ad603a40873fd4ef
+          fetch-depth: 0
+      - name: Verify bundle checksum, ancestry and publish without force
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=83edc228d3ee0179a9712c19ad603a40873fd4ef
+          EXPECTED=63148ad3a5948bf987129edd788690aab83dca68
+          SHA256=2fd17d33084417e84bf946e5158f34e5f32fe92e9e8258f6c26d67e629b5e8f6
+          TARGET=refs/heads/codex/timeline-python-empty-asset-parity-20261107
+          git fetch origin refs/heads/bridge/agent-b41-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b41-20261107.bundle.b64 | base64 --decode > /tmp/agent-b41.bundle
+          echo "$SHA256  /tmp/agent-b41.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b41.bundle
+          git fetch /tmp/agent-b41.bundle "$TARGET"
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Ref already exists at a different commit: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
