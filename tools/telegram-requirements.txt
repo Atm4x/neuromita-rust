@@ -1,0 +1,2 @@
+# Telegram user-session sidecar; pinned until real Telegram compatibility is verified.
+Telethon==1.45.0
