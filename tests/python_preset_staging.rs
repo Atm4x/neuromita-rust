@@ -366,3 +366,115 @@ fn merge_rejects_invalid_existing_json_and_missing_local_credentials() {
     );
     assert!(imported.merge_with_existing(Some(&catalog), None).is_err());
 }
+
+#[test]
+fn historical_python_layouts_preserve_order_credentials_and_exact_source() {
+    let (current, templates) = fixture();
+    let source: Value = serde_json::from_slice(&current).unwrap();
+    let record = source["presets"]["18"].clone();
+    for (historical, has_explicit_order) in [
+        (json!({"presets": [record.clone()], "order": [18]}), true),
+        (
+            json!({"custom": {"legacy-source-key": record.clone()}, "custom_order": [18]}),
+            true,
+        ),
+        (json!([record.clone()]), false),
+    ] {
+        let original = serde_json::to_vec(&historical).unwrap();
+        let stage = PythonPresetStage::prepare(&original, &templates).unwrap();
+        assert_eq!(stage.preview.converted_ids, [18]);
+        assert_eq!(stage.preview.blocked_count(), 0);
+        assert_eq!(stage.preview.python_order_imported, has_explicit_order);
+        let preferences = stage
+            .preview_preferences(br#"{"LAST_API_PRESET_ID":18}"#)
+            .unwrap();
+        assert_eq!(preferences.selected_user_id, Some(18));
+        assert_eq!(preferences.user_order, [18]);
+        assert_eq!(preferences.order_explicit, has_explicit_order);
+
+        let (_parent, destination) = fresh_directory();
+        stage.stage_new_directory(&destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("python-source-api-presets.json")).unwrap(),
+            original
+        );
+        let catalog = std::fs::read_to_string(destination.join("presets.json")).unwrap();
+        assert!(!catalog.contains("private-fixture-key"));
+        assert!(catalog.contains("Private preset"));
+        let keys = std::fs::read_to_string(destination.join("preset-credentials.json")).unwrap();
+        assert!(keys.contains("private-fixture-key"));
+    }
+}
+
+#[test]
+fn historical_python_layouts_reject_ambiguous_ids_and_invalid_order() {
+    let (current, templates) = fixture();
+    let source: Value = serde_json::from_slice(&current).unwrap();
+    let record = source["presets"]["18"].clone();
+    let mut duplicate = record.clone();
+    duplicate["name"] = json!("other entry same ID");
+    for historical in [
+        json!({"presets": [record.clone(), duplicate.clone()]}),
+        json!({"custom": {"a": record.clone(), "b": duplicate}}),
+        json!({"custom": {"a": {"name": "missing id"}}}),
+        json!([{"id": 0, "name": "zero"}]),
+        json!([{"id": 18.5, "name": "fractional"}]),
+        json!([record.clone(), null]),
+        json!({"presets": [record.clone()], "custom": {}}),
+        json!({"custom": {"a": record.clone()}, "custom_order": [18, 18]}),
+        json!({"custom": {"a": record.clone()}, "custom_order": [999]}),
+        json!({"custom": {"a": record.clone()}, "custom_order": "18"}),
+        json!({"custom": {"a": record.clone()}, "order": [18]}),
+        json!({"custom": null}),
+        json!({"custom": {"a": record.clone(), "b": {"id": 19}}}),
+    ] {
+        let bytes = serde_json::to_vec(&historical).unwrap();
+        let result = PythonPresetStage::prepare(&bytes, &templates);
+        assert!(
+            result.is_err(),
+            "invalid historical source was accepted: {historical}"
+        );
+    }
+}
+
+#[test]
+fn python_dictionary_ids_respect_inner_numeric_string_selection() {
+    let (current, templates) = fixture();
+    let mut source: Value = serde_json::from_slice(&current).unwrap();
+    source["presets"]["18"]["id"] = json!("18");
+    let source_bytes = serde_json::to_vec(&source).unwrap();
+    let accepted = PythonPresetStage::prepare(&source_bytes, &templates).unwrap();
+    assert_eq!(accepted.preview.converted_ids, [18]);
+    source["presets"]["18"]["id"] = json!("19");
+    let source_bytes = serde_json::to_vec(&source).unwrap();
+    let blocked = PythonPresetStage::prepare(&source_bytes, &templates).unwrap();
+    assert_eq!(blocked.preview.blocked_ids, [18]);
+    assert_eq!(blocked.preview.blocked_count(), 1);
+    source["presets"]["18"]["id"] = json!(false);
+    let blocked =
+        PythonPresetStage::prepare(&serde_json::to_vec(&source).unwrap(), &templates).unwrap();
+    assert_eq!(blocked.preview.blocked_ids, [18]);
+}
+
+#[test]
+fn historical_list_without_explicit_order_preserves_python_list_position() {
+    let (source, templates) = fixture();
+    let mut first: Value = serde_json::from_slice(&source).unwrap();
+    first = first["presets"]["18"].clone();
+    let mut second = first.clone();
+    second["id"] = json!(19);
+    second["name"] = json!("first in Python list");
+    for value in [
+        json!({"presets": [second.clone(), first.clone()]}),
+        json!([second.clone(), first.clone()]),
+    ] {
+        let stage =
+            PythonPresetStage::prepare(&serde_json::to_vec(&value).unwrap(), &templates).unwrap();
+        assert!(!stage.preview.python_order_imported);
+        let review = stage
+            .preview_preferences(br#"{"LAST_API_PRESET_ID":19}"#)
+            .unwrap();
+        assert!(!review.order_explicit);
+        assert_eq!(review.user_order, [19, 18]);
+    }
+}

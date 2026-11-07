@@ -86,7 +86,8 @@ impl PythonPresetStage {
                 "source JSON exceeds 8 MiB".into(),
             ));
         }
-        let preset_json = parse_unique_json(presets)?;
+        let source_json = parse_unique_json(presets)?;
+        let preset_json = normalize_python_preset_source(&source_json)?;
         let template_json = parse_unique_json(templates)?;
         let sources = preset_json
             .get("presets")
@@ -105,7 +106,9 @@ impl PythonPresetStage {
                 "no Python presets to import".into(),
             ));
         }
-        let plan = PythonPresetImport::parse(presets, templates).map_err(|_| {
+        let normalized_presets = serde_json::to_vec(&preset_json)
+            .map_err(|_| PythonPresetStageError::Invalid("cannot encode Python presets".into()))?;
+        let plan = PythonPresetImport::parse(&normalized_presets, templates).map_err(|_| {
             PythonPresetStageError::Invalid("cannot parse Python preset format".into())
         })?;
         let mut blocked_ids = Vec::new();
@@ -122,12 +125,13 @@ impl PythonPresetStage {
             }
         }
         for (source_id, source_record) in sources {
-            let source_record_id = source_record.get("id").and_then(Value::as_u64);
             let id = source_id.parse::<u32>().ok().filter(|id| *id > 0);
             if id.is_none()
                 || id.is_some_and(|id| template_numeric_ids.contains(&id))
                 || id.is_some_and(|id| occurrences.get(&id).copied().unwrap_or(0) != 1)
-                || id.is_some_and(|id| source_record_id.is_some_and(|inner| inner != id as u64))
+                || source_record
+                    .get("id")
+                    .is_some_and(|inner| user_id(inner) != id)
                 || plan
                     .blockers
                     .iter()
@@ -151,7 +155,8 @@ impl PythonPresetStage {
             blocked_without_id,
             template_count: template_ids.len(),
             preserved_ids: Vec::new(),
-            python_order_imported: preset_json.get("order").is_some(),
+            python_order_imported: source_json.get("order").is_some()
+                || source_json.get("custom_order").is_some(),
         };
         let files = if preview.blocked_count() == 0 {
             let order = normalized_python_order(&preset_json, &valid_ids)?;
@@ -235,11 +240,14 @@ impl PythonPresetStage {
             ));
         }
         let source = self.file("python-source-api-presets.json")?;
-        let source = parse_unique_json(source)?;
+        let original = parse_unique_json(source)?;
+        let order_explicit = ["order", "custom_order"]
+            .iter()
+            .any(|key| original.get(*key).is_some_and(|value| !value.is_null()));
+        let source = normalize_python_preset_source(&original)?;
         let source = source.as_object().ok_or_else(|| {
             PythonPresetStageError::Invalid("Python preset source must be an object".into())
         })?;
-        let order_explicit = source.get("order").is_some_and(|value| !value.is_null());
         let order = normalized_python_order(
             &Value::Object(source.clone()),
             &user_ids.into_iter().collect::<Vec<_>>(),
@@ -528,6 +536,72 @@ impl<'de> Deserialize<'de> for StrictJson {
         }
         deserializer.deserialize_any(JsonVisitor)
     }
+}
+
+fn normalize_python_preset_source(source: &Value) -> Result<Value, PythonPresetStageError> {
+    let invalid =
+        || PythonPresetStageError::Invalid("invalid historical Python preset layout".into());
+    let (records, order, derive_sequence_order) = match source {
+        Value::Object(root) if root.contains_key("presets") => {
+            if root.contains_key("custom") || root.contains_key("custom_order") {
+                return Err(invalid());
+            }
+            match root.get("presets") {
+                Some(Value::Object(_)) => return Ok(source.clone()),
+                Some(Value::Array(records)) => (records.clone(), root.get("order").cloned(), true),
+                _ => return Err(invalid()),
+            }
+        }
+        Value::Object(root) if root.contains_key("custom") => {
+            if root.contains_key("order") {
+                return Err(invalid());
+            }
+            let records = root
+                .get("custom")
+                .and_then(Value::as_object)
+                .ok_or_else(invalid)?
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let order = root.get("custom_order").cloned();
+            if records.len() > 1 && order.as_ref().is_none_or(Value::is_null) {
+                return Err(PythonPresetStageError::Invalid(
+                    "historical custom_order is required to preserve multiple preset positions"
+                        .into(),
+                ));
+            }
+            (records, order, false)
+        }
+        Value::Array(records) => (records.clone(), None, true),
+        _ => return Err(invalid()),
+    };
+    let mut mapped = Map::new();
+    let mut list_order = Vec::with_capacity(records.len());
+    for record in records {
+        let id = record
+            .as_object()
+            .and_then(|entry| entry.get("id"))
+            .and_then(user_id)
+            .ok_or_else(invalid)?;
+        list_order.push(Value::from(id));
+        if mapped.insert(id.to_string(), record).is_some() {
+            return Err(PythonPresetStageError::Invalid(
+                "duplicate Python user preset ID".into(),
+            ));
+        }
+    }
+    let mut canonical = Map::new();
+    canonical.insert("presets".into(), Value::Object(mapped));
+    match order {
+        Some(order) if !order.is_null() => {
+            canonical.insert("order".into(), order);
+        }
+        _ if derive_sequence_order => {
+            canonical.insert("order".into(), Value::Array(list_order));
+        }
+        _ => {}
+    }
+    Ok(Value::Object(canonical))
 }
 
 fn normalized_python_order(

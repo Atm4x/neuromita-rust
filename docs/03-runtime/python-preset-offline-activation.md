@@ -2,6 +2,23 @@
 
 This extends the existing reviewed Python preset staging and existing-profile merge. It is **not** a live migration, a versioned application storage schema, an updater or a general-purpose transaction manager. Source of truth remains `presets.json` plus the separate `preset-credentials.json`, accessed through their existing owner APIs. No Python source is modified.
 
+## Historical Python source representations (D32)
+
+Source reference: `Atm4x/NeuroMita@5f3d061f523d9abefa6a264bb2953048a935fa65`, `src/controllers/api_presets_controller.py`, especially `_load_presets_only`, `_migrate_presets_from_legacy`, and `_user_preset_from_dict`. These are formats accepted by the **active Python loader**, not revisions of the unreleased Rust storage schema.
+
+`import_python_presets` accepts the same user-preset collection shapes from an operator-supplied Python source file:
+
+- `{"presets": {"18": {...}}, "order": [18]}` — current keyed format;
+- `{"presets": [{"id": 18, ...}], "order": [18]}` — historical list inside `api_presets.json`;
+- `{"custom": {"any-key": {"id": 18, ...}}, "custom_order": [18]}` — historical `presets.json` or legacy-like `api_presets.json`, **user presets only**;
+- `[{"id": 18, ...}]` — older top-level list.
+
+All four are normalized **in memory** to the one existing Rust import plan; the original Python source bytes are retained in the staged private source backup. The historical `custom` object uses each record's own `id`, as the Python loader does, rather than treating arbitrary dictionary keys as preset IDs. The current keyed format follows the Python `id`-or-key behavior, but a present record ID contradicting its key is rejected instead of silently renumbered. Display order is retained if explicitly supplied, and a list without an explicit `order` retains its list sequence. A legacy `custom` map with multiple presets must provide `custom_order`: without it the JSON object's original insertion order cannot be safely reconstructed by this staging parser. References to unknown/duplicate user IDs are errors rather than silently discarded. The exact user selection in `LAST_API_PRESET_ID` is separately reviewed against converted IDs.
+
+Unlike the Python runtime, the Rust import **never silently drops** malformed records, duplicate numeric IDs, unknown referenced order entries or unsupported preset fields. Staging fails or reports blocked IDs; no active profile is modified. A separate `api_templates.json` snapshot is still required so protocol mapping can be validated; the migration does **not** fabricate templates from the old file or a built-in default. A historical `presets.json` can be provided as the first CLI source argument even though the staged backup retains the stable filename `python-source-api-presets.json`.
+
+The source snapshot contains no actual customer backups. This is source-format parity testing against redacted synthetic representatives, **not** certification that all historical customer profiles, API keys, custom model schemas and real GUI flows can be migrated.
+
 ## Strict offline workflow
 
 1. Stop both Python NeuroMita and Rust NeuroMita, including Slint GUI and CLI. Wait for pending writes to finish. The command requires an explicit `--confirm-stopped` acknowledgement; it **does not detect or terminate** running processes. An external process writing either file during activation invalidates the safety assumptions.
