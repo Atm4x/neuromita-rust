@@ -641,3 +641,71 @@ fn root_injection_rejects_relative_or_empty_paths_without_writing_to_cwd() {
         Err(TimelineAssetError::InvalidRoot)
     ));
 }
+
+fn mixed_content_projection_contract(timeline: &mut dyn TimelineRepository) {
+    let temp = TempDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let reference = assets.import("image/png", Cursor::new(b"image")).unwrap();
+    let branch = BranchId::new();
+    timeline.create_session(SessionId::new(), branch).unwrap();
+    let message = attachment(&reference, &[CharacterId::Crazy]);
+    let id = message.id;
+    assets
+        .append_checked(timeline, branch, 0, "original", json!({}), vec![message])
+        .unwrap();
+    let original =
+        TimelineMessageQueries::capture(timeline, branch, CharacterId::Crazy, Some(1)).unwrap();
+    assert_eq!(original.messages()[0].content, "look");
+    assert_eq!(
+        assets.read_visible(&original, id, &reference).unwrap(),
+        b"image"
+    );
+
+    let mut revision = EventDraft::new(EventKind::MessageRevised);
+    revision.observers.insert(CharacterId::Crazy);
+    revision
+        .payload
+        .insert("event_id".into(), json!(id.0.to_string()));
+    revision.payload.insert(
+        "message".into(),
+        json!({"content": [
+            {"type":"text", "text":"revised caption"},
+            {"type":"image", "asset":reference}
+        ]}),
+    );
+    assets
+        .append_checked(timeline, branch, 1, "revision", json!({}), vec![revision])
+        .unwrap();
+
+    let revised =
+        TimelineMessageQueries::capture(timeline, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(revised.messages()[0].content, "revised caption");
+    assert_eq!(revised.messages()[0].event_id, id);
+    assert_eq!(revised.messages()[0].fields["content"][1]["type"], "image");
+    assert_eq!(
+        assets.read_visible(&revised, id, &reference).unwrap(),
+        b"image"
+    );
+    assert_eq!(original.messages()[0].content, "look");
+    assert_eq!(
+        TimelineMessageQueries::capture(timeline, branch, CharacterId::Kind, None)
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn multimodal_projection_preserves_text_across_revision_in_memory() {
+    mixed_content_projection_contract(&mut TimelineStore::new());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn multimodal_projection_preserves_text_across_revision_in_sqlite() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let temp = TempDir::new();
+    let mut timeline =
+        SqliteTimelineRepository::open(&temp.path().join("timeline.sqlite")).unwrap();
+    mixed_content_projection_contract(&mut timeline);
+}

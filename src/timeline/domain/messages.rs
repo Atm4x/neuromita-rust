@@ -5,8 +5,9 @@ use serde_json::{Map, Value};
 use crate::identity::{CharacterId, EventId, RequestId};
 
 use super::{
-    character_view,
+    TimelineMessagePart, character_view,
     model::{EventKind, KnownEvent, TimelineFact},
+    parse_message_content,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,27 @@ pub struct ProjectedMessage {
     pub speaker: Option<String>,
     pub content: String,
     pub fields: Map<String, Value>,
+}
+
+fn projected_text(content: &Value) -> String {
+    if let Some(text) = crate::timeline::conversation::spoken_text(content) {
+        return text;
+    }
+    parse_message_content(content)
+        .ok()
+        .map(|parts| {
+            parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    TimelineMessagePart::Text { text } => Some(text),
+                    _ => None,
+                })
+                .map(|text| text.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
 }
 
 fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage> {
@@ -80,7 +102,7 @@ fn record(known: &KnownEvent, character: CharacterId) -> Option<ProjectedMessage
     };
     let content = fields
         .get("content")
-        .and_then(crate::timeline::conversation::spoken_text)
+        .map(projected_text)
         .unwrap_or_default();
     Some(ProjectedMessage {
         event_id: draft.id,
@@ -166,9 +188,8 @@ impl CharacterMessageProjection {
                 original.content = original
                     .fields
                     .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                    .map(projected_text)
+                    .unwrap_or_default();
             }
             self.visible.insert(EventId(target), original.clone());
         }
