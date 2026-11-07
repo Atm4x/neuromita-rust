@@ -18,6 +18,7 @@ pub mod live_speech;
 pub mod managed;
 pub mod overlay;
 pub mod production;
+pub mod removal;
 pub mod resolver;
 pub mod runtime_status;
 pub mod speech;
@@ -164,6 +165,7 @@ struct WorkerProcess {
     timeout: Duration,
     generation: Uuid,
     failed: bool,
+    layers: Vec<PathBuf>,
     selections: HashMap<AiService, (String, Option<String>)>,
     runtime_profiles: HashMap<AiService, RuntimeProfile>,
 }
@@ -262,6 +264,7 @@ impl WorkerProcess {
             timeout: config.request_timeout,
             generation: Uuid::new_v4(),
             failed: false,
+            layers: layers.to_vec(),
             selections: HashMap::new(),
             runtime_profiles: HashMap::new(),
         };
@@ -515,6 +518,40 @@ impl AiSupervisor {
 
     pub fn status_snapshot(&self) -> RuntimeSnapshot {
         self.status.borrow().clone()
+    }
+
+    /// Advisory inventory for removal preflight. A busy activation or IPC request
+    /// makes the inventory incomplete; callers must not interpret it as unused.
+    /// This snapshot is NOT a deletion permit: a future activation can race it.
+    pub fn observed_worker_layers(
+        &self,
+    ) -> Result<Vec<removal::ActiveWorkerLayers>, removal::LayerUsageError> {
+        let activation_slots = self
+            .activation_locks
+            .try_lock()
+            .map_err(|_| removal::LayerUsageError::Busy)?;
+        let mut activation_guards = Vec::with_capacity(activation_slots.len());
+        for slot in activation_slots.values() {
+            activation_guards.push(
+                slot.try_lock()
+                    .map_err(|_| removal::LayerUsageError::Busy)?,
+            );
+        }
+        let workers = self
+            .workers
+            .try_lock()
+            .map_err(|_| removal::LayerUsageError::Busy)?;
+        let mut layers = Vec::with_capacity(workers.len());
+        for worker in workers.values() {
+            let process = worker
+                .try_lock()
+                .map_err(|_| removal::LayerUsageError::Busy)?;
+            layers.push(removal::ActiveWorkerLayers {
+                generation: process.generation,
+                paths: process.layers.clone(),
+            });
+        }
+        Ok(layers)
     }
 
     /// Refresh the observable state from child-process liveness without invoking plugin code.
@@ -1821,6 +1858,72 @@ class Plugin:
         let stopped = supervisor.status_snapshot().service(AiService::Tts);
         assert_eq!(stopped.phase, RuntimePhase::Stopped);
         assert!(stopped.active_model.is_none());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removal_inventory_records_actual_worker_layers_and_denies_busy_observation() {
+        let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+        let root = std::env::temp_dir().join(format!("nm-removal-active-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let dependency = root.join("managed-overlay");
+        tokio::fs::create_dir_all(&dependency).await.unwrap();
+        let supervisor = AiSupervisor::new(
+            ProcessTopology::Split,
+            PythonHostConfig {
+                python_executable: test_python().into(),
+                sdk_root: sdk.clone(),
+                plugins_directory: sdk.join("plugins/builtin"),
+                models_directory: None,
+                request_timeout: Duration::from_secs(5),
+            },
+        );
+        let generation = supervisor
+            .reconfigure(
+                AiService::Tts,
+                &[AiService::Tts],
+                std::slice::from_ref(&dependency),
+                &[ModelActivation {
+                    service: AiService::Tts,
+                    plugin_id: "mock_tts".into(),
+                    settings: json!({}),
+                    asset_revision: None,
+                }],
+            )
+            .await
+            .unwrap();
+        let observed = supervisor.observed_worker_layers().unwrap();
+        assert_eq!(
+            observed,
+            vec![removal::ActiveWorkerLayers {
+                generation,
+                paths: vec![dependency.clone()],
+            }]
+        );
+        let active_worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        let _busy = active_worker.lock().await;
+        assert!(matches!(
+            supervisor.observed_worker_layers(),
+            Err(removal::LayerUsageError::Busy)
+        ));
+        drop(_busy);
+        let activation = supervisor
+            .activation_lock(WorkerKey::Service(AiService::Tts))
+            .await;
+        let _updating = activation.lock().await;
+        assert!(matches!(
+            supervisor.observed_worker_layers(),
+            Err(removal::LayerUsageError::Busy)
+        ));
+        drop(_updating);
+        supervisor.stop(AiService::Tts).await.unwrap();
+        assert!(supervisor.observed_worker_layers().unwrap().is_empty());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
