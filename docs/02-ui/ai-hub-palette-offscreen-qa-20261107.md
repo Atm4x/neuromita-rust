@@ -35,3 +35,7 @@ Visual QA detected and fixed two defects: backend/language chips stretching to f
 - Main application Slint typecheck: run `cargo check --locked --offline --features gui --bin neuromita-gui`; result attached to handoff.
 - Only visual UI, theme, and typed `HubModel` input were modified. No backend service calls, no persistence, no settings presenter, no new production sample catalog, no runtime installation/Remove buttons.
 - The visual snapshots demonstrate one full-size desktop viewport. Responsive/narrow-mode screenshots, actual live-schema forms, integrated main-app sidebar, and Rust presenter binding remain separate future acceptance targets.
+
+### Category-switch layout regression
+
+An additional X11 interaction test switched from TTS to ASR after returning from per-model settings. It exposed that Slint `visible: false` on a repeated `HubModelCard` did **not** collapse its `min-height: 124px`; inactive categories reserved vertical space and pushed ASR cards near the footer. The corrected card delegate binds its `min-height`, `preferred-height` and `max-height` to zero for nonmatching items, and to the intended 124px for visible cards. A fresh rebuild and software-rendered ASR screenshot (`hub-asr-qa-collapsed.png`) confirmed both Whisper cards now begin directly under the toolbar. No absolute positions or negative margins were introduced.

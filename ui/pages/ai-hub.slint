@@ -147,6 +147,9 @@ export component AiHubPage inherits Rectangle {
                         spacing: 10px; alignment: start;
                         for model[index] in root.entries: HubModelCard {
                             visible: root.matches(model);
+                            min-height: root.matches(model) ? 124px : 0px;
+                            preferred-height: root.matches(model) ? 124px : 0px;
+                            max-height: root.matches(model) ? 124px : 0px;
                             horizontal-stretch: 1;
                             entry: model;
                             open-settings(index) => { root.open-details(index); }
