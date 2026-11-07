@@ -661,6 +661,7 @@ impl ApplicationLifecycle {
             chat: api,
             timeline: Arc::clone(&timeline),
             characters,
+            knowledge: Arc::clone(&knowledge),
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),

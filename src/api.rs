@@ -54,6 +54,44 @@ impl PresetApi {
     }
 }
 
+/// Explicit read-only entrypoint for user-initiated inspection of forgotten facts.
+/// This action never submits a model generation request or restores memory.
+pub struct HistoricalRecallApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistoricalRecallApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error(transparent)]
+    Recall(#[from] crate::app::historical_recall::ExplicitRecallError),
+}
+
+impl HistoricalRecallApi {
+    /// Call only from an authenticated/locally trusted explicit user action.
+    /// This entrypoint does not itself authenticate the caller.
+    pub async fn inspect(
+        character: CharacterId,
+        selector: crate::knowledge::forgotten_recall::RecallSelector,
+        query: &str,
+    ) -> Result<Option<String>, HistoricalRecallApiError> {
+        let bindings = runtime::current().map_err(|_| HistoricalRecallApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(HistoricalRecallApiError::CharacterUnavailable)?;
+        crate::app::historical_recall::recall_from_character(
+            &bindings.knowledge,
+            &owner,
+            selector,
+            query,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

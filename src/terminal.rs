@@ -6,12 +6,14 @@ use std::{
 };
 
 use neuromita::{
-    api::ChatApi,
+    api::{ChatApi, HistoricalRecallApi},
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
         seabattle::{Coordinate, Orientation, Side},
     },
+    knowledge::forgotten_recall::RecallSelector,
+    memory::MemoryId,
     presentation::ChatPresenter,
     request::{
         DiagnosticScope, DiagnosticSection, RequestId, RequestOutcome, RequestSnapshot,
@@ -40,7 +42,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -414,6 +416,17 @@ pub async fn run(
                                 }
                                 Err(_) => eprintln!("Invalid request UUID"),
                             }
+                        } else if line == "/recall" || line.starts_with("/recall ") {
+                            match parse_forgotten_recall(&line) {
+                                Ok((selector, query)) => {
+                                    match HistoricalRecallApi::inspect(character, selector, &query).await {
+                                        Ok(Some(text)) => println!("{text}"),
+                                        Ok(None) => println!("Нет совпадающих забытых воспоминаний."),
+                                        Err(error) => eprintln!("Recall: {error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("{error}"),
+                            }
                         } else if line == "/dataset status" {
                             println!("{}", dataset_status(dataset));
                         } else if let Some(value) = line.strip_prefix("/diagnostics") {
@@ -439,6 +452,73 @@ pub async fn run(
                     }
                 }
             }
+        }
+    }
+}
+
+fn parse_forgotten_recall(line: &str) -> Result<(RecallSelector, String), &'static str> {
+    const USAGE: &str =
+        "Используй /recall forgotten id UUID | QUERY или /recall forgotten search | QUERY";
+    let rest = line.strip_prefix("/recall forgotten ").ok_or(USAGE)?;
+    let (selection, query) = rest.split_once('|').ok_or(USAGE)?;
+    let selection = selection.trim();
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(USAGE);
+    }
+    let selector = if let Some(raw_id) = selection.strip_prefix("id ") {
+        let id = uuid::Uuid::parse_str(raw_id.trim()).map_err(|_| USAGE)?;
+        RecallSelector::Ids(vec![MemoryId(id)])
+    } else if selection == "search" {
+        RecallSelector::Text {
+            query: query.to_owned(),
+            limit: 12,
+        }
+    } else {
+        return Err(USAGE);
+    };
+    Ok((selector, query.to_owned()))
+}
+
+#[cfg(test)]
+mod forgotten_recall_command_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_recall_parses_scoped_search_or_exact_uuid_only() {
+        let (selector, query) =
+            parse_forgotten_recall("/recall forgotten search | green tea").unwrap();
+        assert_eq!(query, "green tea");
+        assert_eq!(
+            selector,
+            RecallSelector::Text {
+                query: query.clone(),
+                limit: 12
+            }
+        );
+
+        let id = uuid::Uuid::new_v4();
+        let (selector, query) =
+            parse_forgotten_recall(&format!("/recall forgotten id {id} | player")).unwrap();
+        assert_eq!(selector, RecallSelector::Ids(vec![MemoryId(id)]));
+        assert_eq!(query, "player");
+    }
+
+    #[test]
+    fn malformed_or_implicit_recall_never_becomes_chat_text() {
+        for invalid in [
+            "/recall",
+            "/recall forgotten",
+            "/recall forgotten search",
+            "/recall forgotten search | ",
+            "/recall forgotten id not-a-uuid | tea",
+            "/recall forgotten id 00000000-0000-0000-0000-000000000001",
+            "/recall forgotten all | tea",
+        ] {
+            assert!(
+                parse_forgotten_recall(invalid).is_err(),
+                "accepted {invalid}"
+            );
         }
     }
 }
