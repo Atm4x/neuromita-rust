@@ -201,10 +201,27 @@ fn composite_import_unknown_fields_require_explicit_approval_before_any_write() 
     assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
     assert!(!active.join("presets.json").exists());
     assert!(!active.join(".preset-activation-journal").exists());
+    for approved in [
+        vec![],
+        vec!["SOMETHING_ELSE".into()],
+        vec!["UNSUPPORTED_SECRET".into(), "EXTRA".into()],
+        vec!["UNSUPPORTED_SECRET".into(), "UNSUPPORTED_SECRET".into()],
+    ] {
+        assert!(matches!(
+            PresetActivation::apply_with_imported_settings(
+                &review,
+                &active,
+                PythonUnmappedPolicy::SkipApprovedKeys(approved),
+            ),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+        assert!(!active.join(".preset-activation-journal").exists());
+    }
     PresetActivation::apply_with_imported_settings(
         &review,
         &active,
-        PythonUnmappedPolicy::SkipAfterReview,
+        PythonUnmappedPolicy::SkipApprovedKeys(vec!["UNSUPPORTED_SECRET".into()]),
     )
     .unwrap();
     let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
@@ -228,7 +245,7 @@ fn composite_import_rejects_invalid_known_fields_even_if_unmapped_are_approved()
         PresetActivation::apply_with_imported_settings(
             &review,
             &active,
-            PythonUnmappedPolicy::SkipAfterReview,
+            PythonUnmappedPolicy::SkipApprovedKeys(vec!["UNKNOWN_KEY".into()]),
         ),
         Err(PresetActivationError::SnapshotConflict)
     ));

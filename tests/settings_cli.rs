@@ -213,7 +213,33 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
     assert!(stderr(&rejected).contains("--allow-unmapped"));
     assert_eq!(fs::read(&target).unwrap(), original);
 
-    let applied = execute(&["--allow-unmapped"]);
+    let unacknowledged = execute(&["--allow-unmapped"]);
+    assert!(!unacknowledged.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let partial = execute(&["--allow-unmapped", "--accept-skipped-key", "API_KEY"]);
+    assert!(!partial.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let extra = execute(&[
+        "--allow-unmapped",
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+        "--accept-skipped-key",
+        "UNEXPECTED_KEY",
+    ]);
+    assert!(!extra.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let applied = execute(&[
+        "--allow-unmapped",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+        "--accept-skipped-key",
+        "API_KEY",
+    ]);
     assert!(applied.status.success(), "{}", stderr(&applied));
     assert!(stdout(&applied).contains("Previous Rust settings backup:"));
     assert_eq!(fs::read(&source).unwrap(), python_source);
@@ -232,7 +258,13 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
             .count(),
         2
     );
-    let second = execute(&["--allow-unmapped"]);
+    let second = execute(&[
+        "--allow-unmapped",
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+    ]);
     assert!(second.status.success());
     assert!(stdout(&second).contains("changed=false"));
     assert_eq!(

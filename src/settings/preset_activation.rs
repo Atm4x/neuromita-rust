@@ -83,7 +83,7 @@ impl Drop for PresetStorageLock {
 
 pub struct PresetActivation;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SettingsActivationMode {
     PresetsOnly,
     WithSelection,
@@ -243,7 +243,7 @@ impl PresetActivation {
                 preview
                     .skipped_keys
                     .retain(|name| name != "LAST_API_PRESET_ID");
-                if unmapped == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+                if !unmapped.permits_skipped(&preview.skipped_keys) {
                     return Err(PresetActivationError::SnapshotConflict);
                 }
                 preview.transfer.into_stored()

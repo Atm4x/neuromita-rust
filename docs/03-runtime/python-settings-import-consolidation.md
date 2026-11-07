@@ -8,10 +8,10 @@ This change ports the independent, verified behavior from #109 into the existing
 
 ```text
 neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --preview
-neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --allow-unmapped
+neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --allow-unmapped --accept-skipped-key KEY_1 --accept-skipped-key KEY_2
 ```
 
-`--dry-run` remains an alias for `--preview` (read-only). `--allow-unmapped` explicitly accepts skipping unknown names. Without it, the import is rejected if *any* unmapped keys exist, regardless of whether the known keys would have changed. Unknown **values are never printed**. Invalid mapped values always fail, even with approval. A direct generic `SettingsRepository::import_from(Python)` is rejected; the reviewed merge API is required.
+`--dry-run` remains an alias for `--preview` (read-only). `--allow-unmapped` must be accompanied by `--accept-skipped-key NAME` for **each** exact skipped key printed by the preview. The write operation recomputes skipped names after acquiring the writer lock; incomplete, extra, or duplicate acknowledgements are rejected. Without it, the import is rejected if *any* unmapped keys exist, regardless of whether the known keys would have changed. Unknown **values are never printed**. Invalid mapped values always fail, even with approval. A direct generic `SettingsRepository::import_from(Python)` is rejected; the reviewed merge API is required.
 
 ### Known mappings
 

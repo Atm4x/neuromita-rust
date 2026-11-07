@@ -128,7 +128,10 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
     assert_eq!(readonly_preview.transfer.stored().revision, 7);
     assert_eq!(fs::read(&path).unwrap(), original);
     let result = repository
-        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
+        .import_python_with_policy(
+            &bytes,
+            PythonUnmappedPolicy::SkipApprovedKeys(vec!["LAST_API_PRESET_ID".into()]),
+        )
         .unwrap();
     assert!(result.preview.changed);
     assert_eq!(result.preview.transfer.stored().revision, 8);
@@ -142,7 +145,10 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
     );
     let after = fs::read(&path).unwrap();
     let repeated = repository
-        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
+        .import_python_with_policy(
+            &bytes,
+            PythonUnmappedPolicy::SkipApprovedKeys(vec!["LAST_API_PRESET_ID".into()]),
+        )
         .unwrap();
     assert!(!repeated.preview.changed);
     assert!(repeated.backup_path.is_none());
@@ -292,7 +298,10 @@ fn unknown_fields_are_rejected_by_default_and_never_overwrite() {
     assert!(!err.contains("private-token"));
     assert_eq!(fs::read(&target).unwrap(), before);
     let applied = repo
-        .import_python_with_policy(&python, PythonUnmappedPolicy::SkipAfterReview)
+        .import_python_with_policy(
+            &python,
+            PythonUnmappedPolicy::SkipApprovedKeys(vec!["API_KEY".into()]),
+        )
         .unwrap();
     assert!(applied.preview.changed);
     assert_eq!(
@@ -300,6 +309,44 @@ fn unknown_fields_are_rejected_by_default_and_never_overwrite() {
         Language::English
     );
     assert_eq!(fs::read(&applied.backup_path.unwrap()).unwrap(), before);
+}
+
+#[test]
+fn approvals_bind_exact_skipped_keys_and_never_publish_on_mismatch() {
+    let dir = Directory::new();
+    let target = dir.path("settings.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    repo.save(&baseline()).unwrap();
+    let original = fs::read(&target).unwrap();
+    let source = source(json!({"LANGUAGE":"EN", "UNKNOWN_A":"secret-a", "UNKNOWN_B":"secret-b"}));
+    for approved in [
+        vec![],
+        vec!["UNKNOWN_A".to_string()],
+        vec!["UNKNOWN_A".to_string(), "UNKNOWN_C".to_string()],
+        vec![
+            "UNKNOWN_A".to_string(),
+            "UNKNOWN_B".to_string(),
+            "UNKNOWN_B".to_string(),
+        ],
+    ] {
+        let error = repo
+            .import_python_with_policy(&source, PythonUnmappedPolicy::SkipApprovedKeys(approved))
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret-a"));
+        assert!(!error.contains("secret-b"));
+        assert_eq!(fs::read(&target).unwrap(), original);
+    }
+    let result = repo
+        .import_python_with_policy(
+            &source,
+            PythonUnmappedPolicy::SkipApprovedKeys(vec![
+                "UNKNOWN_B".to_string(),
+                "UNKNOWN_A".to_string(),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(result.preview.skipped_keys, vec!["UNKNOWN_A", "UNKNOWN_B"]);
 }
 
 #[test]

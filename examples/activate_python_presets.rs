@@ -16,10 +16,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     args.retain(|a| a != "--confirm-stopped");
     let allow_unmapped = args.iter().any(|a| a == "--allow-unmapped");
     args.retain(|a| a != "--allow-unmapped");
+    let mut approved_keys = Vec::new();
+    let mut remaining = Vec::new();
+    let mut values = args.into_iter();
+    while let Some(value) = values.next() {
+        if value == "--accept-skipped-key" {
+            let key = values
+                .next()
+                .ok_or("--accept-skipped-key requires a name")?;
+            let key = key
+                .into_string()
+                .map_err(|_| "skipped key names must be UTF-8")?;
+            if key.is_empty() || approved_keys.contains(&key) {
+                return Err("skipped key approval must be nonempty and unique".into());
+            }
+            approved_keys.push(key);
+        } else {
+            remaining.push(value);
+        }
+    }
+    let args = remaining;
     if allow_unmapped
         && !matches!(args.as_slice(), [action, _, _] if action == "--apply-with-imported-settings")
     {
         return Err("--allow-unmapped only applies to --apply-with-imported-settings".into());
+    }
+    if !allow_unmapped && !approved_keys.is_empty() {
+        return Err("--accept-skipped-key requires --allow-unmapped".into());
     }
     if !confirmed {
         return Err(
@@ -40,7 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &PathBuf::from(review),
                 &PathBuf::from(active),
                 if allow_unmapped {
-                    PythonUnmappedPolicy::SkipAfterReview
+                    PythonUnmappedPolicy::SkipApprovedKeys(approved_keys)
                 } else {
                     PythonUnmappedPolicy::Reject
                 },
@@ -56,7 +79,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 PresetRecovery::DiscardedUnprepared => println!("Removed incomplete pre-activation journal; existing presets unchanged"),
             }
         }
-        _ => return Err("usage: activate_python_presets --apply REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --apply-with-preferences REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --apply-with-imported-settings REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped [--allow-unmapped] | --recover ACTIVE_USERDATA_DIR --confirm-stopped".into()),
+        _ => return Err("usage: activate_python_presets --apply REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --apply-with-preferences REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped | --apply-with-imported-settings REVIEW_DIR ACTIVE_USERDATA_DIR --confirm-stopped [--allow-unmapped --accept-skipped-key NAME ...] | --recover ACTIVE_USERDATA_DIR --confirm-stopped".into()),
     }
     Ok(())
 }

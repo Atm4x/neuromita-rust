@@ -67,10 +67,27 @@ pub struct PythonImportOutcome {
     pub backup_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PythonUnmappedPolicy {
     Reject,
-    SkipAfterReview,
+    SkipApprovedKeys(Vec<String>),
+}
+
+impl PythonUnmappedPolicy {
+    /// The acknowledged key names must match the source exactly at publication time.
+    pub fn permits_skipped(&self, skipped_keys: &[String]) -> bool {
+        match self {
+            Self::Reject => skipped_keys.is_empty(),
+            Self::SkipApprovedKeys(approved) => {
+                let approved_set = approved
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                approved_set.len() == approved.len()
+                    && approved_set == skipped_keys.iter().map(String::as_str).collect()
+            }
+        }
+    }
 }
 
 pub struct JsonSettingsRepository {
@@ -127,7 +144,7 @@ impl JsonSettingsRepository {
         let baseline = self.python_import_baseline()?;
         let mut preview = PythonSettingsMigration.preview(bytes, &baseline)?;
         preview.changed |= !self.path.exists();
-        if policy == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+        if !policy.permits_skipped(&preview.skipped_keys) {
             return Err(SettingsTransferError::UnmappedPythonFields(preview.skipped_keys).into());
         }
         if !preview.changed {

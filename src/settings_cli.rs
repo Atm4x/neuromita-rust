@@ -9,11 +9,11 @@ use std::{
 use neuromita::settings::{JsonSettingsRepository, PythonUnmappedPolicy, SettingsImportFormat};
 
 pub const HELP: &str = "neuromita settings export --source STORE.json --destination BACKUP.json\n\
-    neuromita settings import --source BACKUP.json --destination STORE.json [--format rust|python] [--dry-run|--preview] [--allow-unmapped]\n\n\
+    neuromita settings import --source BACKUP.json --destination STORE.json [--format rust|python] [--dry-run|--preview] [--allow-unmapped --accept-skipped-key NAME ...]\n\n\
     Offline operations: no Core and no GEMINI_API_KEY. Stop the application first.\n\
     Rust imports require the current strict settings format; no dev migrations.\n\
     The default format is rust. Python import overlays supported keys, lists omissions,\n\
-    and requires --allow-unmapped to skip unsupported fields.\n\
+    and requires each skipped key name to be acknowledged before import.\n\
     Backups of both source and destination are kept by the Rust target.\n\
     Preset bodies, credentials and Timeline are not included.\n";
 
@@ -36,6 +36,7 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let mut format = None;
     let mut dry_run = false;
     let mut allow_unmapped = false;
+    let mut approved_keys = Vec::new();
     while let Some(option) = arguments.next() {
         if option == "--help" {
             print!("{HELP}");
@@ -46,6 +47,18 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
             Some("--destination") => path_argument(&mut destination, arguments.next())?,
             Some("--dry-run" | "--preview") if import && !dry_run => dry_run = true,
             Some("--allow-unmapped") if import && !allow_unmapped => allow_unmapped = true,
+            Some("--accept-skipped-key") if import => {
+                let key = arguments
+                    .next()
+                    .ok_or_else(|| invalid("--accept-skipped-key requires a name"))?;
+                let key = key
+                    .into_string()
+                    .map_err(|_| invalid("skipped key names must be UTF-8"))?;
+                if key.is_empty() || approved_keys.contains(&key) {
+                    return Err(invalid("skipped key approval must be nonempty and unique").into());
+                }
+                approved_keys.push(key);
+            }
             Some("--format") if import => {
                 let value = match arguments.next().as_deref().and_then(|value| value.to_str()) {
                     Some("rust") => SettingsImportFormat::Rust,
@@ -62,7 +75,9 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let source = source.ok_or_else(|| invalid("--source is required"))?;
     let destination = destination.ok_or_else(|| invalid("--destination is required"))?;
     let format = format.unwrap_or(SettingsImportFormat::Rust);
-    if (dry_run || allow_unmapped) && (!import || format != SettingsImportFormat::Python) {
+    if (dry_run || allow_unmapped || !approved_keys.is_empty())
+        && (!import || format != SettingsImportFormat::Python)
+    {
         return Err(
             invalid("--preview, --dry-run and --allow-unmapped require Python import").into(),
         );
@@ -82,25 +97,25 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
         if dry_run {
             print_python_report(&preview, true, None);
         } else {
-            if !allow_unmapped && !preview.skipped_keys.is_empty() {
+            if !allow_unmapped && !approved_keys.is_empty() {
+                return Err(invalid("--accept-skipped-key requires --allow-unmapped").into());
+            }
+            let policy = if allow_unmapped {
+                PythonUnmappedPolicy::SkipApprovedKeys(approved_keys)
+            } else {
+                PythonUnmappedPolicy::Reject
+            };
+            if !policy.permits_skipped(&preview.skipped_keys) {
                 return Err(invalid(
-                    "unmapped Python settings require --allow-unmapped after preview",
-                )
-                .into());
+                    "unmapped Python settings: approve every skipped name from --preview using --allow-unmapped --accept-skipped-key NAME",
+                ).into());
             }
             let source_backup = if preview.changed {
                 Some(backup_python_source(&source, &destination, &bytes)?)
             } else {
                 None
             };
-            let applied = repository.import_python_with_policy(
-                &bytes,
-                if allow_unmapped {
-                    PythonUnmappedPolicy::SkipAfterReview
-                } else {
-                    PythonUnmappedPolicy::Reject
-                },
-            )?;
+            let applied = repository.import_python_with_policy(&bytes, policy)?;
             print_python_report(&applied.preview, false, applied.backup_path.as_deref());
             if let Some(source_backup) = source_backup {
                 println!("Python source backup: {}", source_backup.display());

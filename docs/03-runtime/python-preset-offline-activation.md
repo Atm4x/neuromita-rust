@@ -109,7 +109,7 @@ Run `neuromita settings import --format python --source /absolute/review/python-
 unmapped key names. The selected `LAST_API_PRESET_ID` is reviewed by the preset staging flow,
 not treated as an unmapped setting during combined activation. If any *other* keys are unmapped,
 the combined operation fails before creating the journal or changing an active file. Only after
-review may an operator append `--allow-unmapped` to skip those keys. Invalid supported keys
+review may an operator append `--allow-unmapped --accept-skipped-key KEY` (repeat for each exact skipped name) to skip those keys. Any missing, additional or duplicate key acknowledgement prevents activation before journal creation; names are checked again under the activation locks. Invalid supported keys
 continue to fail even with this opt-in. No skipped values or credentials are logged.
 
 Supported settings are merged onto the existing, validated Rust `settings.json` (never generic
