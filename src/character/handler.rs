@@ -19,6 +19,9 @@ use crate::{
     character::memory_access::{
         CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
     },
+    character::variables_access::{
+        CharacterVariablesSnapshot, edit_variables_snapshot, read_variables_snapshot,
+    },
     games::{
         GameError, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause, PendingInvite,
         ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
@@ -56,6 +59,8 @@ pub enum CharacterError {
     StaleState,
     #[error("invalid character memory operation: {0}")]
     InvalidMemory(&'static str),
+    #[error("invalid character variable operation: {0}")]
+    InvalidVariables(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
     #[error("invalid mini-game command: {0}")]
@@ -112,6 +117,12 @@ enum Command {
         >,
     ),
     MemorySnapshot(oneshot::Sender<Result<CharacterMemorySnapshot, CharacterError>>),
+    VariableSnapshot(oneshot::Sender<Result<CharacterVariablesSnapshot, CharacterError>>),
+    ImportVariables {
+        expected: CharacterVariablesSnapshot,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+        reply: oneshot::Sender<Result<CharacterVariablesSnapshot, CharacterError>>,
+    },
     EditMemory {
         expected: CharacterMemorySnapshot,
         commands: Vec<MemoryCommand>,
@@ -159,6 +170,32 @@ impl CharacterHandle {
         let (reply, receive) = oneshot::channel();
         self.commands
             .send(Command::MemorySnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn user_variables(&self) -> Result<CharacterVariablesSnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::VariableSnapshot(reply))
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub async fn import_variables(
+        &self,
+        expected: CharacterVariablesSnapshot,
+        values: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CharacterVariablesSnapshot, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::ImportVariables {
+                expected,
+                values,
+                reply,
+            })
             .await
             .map_err(|_| CharacterError::Unavailable)?;
         receive.await.map_err(|_| CharacterError::Unavailable)?
@@ -502,6 +539,45 @@ impl CharacterHandler {
                         .and_then(|timeline| {
                             read_memory_snapshot(&timeline, self.character.id)
                                 .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::VariableSnapshot(reply) => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|timeline| {
+                            read_variables_snapshot(&timeline, self.character.id)
+                                .map_err(|error| CharacterError::Internal(error.to_string()))
+                        });
+                    let _ = reply.send(result);
+                }
+                Command::ImportVariables {
+                    expected,
+                    values,
+                    reply,
+                } => {
+                    let result = self
+                        .timeline
+                        .lock()
+                        .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))
+                        .and_then(|mut timeline| {
+                            edit_variables_snapshot(
+                                &mut timeline,
+                                self.character.id,
+                                &expected,
+                                &values,
+                            )
+                            .map_err(|error| match error {
+                                crate::timeline::domain::TimelineError::ConcurrentWrite => {
+                                    CharacterError::StaleState
+                                }
+                                crate::timeline::domain::TimelineError::Invalid(reason) => {
+                                    CharacterError::InvalidVariables(reason)
+                                }
+                                other => CharacterError::Internal(other.to_string()),
+                            })
                         });
                     let _ = reply.send(result);
                 }

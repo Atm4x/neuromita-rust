@@ -14,6 +14,7 @@ pub mod memory_transfer;
 pub mod reranking;
 pub mod retrieval_fusion;
 pub mod semantic_memory;
+pub mod variable_transfer;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

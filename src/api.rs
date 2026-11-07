@@ -400,6 +400,79 @@ impl MemoryTransferApi {
     }
 }
 
+/// Trusted-local, explicitly confirmed transfer of user-defined character variables.
+/// Computed state and Timeline history are not transferred.
+pub struct VariableTransferApi;
+
+#[derive(Debug, thiserror::Error)]
+pub enum VariableTransferApiError {
+    #[error("application is unavailable")]
+    Unavailable,
+    #[error("character is unavailable")]
+    CharacterUnavailable,
+    #[error("variable transfer preview belongs to another character")]
+    ForeignPreview,
+    #[error(transparent)]
+    Character(#[from] CharacterError),
+    #[error(transparent)]
+    Transfer(#[from] crate::knowledge::variable_transfer::VariableTransferError),
+}
+
+impl VariableTransferApi {
+    pub async fn export(character: CharacterId) -> Result<Vec<u8>, VariableTransferApiError> {
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(character)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.user_variables().await?;
+        let bytes = crate::knowledge::variable_transfer::export_variables(&snapshot)?;
+        let current = owner.user_variables().await?;
+        if snapshot.anchor() != current.anchor() || snapshot.values() != current.values() {
+            return Err(VariableTransferApiError::Transfer(
+                crate::knowledge::variable_transfer::VariableTransferError::StalePreview,
+            ));
+        }
+        Ok(bytes)
+    }
+
+    pub async fn preview_import(
+        target: CharacterId,
+        bytes: &[u8],
+    ) -> Result<crate::knowledge::variable_transfer::VariableImportPreview, VariableTransferApiError>
+    {
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        let snapshot = owner.user_variables().await?;
+        crate::knowledge::variable_transfer::preview_variable_import(snapshot, bytes)
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_confirmed(
+        target: CharacterId,
+        preview: crate::knowledge::variable_transfer::VariableImportPreview,
+        confirmed: bool,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<crate::character::CharacterVariablesSnapshot, VariableTransferApiError> {
+        if preview.target_character() != target {
+            return Err(VariableTransferApiError::ForeignPreview);
+        }
+        let bindings = runtime::current().map_err(|_| VariableTransferApiError::Unavailable)?;
+        let owner = bindings
+            .characters
+            .get(target)
+            .ok_or(VariableTransferApiError::CharacterUnavailable)?;
+        crate::knowledge::variable_transfer::apply_variable_import(
+            &owner, preview, confirmed, cancel,
+        )
+        .await
+        .map_err(Into::into)
+    }
+}
+
 pub struct ChatApi;
 
 impl ChatApi {

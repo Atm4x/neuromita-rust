@@ -5,6 +5,7 @@ pub(crate) mod memory_access;
 mod model;
 pub(crate) mod projection;
 pub mod state;
+mod variables_access;
 
 pub use crate::identity::CharacterId;
 pub(crate) use handler::AcceptanceContext;
@@ -17,3 +18,4 @@ pub use model::{
 };
 
 pub use memory_access::{CharacterMemorySnapshot, MemoryEditResult};
+pub use variables_access::CharacterVariablesSnapshot;

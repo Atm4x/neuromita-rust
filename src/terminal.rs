@@ -8,7 +8,7 @@ use std::{
 use neuromita::{
     api::{
         ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi,
-        MemoryTransferApi,
+        MemoryTransferApi, VariableTransferApi,
     },
     character::CharacterId,
     games::{
@@ -21,6 +21,7 @@ use neuromita::{
         memory_transfer::{MAX_ARCHIVE_BYTES, MemoryImportPreview},
         retrieval_fusion::FusionMode,
         semantic_memory::EmbeddingCachePreview,
+        variable_transfer::VariableImportPreview,
     },
     memory::MemoryId,
     presentation::ChatPresenter,
@@ -52,7 +53,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -354,6 +355,8 @@ pub async fn run(
     let mut pending_cache_clear: Option<(uuid::Uuid, EmbeddingCachePreview)> = None;
     let mut pending_graph: Option<(uuid::Uuid, CharacterId, GraphMaintenancePreview)> = None;
     let mut pending_memory_import: Option<(uuid::Uuid, CharacterId, MemoryImportPreview)> = None;
+    let mut pending_variable_import: Option<(uuid::Uuid, CharacterId, VariableImportPreview)> =
+        None;
     let mut eof = options.message.is_some();
     let mut lines = if eof { None } else { Some(input()) };
     if let Some(message) = options.message {
@@ -418,7 +421,7 @@ pub async fn run(
                         if line == "/quit" { return Ok(()); }
                         if let Some(value) = line.strip_prefix("/character ") {
                             match CharacterId::parse(value) {
-                                Some(id) => { character = id; pending_graph = None; pending_memory_import = None; println!("Character: {id}"); }
+                                Some(id) => { character = id; pending_graph = None; pending_memory_import = None; pending_variable_import = None; println!("Character: {id}"); }
                                 None => eprintln!("Unknown character"),
                             }
                         } else if let Some(value) = line.strip_prefix("/cancel ") {
@@ -472,7 +475,7 @@ pub async fn run(
                             match parse_memory_transfer(&line) {
                                 Ok(MemoryTransferCommand::Export(path)) => {
                                     match MemoryTransferApi::export(character).await {
-                                        Ok(bytes) => match write_memory_export(&path, &bytes) {
+                                        Ok(bytes) => match write_no_clobber_export(&path, &bytes) {
                                             Ok(ExportPublication::Durable) => println!("Memory records for {character}: {} bytes durably published to {path}. Scope: retained MemoryRecord only; NOT history, variables, or graph.", bytes.len()),
                                             Ok(ExportPublication::PublishedDurabilityUnconfirmed(warning)) => eprintln!("Memory export: COMPLETE bytes published to {path} but durability/cleanup is unconfirmed: {warning}. Check the file before retrying; it was not overwritten."),
                                             Err(error) => eprintln!("Memory export not published: {error}"),
@@ -482,7 +485,7 @@ pub async fn run(
                                 }
                                 Ok(MemoryTransferCommand::Preview(path)) => {
                                     pending_memory_import = None;
-                                    match read_memory_import(&path) {
+                                    match read_scoped_archive(&path, MAX_ARCHIVE_BYTES) {
                                         Ok(bytes) => match MemoryTransferApi::preview_import(character, &bytes).await {
                                             Ok(plan) => {
                                                 let token = uuid::Uuid::new_v4();
@@ -507,6 +510,46 @@ pub async fn run(
                                     }
                                 }
                                 Err(error) => eprintln!("Memory transfer: {error}"),
+                            }
+                        } else if slash_command(&line, "/knowledge variables") {
+                            match parse_variable_transfer(&line) {
+                                Ok(MemoryTransferCommand::Export(path)) => {
+                                    match VariableTransferApi::export(character).await {
+                                        Ok(bytes) => match write_no_clobber_export(&path, &bytes) {
+                                            Ok(ExportPublication::Durable) => println!("User variables: {} bytes exported to {path}; only canonical character variables, not computed state or history.", bytes.len()),
+                                            Ok(ExportPublication::PublishedDurabilityUnconfirmed(warning)) => eprintln!("Variable export published to {path}, but durability/cleanup uncertain: {warning}"),
+                                            Err(error) => eprintln!("Variable export not published: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Variable export: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Preview(path)) => {
+                                    pending_variable_import = None;
+                                    match read_scoped_archive(&path, neuromita::knowledge::variable_transfer::MAX_VARIABLE_ARCHIVE_BYTES) {
+                                        Ok(bytes) => match VariableTransferApi::preview_import(character, &bytes).await {
+                                            Ok(plan) => {
+                                                let token = uuid::Uuid::new_v4();
+                                                println!("Variable import: source={}, target={}, entries={}, new={}, identical={}, branch/head={:?}; only canonical variables. Confirm with /knowledge variables apply {token}",
+                                                    plan.source_character(), plan.target_character(), plan.incoming_count(), plan.added_count(), plan.identical_count(), plan.target_anchor());
+                                                pending_variable_import = Some((token, character, plan));
+                                            }
+                                            Err(error) => eprintln!("Variable import preview: {error}"),
+                                        },
+                                        Err(error) => eprintln!("Variable import preview: {error}"),
+                                    }
+                                }
+                                Ok(MemoryTransferCommand::Apply(token)) => {
+                                    match take_scoped_preview(&mut pending_variable_import, character, token, "Variables") {
+                                        Ok(plan) => match VariableTransferApi::apply_confirmed(
+                                            character, plan, true, &tokio_util::sync::CancellationToken::new()
+                                        ).await {
+                                            Ok(snapshot) => println!("Variable import committed; character now has {} user variables, computed state untouched.", snapshot.values().len()),
+                                            Err(error) => eprintln!("Variable import: {error}; request new preview."),
+                                        },
+                                        Err(error) => eprintln!("Variable import: {error}"),
+                                    }
+                                }
+                                Err(error) => eprintln!("Variable transfer: {error}"),
                             }
                         } else if slash_command(&line, "/knowledge graph") {
                             match parse_graph_maintenance(&line) {
@@ -663,14 +706,32 @@ fn parse_memory_transfer(line: &str) -> Result<MemoryTransferCommand, &'static s
     }
 }
 
-fn read_memory_import(path: &str) -> io::Result<Vec<u8>> {
+fn parse_variable_transfer(line: &str) -> Result<MemoryTransferCommand, &'static str> {
+    const USAGE: &str = "Используй /knowledge variables export PATH | preview PATH | apply TOKEN";
+    let rest = line.strip_prefix("/knowledge variables ").ok_or(USAGE)?;
+    let (operation, value) = rest.split_once(char::is_whitespace).ok_or(USAGE)?;
+    let value = unquote(value.trim());
+    if value.is_empty() {
+        return Err(USAGE);
+    }
+    match operation {
+        "export" => Ok(MemoryTransferCommand::Export(value.to_owned())),
+        "preview" => Ok(MemoryTransferCommand::Preview(value.to_owned())),
+        "apply" if !value.chars().any(char::is_whitespace) => uuid::Uuid::parse_str(value)
+            .map(MemoryTransferCommand::Apply)
+            .map_err(|_| USAGE),
+        _ => Err(USAGE),
+    }
+}
+
+fn read_scoped_archive(path: &str, limit: usize) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
-        .take((MAX_ARCHIVE_BYTES as u64) + 1)
+        .take((limit as u64) + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_ARCHIVE_BYTES {
-        return Err(invalid("memory archive exceeds bounded byte limit"));
+    if bytes.len() > limit {
+        return Err(invalid("archive exceeds bounded byte limit"));
     }
     Ok(bytes)
 }
@@ -681,13 +742,13 @@ enum ExportPublication {
     PublishedDurabilityUnconfirmed(String),
 }
 
-fn write_memory_export(path: &str, bytes: &[u8]) -> io::Result<ExportPublication> {
-    write_memory_export_with_preflight(std::path::Path::new(path), bytes, || Ok(()))
+fn write_no_clobber_export(path: &str, bytes: &[u8]) -> io::Result<ExportPublication> {
+    write_no_clobber_export_with_preflight(std::path::Path::new(path), bytes, || Ok(()))
 }
 
 /// Publishes only fully written and synced bytes, never replacing an existing path.
 /// Hard-link publication is intentionally required; unsupported filesystems fail closed.
-fn write_memory_export_with_preflight(
+fn write_no_clobber_export_with_preflight(
     path: &std::path::Path,
     bytes: &[u8],
     before_publish: impl FnOnce() -> io::Result<()>,
@@ -1070,6 +1131,54 @@ mod forgotten_recall_command_tests {
     }
 
     #[test]
+    fn variable_transfer_cli_requires_explicit_scoped_token() {
+        let token = uuid::Uuid::new_v4();
+        assert_eq!(
+            parse_variable_transfer("/knowledge variables export user.json"),
+            Ok(MemoryTransferCommand::Export("user.json".into()))
+        );
+        assert_eq!(
+            parse_variable_transfer("/knowledge variables preview \"path with spaces.json\""),
+            Ok(MemoryTransferCommand::Preview(
+                "path with spaces.json".into()
+            ))
+        );
+        assert_eq!(
+            parse_variable_transfer(&format!("/knowledge variables apply {token}")),
+            Ok(MemoryTransferCommand::Apply(token))
+        );
+        for bad in [
+            "/knowledge variables",
+            "/knowledge variables export",
+            "/knowledge variables preview",
+            "/knowledge variables apply",
+            "/knowledge variables apply yes",
+            "/knowledge variables purge all",
+            "/knowledge variables apply 00000000-0000-0000-0000-000000000000 extra",
+        ] {
+            assert!(parse_variable_transfer(bad).is_err());
+            assert!(slash_command(bad, "/knowledge variables"));
+        }
+        let mut pending = Some((token, CharacterId::Crazy, "variables"));
+        assert!(take_scoped_preview(&mut pending, CharacterId::Kind, token, "Variables").is_err());
+        assert!(pending.is_some());
+        assert!(
+            take_scoped_preview(
+                &mut pending,
+                CharacterId::Crazy,
+                uuid::Uuid::new_v4(),
+                "Variables"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            take_scoped_preview(&mut pending, CharacterId::Crazy, token, "Variables"),
+            Ok("variables")
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
     fn memory_transfer_requires_exact_local_confirm_token_and_no_overwrite_file() {
         let id = uuid::Uuid::new_v4();
         assert_eq!(
@@ -1101,9 +1210,12 @@ mod forgotten_recall_command_tests {
         }
         let path = std::env::temp_dir().join(format!("memory-export-test-{id}.json"));
         let path = path.to_str().unwrap();
-        write_memory_export(path, b"validated export").unwrap();
-        assert!(write_memory_export(path, b"must not replace").is_err());
-        assert_eq!(read_memory_import(path).unwrap(), b"validated export");
+        write_no_clobber_export(path, b"validated export").unwrap();
+        assert!(write_no_clobber_export(path, b"must not replace").is_err());
+        assert_eq!(
+            read_scoped_archive(path, MAX_ARCHIVE_BYTES).unwrap(),
+            b"validated export"
+        );
         std::fs::remove_file(path).unwrap();
         let mut pending = Some((id, CharacterId::Crazy, "preview"));
         assert!(take_scoped_preview(&mut pending, CharacterId::Kind, id, "Memory").is_err());
@@ -1130,19 +1242,19 @@ mod forgotten_recall_command_tests {
             std::env::temp_dir().join(format!("memory-export-atomic-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let dest = root.join("memory.json");
-        let failed = write_memory_export_with_preflight(&dest, b"private test archive", || {
+        let failed = write_no_clobber_export_with_preflight(&dest, b"private test archive", || {
             Err(io::Error::other("injected failure before publication"))
         });
         assert!(failed.is_err());
         assert!(!dest.exists());
         assert!(std::fs::read_dir(&root).unwrap().next().is_none());
-        let done = write_memory_export(dest.to_str().unwrap(), b"complete archive").unwrap();
+        let done = write_no_clobber_export(dest.to_str().unwrap(), b"complete archive").unwrap();
         #[cfg(unix)]
         assert!(matches!(done, ExportPublication::Durable));
         #[cfg(not(unix))]
         let _ = done;
         assert_eq!(std::fs::read(&dest).unwrap(), b"complete archive");
-        assert!(write_memory_export(dest.to_str().unwrap(), b"dangerous replacement").is_err());
+        assert!(write_no_clobber_export(dest.to_str().unwrap(), b"dangerous replacement").is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"complete archive");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         #[cfg(unix)]
@@ -1151,7 +1263,7 @@ mod forgotten_recall_command_tests {
             std::fs::write(&target, b"original target").unwrap();
             let link = root.join("symlink.json");
             std::os::unix::fs::symlink(&target, &link).unwrap();
-            assert!(write_memory_export(link.to_str().unwrap(), b"changed").is_err());
+            assert!(write_no_clobber_export(link.to_str().unwrap(), b"changed").is_err());
             assert_eq!(std::fs::read(&target).unwrap(), b"original target");
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -1169,14 +1281,14 @@ mod forgotten_recall_command_tests {
             let ready = std::sync::Arc::clone(&ready);
             move || {
                 ready.wait();
-                write_memory_export(destination.to_str().unwrap(), b"archive A")
+                write_no_clobber_export(destination.to_str().unwrap(), b"archive A")
             }
         });
         let second = std::thread::spawn({
             let destination = destination.clone();
             move || {
                 ready.wait();
-                write_memory_export(destination.to_str().unwrap(), b"archive B")
+                write_no_clobber_export(destination.to_str().unwrap(), b"archive B")
             }
         });
         let results = [first.join().unwrap(), second.join().unwrap()];
