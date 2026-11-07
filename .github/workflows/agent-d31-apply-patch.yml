@@ -1,0 +1,39 @@
+name: Agent D31 exact patch bridge
+on:
+  push:
+    branches:
+      - bridge/agent-d31-patch-import-20261107
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 4108f48ec55bf1a2a55b0961c5cf781d5493bb80
+          fetch-depth: 0
+      - name: Import checksum-verified D31 patch with exact Git identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=4108f48ec55bf1a2a55b0961c5cf781d5493bb80
+          EXPECTED=bfec9f74c7b4fb1e235fec68118e8ff4a12060b7
+          TREE=7addc4ae6afed51609689fe063e4383ad6564a70
+          SOURCE=refs/remotes/origin/bridge/agent-d31-patch-import-20261107
+          PAYLOAD=.github/bridge/agent-d31.patch.xz.b64
+          git fetch --no-tags origin "refs/heads/bridge/agent-d31-patch-import-20261107:$SOURCE"
+          if ! git cat-file -e "$SOURCE:$PAYLOAD" 2>/dev/null; then echo 'Patch pending'; exit 0; fi
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git show "$SOURCE:$PAYLOAD" | base64 -d > "$RUNNER_TEMP/d31.patch.xz"
+          echo "7ba28045e045e39c90ce2f499e71d77eff72b09cfeb349f3d0aa6adb4030eb9f  $RUNNER_TEMP/d31.patch.xz" | sha256sum -c -
+          xzcat "$RUNNER_TEMP/d31.patch.xz" | git apply --index
+          git config user.name 'Agent D'
+          git config user.email 'agent-d@local.invalid'
+          GIT_AUTHOR_DATE='2026-11-07T21:51:00+00:00' GIT_COMMITTER_DATE='2026-11-07T21:51:00+00:00' git commit -m 'fix(settings): keep offline CLI outside implicit portable root'
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          git diff --check "$BASE" HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/bridge/agent-d31-candidate-20261107
