@@ -1,0 +1,44 @@
+name: Agent D28 atomic Python settings import regression
+on:
+  push:
+    branches:
+      - bridge/agent-d28-verify-20261107
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/python-settings-atomic-composite-import-20261107
+          persist-credentials: false
+      - name: Assert exact D28 source SHA
+        run: test "$(git rev-parse HEAD)" = "860284de8b65c35cb84fb70cd58e35a1246a00ed"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check rustfmt
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Core atomic three-file import
+        run: cargo +1.98.1 test --locked --offline --test python_preset_three_file
+      - name: Preset activation crash recovery
+        run: cargo +1.98.1 test --locked --offline --lib settings::preset_activation::tests
+      - name: Existing Python settings import regression
+        run: cargo +1.98.1 test --locked --offline --test python_settings_import
+      - name: Compile all GUI targets and examples
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: Full Rust library regression on Python 3.12
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
