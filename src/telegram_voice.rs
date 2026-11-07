@@ -333,7 +333,12 @@ impl DynamicTelegramVoice {
 impl VoiceProvider for DynamicTelegramVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
-            let provider = self.current.read().await.clone().ok_or(VoiceError::Unavailable)?;
+            let provider = self
+                .current
+                .read()
+                .await
+                .clone()
+                .ok_or(VoiceError::Unavailable)?;
             provider.synthesize(text, options).await
         })
     }
