@@ -358,6 +358,38 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn aborted_caller_does_not_corrupt_the_next_sidecar_frame() {
+        let script = std::env::temp_dir().join(format!(
+            "neuromita-fake-telegram-{}.py",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &script,
+            r#"import json, sys, time
+for line in sys.stdin:
+    req = json.loads(line)
+    if req["request_id"] == 1:
+        time.sleep(0.2)
+    print(json.dumps({"request_id": req["request_id"], "ok": True,
+                      "result": {"authorized": True, "connected": True}}), flush=True)
+"#,
+        )
+        .unwrap();
+        let session = TelethonSession::spawn(Path::new("python3"), &script).unwrap();
+        let first = Arc::clone(&session);
+        let task = tokio::spawn(async move { first.ready().await });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        task.abort();
+        let second = tokio::time::timeout(Duration::from_secs(3), session.ready())
+            .await
+            .unwrap();
+        assert_eq!(second, Ok(()));
+        drop(session);
+        let _ = std::fs::remove_file(script);
+    }
+
     #[tokio::test]
     async fn sidecar_line_has_hard_limit_and_requires_newline() {
         let mut valid = BufReader::new(&b"{\"ok\":true}\n"[..]);
