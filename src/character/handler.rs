@@ -884,7 +884,13 @@ impl CharacterHandler {
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
         let branch = timeline.selection().branch_id;
-        if !self.policy.enabled && matches!(command, UserGameCommand::Start { .. }) {
+        if !self.policy.enabled
+            && matches!(
+                &command,
+                UserGameCommand::Start { .. }
+                    | UserGameCommand::Chess(crate::games::chess::ChessUserCommand::Start { .. })
+            )
+        {
             return Err(CharacterError::InvalidGame(GameError::Disabled));
         }
         let at = timeline.anchor();
@@ -928,9 +934,10 @@ impl CharacterHandler {
         events: Vec<EventId>,
     ) -> GameReceipt {
         GameReceipt {
-            game: crate::games::GameId::SeaBattle,
+            game: slot.active_game().unwrap_or(crate::games::GameId::SeaBattle),
             key: slot.key(),
             view,
+            chess: slot.chess_projection(),
             events,
             auto_reactions: slot.auto_reactions(),
         }
