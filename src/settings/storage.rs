@@ -6,7 +6,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{AppSettings, SettingsError, SettingsImportFormat, SettingsTransfer};
+use super::{
+    AppSettings, SettingsError, SettingsImportFormat, SettingsInstanceLease, SettingsTransfer,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +22,9 @@ pub trait SettingsRepository: Send + Sync + 'static {
     fn migrate(&self) -> Result<(), SettingsError>;
     fn load(&self) -> Result<StoredSettings, SettingsError>;
     fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError>;
+    fn lifecycle_root(&self) -> Option<&Path> {
+        None
+    }
 }
 
 pub struct MemorySettingsRepository {
@@ -81,11 +86,48 @@ impl JsonSettingsRepository {
         bytes: &[u8],
     ) -> Result<SettingsTransfer, SettingsError> {
         let transfer = SettingsTransfer::prepare(format, bytes)?;
+        let _maintenance = self.maintenance_lock()?;
         atomic_write(&self.path, &transfer.encode()?)?;
         Ok(transfer)
     }
+
+    /// Offline-only snapshot while no application instance owns the data root.
+    /// Does not grant permission to delete AI layers or modify running selections.
+    pub fn inspect_for_maintenance(&self) -> Result<SettingsMaintenanceSnapshot, SettingsError> {
+        let lease = self.maintenance_lock()?;
+        let stored = self.load()?;
+        Ok(SettingsMaintenanceSnapshot {
+            stored,
+            _lease: lease,
+        })
+    }
+
+    fn maintenance_lock(&self) -> Result<SettingsInstanceLease, SettingsError> {
+        let root = self
+            .path
+            .parent()
+            .ok_or_else(|| SettingsError::Storage("settings path has no portable root".into()))?;
+        SettingsInstanceLease::acquire(root)
+            .map_err(|error| SettingsError::Storage(error.to_string()))
+    }
 }
+/// Complete persisted settings are available only while an exclusive offline
+/// ownership lease is held. This does not authorize destructive layer changes.
+pub struct SettingsMaintenanceSnapshot {
+    stored: StoredSettings,
+    _lease: SettingsInstanceLease,
+}
+
+impl SettingsMaintenanceSnapshot {
+    pub fn stored(&self) -> &StoredSettings {
+        &self.stored
+    }
+}
+
 impl SettingsRepository for JsonSettingsRepository {
+    fn lifecycle_root(&self) -> Option<&Path> {
+        self.path.parent()
+    }
     fn migrate(&self) -> Result<(), SettingsError> {
         self.load().map(|_| ())
     }
@@ -163,5 +205,31 @@ mod tests {
         assert!(repo.migrate().is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn offline_import_and_maintenance_refuse_running_owner() {
+        let root = std::env::temp_dir().join(format!("nm-settings-maint-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let repository = JsonSettingsRepository::new(root.join("settings.json"));
+        let persisted = StoredSettings {
+            revision: 13,
+            settings: AppSettings::initial_profile(),
+        };
+        repository.save(&persisted).unwrap();
+        let lease = SettingsInstanceLease::acquire(&root).unwrap();
+        let bytes = SettingsTransfer::new(persisted.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert!(repository.inspect_for_maintenance().is_err());
+        assert!(repository.import(&bytes).is_err());
+        drop(lease);
+        let snapshot = repository.inspect_for_maintenance().unwrap();
+        assert_eq!(snapshot.stored(), &persisted);
+        assert!(repository.import(&bytes).is_err());
+        drop(snapshot);
+        assert_eq!(repository.import(&bytes).unwrap().stored(), &persisted);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
