@@ -11,6 +11,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     time::{Instant, sleep, timeout},
 };
+use tokio_util::sync::CancellationToken;
 
 pub type TelegramFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TelegramError>> + Send + 'a>>;
@@ -358,26 +359,36 @@ impl TelegramVoiceService {
 /// authorized Telegram session without replacing character-owned runtime state.
 #[derive(Default)]
 pub struct DynamicTelegramVoice {
-    current: RwLock<Option<Arc<dyn VoiceProvider>>>,
+    current: RwLock<Option<(Arc<dyn VoiceProvider>, CancellationToken)>>,
 }
 impl DynamicTelegramVoice {
     pub async fn install(&self, provider: Arc<dyn VoiceProvider>) {
-        *self.current.write().await = Some(provider);
+        let mut current = self.current.write().await;
+        if let Some((_, cancellation)) = current.take() {
+            cancellation.cancel();
+        }
+        *current = Some((provider, CancellationToken::new()));
     }
     pub async fn clear(&self) {
-        *self.current.write().await = None;
+        if let Some((_, cancellation)) = self.current.write().await.take() {
+            cancellation.cancel();
+        }
     }
 }
 impl VoiceProvider for DynamicTelegramVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
-            let provider = self
+            let (provider, cancellation) = self
                 .current
                 .read()
                 .await
                 .clone()
                 .ok_or(VoiceError::Unavailable)?;
-            provider.synthesize(text, options).await
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(VoiceError::Unavailable),
+                result = provider.synthesize(text, options) => result,
+            }
         })
     }
 }
@@ -462,6 +473,36 @@ mod tests {
             reply_to_id: None,
         }
     }
+    struct PendingProvider;
+    impl VoiceProvider for PendingProvider {
+        fn synthesize(&self, _: Arc<str>, _: VoiceOptions) -> VoiceFuture<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_ongoing_telegram_generation() {
+        let router = Arc::new(DynamicTelegramVoice::default());
+        router.install(Arc::new(PendingProvider)).await;
+        let running = Arc::clone(&router);
+        let task = tokio::spawn(async move {
+            running.synthesize(
+                Arc::from("hello"),
+                VoiceOptions {
+                    voice: "mita".into(),
+                    volume: crate::settings::Volume::new(100).unwrap(),
+                },
+            ).await
+        });
+        tokio::task::yield_now().await;
+        router.clear().await;
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(VoiceError::Unavailable)));
+    }
+
     #[test]
     fn rolling_rate_limit_includes_commands_and_recovers_after_window() {
         let start = Instant::now();
