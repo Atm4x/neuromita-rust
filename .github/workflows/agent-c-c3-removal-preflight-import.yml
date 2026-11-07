@@ -1,0 +1,39 @@
+name: Agent C C3 immutable layer removal preflight import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-removal-preflight-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-removal-preflight-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact increment
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=589ab8e7ac7640e649979d4a9203a4de01b7ee11
+          HEAD=7a62a3af79c0e420775f335a7f2f21887cd5fb5c
+          SOURCE=codex/ai-platform-hub-c3-removal-preflight-20261107
+          TARGET=codex/ai-platform-hub-c3-removal-preflight-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-removal-preflight.bundle.b64 > /tmp/c3-removal.bundle
+          echo '31a479846791379e9418232d0885c723b84ad8bd0fa8fd8973491c28932352f1  /tmp/c3-removal.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-removal.bundle
+          git fetch --no-tags /tmp/c3-removal.bundle "refs/heads/$SOURCE:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "unexpected current target: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
