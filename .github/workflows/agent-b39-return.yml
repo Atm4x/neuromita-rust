@@ -1,0 +1,42 @@
+name: Publish Agent B39 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b39-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-python-image-only-20261107
+          fetch-depth: 0
+      - name: Import verified B39 commit and publish isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=2f8f2ea82d926b5ff1b645c7c6b0b8573ac536a5
+          EXPECTED=b0b745082a8b844b3043c868369ed735d00fca3b
+          SHA256=7741783811b2d043c66ffbd77ab06a6ad6ffac1eb876e056ff60aad2fe1705df
+          TARGET=refs/heads/codex/timeline-python-asset-mime-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git fetch origin refs/heads/bridge/agent-b39-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b39-20261107.bundle.b64 | base64 --decode > /tmp/agent-b39.bundle
+          echo "$SHA256  /tmp/agent-b39.bundle" | sha256sum --check
+          git bundle verify /tmp/agent-b39.bundle
+          git fetch /tmp/agent-b39.bundle refs/heads/codex/timeline-python-asset-mime-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Reject non-fast-forward/foreign destination: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Verified $TARGET at $IMPORTED"
