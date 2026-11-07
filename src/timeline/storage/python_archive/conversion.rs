@@ -6,8 +6,8 @@ use super::{BoundPythonArchive, PythonArchiveError, PythonEvent};
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
     Branch, BranchId, BranchInfo, CausalLink, CausalRelation, EventDraft, EventKind, Receipt,
-    SessionId, SessionProvenance, TimelineAssetRef, TimelineFact, TimelineMessagePart,
-    TimelineStore,
+    SessionId, SessionProvenance, TimelineAssetRef, TimelineError, TimelineFact,
+    TimelineMessagePart, TimelineStore,
 };
 
 /// Detached canonical facts and receipts. No Timeline/SQLite/AssetStore writes take place.
@@ -44,6 +44,44 @@ impl PreparedPythonCanonical {
 }
 
 impl BoundPythonArchive<'_> {
+    /// Revalidate the current destination, stage verified binaries, and atomically
+    /// install the complete canonical session with its exact Python provenance.
+    /// If native publication fails, staged orphan blobs may remain, but no
+    /// partial Timeline facts or receipts are exposed.
+    pub fn import_memory(
+        &self,
+        destination: &mut TimelineStore,
+        assets: &crate::timeline::storage::assets::TimelineAssetStore,
+    ) -> Result<SessionId, PythonArchiveError> {
+        let bound = self.source.bind_memory(destination, &self.observers)?;
+        let prepared = bound.prepare_canonical()?;
+        bound.stage_assets(assets)?;
+        let session = prepared.session;
+        destination
+            .install_archive_branches_with_provenance(prepared.branches, Some(prepared.provenance))
+            .map_err(native_install_error)?;
+        Ok(session)
+    }
+
+    /// SQLite validates collisions again inside its write transaction. Asset
+    /// staging precedes that transaction; a failed commit never publishes a
+    /// partial session even when content-addressed orphan files remain.
+    #[cfg(feature = "sqlite-system")]
+    pub fn import_sqlite(
+        &self,
+        destination: &mut crate::timeline::storage::SqliteTimelineRepository,
+        assets: &crate::timeline::storage::assets::TimelineAssetStore,
+    ) -> Result<SessionId, PythonArchiveError> {
+        let bound = self.source.bind_sqlite(destination, &self.observers)?;
+        let prepared = bound.prepare_canonical()?;
+        bound.stage_assets(assets)?;
+        let session = prepared.session;
+        destination
+            .archive_install_with_provenance(prepared.branches, Some(prepared.provenance))
+            .map_err(native_install_error)?;
+        Ok(session)
+    }
+
     /// Transform only known semantically equivalent Python events to native drafts
     /// and receipts. Verify the detached result with the *native* replay validator.
     /// Python `EventObserved` remains unsupported: disclosure of an old world
@@ -297,6 +335,13 @@ fn convert_message_content(
         serde_json::to_value(parts).map_err(|_| PythonArchiveError::Encoding)?,
     );
     Ok(())
+}
+
+fn native_install_error(error: TimelineError) -> PythonArchiveError {
+    match error {
+        TimelineError::Conflict => PythonArchiveError::Invalid("native session identity conflict"),
+        _ => PythonArchiveError::Invalid("native session installation failed"),
+    }
 }
 
 fn native_draft(
