@@ -1,0 +1,47 @@
+name: Telegram Voice branch validation
+on:
+  push:
+    branches:
+      - codex/telegram-voice-47
+  workflow_dispatch:
+permissions:
+  contents: read
+# Do not spend runner capacity validating superseded commits from this branch.
+concurrency:
+  group: telegram-voice-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libfontconfig1-dev libssl-dev
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.89.0
+          rustup toolchain install 1.92.0 --profile minimal
+      - name: Python Telethon fake-transport tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_telegram_sidecar.py' -v
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Compile Slint Telegram GUI integration
+        run: cargo +1.92.0 check --locked --offline --features gui --bin neuromita-gui
+      - name: Telegram focused tests
+        run: cargo test --locked --offline telegram_
+      - name: Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
+      - name: Install Python 3.12 for asset-generation fixtures
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Full unit and integration suite
+        env:
+          NEUROMITA_TEST_PYTHON: python3.12
+        run: cargo test --locked --offline

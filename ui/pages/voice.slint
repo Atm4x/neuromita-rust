@@ -20,6 +20,9 @@ export global VoiceUi {
     in-out property <string> telegram-api-hash;
     in-out property <string> telegram-phone;
     in-out property <string> telegram-status;
+    in-out property <int> telegram-auth-phase: 0;
+    in-out property <string> telegram-code;
+    in-out property <string> telegram-password;
     in-out property <[string]> local-models;
     in-out property <string> local-model;
     in-out property <[string]> local-languages;
@@ -47,6 +50,9 @@ export global VoiceUi {
     callback voice-id-changed(int, string);
     callback voice-test(string, int);
     callback telegram-connect();
+    callback telegram-submit-code(string);
+    callback telegram-submit-password(string);
+    callback telegram-disconnect();
     callback local-initialize();
     callback local-restart();
     callback open-engine-settings();
@@ -246,7 +252,28 @@ export component VoiceSettingsPage inherits VerticalLayout {
             VerticalLayout { padding: 17px; spacing: 11px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.telegram.title", "Подключение Telegram"); description: I18n.i18n("voice.telegram.description", "Синтез через выбранного Telegram-бота."); glyph: "\u{f1d8}"; }
                 SettingsToggleRow { title: I18n.i18n("voice.telegram.auto", "Автоподключение Telegram"); checked: VoiceUi.telegram-auto-connect; changed(v) => { VoiceUi.telegram-auto-connect = v; VoiceUi.persist(); } }
-                VoiceButton { text: I18n.i18n("voice.telegram.connect", "Подключиться к Telegram"); glyph: "\u{f1d8}"; horizontal-stretch: 1; enabled: VoiceUi.preview-available; activated => { VoiceUi.telegram-connect(); } }
+                VoiceButton { text: I18n.i18n("voice.telegram.connect", "Подключиться к Telegram"); glyph: "\u{f1d8}"; horizontal-stretch: 1; enabled: true; activated => { VoiceUi.telegram-connect(); } }
+                StatusPill { message: VoiceUi.telegram-status == "" ? "Telegram: не подключён" : VoiceUi.telegram-status; }
+                if VoiceUi.telegram-auth-phase == 1: VoiceFieldRow {
+                    title: "Код Telegram"; hint: "Код подтверждения";
+                    value <=> VoiceUi.telegram-code;
+                }
+                if VoiceUi.telegram-auth-phase == 1: VoiceButton {
+                    text: "Подтвердить код"; horizontal-stretch: 1;
+                    activated => { VoiceUi.telegram-submit-code(VoiceUi.telegram-code); VoiceUi.telegram-code = ""; }
+                }
+                if VoiceUi.telegram-auth-phase == 2: SecretField {
+                    title: "Пароль 2FA"; hint: "Пароль двухфакторной защиты";
+                    value <=> VoiceUi.telegram-password;
+                }
+                if VoiceUi.telegram-auth-phase == 2: VoiceButton {
+                    text: "Подтвердить пароль"; horizontal-stretch: 1;
+                    activated => { VoiceUi.telegram-submit-password(VoiceUi.telegram-password); VoiceUi.telegram-password = ""; }
+                }
+                if VoiceUi.telegram-auth-phase != 0: VoiceButton {
+                    text: "Отключиться"; horizontal-stretch: 1;
+                    activated => { VoiceUi.telegram-disconnect(); }
+                }
                 VoiceFieldRow { title: I18n.i18n("voice.telegram.service", "Канал/Сервис"); hint: "@..."; value <=> VoiceUi.telegram-service; committed(v) => { VoiceUi.persist(); } }
                 VoiceFieldRow { title: I18n.i18n("voice.telegram.wait", "Макс. ожидание (сек)"); value <=> VoiceUi.telegram-wait; committed(v) => { VoiceUi.persist(); } }
                 VoiceFieldRow { title: I18n.i18n("voice.telegram.interval", "Мин. интервал запросов (сек)"); value <=> VoiceUi.telegram-interval; committed(v) => { VoiceUi.persist(); } }
