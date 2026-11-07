@@ -28,6 +28,9 @@ pub trait SettingsRepository: Send + Sync + 'static {
     fn json_path_for_owned_lifecycle(&self) -> Option<&Path> {
         None
     }
+    fn has_application_root_owner(&self) -> bool {
+        false
+    }
 }
 
 pub struct MemorySettingsRepository {
@@ -187,6 +190,9 @@ impl LeasedJsonSettingsRepository {
 impl SettingsRepository for LeasedJsonSettingsRepository {
     fn lifecycle_root(&self) -> Option<&Path> {
         self.inner.lifecycle_root()
+    }
+    fn has_application_root_owner(&self) -> bool {
+        true
     }
 
     fn migrate(&self) -> Result<(), SettingsError> {
