@@ -876,6 +876,10 @@ async fn client(
                                 tx.send(error(Some(id),"capacity",reason)).await.map_err(io::Error::other)?;
                                 continue;
                             }
+                            if beat_jobs.lock().expect("beat jobs poisoned").contains_key(&request_id) {
+                                tx.send(error(Some(id),"beat_request_conflict","beat request ID is already active")).await.map_err(io::Error::other)?;
+                                continue;
+                            }
                             let permit = match service.permits.clone().try_acquire_owned() {
                                 Ok(permit) => permit,
                                 Err(_) => {
