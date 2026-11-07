@@ -1,0 +1,32 @@
+name: Import Agent A Cycle14 Explicit Console Recall
+on:
+  push:
+    branches:
+      - bridge/import-agent-a-cycle14-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish original local Agent A commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=a240d507233bf04036b83515d629891f033a94aa
+          TARGET=5d994a85833bb7bd6377659a08f2d1129933595c
+          BRANCH=codex/knowledge-explicit-console-recall-20261107
+          git cat-file -e "$BASE^{commit}"
+          sha256sum -c .bridge/agent-a-cycle14-console-recall.bundle.sha256
+          git bundle verify .bridge/agent-a-cycle14-console-recall.bundle
+          git fetch --no-tags .bridge/agent-a-cycle14-console-recall.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
+          git merge-base --is-ancestor "$BASE" "$TARGET"
+          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
+            echo "Target branch exists; refusing overwrite"
+            exit 1
+          fi
+          git push origin "$TARGET:refs/heads/$BRANCH"
