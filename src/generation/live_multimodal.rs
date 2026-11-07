@@ -1015,6 +1015,7 @@ mod live_http_tests {
     }
 
     fn context(view: MitaView, branch: BranchId, target: EventId) -> CharacterContext {
+        let through = view.through;
         CharacterContext {
             variables: Default::default(),
             memory_relations: Vec::new(),
@@ -1036,7 +1037,7 @@ mod live_http_tests {
             history: HistoryView {
                 at: ContextAnchor {
                     branch_id: branch.0,
-                    through: 1,
+                    through,
                 },
                 events: vec![],
             },
@@ -1048,14 +1049,14 @@ mod live_http_tests {
             },
             anchor: ContextAnchor {
                 branch_id: branch.0,
-                through: 1,
+                through,
             },
             turn: TimelineTurn {
                 selection: TimelineSelection {
                     branch_id: branch,
                     generation: 1,
                 },
-                context_head: 1,
+                context_head: through,
                 character: CharacterId::Crazy,
                 context_epoch: 0,
                 trigger: Some(target),
@@ -1070,14 +1071,29 @@ mod live_http_tests {
         provider_name: &str,
         endpoint: &str,
     ) -> (Arc<dyn super::super::GenerationProvider>, GenerationPreset) {
+        provider_with_stream(provider_name, endpoint, false)
+    }
+
+    fn provider_with_stream(
+        provider_name: &str,
+        endpoint: &str,
+        stream: bool,
+    ) -> (Arc<dyn super::super::GenerationProvider>, GenerationPreset) {
         match provider_name {
             "gemini" => {
+                let options = super::super::gemini::GeminiRequestOptions {
+                    stream,
+                    max_retries: 0,
+                    ..Default::default()
+                };
                 let template = GeminiTemplate::new(
                     endpoint,
                     "fixture-model",
                     "test-key",
                     GenerationSettings::new(0.5, 128, Duration::from_secs(3)).unwrap(),
                 )
+                .unwrap()
+                .with_options(options)
                 .unwrap();
                 (
                     Arc::new(GeminiProvider::new().unwrap()),
@@ -1090,6 +1106,9 @@ mod live_http_tests {
                     "mistral" => OpenAiProtocol::Mistral,
                     _ => OpenAiProtocol::Compatible,
                 };
+                let mut options = protocol.options();
+                options.stream = stream;
+                options.max_retries = 0;
                 let template = OpenAiTemplate::new(
                     OpenAiPresetDefinition {
                         protocol,
@@ -1099,7 +1118,7 @@ mod live_http_tests {
                         temperature: 0.5,
                         max_output_tokens: 128,
                         timeout_ms: 3000,
-                        options: protocol.options(),
+                        options,
                         transforms: protocol.transforms(),
                     },
                     None,
@@ -1384,5 +1403,301 @@ mod live_http_tests {
             "[REDACTED MULTIMODAL ATTACHMENTS]"
         );
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[derive(Default)]
+    struct StreamObserve {
+        requests: Vec<PreparedRequest>,
+        deltas: Vec<String>,
+        replies: Vec<super::super::ProviderReply>,
+        failures: Vec<String>,
+    }
+
+    impl GenerationObserver for StreamObserve {
+        fn request_prepared(&mut self, request: PreparedRequest) {
+            self.requests.push(request);
+        }
+
+        fn stream_delta(&mut self, delta: &str) {
+            self.deltas.push(delta.to_owned());
+        }
+
+        fn response_received(&mut self, reply: super::super::ProviderReply) {
+            self.replies.push(reply);
+        }
+
+        fn failed(&mut self, error: &GenerationError) {
+            self.failures.push(error.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_empty_media_fails_before_any_provider_request_or_observation() {
+        for provider_name in ["gemini", "chat", "responses"] {
+            let directory = std::env::temp_dir().join(format!("nm-sse-empty-{}", Uuid::new_v4()));
+            let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+            let empty = assets.import("image/png", Cursor::new([])).unwrap();
+            let mut timeline = TimelineStore::new();
+            let branch = BranchId::new();
+            timeline.create_session(SessionId::new(), branch).unwrap();
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft
+                .payload
+                .insert("content".into(), json!([{"type":"image","asset":empty}]));
+            let target = draft.id;
+            timeline
+                .append(branch, 0, "empty-fixture", json!({}), vec![draft])
+                .unwrap();
+            let view = TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None)
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let (provider, preset) = provider_with_stream(provider_name, &endpoint, true);
+            let generator = ResponseGenerator::new([provider]).unwrap();
+            let mut observation = StreamObserve::default();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                generator.generate_observed(
+                    GenerationRequest::new(context(view, branch, target), preset, None)
+                        .with_assets(Some(Arc::clone(&assets))),
+                    &mut observation,
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(&result, Err(GenerationError::Response(error)) if error.contains("empty")),
+                "{provider_name}: {result:?}"
+            );
+            assert!(observation.requests.is_empty(), "{provider_name}");
+            assert!(observation.replies.is_empty(), "{provider_name}");
+            assert!(observation.deltas.is_empty(), "{provider_name}");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(75), listener.accept())
+                    .await
+                    .is_err(),
+                "{provider_name}: empty media was sent over HTTP"
+            );
+            std::fs::remove_dir_all(directory).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_multimodal_provider_wires_keep_image_once_and_redact_observations() {
+        use tokio::time::timeout;
+
+        for provider_name in ["gemini", "chat", "responses"] {
+            let directory = std::env::temp_dir().join(format!("nm-sse-media-{}", Uuid::new_v4()));
+            let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+            let image = assets
+                .import("image/png", Cursor::new(b"private-sse-pixels"))
+                .unwrap();
+            let outsider_image = assets
+                .import("image/png", Cursor::new(b"for-kind-only"))
+                .unwrap();
+            let hidden_image = assets
+                .import("image/png", Cursor::new(b"hidden-from-crazy"))
+                .unwrap();
+            let mut timeline = TimelineStore::new();
+            let branch = BranchId::new();
+            timeline.create_session(SessionId::new(), branch).unwrap();
+            let mut outsider = EventDraft::new(EventKind::PlayerMessage);
+            outsider.actor = Some("player".into());
+            outsider.observers.insert(CharacterId::Kind);
+            outsider.payload.insert(
+                "content".into(),
+                json!([{"type":"text","text":"kind-confidential"},{"type":"image","asset":outsider_image}]),
+            );
+            timeline
+                .append(branch, 0, "private-fixture", json!({}), vec![outsider])
+                .unwrap();
+            let mut previously_visible = EventDraft::new(EventKind::PlayerMessage);
+            previously_visible.actor = Some("player".into());
+            previously_visible.observers.insert(CharacterId::Crazy);
+            previously_visible.payload.insert(
+                "content".into(),
+                json!([{"type":"text","text":"crazy-revoked"},{"type":"image","asset":hidden_image}]),
+            );
+            let hidden_event = previously_visible.id;
+            timeline
+                .append(
+                    branch,
+                    1,
+                    "hidden-fixture",
+                    json!({}),
+                    vec![previously_visible],
+                )
+                .unwrap();
+            let mut hide = EventDraft::new(EventKind::MessageHidden);
+            hide.observers.insert(CharacterId::Crazy);
+            hide.payload
+                .insert("event_ids".into(), json!([hidden_event.0.to_string()]));
+            timeline
+                .append(branch, 2, "hide-fixture", json!({}), vec![hide])
+                .unwrap();
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft.payload.insert(
+                "content".into(),
+                json!([{"type":"text","text":"before"},{"type":"image","asset":image},{"type":"text","text":"after"}]),
+            );
+            let target = draft.id;
+            timeline
+                .append(branch, 3, "stream-fixture", json!({}), vec![draft])
+                .unwrap();
+            let view = TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None)
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let name = provider_name.to_owned();
+            let server = tokio::spawn(async move {
+                let (socket, _) = timeout(Duration::from_secs(3), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut length = 0;
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).await.unwrap();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let events = match name.as_str() {
+                    "gemini" => {
+                        assert!(request_line.contains("streamGenerateContent"));
+                        vec![
+                            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"{\"segments\":["}]}}]}),
+                            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"{\"text\":\"ack\"}]}"}]},"finishReason":"STOP"}]}),
+                        ]
+                    }
+                    "responses" => vec![
+                        json!({"type":"response.output_text.delta","delta":"{\"segments\":["}),
+                        json!({"type":"response.output_text.delta","delta":"{\"text\":\"ack\"}]}"}),
+                        json!({"type":"response.completed","response":{"status":"completed"}}),
+                    ],
+                    _ => vec![
+                        json!({"choices":[{"index":0,"delta":{"content":"{\"segments\":["},"finish_reason":null}]}),
+                        json!({"choices":[{"index":0,"delta":{"content":"{\"text\":\"ack\"}]}"},"finish_reason":null}]}),
+                        json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                    ],
+                };
+                let mut response = events
+                    .iter()
+                    .map(|event| format!("data: {event}\r\n\r\n"))
+                    .collect::<String>();
+                if name == "chat" {
+                    response.push_str("data: [DONE]\r\n\r\n");
+                }
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                ).as_bytes()).await.unwrap();
+                for bytes in response.as_bytes().chunks(17) {
+                    reader.get_mut().write_all(bytes).await.unwrap();
+                }
+                body
+            });
+            let (provider, preset) = provider_with_stream(provider_name, &endpoint, true);
+            let generator = ResponseGenerator::new([provider]).unwrap();
+            let mut observation = StreamObserve::default();
+            let output = timeout(
+                Duration::from_secs(5),
+                generator.generate_observed(
+                    GenerationRequest::new(context(view, branch, target), preset, None)
+                        .with_assets(Some(Arc::clone(&assets))),
+                    &mut observation,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(output.text().as_ref(), "ack");
+            let payload = server.await.unwrap();
+            let entries = match provider_name {
+                "gemini" => &payload["contents"],
+                "responses" => &payload["input"],
+                _ => &payload["messages"],
+            };
+            let actual = entries.as_array().unwrap();
+            let encoded = "cHJpdmF0ZS1zc2UtcGl4ZWxz";
+            let all = entries.to_string();
+            assert_eq!(all.matches(encoded).count(), 1, "{provider_name}");
+            assert_eq!(all.matches("before").count(), 1, "{provider_name}");
+            assert_eq!(all.matches("after").count(), 1, "{provider_name}");
+            assert!(!all.contains("Zm9yLWtpbmQtb25seQ=="), "{provider_name}");
+            assert!(!all.contains("aGlkZGVuLWZyb20tY3Jhenk="), "{provider_name}");
+            assert!(!all.contains("kind-confidential"), "{provider_name}");
+            assert!(!all.contains("crazy-revoked"), "{provider_name}");
+            let media = actual
+                .iter()
+                .filter(|item| item.to_string().contains(encoded))
+                .collect::<Vec<_>>();
+            assert_eq!(media.len(), 1, "{provider_name}");
+            assert_eq!(media[0]["role"], "user", "{provider_name}");
+            let parts = if provider_name == "gemini" {
+                &media[0]["parts"]
+            } else {
+                &media[0]["content"]
+            };
+            let parts = parts.as_array().unwrap();
+            assert_eq!(parts.len(), 3, "{provider_name}");
+            let image_key = if provider_name == "gemini" {
+                "inlineData"
+            } else {
+                "image_url"
+            };
+            assert!(parts[1].get(image_key).is_some(), "{provider_name}");
+            assert_eq!(observation.requests.len(), 1, "{provider_name}");
+            let observed_prompt = observation.requests[0]
+                .prompt
+                .iter()
+                .map(|message| message.text.as_ref())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!observed_prompt.contains("kind-confidential"));
+            assert!(!observed_prompt.contains("crazy-revoked"));
+            assert_eq!(
+                observation.requests[0].payload_json.as_ref(),
+                "[REDACTED MULTIMODAL ATTACHMENTS]"
+            );
+            assert_eq!(
+                observation.deltas.concat(),
+                "{\"segments\":[{\"text\":\"ack\"}]}"
+            );
+            assert_eq!(observation.replies.len(), 1, "{provider_name}");
+            assert!(
+                observation.failures.is_empty(),
+                "{provider_name}: {:?}",
+                observation.failures
+            );
+            assert!(observation.replies[0].complete);
+            for visible in observation
+                .deltas
+                .iter()
+                .map(String::as_str)
+                .chain(observation.failures.iter().map(String::as_str))
+                .chain(std::iter::once(observation.replies[0].raw_body.as_ref()))
+            {
+                assert!(
+                    !visible.contains(encoded),
+                    "media leaked to observer: {provider_name}"
+                );
+                assert!(!visible.contains("private-sse-pixels"));
+            }
+            std::fs::remove_dir_all(directory).ok();
+        }
     }
 }
