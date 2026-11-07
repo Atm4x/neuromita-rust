@@ -333,8 +333,9 @@ fn process_creation_time(
 fn wait_until_parent_exits(pid: u32, expected: u64) -> Result<(), HandoffError> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
+        Storage::FileSystem::SYNCHRONIZE,
         System::Threading::{
-            GetProcessTimes, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE,
+            GetProcessTimes, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
             WaitForSingleObject,
         },
     };
