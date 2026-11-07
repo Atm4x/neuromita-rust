@@ -151,6 +151,7 @@ pub fn load_installed_backend(
     }
     let path = backends_directory.join(kind.directory()).join(revision);
     reject_symlinked_layer_components(&path)?;
+    let _reader = super::revision_lease::RevisionLease::shared(&path)?;
     let marker = path.join(".neuromita-backend.json");
     reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {

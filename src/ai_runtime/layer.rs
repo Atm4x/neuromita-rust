@@ -451,6 +451,23 @@ impl LayerInstaller<'_> {
         if !destination.exists() {
             return Ok(false);
         }
+        let _reader = super::revision_lease::RevisionLease::shared(destination)?;
+        self.installed_unlocked(destination, marker, plan, packages, actions)
+            .await
+    }
+
+    async fn installed_unlocked<T: DeserializeOwned + PartialEq>(
+        &self,
+        destination: &Path,
+        marker: &str,
+        plan: &T,
+        packages: &[LockedPackage],
+        actions: &[InstallerAction],
+    ) -> Result<bool, LayerError> {
+        reject_symlinked_layer_components(destination)?;
+        if !destination.exists() {
+            return Ok(false);
+        }
         let marker_path = destination.join(marker);
         reject_unsafe_layer_receipt(&marker_path)?;
         let data = tokio::fs::read(marker_path)
@@ -594,9 +611,22 @@ impl LayerInstaller<'_> {
             let bytes =
                 serde_json::to_vec_pretty(plan).map_err(|e| LayerError::Invalid(e.to_string()))?;
             tokio::fs::write(staging.join(marker), bytes).await?;
+            let _revision_writer = timeout(self.timeout, async {
+                loop {
+                    match super::revision_lease::RevisionLease::exclusive(destination) {
+                        Ok(guard) => return Ok(guard),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            })
+            .await
+            .map_err(|_| LayerError::Timeout)??;
             if destination.exists() {
                 if self
-                    .installed(destination, marker, plan, packages, actions)
+                    .installed_unlocked(destination, marker, plan, packages, actions)
                     .await?
                 {
                     return Ok(destination.to_owned());
@@ -614,7 +644,7 @@ impl LayerInstaller<'_> {
                     ) =>
                 {
                     if self
-                        .installed(destination, marker, plan, packages, actions)
+                        .installed_unlocked(destination, marker, plan, packages, actions)
                         .await?
                     {
                         return Ok(destination.to_owned());
