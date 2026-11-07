@@ -1,0 +1,39 @@
+name: Agent B48 execute headless Slint binding tests
+on:
+  push:
+    branches: [bridge/agent-b48-gui-test-20261107]
+    paths: [bridge/agent-b48-ci-trigger.txt]
+permissions:
+  contents: read
+jobs:
+  slint-headless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-b47-chat-late-attachment-fence-20261107
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Validate checkout commit
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = a182c77686926482cd5d946f4c30d681eb405fee
+          rustc -V
+          cargo -V
+      - name: Run actual headless Slint UI tests
+        run: |
+          set -euxo pipefail
+          cargo test --locked --offline --features gui --bin neuromita-gui existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision -- --test-threads=1
