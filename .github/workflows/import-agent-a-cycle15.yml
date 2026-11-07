@@ -12,21 +12,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify original source bundle and publish checked commit
+      - name: Verify and fast-forward original GUI feature commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=5d994a85833bb7bd6377659a08f2d1129933595c
-          TARGET=4ccf2dfdc9f8e0f1f09e78fa3b851fe247aaa3bf
+          BASE=4ccf2dfdc9f8e0f1f09e78fa3b851fe247aaa3bf
+          TARGET=b989d8b73ba85d871e99ddb0c16a50459467dc49
           BRANCH=codex/knowledge-slint-forgotten-inspection-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-cycle15-slint-recall.bundle.sha256
-          git bundle verify .bridge/agent-a-cycle15-slint-recall.bundle
-          git fetch --no-tags .bridge/agent-a-cycle15-slint-recall.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          sha256sum -c .bridge/agent-a-cycle15-slint-recall-fix.bundle.sha256
+          git bundle verify .bridge/agent-a-cycle15-slint-recall-fix.bundle
+          git fetch --no-tags .bridge/agent-a-cycle15-slint-recall-fix.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
-          if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target branch already exists; refusing overwrite"
-            exit 1
-          fi
+          CURRENT="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+          test "$CURRENT" = "$BASE"
           git push origin "$TARGET:refs/heads/$BRANCH"
