@@ -5,6 +5,8 @@ use std::{
     path::Path,
 };
 
+use ring::digest::{SHA256, digest};
+
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{MapAccess, SeqAccess, Visitor},
@@ -13,6 +15,15 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::generation::{PresetId, StoredPresets, python_import::PythonPresetImport};
+
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(64);
+    for byte in digest(&SHA256, bytes).as_ref() {
+        write!(encoded, "{byte:02x}").expect("writing hex to String");
+    }
+    encoded
+}
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -54,6 +65,8 @@ pub struct PythonPresetPreferencesReview {
     pub selected_user_id: Option<u32>,
     /// True when Python explicitly stored this key, even as JSON null.
     pub selection_explicit: bool,
+    /// SHA-256 of the exact reviewed source bytes; rejects even value-only edits.
+    pub source_settings_sha256: String,
     /// Complete Python user-preset display order after Python-style completion.
     pub user_order: Vec<u32>,
     pub order_explicit: bool,
@@ -234,6 +247,7 @@ impl PythonPresetStage {
         Ok(PythonPresetPreferencesReview {
             selected_user_id,
             selection_explicit,
+            source_settings_sha256: sha256_hex(python_settings),
             user_order: order,
             order_explicit,
             activation_not_performed: true,

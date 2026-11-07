@@ -7,9 +7,10 @@ use std::{
 
 use thiserror::Error;
 
-use super::python_presets::{parse_credentials, parse_unique_json};
+use super::python_presets::{parse_credentials, parse_unique_json, sha256_hex};
 use super::{
-    PresetId, PythonPresetStage, PythonSettingsMigration, PythonUnmappedPolicy, SettingsTransfer,
+    PresetId, PythonPresetStage, PythonSettingsMigration, PythonSettingsPreview,
+    PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
 };
 use crate::generation::StoredPresets;
 
@@ -81,13 +82,116 @@ impl Drop for PresetStorageLock {
     }
 }
 
+/// Public, non-secret receipt for a stopped-profile Python settings preview.
+/// The digest covers every byte of the staged source, including unmapped values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonSettingsImportReview {
+    pub source_sha256: String,
+    pub target_settings_sha256: String,
+    pub imported_keys: Vec<String>,
+    pub skipped_keys: Vec<String>,
+}
+
 pub struct PresetActivation;
 
 #[derive(Clone, Copy)]
-enum SettingsActivationMode {
+enum SettingsActivationMode<'a> {
     PresetsOnly,
     WithSelection,
     ImportSupported(PythonUnmappedPolicy),
+    ImportReviewed(&'a PythonSettingsImportReview),
+}
+
+fn imported_settings_preview(
+    source: &[u8],
+    baseline: &StoredSettings,
+    baseline_bytes: &[u8],
+) -> Result<(PythonSettingsPreview, PythonSettingsImportReview), PresetActivationError> {
+    let mut preview = PythonSettingsMigration
+        .preview(source, baseline)
+        .map_err(|_| PresetActivationError::SnapshotConflict)?;
+    // Selection is validated separately against the converted user catalog.
+    preview
+        .skipped_keys
+        .retain(|key| key != "LAST_API_PRESET_ID");
+    let review = PythonSettingsImportReview {
+        source_sha256: sha256_hex(source),
+        target_settings_sha256: sha256_hex(baseline_bytes),
+        imported_keys: preview.imported_keys.clone(),
+        skipped_keys: preview.skipped_keys.clone(),
+    };
+    Ok((preview, review))
+}
+
+fn verified_staged_catalog(
+    review: &Path,
+    active: &Path,
+) -> Result<(Vec<Vec<u8>>, Vec<Option<Vec<u8>>>, PythonPresetStage), PresetActivationError> {
+    let mut new = Vec::with_capacity(2);
+    let mut old = Vec::with_capacity(2);
+    for i in 0..2 {
+        let incoming = read_file(&review.join(NAMES[i]), MAX_BYTES[i])?
+            .ok_or(PresetActivationError::SnapshotConflict)?;
+        let previous = read_file(&active.join(NAMES[i]), MAX_BYTES[i])?;
+        let expected = read_file(&review.join(SOURCES[i]), MAX_BYTES[i])?;
+        if previous != expected {
+            return Err(PresetActivationError::SnapshotConflict);
+        }
+        new.push(incoming);
+        old.push(previous);
+    }
+    let python_presets = read_file(&review.join("python-source-api-presets.json"), MAX_BYTES[0])?
+        .ok_or(PresetActivationError::SnapshotConflict)?;
+    let python_templates = read_file(
+        &review.join("python-source-api-templates.json"),
+        MAX_BYTES[0],
+    )?
+    .ok_or(PresetActivationError::SnapshotConflict)?;
+    let source_plan = PythonPresetStage::prepare(&python_presets, &python_templates)
+        .map_err(|_| PresetActivationError::SnapshotConflict)?;
+    let expected_plan = if old.iter().any(Option::is_some) {
+        source_plan
+            .merge_with_existing(old[0].as_deref(), old[1].as_deref())
+            .map_err(|_| PresetActivationError::SnapshotConflict)?
+    } else {
+        source_plan
+    };
+    for (i, bytes) in new.iter().enumerate() {
+        if expected_plan
+            .file(NAMES[i])
+            .map_err(|_| PresetActivationError::SnapshotConflict)?
+            != bytes
+        {
+            return Err(PresetActivationError::SnapshotConflict);
+        }
+    }
+    validate_pair(&new[0], &new[1])?;
+    Ok((new, old, expected_plan))
+}
+
+fn verified_staged_settings(
+    review: &Path,
+    plan: &PythonPresetStage,
+) -> Result<(Vec<u8>, u32), PresetActivationError> {
+    let python_settings = read_file(&review.join("python-source-settings.json"), SETTINGS_LIMIT)?
+        .ok_or(PresetActivationError::SnapshotConflict)?;
+    let reviewed = read_file(
+        &review.join("python-preset-preferences-review.json"),
+        SETTINGS_LIMIT,
+    )?
+    .ok_or(PresetActivationError::SnapshotConflict)?;
+    let expected_review = plan
+        .preview_preferences(&python_settings)
+        .map_err(|_| PresetActivationError::SnapshotConflict)?;
+    let expected_bytes = serde_json::to_vec_pretty(&expected_review)
+        .map_err(|_| PresetActivationError::SnapshotConflict)?;
+    if reviewed != expected_bytes || !expected_review.selection_explicit {
+        return Err(PresetActivationError::SnapshotConflict);
+    }
+    let selected = expected_review
+        .selected_user_id
+        .ok_or(PresetActivationError::SnapshotConflict)?;
+    Ok((python_settings, selected))
 }
 
 impl PresetActivation {
@@ -128,8 +232,10 @@ impl PresetActivation {
     }
 
     /// Import supported Python settings alongside presets, credentials and the
-    /// explicitly reviewed Python user-preset selection. Unknown keys (other
-    /// than the separately reviewed LAST_API_PRESET_ID) require opt-in.
+    /// explicitly reviewed Python user-preset selection. This legacy entry
+    /// point only permits Reject: SkipAfterReview fails closed because a
+    /// boolean cannot attest the skipped names or source and target digests.
+    /// Use apply_with_reviewed_settings for explicitly approved omissions.
     /// Only valid for an explicitly stopped Rust and Python application.
     pub fn apply_with_imported_settings(
         review: &Path,
@@ -141,6 +247,47 @@ impl PresetActivation {
             active,
             None,
             SettingsActivationMode::ImportSupported(unmapped),
+        )
+    }
+
+    /// Read-only review of the exact staged Python bytes and the current Rust profile.
+    /// No journal or active settings data is modified by the preview.
+    pub fn review_imported_settings(
+        review: &Path,
+        active: &Path,
+    ) -> Result<PythonSettingsImportReview, PresetActivationError> {
+        check_dir(review)?;
+        check_dir(active)?;
+        let _lock = lock_storage(active)?;
+        let _settings_lock = super::storage::writer_lock(&active.join("settings.json"))
+            .map_err(|_| PresetActivationError::StorageBusy)?;
+        Self::ensure_ready(active)?;
+        if fs::canonicalize(review)? == fs::canonicalize(active)? {
+            return Err(PresetActivationError::UnsafePath);
+        }
+        let (_, _, plan) = verified_staged_catalog(review, active)?;
+        let (source, _) = verified_staged_settings(review, &plan)?;
+        let current = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
+            .ok_or(PresetActivationError::SnapshotConflict)?;
+        let baseline = SettingsTransfer::decode(&current)
+            .map_err(|_| PresetActivationError::SnapshotConflict)?
+            .into_stored();
+        let (_, review) = imported_settings_preview(&source, &baseline, &current)?;
+        Ok(review)
+    }
+
+    /// Exact source and target digests plus an exact list of skipped key names
+    /// authorizes selective loss. A stale receipt is rejected before journaling.
+    pub fn apply_with_reviewed_settings(
+        review: &Path,
+        active: &Path,
+        approved: &PythonSettingsImportReview,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner(
+            review,
+            active,
+            None,
+            SettingsActivationMode::ImportReviewed(approved),
         )
     }
 
@@ -168,87 +315,39 @@ impl PresetActivation {
         if fs::canonicalize(review)? == fs::canonicalize(active)? {
             return Err(PresetActivationError::UnsafePath);
         }
-        let mut new = Vec::with_capacity(2);
-        let mut old = Vec::with_capacity(2);
-        for i in 0..2 {
-            let incoming = read_file(&review.join(NAMES[i]), MAX_BYTES[i])?
-                .ok_or(PresetActivationError::SnapshotConflict)?;
-            let previous = read_file(&active.join(NAMES[i]), MAX_BYTES[i])?;
-            let expected = read_file(&review.join(SOURCES[i]), MAX_BYTES[i])?;
-            if previous != expected {
-                return Err(PresetActivationError::SnapshotConflict);
-            }
-            new.push(incoming);
-            old.push(previous);
-        }
-        // Recreate the reviewed output from the source backups. A manually
-        // edited or stale review package may not silently replace a profile.
-        let python_presets =
-            read_file(&review.join("python-source-api-presets.json"), MAX_BYTES[0])?
-                .ok_or(PresetActivationError::SnapshotConflict)?;
-        let python_templates = read_file(
-            &review.join("python-source-api-templates.json"),
-            MAX_BYTES[0],
-        )?
-        .ok_or(PresetActivationError::SnapshotConflict)?;
-        let source_plan = PythonPresetStage::prepare(&python_presets, &python_templates)
-            .map_err(|_| PresetActivationError::SnapshotConflict)?;
-        let expected_plan = if old.iter().any(Option::is_some) {
-            source_plan
-                .merge_with_existing(old[0].as_deref(), old[1].as_deref())
-                .map_err(|_| PresetActivationError::SnapshotConflict)?
-        } else {
-            source_plan
-        };
-        for (i, bytes) in new.iter().enumerate() {
-            if expected_plan
-                .file(NAMES[i])
-                .map_err(|_| PresetActivationError::SnapshotConflict)?
-                != bytes
-            {
-                return Err(PresetActivationError::SnapshotConflict);
-            }
-        }
+        let (mut new, mut old, expected_plan) = verified_staged_catalog(review, active)?;
         if with_settings {
-            let python_settings =
-                read_file(&review.join("python-source-settings.json"), SETTINGS_LIMIT)?
-                    .ok_or(PresetActivationError::SnapshotConflict)?;
-            let reviewed = read_file(
-                &review.join("python-preset-preferences-review.json"),
-                SETTINGS_LIMIT,
-            )?
-            .ok_or(PresetActivationError::SnapshotConflict)?;
-            let expected_review = expected_plan
-                .preview_preferences(&python_settings)
-                .map_err(|_| PresetActivationError::SnapshotConflict)?;
-            let expected_bytes = serde_json::to_vec_pretty(&expected_review)
-                .map_err(|_| PresetActivationError::SnapshotConflict)?;
-            if reviewed != expected_bytes || !expected_review.selection_explicit {
-                return Err(PresetActivationError::SnapshotConflict);
-            }
-            let selected = expected_review
-                .selected_user_id
-                .ok_or(PresetActivationError::SnapshotConflict)?;
+            let (python_settings, selected) = verified_staged_settings(review, &expected_plan)?;
             let settings_original = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
                 .ok_or(PresetActivationError::SnapshotConflict)?;
             let baseline = SettingsTransfer::decode(&settings_original)
                 .map_err(|_| PresetActivationError::SnapshotConflict)?
                 .into_stored();
-            let mut stored = if let SettingsActivationMode::ImportSupported(unmapped) = mode {
-                let mut preview = PythonSettingsMigration
-                    .preview(&python_settings, &baseline)
-                    .map_err(|_| PresetActivationError::SnapshotConflict)?;
-                // The staged preset-preferences review already validated this
-                // key against the imported catalog. It is not an unmapped field.
-                preview
-                    .skipped_keys
-                    .retain(|name| name != "LAST_API_PRESET_ID");
-                if unmapped == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+            let mut stored = match mode {
+                SettingsActivationMode::ImportSupported(PythonUnmappedPolicy::SkipAfterReview) => {
+                    // A boolean approval cannot attest which exact keys or source
+                    // bytes were inspected. Use apply_with_reviewed_settings.
                     return Err(PresetActivationError::SnapshotConflict);
                 }
-                preview.transfer.into_stored()
-            } else {
-                baseline
+                SettingsActivationMode::ImportSupported(PythonUnmappedPolicy::Reject) => {
+                    let (preview, expected) =
+                        imported_settings_preview(&python_settings, &baseline, &settings_original)?;
+                    if !expected.skipped_keys.is_empty() {
+                        return Err(PresetActivationError::SnapshotConflict);
+                    }
+                    preview.transfer.into_stored()
+                }
+                SettingsActivationMode::ImportReviewed(approved) => {
+                    let (preview, expected) =
+                        imported_settings_preview(&python_settings, &baseline, &settings_original)?;
+                    if expected != *approved {
+                        return Err(PresetActivationError::SnapshotConflict);
+                    }
+                    preview.transfer.into_stored()
+                }
+                SettingsActivationMode::PresetsOnly | SettingsActivationMode::WithSelection => {
+                    baseline
+                }
             };
             stored.revision = stored
                 .revision

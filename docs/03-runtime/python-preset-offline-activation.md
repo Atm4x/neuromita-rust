@@ -62,8 +62,9 @@ cargo run --locked --offline --example activate_python_presets -- \
 This requires a valid, **existing** Rust `settings.json`. It neither creates a
 new default settings profile nor imports unrelated Python settings. The reviewed
 Python `LAST_API_PRESET_ID` must explicitly resolve to a converted user preset;
-null, absent, template or unknown selections are refused. The review payload
-is rederived from the byte-exact Python sources before any active write. Only
+null, absent, template or unknown selections are refused. The review payload includes a SHA-256 fingerprint of the exact staged
+Python settings bytes and is rederived from the original staged sources before any active write.
+Older review packages without this fingerprint must be restaged with the current tool. Only
 `AppSettings.presets.active` and the monotonically increasing `revision` change;
 per-character assignments, speech, AI, locale and all other settings remain
 unchanged. Custom Python display order is **not installed**, because Rust does
@@ -104,13 +105,48 @@ cargo run --locked --offline --example activate_python_presets -- \
   --apply-with-imported-settings /absolute/review /absolute/UserData --confirm-stopped
 ```
 
-Run `neuromita settings import --format python --source /absolute/review/python-source-settings.json
---destination /absolute/UserData/settings.json --preview` first to inspect all supported and
-unmapped key names. The selected `LAST_API_PRESET_ID` is reviewed by the preset staging flow,
-not treated as an unmapped setting during combined activation. If any *other* keys are unmapped,
-the combined operation fails before creating the journal or changing an active file. Only after
-review may an operator append `--allow-unmapped` to skip those keys. Invalid supported keys
-continue to fail even with this opt-in. No skipped values or credentials are logged.
+When no keys are unmapped, the command above remains available without a confirmation receipt.
+For any unmapped keys, the combined operation fails closed. Its former boolean
+`--allow-unmapped` is intentionally rejected: it cannot prove what was inspected.
+Instead, with both applications stopped, run the review operation against the
+**staged** Python source and the actual Rust target:
+
+```text
+cargo run --locked --offline --example activate_python_presets -- \
+  --review-imported-settings /absolute/review /absolute/UserData --confirm-stopped
+```
+
+The read-only review displays the exact staged source SHA-256, exact existing
+Rust `settings.json` SHA-256, names and counts of mapped keys and names and
+counts of skipped keys (never values or credentials). The selected
+`LAST_API_PRESET_ID` is separately validated against the staged user catalog
+and is therefore excluded from skipped keys. Only if the operator accepts **each**
+skipped name, use the displayed digests and one explicit `--accept-skipped-key`
+per name:
+
+```text
+cargo run --locked --offline --example activate_python_presets -- \
+  --apply-with-imported-settings /absolute/review /absolute/UserData \
+  --confirm-stopped --expect-source-sha256 SOURCE_SHA256 \
+  --expect-target-sha256 TARGET_SHA256 \
+  --accept-skipped-key UNKNOWN_NAME_1 --accept-skipped-key UNKNOWN_NAME_2
+```
+
+The two digests and *exact sorted skipped-name list* must all match the new
+preview, which is recomputed under the existing OS locks before the transaction
+journal is created. The operation verifies them again inside the transaction
+preflight, protecting against changes between CLI precheck and apply. A changed
+known or unknown value, newly added unknown name, changed target profile,
+invalid known value, stale staged presets or journal prevents activation.
+Source JSON and Rust settings bytes are not logged. Neither preview nor
+rejected activation writes an active settings file or creates a journal; the
+stable OS lock files may be created as part of cooperative locking.
+
+This exact receipt applies **only** to the combined offline preset + settings
+activation. The standalone `neuromita settings import --format python` workflow
+has its own existing preview and `--allow-unmapped` contract; it must not be
+mistaken for a transaction-level approval. A complete backup is not implied by
+this selective import.
 
 Supported settings are merged onto the existing, validated Rust `settings.json` (never generic
 Python defaults), with the selected preset ID resolved against the staged preset catalog.

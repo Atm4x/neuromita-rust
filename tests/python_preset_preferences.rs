@@ -245,3 +245,16 @@ fn python_order_is_persisted_in_canonical_catalog_and_survives_offline_activatio
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn preference_review_digest_binds_exact_source_without_exposing_values() {
+    let first = br#"{"LAST_API_PRESET_ID":18,"UNKNOWN_SECRET":"first-credential"}"#;
+    let second = br#"{"LAST_API_PRESET_ID":18,"UNKNOWN_SECRET":"second-credential"}"#;
+    let a = plan().preview_preferences(first).unwrap();
+    let b = plan().preview_preferences(second).unwrap();
+    assert_eq!(a.selected_user_id, b.selected_user_id);
+    assert_eq!(a.user_order, b.user_order);
+    assert_ne!(a.source_settings_sha256, b.source_settings_sha256);
+    assert_eq!(a.source_settings_sha256.len(), 64);
+    assert!(!format!("{a:?}").contains("first-credential"));
+}

@@ -12,6 +12,7 @@ pub use migration::{PythonSettingsMigration, PythonSettingsPreview, RustSettings
 pub use model::*;
 pub use preset_activation::{
     PresetActivation, PresetActivationError, PresetRecovery, PresetStorageLease,
+    PythonSettingsImportReview,
 };
 pub use python_presets::{
     PythonPresetPreferencesReview, PythonPresetStage, PythonPresetStageError,

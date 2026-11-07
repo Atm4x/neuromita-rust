@@ -201,12 +201,18 @@ fn composite_import_unknown_fields_require_explicit_approval_before_any_write() 
     assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
     assert!(!active.join("presets.json").exists());
     assert!(!active.join(".preset-activation-journal").exists());
-    PresetActivation::apply_with_imported_settings(
-        &review,
-        &active,
-        PythonUnmappedPolicy::SkipAfterReview,
-    )
-    .unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_imported_settings(
+            &review,
+            &active,
+            PythonUnmappedPolicy::SkipAfterReview,
+        ),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    let inspected = PresetActivation::review_imported_settings(&review, &active).unwrap();
+    assert_eq!(inspected.skipped_keys, ["UNSUPPORTED_SECRET"]);
+    assert_eq!(inspected.imported_keys, ["LANGUAGE"]);
+    PresetActivation::apply_with_reviewed_settings(&review, &active, &inspected).unwrap();
     let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
         .unwrap()
         .into_stored();
@@ -257,4 +263,163 @@ fn legacy_preference_only_activation_does_not_import_other_python_keys() {
         before.settings.reminders.enabled
     );
     assert_eq!(after.settings.presets.active, PresetId(18));
+}
+
+#[test]
+fn exact_review_rejects_stale_unmapped_value_before_journaling() {
+    let root = Temp::new();
+    let original = br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN_TOKEN":"alpha"}"#;
+    let (review, active, old) = fixture(&root, original);
+    let inspected = PresetActivation::review_imported_settings(&review, &active).unwrap();
+    assert_eq!(inspected.skipped_keys, ["UNKNOWN_TOKEN"]);
+    assert_eq!(inspected.imported_keys, ["LANGUAGE"]);
+    assert_eq!(inspected.source_sha256.len(), 64);
+    assert_eq!(inspected.target_settings_sha256.len(), 64);
+    fs::write(
+        review.join("python-source-settings.json"),
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN_TOKEN":"beta"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_reviewed_settings(&review, &active, &inspected),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+    assert!(!active.join("presets.json").exists());
+    assert!(!active.join("preset-credentials.json").exists());
+    assert!(!active.join(".preset-activation-journal").exists());
+    assert_eq!(
+        fs::read(review.join("python-source-settings.json")).unwrap(),
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN_TOKEN":"beta"}"#
+    );
+}
+
+#[test]
+fn exact_review_rejects_a_new_unmapped_name_and_a_changed_mapped_value() {
+    for modified in [
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN_TOKEN":1,"EXTRA":true}"#.as_slice(),
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"RU","UNKNOWN_TOKEN":1}"#,
+    ] {
+        let root = Temp::new();
+        let (review, active, old) = fixture(
+            &root,
+            br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN_TOKEN":1}"#,
+        );
+        let inspected = PresetActivation::review_imported_settings(&review, &active).unwrap();
+        fs::write(review.join("python-source-settings.json"), modified).unwrap();
+        assert!(matches!(
+            PresetActivation::apply_with_reviewed_settings(&review, &active, &inspected),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+        assert!(!active.join(".preset-activation-journal").exists());
+    }
+}
+
+#[test]
+fn exact_review_rejects_missing_extra_or_reordered_approval() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","X_UNKNOWN":1,"Y_UNKNOWN":false}"#,
+    );
+    let inspected = PresetActivation::review_imported_settings(&review, &active).unwrap();
+    assert_eq!(inspected.skipped_keys, ["X_UNKNOWN", "Y_UNKNOWN"]);
+    let mut approvals = Vec::new();
+    let mut missing = inspected.clone();
+    missing.skipped_keys.pop();
+    approvals.push(missing);
+    let mut extra = inspected.clone();
+    extra.skipped_keys.push("Z_UNKNOWN".into());
+    approvals.push(extra);
+    let mut reordered = inspected.clone();
+    reordered.skipped_keys.reverse();
+    approvals.push(reordered);
+    let mut duplicate = inspected.clone();
+    duplicate.skipped_keys.push("X_UNKNOWN".into());
+    approvals.push(duplicate);
+    let mut tampered_digest = inspected.clone();
+    tampered_digest.source_sha256.replace_range(..1, "0");
+    tampered_digest.source_sha256.push('0');
+    approvals.push(tampered_digest);
+    for approval in &approvals {
+        assert!(matches!(
+            PresetActivation::apply_with_reviewed_settings(&review, &active, approval),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+        assert!(!active.join(".preset-activation-journal").exists());
+    }
+    PresetActivation::apply_with_reviewed_settings(&review, &active, &inspected).unwrap();
+    assert_eq!(
+        PresetActivation::recover(&active).unwrap(),
+        PresetRecovery::NoJournal
+    );
+}
+
+#[test]
+fn exact_review_rejects_stale_target_settings_before_journaling() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","UNKNOWN":7}"#,
+    );
+    let inspected = PresetActivation::review_imported_settings(&review, &active).unwrap();
+    let mut target: serde_json::Value = serde_json::from_slice(&old).unwrap();
+    target["revision"] = json!(13);
+    let new_target = serde_json::to_vec_pretty(&target).unwrap();
+    fs::write(active.join("settings.json"), &new_target).unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_reviewed_settings(&review, &active, &inspected),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), new_target);
+    assert!(!active.join(".preset-activation-journal").exists());
+}
+
+#[test]
+fn reviewed_import_rejects_invalid_mapped_values_even_with_exact_approval() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"invalid","UNKNOWN_TOKEN":true}"#,
+    );
+    assert!(matches!(
+        PresetActivation::review_imported_settings(&review, &active),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+    assert!(!active.join(".preset-activation-journal").exists());
+}
+
+#[test]
+fn staged_preference_review_binds_all_source_bytes_even_without_unmapped_keys() {
+    for combined in [false, true] {
+        let root = Temp::new();
+        let (review, active, old) = fixture(
+            &root,
+            br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","REMINDERS_ENABLED":true}"#,
+        );
+        fs::write(
+            review.join("python-source-settings.json"),
+            br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"RU","REMINDERS_ENABLED":true}"#,
+        )
+        .unwrap();
+        let outcome = if combined {
+            PresetActivation::apply_with_imported_settings(
+                &review,
+                &active,
+                PythonUnmappedPolicy::Reject,
+            )
+        } else {
+            PresetActivation::apply_with_preferences(&review, &active)
+        };
+        assert!(matches!(
+            outcome,
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+        assert!(!active.join(".preset-activation-journal").exists());
+        assert!(!active.join("presets.json").exists());
+    }
 }
