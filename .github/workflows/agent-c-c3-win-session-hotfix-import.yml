@@ -1,0 +1,50 @@
+name: Agent C Windows session query corrected import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-win-session-hotfix-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-win-session-hotfix-20261107
+          fetch-depth: 0
+      - name: Verify and advance exact PR178 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=f2393720671c17b37dc9335ffaa9d46f66e0e139
+          HEAD=589ab8e7ac7640e649979d4a9203a4de01b7ee11
+          TARGET=codex/ai-platform-hub-c3-windows-orphan-witness-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-win-session-hotfix.bundle.b64 > /tmp/winsession.bundle
+          echo '1478b9ee31c823f0c81537b1e2446d1fa8e9afcd0d32f81fda8b8a5b54bfe554  /tmp/winsession.bundle' | sha256sum -c -
+          git bundle verify /tmp/winsession.bundle
+          git fetch --no-tags /tmp/winsession.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$CURRENT" = "$BASE"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-windows-orphan-witness-20261107
+          fetch-depth: 1
+      - name: Validate native Job witness and cancelled uv on Windows 1.98.1
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_reclaims_only_closed_named_jobs_with_verified_witness -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_cancelled_uv_job_releases_staging_only_after_child_shutdown -- --nocapture
