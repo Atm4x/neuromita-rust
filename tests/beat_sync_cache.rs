@@ -206,18 +206,27 @@ fn old_cache_format_is_rejected_instead_of_reused() {
 
 #[test]
 fn immutable_input_pipeline_reuses_raw_result_after_threshold_change() {
-    use neuromita::music::BeatResultOrigin;
+    use neuromita::music::{BeatAnalysisRequest, BeatResultOrigin};
     let tmp = TempDirectory::new();
     let cache = BeatCache::new(&tmp.0);
     let input = b"immutable-audio-fixture";
     let first = cache
         .analyze_or_reuse(
             input,
-            BeatBackend::Auto,
-            "backend-v1",
-            "decoder-v1",
-            "settings-v1",
-            0.8,
+
+            BeatAnalysisRequest {
+
+                backend: BeatBackend::Auto,
+
+                backend_revision: "backend-v1",
+
+                decoder_revision: "decoder-v1",
+
+                analysis_settings_revision: "settings-v1",
+
+                min_confidence: 0.8,
+
+            },
             |received| {
                 assert_eq!(received, input);
                 Ok::<BeatTimeline, ()>(fixture())
@@ -230,11 +239,20 @@ fn immutable_input_pipeline_reuses_raw_result_after_threshold_change() {
     let second = cache
         .analyze_or_reuse(
             input,
-            BeatBackend::Auto,
-            "backend-v1",
-            "decoder-v1",
-            "settings-v1",
-            0.0,
+
+            BeatAnalysisRequest {
+
+                backend: BeatBackend::Auto,
+
+                backend_revision: "backend-v1",
+
+                decoder_revision: "decoder-v1",
+
+                analysis_settings_revision: "settings-v1",
+
+                min_confidence: 0.0,
+
+            },
             |_| -> Result<BeatTimeline, ()> {
                 panic!("the cached unfiltered result should be reused")
             },
@@ -246,7 +264,7 @@ fn immutable_input_pipeline_reuses_raw_result_after_threshold_change() {
 
 #[test]
 fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
-    use neuromita::music::BeatResultOrigin;
+    use neuromita::music::{BeatAnalysisRequest, BeatResultOrigin};
     let tmp = TempDirectory::new();
     let cache = BeatCache::new(&tmp.0);
     let input = b"immutable-audio-fixture";
@@ -263,11 +281,20 @@ fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
     let outcome = cache
         .analyze_or_reuse(
             input,
-            BeatBackend::Dsp,
-            "v1",
-            "wav-v1",
-            "analysis-v1",
-            0.0,
+
+            BeatAnalysisRequest {
+
+                backend: BeatBackend::Dsp,
+
+                backend_revision: "v1",
+
+                decoder_revision: "wav-v1",
+
+                analysis_settings_revision: "analysis-v1",
+
+                min_confidence: 0.0,
+
+            },
             |_| Ok::<BeatTimeline, ()>(fixture()),
         )
         .unwrap();
@@ -278,16 +305,25 @@ fn corrupt_pipeline_entry_recomputes_and_preserves_diagnostic() {
 
 #[test]
 fn invalid_threshold_never_invokes_analyzer() {
-    use neuromita::music::BeatPipelineError;
+    use neuromita::music::{BeatAnalysisRequest, BeatPipelineError};
     let tmp = TempDirectory::new();
     let cache = BeatCache::new(&tmp.0);
     let result = cache.analyze_or_reuse(
         b"fixture",
-        BeatBackend::Dsp,
-        "v1",
-        "wav-v1",
-        "analysis-v1",
-        f32::NAN,
+
+        BeatAnalysisRequest {
+
+            backend: BeatBackend::Dsp,
+
+            backend_revision: "v1",
+
+            decoder_revision: "wav-v1",
+
+            analysis_settings_revision: "analysis-v1",
+
+            min_confidence: f32::NAN,
+
+        },
         |_| -> Result<BeatTimeline, ()> {
             panic!("analyzer must not be called with an invalid threshold")
         },
