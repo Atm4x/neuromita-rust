@@ -1,0 +1,48 @@
+name: Agent B48 cancel callback fast-forward and isolated Slint test
+on:
+  push:
+    branches: [bridge/agent-b48-cancel-callback-20261107]
+    paths: [bridge/agent-b48-cancel.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: SHA verified fast-forward only
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=1c77a8cefec0472a80567b98aa2efad624ec8914
+          tree=141949c51c96546e8fd6ed56737f4c4d5b284165
+          branch=codex/timeline-b48-chat-asr-cancel-20261107
+          base64 -d bridge/agent-b48-cancel.patch.gz.b64 > /tmp/b48fix.gz
+          echo "6a0d467daf4710ff11dcf3a91a62d89b09c7f12ba1766d3aa5547571175e67c0  /tmp/b48fix.gz" | sha256sum -c -
+          gzip -t /tmp/b48fix.gz
+          gzip -dc /tmp/b48fix.gz > /tmp/b48fix.patch
+          git switch --detach "$base"
+          git apply --check /tmp/b48fix.patch
+          git apply --index /tmp/b48fix.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "test(chat): bind cancel callback with other scoped chat commands"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$base"
+          git push origin "HEAD:refs/heads/$branch"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$(git rev-parse HEAD)"
+          echo "B48_FINAL_TREE=$tree"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install build packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute isolated Slint selection callbacks
+        run: cargo test --locked --offline --features gui --bin neuromita-gui chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision -- --test-threads=1
