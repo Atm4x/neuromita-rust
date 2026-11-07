@@ -12,7 +12,7 @@ use serde::{
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::generation::{StoredPresets, python_import::PythonPresetImport};
+use crate::generation::{PresetId, StoredPresets, python_import::PythonPresetImport};
 
 const MAX_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -37,7 +37,7 @@ pub struct PythonPresetStagePreview {
     pub blocked_without_id: usize,
     pub template_count: usize,
     pub preserved_ids: Vec<u32>,
-    pub python_order_not_imported: bool,
+    pub python_order_imported: bool,
 }
 
 impl PythonPresetStagePreview {
@@ -133,18 +133,30 @@ impl PythonPresetStage {
         valid_ids.sort_unstable();
         blocked_ids.sort_unstable();
         let preview = PythonPresetStagePreview {
-            converted_ids: valid_ids,
+            converted_ids: valid_ids.clone(),
             blocked_ids,
             blocked_without_id,
             template_count: template_ids.len(),
             preserved_ids: Vec::new(),
-            python_order_not_imported: preset_json.get("order").is_some(),
+            python_order_imported: preset_json.get("order").is_some(),
         };
         let files = if preview.blocked_count() == 0 {
+            let order = normalized_python_order(&preset_json, &valid_ids)?;
+            let catalog = plan.catalog_bytes().map_err(|_| {
+                PythonPresetStageError::Invalid("cannot encode preset catalog".into())
+            })?;
+            let imported: StoredPresets = serde_json::from_slice(&catalog).map_err(|_| {
+                PythonPresetStageError::Invalid("invalid converted preset catalog".into())
+            })?;
+            let stored = imported
+                .with_order(&order.into_iter().map(PresetId).collect::<Vec<_>>())
+                .map_err(|_| {
+                    PythonPresetStageError::Invalid("invalid Python preset order".into())
+                })?;
             vec![
                 (
                     "presets.json",
-                    plan.catalog_bytes().map_err(|_| {
+                    serde_json::to_vec_pretty(&stored).map_err(|_| {
                         PythonPresetStageError::Invalid("cannot encode preset catalog".into())
                     })?,
                 ),
@@ -214,28 +226,11 @@ impl PythonPresetStage {
         let source = source.as_object().ok_or_else(|| {
             PythonPresetStageError::Invalid("Python preset source must be an object".into())
         })?;
-        let raw_order = source.get("order");
-        let order_explicit = raw_order.is_some_and(|value| !value.is_null());
-        let mut order = Vec::with_capacity(user_ids.len());
-        let mut seen = BTreeSet::new();
-        if let Some(raw) = raw_order.filter(|value| !value.is_null()) {
-            let values = raw.as_array().ok_or_else(|| {
-                PythonPresetStageError::Invalid("Python preset order must be a list".into())
-            })?;
-            for value in values {
-                let id = user_id(value).ok_or_else(|| {
-                    PythonPresetStageError::Invalid("Python preset order has invalid ID".into())
-                })?;
-                if !user_ids.contains(&id) || !seen.insert(id) {
-                    return Err(PythonPresetStageError::Invalid(
-                        "Python preset order references an unknown or duplicate user ID".into(),
-                    ));
-                }
-                order.push(id);
-            }
-        }
-        // Python appends any missing user IDs in ascending order.
-        order.extend(user_ids.into_iter().filter(|id| !seen.contains(id)));
+        let order_explicit = source.get("order").is_some_and(|value| !value.is_null());
+        let order = normalized_python_order(
+            &Value::Object(source.clone()),
+            &user_ids.into_iter().collect::<Vec<_>>(),
+        )?;
         Ok(PythonPresetPreferencesReview {
             selected_user_id,
             selection_explicit,
@@ -519,6 +514,33 @@ impl<'de> Deserialize<'de> for StrictJson {
         }
         deserializer.deserialize_any(JsonVisitor)
     }
+}
+
+fn normalized_python_order(
+    source: &Value,
+    converted_ids: &[u32],
+) -> Result<Vec<u32>, PythonPresetStageError> {
+    let user_ids: BTreeSet<u32> = converted_ids.iter().copied().collect();
+    let mut result = Vec::with_capacity(user_ids.len());
+    let mut seen = BTreeSet::new();
+    if let Some(raw) = source.get("order").filter(|value| !value.is_null()) {
+        let values = raw.as_array().ok_or_else(|| {
+            PythonPresetStageError::Invalid("Python preset order must be a list".into())
+        })?;
+        for value in values {
+            let id = user_id(value).ok_or_else(|| {
+                PythonPresetStageError::Invalid("Python preset order has invalid ID".into())
+            })?;
+            if !user_ids.contains(&id) || !seen.insert(id) {
+                return Err(PythonPresetStageError::Invalid(
+                    "Python preset order references an unknown or duplicate user ID".into(),
+                ));
+            }
+            result.push(id);
+        }
+    }
+    result.extend(user_ids.into_iter().filter(|id| !seen.contains(id)));
+    Ok(result)
 }
 
 pub(super) fn parse_unique_json(bytes: &[u8]) -> Result<Value, PythonPresetStageError> {

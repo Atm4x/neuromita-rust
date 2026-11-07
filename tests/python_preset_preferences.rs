@@ -94,11 +94,8 @@ fn malformed_order_never_silently_normalizes_unknowns_or_duplicates() {
     for bad in [json!([19, 19]), json!([19, 999]), json!([3]), json!("19")] {
         let mut value: Value = serde_json::from_slice(&presets).unwrap();
         value["order"] = bad;
-        let plan =
-            PythonPresetStage::prepare(&serde_json::to_vec(&value).unwrap(), &templates).unwrap();
         assert!(
-            plan.preview_preferences(br#"{"LAST_API_PRESET_ID":19}"#)
-                .is_err()
+            PythonPresetStage::prepare(&serde_json::to_vec(&value).unwrap(), &templates).is_err()
         );
     }
 }
@@ -213,6 +210,38 @@ fn offline_two_file_activation_does_not_apply_reviewed_selection_or_order() {
         review_dir
             .join("python-preset-preferences-review.json")
             .exists()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn python_order_is_persisted_in_canonical_catalog_and_survives_offline_activation() {
+    use neuromita::generation::{
+        EnvironmentPresetCredentials, JsonPresetRepository, PresetCatalog, PresetId,
+    };
+    use neuromita::settings::PresetActivation;
+    use std::{collections::BTreeMap, sync::Arc};
+    let (presets, templates) = inputs();
+    let staged = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let root = std::env::temp_dir().join(format!("neuromita-ordered-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let review = root.join("review");
+    let active = root.join("UserData");
+    std::fs::create_dir(&active).unwrap();
+    staged.stage_new_directory(&review).unwrap();
+    let staged_json: Value =
+        serde_json::from_slice(&std::fs::read(review.join("presets.json")).unwrap()).unwrap();
+    assert_eq!(staged_json["order"], json!([19, 18]));
+    PresetActivation::apply(&review, &active).unwrap();
+    let catalog = PresetCatalog::open(
+        BTreeMap::new(),
+        Arc::new(JsonPresetRepository::new(active.join("presets.json"))),
+        Arc::new(EnvironmentPresetCredentials),
+    )
+    .unwrap();
+    assert_eq!(
+        catalog.list().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        [PresetId(19), PresetId(18)]
     );
     std::fs::remove_dir_all(root).unwrap();
 }

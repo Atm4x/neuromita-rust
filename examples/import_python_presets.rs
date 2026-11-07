@@ -75,9 +75,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Blocked numeric IDs: {:?}; invalid IDs: {}",
         plan.preview.blocked_ids, plan.preview.blocked_without_id
     );
-    if plan.preview.python_order_not_imported {
+    if plan.preview.python_order_imported {
         println!(
-            "Note: the Python custom display order is not represented in the Rust preset catalog; the exact source is preserved."
+            "Python custom user order is stored in the Rust preset catalog; the exact Python source is also preserved."
         );
     }
     if dry_run {

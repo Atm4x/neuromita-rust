@@ -245,6 +245,7 @@ fn existing_profile(imported: &PythonPresetStage) -> (Vec<u8>, Vec<u8>) {
         *definition = json!({"source":"local","name":"imported_7"});
     }
     catalog["entries"]["7"] = record;
+    catalog["order"] = json!([7]);
     catalog["next_id"] = json!(8);
     (
         serde_json::to_vec(&catalog).unwrap(),

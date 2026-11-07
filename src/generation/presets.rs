@@ -384,6 +384,8 @@ pub struct StoredPresets {
     schema_version: u32,
     next_id: u32,
     entries: BTreeMap<PresetId, PresetRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    order: Vec<PresetId>,
 }
 
 impl StoredPresets {
@@ -393,10 +395,12 @@ impl StoredPresets {
         let next_id = entries.keys().next_back().map_or(Ok(0), |id| {
             id.0.checked_add(1).ok_or(PresetCatalogError::IdExhausted)
         })?;
+        let order = entries.keys().copied().collect();
         let stored = Self {
             schema_version: 1,
             next_id,
             entries,
+            order,
         };
         stored.validate()?;
         Ok(stored)
@@ -419,10 +423,51 @@ impl StoredPresets {
                 "imported preset ID overlaps existing or retired ID space".into(),
             ));
         }
+        let existing_order = merged.effective_order();
+        let imported_order = imported.effective_order();
         merged.entries.extend(imported.entries.clone());
+        merged.order = existing_order.into_iter().chain(imported_order).collect();
         merged.next_id = merged.next_id.max(imported.next_id);
         merged.validate()?;
         Ok(merged)
+    }
+
+    pub(crate) fn with_order(mut self, ids: &[PresetId]) -> Result<Self, PresetCatalogError> {
+        self.order = ids.to_vec();
+        self.validate_order(true)?;
+        Ok(self)
+    }
+
+    fn effective_order(&self) -> Vec<PresetId> {
+        let mut result = self.order.clone();
+        let specified: BTreeSet<PresetId> = result.iter().copied().collect();
+        result.extend(
+            self.entries
+                .keys()
+                .filter(|id| !specified.contains(id))
+                .copied(),
+        );
+        result
+    }
+
+    fn ordered_records(&self) -> Vec<(PresetId, PresetRecord)> {
+        self.effective_order()
+            .into_iter()
+            .filter_map(|id| self.entries.get(&id).cloned().map(|record| (id, record)))
+            .collect()
+    }
+
+    fn validate_order(&self, complete: bool) -> Result<(), PresetCatalogError> {
+        let unique: BTreeSet<_> = self.order.iter().copied().collect();
+        if unique.len() != self.order.len()
+            || self.order.iter().any(|id| !self.entries.contains_key(id))
+            || (complete && self.order.len() != self.entries.len())
+        {
+            return Err(PresetCatalogError::Invalid(
+                "preset display order must contain each existing user preset exactly once".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn id_values(&self) -> Vec<u32> {
@@ -453,6 +498,7 @@ impl StoredPresets {
             schema_version: 1,
             next_id,
             entries: BTreeMap::new(),
+            order: Vec::new(),
         }
     }
 
@@ -467,6 +513,7 @@ impl StoredPresets {
                 "invalid preset identifier sequence".into(),
             ));
         }
+        self.validate_order(false)?;
         for value in self.entries.values() {
             value.validate()?;
         }
@@ -528,6 +575,7 @@ impl PresetRepository for JsonPresetRepository {
 pub struct PresetCatalogSnapshot {
     pub revision: u64,
     pub entries: BTreeMap<PresetId, PresetRecord>,
+    pub order: Vec<PresetId>,
 }
 
 struct CatalogState {
@@ -560,6 +608,7 @@ impl PresetCatalog {
         let (changes, _) = watch::channel(Arc::new(PresetCatalogSnapshot {
             revision: 0,
             entries: stored.entries.clone(),
+            order: stored.effective_order(),
         }));
         Self {
             state: RwLock::new(CatalogState {
@@ -603,6 +652,7 @@ impl PresetCatalog {
         let (changes, _) = watch::channel(Arc::new(PresetCatalogSnapshot {
             revision: 0,
             entries: stored.entries.clone(),
+            order: stored.effective_order(),
         }));
         Ok(Self {
             state: RwLock::new(CatalogState {
@@ -637,10 +687,19 @@ impl PresetCatalog {
             .read()
             .expect("preset catalog poisoned")
             .stored
-            .entries
-            .iter()
-            .map(|(id, value)| (*id, value.clone()))
-            .collect()
+            .ordered_records()
+    }
+
+    /// Persist a complete user-preset display order without changing IDs or definitions.
+    pub fn reorder(&self, order: &[PresetId]) -> Result<(), PresetCatalogError> {
+        let mut state = self.state.write().expect("preset catalog poisoned");
+        let next = state.stored.clone().with_order(order)?;
+        if state.stored.effective_order() == next.effective_order() {
+            return Ok(());
+        }
+        self.persist(&next)?;
+        self.publish(&mut state, next);
+        Ok(())
     }
 
     pub fn configured(&self, id: PresetId) -> Result<bool, PresetCatalogError> {
@@ -688,6 +747,7 @@ impl PresetCatalog {
         let mut next = state.stored.clone();
         next.next_id = next_id;
         next.entries.insert(id, record);
+        next.order = next.effective_order();
         self.persist(&next)?;
         self.publish(&mut state, next);
         Ok(id)
@@ -718,6 +778,7 @@ impl PresetCatalog {
         if next.entries.remove(&id).is_none() {
             return Err(PresetCatalogError::NotFound(id));
         }
+        next.order.retain(|item| *item != id);
         self.persist(&next)?;
         self.publish(&mut state, next);
         Ok(())
@@ -837,6 +898,7 @@ impl PresetCatalog {
         self.changes.send_replace(Arc::new(PresetCatalogSnapshot {
             revision: state.revision,
             entries: state.stored.entries.clone(),
+            order: state.stored.effective_order(),
         }));
     }
 

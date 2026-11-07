@@ -66,6 +66,24 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .update_connection(id, record)
             .map_err(|e| e.to_string())?,
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
+        Command::MovePreset(id, step) => {
+            let mut order: Vec<_> = api.presets.list().into_iter().map(|(id, _)| id).collect();
+            let position = order
+                .iter()
+                .position(|candidate| *candidate == id)
+                .ok_or_else(|| format!("Preset {id:?} does not exist"))?;
+            let destination = if step < 0 {
+                position.checked_sub(1)
+            } else if step > 0 {
+                (position + 1 < order.len()).then_some(position + 1)
+            } else {
+                None
+            };
+            if let Some(destination) = destination {
+                order.swap(position, destination);
+                api.presets.reorder(&order).map_err(|e| e.to_string())?;
+            }
+        }
         Command::ActivePreset(id) => {
             api.presets
                 .require_configured(id)
@@ -477,6 +495,17 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             match id(&value) {
                 Ok(id) => send(Command::DeletePreset(id)),
                 Err(error) => window.set_settings_error(error.into()),
+            }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_preset_move(move |value, step| {
+        if let Some(component) = weak.upgrade() {
+            let ui = component.global::<SettingsUi>();
+            match id(&value) {
+                Ok(id) => send(Command::MovePreset(id, step)),
+                Err(error) => ui.set_settings_error(error.into()),
             }
         }
     });
