@@ -1,0 +1,29 @@
+name: Rustfmt Agent D17
+on:
+  push:
+    branches:
+      - bridge/agent-d17-source-export-20261107
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-contents-20261107
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Apply pinned Rust 1.98.1 rustfmt and push only if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          cargo +1.98.1 fmt --all
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src
+            git commit -m "style(guide): normalize Rust formatting in D15-D17 additions"
+            git push origin HEAD:refs/heads/codex/onboarding-guide-contents-20261107
+          fi
