@@ -1,0 +1,36 @@
+name: Agent B42 self-contained source transport
+on:
+  push:
+    branches:
+      - bridge/agent-b42-source-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pinned B41 HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: 63148ad3a5948bf987129edd788690aab83dca68
+          fetch-depth: 0
+      - name: Create and verify full bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "63148ad3a5948bf987129edd788690aab83dca68"
+          git update-ref refs/heads/agent-b42-transport 63148ad3a5948bf987129edd788690aab83dca68
+          git bundle create /tmp/agent-b42-source.bundle refs/heads/agent-b42-transport
+          git bundle verify /tmp/agent-b42-source.bundle
+          sha256sum /tmp/agent-b42-source.bundle > /tmp/agent-b42-source.bundle.sha256
+          printf 'source=%s\n' "$(git rev-parse HEAD)" > /tmp/agent-b42-source.manifest
+      - name: Upload B41 full source
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-b42-source-bundle
+          path: |
+            /tmp/agent-b42-source.bundle
+            /tmp/agent-b42-source.bundle.sha256
+            /tmp/agent-b42-source.manifest
+          retention-days: 3
+          if-no-files-found: error
