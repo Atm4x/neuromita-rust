@@ -6,7 +6,9 @@ use std::{
 
 use neuromita::{
     UserInput,
-    api::{ChatApi, HistorySearchApi, HistorySearchApiError},
+    api::{
+        ChatApi, HistorySearchApi, HistorySearchApiError, KnowledgeCacheApi, KnowledgeCacheApiError,
+    },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     character::CharacterId,
     generation::{
@@ -21,7 +23,7 @@ use neuromita::{
         },
         history_retrieval::{HistorySearchError, HistorySearchStatus},
         retrieval_fusion::FusionMode,
-        semantic_memory::SemanticMemoryRetriever,
+        semantic_memory::{EmbeddingCacheMaintenanceError, SemanticMemoryRetriever},
     },
 };
 
@@ -206,5 +208,96 @@ async fn live_semantic_history_revalidates_timeline_after_await() {
             .await
             .unwrap();
     assert_eq!(refreshed.hits.len(), 2);
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn user_confirmed_cache_workflow_is_live_stale_safe_and_noncanonical() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let provider = Arc::new(PausedEmbedding::new());
+    let retriever = Arc::new(SemanticMemoryRetriever::new(provider.clone(), 16).unwrap());
+    let app = ApplicationLifecycle::start(application_config(KnowledgeRetrieval::semantic(
+        retriever.clone(),
+    )))
+    .await
+    .unwrap();
+    let event = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("tea on the balcony".into()).unwrap(),
+    )
+    .unwrap();
+    let hits_before = HistorySearchApi::inspect(CharacterId::Crazy, "balcony")
+        .await
+        .unwrap();
+    assert_eq!(hits_before.hits[0].key.id, event.0.to_string());
+    let empty_preview = KnowledgeCacheApi::preview().unwrap();
+    assert_eq!(empty_preview.total_entries, 0);
+
+    let search = tokio::spawn(async {
+        HistorySearchApi::inspect_semantic(CharacterId::Crazy, "tea", FusionMode::VectorOnly, None)
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        provider.first_query_started.notified(),
+    )
+    .await
+    .unwrap();
+    provider.first_query_resume.notify_one();
+    assert_eq!(search.await.unwrap().unwrap().hits.len(), 1);
+    let preview = KnowledgeCacheApi::preview().unwrap();
+    assert_eq!(preview.total_entries, 1);
+    assert_eq!(preview.entries_by_character[&CharacterId::Crazy], 1);
+    assert!(
+        !preview
+            .entries_by_character
+            .contains_key(&CharacterId::Kind)
+    );
+
+    assert!(matches!(
+        KnowledgeCacheApi::clear_confirmed(&preview, false),
+        Err(KnowledgeCacheApiError::Clear(
+            neuromita::knowledge::KnowledgeCacheClearError::Maintenance(
+                EmbeddingCacheMaintenanceError::ConfirmationRequired
+            )
+        ))
+    ));
+    assert_eq!(KnowledgeCacheApi::preview().unwrap().total_entries, 1);
+    assert_eq!(
+        KnowledgeCacheApi::clear_confirmed(&preview, true).unwrap(),
+        1
+    );
+    assert_eq!(KnowledgeCacheApi::preview().unwrap().total_entries, 0);
+    assert!(matches!(
+        KnowledgeCacheApi::clear_confirmed(&preview, true),
+        Err(KnowledgeCacheApiError::Clear(
+            neuromita::knowledge::KnowledgeCacheClearError::Maintenance(
+                EmbeddingCacheMaintenanceError::StalePreview
+            )
+        ))
+    ));
+
+    let after = HistorySearchApi::inspect(CharacterId::Crazy, "balcony")
+        .await
+        .unwrap();
+    assert_eq!(after.hits[0].key.id, event.0.to_string());
+    assert_eq!(after.hits[0].content, hits_before.hits[0].content);
+    app.shutdown().await.unwrap();
+    assert!(matches!(
+        KnowledgeCacheApi::preview(),
+        Err(KnowledgeCacheApiError::Unavailable)
+    ));
+}
+
+#[tokio::test]
+async fn lexical_mode_refuses_cache_preview_and_clear_without_silent_upgrade() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let app = ApplicationLifecycle::start(application_config(KnowledgeRetrieval::lexical()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        KnowledgeCacheApi::preview(),
+        Err(KnowledgeCacheApiError::BackendUnavailable)
+    ));
     app.shutdown().await.unwrap();
 }

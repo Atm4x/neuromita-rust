@@ -85,3 +85,10 @@ Failures from semantic retrieval are explicit errors; the selected mode cannot s
   first 4000 searchable characters per message). Over-capacity is an explicit
   error, not a hidden source fallback. An absent derived cache row is a cache
   miss and is recomputed, **not** a missing persistent index failure.
+
+## Local confirmed cache-clear workflow (partial #50; Agent A cycle 18)
+
+- `KnowledgeCacheApi::preview` reads the **running** `KnowledgeRetrieval` owner, returns a bounded `EmbeddingCachePreview` (model-space, total count and per-character counts) without message text or vectors. In lexical-only mode it returns `BackendUnavailable`, rather than constructing an embedding model for inspection.
+- `KnowledgeCacheApi::clear_confirmed` delegates to the **same** owner and requires a preview plus explicit confirmation. The cache instance/revision guard rejects stale or foreign previews atomically; clearing is confined to derived memory/history embeddings, never Timeline or the canonical memory store. In-flight batches started before the clear cannot repopulate the cache after invalidation.
+- The interactive terminal command `/knowledge cache preview` issues an opaque one-use UUID confirmation token stored **only within the running terminal session**. `/knowledge cache clear TOKEN` requires an exact matching token. Unknown commands and malformed token formats fail closed and do not become model chat. A failed/consumed confirmation requires another preview; a wrong token does not consume the valid pending preview. Changing characters does not change the scope: the preview explicitly lists each character's entry count and confirmation clears the shared derived cache across all character scopes.
+- This is a local trusted-user workflow; no unauthenticated remote route, permanent confirmation token or background cleanup task was added. The entire #50 issue still includes graph maintenance, other data operations and cross-agent import/export acceptance.

@@ -28,7 +28,10 @@ use memory_context::{
     render_ranked_memory_context_scoped, render_relation_context,
 };
 use retrieval_fusion::{FusionConfig, FusionMode, fuse};
-use semantic_memory::{SemanticMemoryRetriever, SemanticRetrievalFilter};
+use semantic_memory::{
+    EmbeddingCacheMaintenanceError, EmbeddingCachePreview, SemanticMemoryRetriever,
+    SemanticRetrievalFilter,
+};
 
 /// Explicit selection policy. Knowledge does not own canonical Timeline records or model runtimes.
 pub struct KnowledgeRetrieval {
@@ -51,6 +54,14 @@ pub enum HistoricalMemorySelectionError {
     InvalidRecall,
     #[error("historical semantic retrieval failed: {0}")]
     Embedding(#[from] EmbeddingError),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum KnowledgeCacheClearError {
+    #[error("semantic embedding cache is not configured")]
+    BackendUnavailable,
+    #[error(transparent)]
+    Maintenance(#[from] EmbeddingCacheMaintenanceError),
 }
 
 /// Asynchronous historical retrieval cannot expose prompt text until the owner
@@ -153,6 +164,28 @@ impl KnowledgeRetrieval {
             minimum_cosine,
         )
         .await
+    }
+
+    /// Preview the single derived embedding cache belonging to the running
+    /// Knowledge owner. No canonical memories or Timeline events are exposed.
+    pub fn preview_embedding_cache_clear(&self) -> Option<EmbeddingCachePreview> {
+        match &self.mode {
+            KnowledgeMode::Lexical => None,
+            KnowledgeMode::Semantic { retriever, .. } => Some(retriever.preview_cache_clear()),
+        }
+    }
+
+    /// Perform an explicitly confirmed clear against an exact prior preview.
+    /// A stale preview cannot delete newer cache entries.
+    pub fn clear_embedding_cache_confirmed(
+        &self,
+        preview: &EmbeddingCachePreview,
+        confirmed: bool,
+    ) -> Result<usize, KnowledgeCacheClearError> {
+        let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
+            return Err(KnowledgeCacheClearError::BackendUnavailable);
+        };
+        Ok(retriever.clear_cache_confirmed(preview, confirmed)?)
     }
 
     pub fn lexical() -> Self {
