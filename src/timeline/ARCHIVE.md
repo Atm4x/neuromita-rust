@@ -229,3 +229,21 @@ whole unsupported archive before staging assets or committing Timeline rows.
 A human-directed semantic migration may create a *new retelling event* witnessed
 by the intended recipient, but such a retelling cannot be declared a lossless
 translation of the historical Python receipt or a direct witness of its target.
+
+## Python receipt and note fidelity (B36)
+
+The verified Python source at `5f3d061f523d9abefa6a264bb2953048a935fa65`
+explicitly permits an append with **zero events** to persist a command receipt
+without advancing the branch head. It also permits a single receipt for a
+contiguous multi-event append. Both forms survive native Memory and SQLite
+imports, retry with a stale expected head, native re-export, and SQLite reopen;
+a conflicting command or reordered batch does not replay under the same key.
+The importer must not silently discard no-event receipts merely because they
+have no corresponding Timeline facts.
+
+Python `SessionNote` does not require a top-level `content` member. Its
+projection uses an empty string or nested `message.content` when absent. The
+native converter preserves such JSON payloads without inventing text, while
+still rejecting unverified Python media embedded in arbitrary payload fields.
+These targeted parity guarantees do **not** make `EventObserved` importable;
+its independent identity and retroactive visibility semantics remain blocked.

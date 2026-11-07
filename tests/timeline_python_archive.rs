@@ -1314,3 +1314,323 @@ fn python_disclosure_import_refuses_before_sqlite_mutation_or_binary_staging() {
     drop(destination);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn python_empty_operation_receipt_preserves_idempotent_retry_in_memory() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::export_memory;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let bytes = alter(|document| {
+        document["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id": "main",
+            "key": "no-op:checkpoint",
+            "intent": {"command": {"purpose": "keep receipt without events"}, "events": []},
+            "event_ids": []
+        }));
+    });
+    let source = inspect_python_archive(&bytes).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = source
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    assert_eq!(prepared.receipt_count(), 3);
+    let root =
+        std::env::temp_dir().join(format!("nm-python-empty-receipt-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let branch = neuromita::timeline::domain::BranchId(
+        source
+            .identities
+            .branches
+            .iter()
+            .find(|id| id.source == "main")
+            .unwrap()
+            .candidate_uuid,
+    );
+    let head = timeline.branch(branch).unwrap().head_sequence;
+    let command = json!({"purpose": "keep receipt without events"});
+    assert!(
+        timeline
+            .append(branch, 0, "no-op:checkpoint", command.clone(), vec![])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, head);
+    assert!(
+        timeline
+            .append(
+                branch,
+                head,
+                "no-op:checkpoint",
+                json!({"purpose": "wrong"}),
+                vec![]
+            )
+            .is_err()
+    );
+    let canonical = export_memory(&timeline, session, &assets).unwrap();
+    let mut restored = TimelineStore::new();
+    neuromita::timeline::storage::archive::import_memory(&mut restored, &canonical, &assets)
+        .unwrap();
+    assert!(
+        restored
+            .append(branch, 0, "no-op:checkpoint", command, vec![])
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(restored.branch(branch).unwrap().head_sequence, head);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_empty_operation_receipt_survives_sqlite_reopen() {
+    use neuromita::timeline::domain::{BranchId, TimelineRepository};
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let bytes = alter(|document| {
+        document["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id": "main", "key": "no-op:checkpoint",
+            "intent": {"command": {"purpose": "keep receipt without events"}, "events": []},
+            "event_ids": []
+        }));
+    });
+    let source = inspect_python_archive(&bytes).unwrap();
+    let root =
+        std::env::temp_dir().join(format!("nm-python-empty-sqlite-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let database = root.join("timeline.sqlite");
+    let session;
+    let archive;
+    {
+        let mut timeline = SqliteTimelineRepository::open(&database).unwrap();
+        let bound = source
+            .bind_sqlite(&timeline, &explicit_observers())
+            .unwrap();
+        session = bound.import_sqlite(&mut timeline, &assets).unwrap();
+        archive = export_sqlite(&timeline, session, &assets).unwrap();
+    }
+    {
+        let mut reopened = SqliteTimelineRepository::open(&database).unwrap();
+        assert_eq!(export_sqlite(&reopened, session, &assets).unwrap(), archive);
+        let branch = BranchId(
+            source
+                .identities
+                .branches
+                .iter()
+                .find(|id| id.source == "main")
+                .unwrap()
+                .candidate_uuid,
+        );
+        let head = reopened.branch(branch).unwrap().head_sequence;
+        assert!(
+            reopened
+                .append(
+                    branch,
+                    0,
+                    "no-op:checkpoint",
+                    json!({"purpose": "keep receipt without events"}),
+                    vec![]
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, head);
+        assert!(
+            reopened
+                .append(
+                    branch,
+                    head,
+                    "no-op:checkpoint",
+                    json!({"purpose": "wrong"}),
+                    vec![]
+                )
+                .is_err()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn python_multi_event_receipt_preserves_atomic_batch_and_fork() {
+    use neuromita::timeline::domain::{BranchId, TimelineStore};
+    use neuromita::timeline::storage::archive::export_memory;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let bytes = alter(|document| {
+        document["branches"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|branch| branch["branch_id"] == "main")
+            .unwrap()["head_sequence"] = json!(4);
+        let mut intent_events = Vec::new();
+        for (sequence, id, move_name) in [(3, "batch:one", "left"), (4, "batch:two", "right")] {
+            let event = json!({
+                "event_id": id, "session_id": "session:русский", "branch_id": "main",
+                "sequence":sequence, "kind":"GameAction", "payload":{"move":move_name},
+                "actor_id":null, "observers":[], "links":[],
+                "occurred_at":"2026-11-07T06:28:45.123456+00:00", "schema_version":1
+            });
+            document["events"]
+                .as_array_mut()
+                .unwrap()
+                .push(event.clone());
+            let mut intent_event = event;
+            for key in ["session_id", "branch_id", "sequence", "occurred_at"] {
+                intent_event.as_object_mut().unwrap().remove(key);
+            }
+            intent_events.push(intent_event);
+        }
+        document["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id":"main", "key":"batch:two-actions", "event_ids":["batch:one", "batch:two"],
+            "intent":{"command":{"source":"python batch"}, "events":intent_events}
+        }));
+    });
+    let source = inspect_python_archive(&bytes).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = source
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-batch-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let branch = BranchId(
+        source
+            .identities
+            .branches
+            .iter()
+            .find(|id| id.source == "main")
+            .unwrap()
+            .candidate_uuid,
+    );
+    let child = BranchId(
+        source
+            .identities
+            .branches
+            .iter()
+            .find(|id| id.source == "child")
+            .unwrap()
+            .candidate_uuid,
+    );
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 4);
+    assert_eq!(timeline.branch(child).unwrap().head_sequence, 3);
+    assert!(
+        timeline
+            .world(child)
+            .unwrap()
+            .iter()
+            .all(|fact| fact.draft.payload.get("move").is_none())
+    );
+    let drafts = ["batch:one", "batch:two"].map(|id| {
+        let event_id = source
+            .identities
+            .events
+            .iter()
+            .find(|event| event.source == id)
+            .unwrap()
+            .candidate_uuid;
+        prepared
+            .fact(neuromita::timeline::EventId(event_id))
+            .unwrap()
+            .draft
+            .clone()
+    });
+    let replay = timeline
+        .append(
+            branch,
+            0,
+            "batch:two-actions",
+            json!({"source":"python batch"}),
+            drafts.to_vec(),
+        )
+        .unwrap();
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].sequence, 3);
+    assert_eq!(replay[1].sequence, 4);
+    assert_eq!(timeline.branch(branch).unwrap().head_sequence, 4);
+    assert!(
+        timeline
+            .append(
+                branch,
+                4,
+                "batch:two-actions",
+                json!({"source":"python batch"}),
+                drafts.into_iter().rev().collect()
+            )
+            .is_err()
+    );
+    let exported = export_memory(&timeline, session, &assets).unwrap();
+    let mut cloned = TimelineStore::new();
+    neuromita::timeline::storage::archive::import_memory(&mut cloned, &exported, &assets).unwrap();
+    assert_eq!(export_memory(&cloned, session, &assets).unwrap(), exported);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn python_session_note_without_content_preserves_original_payload_in_native_timeline() {
+    use neuromita::timeline::domain::{EventKind, TimelineStore};
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let source = alter(|document| {
+        document["branches"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|branch| branch["branch_id"] == "main")
+            .unwrap()["head_sequence"] = json!(3);
+        document["events"].as_array_mut().unwrap().push(json!({
+            "event_id": "note:without-content", "session_id": "session:русский",
+            "branch_id": "main", "sequence": 3, "kind":"SessionNote",
+            "payload":{"category":"transfer-proof", "message":{"label":"notice"}},
+            "actor_id": null, "observers":["A"], "links":[],
+            "occurred_at":"2026-11-07T06:28:45.123456+00:00", "schema_version":1
+        }));
+        document["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id":"main", "key":"note:no-content", "event_ids":["note:without-content"],
+            "intent":{"command":{},"events":[{
+                "event_id":"note:without-content", "kind":"SessionNote",
+                "payload":{"category":"transfer-proof", "message":{"label":"notice"}},
+                "actor_id":null, "observers":["A"], "links":[], "schema_version":1
+            }]}
+        }));
+    });
+    let parsed = inspect_python_archive(&source).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = parsed
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let fact = prepared
+        .fact(neuromita::timeline::EventId(
+            parsed
+                .identities
+                .events
+                .iter()
+                .find(|id| id.source == "note:without-content")
+                .unwrap()
+                .candidate_uuid,
+        ))
+        .unwrap();
+    assert_eq!(fact.draft.kind, EventKind::SessionNote);
+    assert_eq!(fact.draft.payload["category"], json!("transfer-proof"));
+    assert_eq!(fact.draft.payload["message"]["label"], json!("notice"));
+    assert!(!fact.draft.payload.contains_key("content"));
+    let root = std::env::temp_dir().join(format!("nm-python-note-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let canonical =
+        neuromita::timeline::storage::archive::export_memory(&timeline, session, &assets).unwrap();
+    let mut cloned = TimelineStore::new();
+    neuromita::timeline::storage::archive::import_memory(&mut cloned, &canonical, &assets).unwrap();
+    assert_eq!(
+        neuromita::timeline::storage::archive::export_memory(&cloned, session, &assets).unwrap(),
+        canonical
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

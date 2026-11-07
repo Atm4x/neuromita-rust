@@ -385,12 +385,17 @@ fn native_draft(
         .ok_or(PythonArchiveError::Invalid("event payload not an object"))?;
     if matches!(
         kind,
-        EventKind::PlayerMessage
-            | EventKind::CharacterMessage
-            | EventKind::CharacterObservation
-            | EventKind::SessionNote
-    ) {
+        EventKind::PlayerMessage | EventKind::CharacterMessage | EventKind::CharacterObservation
+    ) || (kind == EventKind::SessionNote
+        && (payload.contains_key("content") || payload.contains_key("attachments")))
+    {
         convert_message_content(&mut payload, assets)?;
+    } else if kind == EventKind::SessionNote {
+        if contains_python_media(&Value::Object(payload.clone())) {
+            return Err(PythonArchiveError::Invalid(
+                "Python media requires typed native conversion",
+            ));
+        }
     } else if kind == EventKind::MessageHidden {
         if payload.len() != 1 {
             return Err(PythonArchiveError::Invalid(
