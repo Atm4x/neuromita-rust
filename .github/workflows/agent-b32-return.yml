@@ -1,0 +1,42 @@
+name: Publish Agent B32 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b32-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f05b5692f4e54decac012cf962f5c8dd0fbdc235
+          fetch-depth: 0
+      - name: Import B32 and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=f05b5692f4e54decac012cf962f5c8dd0fbdc235
+          EXPECTED=f4b572f5b607966d765c2cf92f0ab337c860c133
+          SHA256=111caca015f52646308f4599e61747c9115bcb046348075c73526828e99622ff
+          TARGET=refs/heads/codex/timeline-python-sqlite-runtime-20261107
+          git fetch origin refs/heads/bridge/agent-b32-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b32-20261107.bundle.b64 | base64 --decode > /tmp/agent-b32.bundle
+          echo "$SHA256  /tmp/agent-b32.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b32.bundle
+          git fetch /tmp/agent-b32.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination ref already points to different commit: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET @ $IMPORTED"
