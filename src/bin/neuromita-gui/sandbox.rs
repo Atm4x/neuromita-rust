@@ -239,6 +239,13 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::MemoryRecallResult(request_id, result) => {
             super::memory::recalled(window, memory_editor, request_id, result)
         }
+        Update::GraphCapability(available) => {
+            let ui = window.global::<MemoryUi>();
+            ui.set_graph_reindex_available(available);
+            if !available && ui.get_graph_reindex_confirmation() && !ui.get_graph_applying() {
+                ui.invoke_graph_cancel();
+            }
+        }
         Update::GraphPreviewResult(request_id, result) => {
             super::memory::graph_previewed(window, memory_editor, request_id, result)
         }
