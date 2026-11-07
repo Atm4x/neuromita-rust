@@ -62,7 +62,7 @@ pub fn recall_forgotten(
 
 /// Operate directly on the immutable owner-projected records without rebuilding
 /// another mutable CharacterMemories instance or altering source revisions.
-pub(super) fn recall_forgotten_records(
+pub(crate) fn recall_forgotten_records(
     character: CharacterId,
     anchor: ContextAnchor,
     records: &[MemoryRecord],

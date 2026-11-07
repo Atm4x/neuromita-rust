@@ -15,15 +15,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::{
-    character::{CharacterError, CharacterHandle, CharacterMemorySnapshot},
+    character::CharacterMemorySnapshot,
     identity::CharacterId,
     memory::{MemoryKind, MemoryRelation, MemoryState},
     timeline::domain::MemoryRecord,
 };
 use embedding::EmbeddingError;
-use forgotten_recall::{
-    ForgottenRecall, MAX_RECALL_RESULTS, RecallError, RecallSelector, recall_forgotten_records,
-};
+use forgotten_recall::{ForgottenRecall, MAX_RECALL_RESULTS};
 use memory_context::{
     lexical_ranked_scoped, render_memory_context, render_memory_islands,
     render_ranked_memory_context_scoped, render_relation_context,
@@ -54,16 +52,6 @@ pub enum HistoricalMemorySelectionError {
     Embedding(#[from] EmbeddingError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ExplicitRecallError {
-    #[error("character owner cannot provide an authoritative memory snapshot: {0}")]
-    Character(#[from] CharacterError),
-    #[error("invalid explicit forgotten-memory selector: {0}")]
-    Selector(#[from] RecallError),
-    #[error(transparent)]
-    Retrieval(#[from] HistoricalMemorySelectionError),
-}
-
 /// Asynchronous historical retrieval cannot expose prompt text until the owner
 /// re-reads its current authoritative Timeline projection and verifies that the
 /// original read is still valid. Constructed only by KnowledgeRetrieval.
@@ -89,31 +77,6 @@ impl PendingHistoricalRecall {
 }
 
 impl KnowledgeRetrieval {
-    /// Read-only, opt-in historical recall over one live character owner.
-    /// Only a caller handling an explicit user request should call this API.
-    /// It acquires the canonical snapshot itself, selects only requested facts,
-    /// then re-reads the owner after asynchronous retrieval before returning
-    /// text. It is not a user-consent primitive and does not inject prompts.
-    pub async fn recall_from_character(
-        &self,
-        owner: &CharacterHandle,
-        selector: RecallSelector,
-        query: &str,
-    ) -> Result<Option<String>, ExplicitRecallError> {
-        let captured = owner.memories().await?;
-        let recalled = recall_forgotten_records(
-            captured.character(),
-            captured.anchor(),
-            captured.records(),
-            selector,
-        )?;
-        let pending = self
-            .select_recalled_forgotten(&captured, &recalled, query)
-            .await?;
-        let fresh = owner.memories().await?;
-        Ok(pending.finalize(&fresh)?)
-    }
-
     /// Explicitly rank *only* the forgotten facts selected by a prior recall
     /// action, tied to one character and one immutable Timeline prefix.
     /// The regular generation selection never calls this method. A request
@@ -284,8 +247,9 @@ impl Default for KnowledgeRetrieval {
 mod tests {
     use super::*;
     use crate::{
+        app::historical_recall::{ExplicitRecallError, recall_from_character},
         character::CharacterMemorySnapshot,
-        knowledge::forgotten_recall::{RecallSelector, recall_forgotten},
+        knowledge::forgotten_recall::{RecallError, RecallSelector, recall_forgotten},
         memory::{CharacterMemories, MemoryChange, MemoryState},
         timeline::{
             ContextAnchor,
@@ -692,18 +656,26 @@ mod tests {
                 .all(|r| r.state == MemoryState::Forgotten)
         );
         let query = KnowledgeRetrieval::lexical();
-        let selected = query
-            .recall_from_character(&owner, RecallSelector::Ids(vec![selected_id]), "tea")
-            .await
-            .unwrap()
-            .unwrap();
+        let selected = recall_from_character(
+            &query,
+            &owner,
+            RecallSelector::Ids(vec![selected_id]),
+            "tea",
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(selected.contains("secret forgotten orange tea"));
         assert!(!selected.contains("other forgotten purple tea"));
         assert!(selected.contains("[FORGOTTEN]"));
         assert!(matches!(
-            query
-                .recall_from_character(&other, RecallSelector::Ids(vec![selected_id]), "tea")
-                .await,
+            recall_from_character(
+                &query,
+                &other,
+                RecallSelector::Ids(vec![selected_id]),
+                "tea"
+            )
+            .await,
             Err(ExplicitRecallError::Selector(RecallError::IneligibleId))
         ));
         assert!(
@@ -763,9 +735,7 @@ mod tests {
         let query = KnowledgeRetrieval::semantic(retriever);
         let handle = owner.clone();
         let task = tokio::spawn(async move {
-            query
-                .recall_from_character(&handle, RecallSelector::Ids(vec![id]), "tea")
-                .await
+            recall_from_character(&query, &handle, RecallSelector::Ids(vec![id]), "tea").await
         });
         tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
             .await
