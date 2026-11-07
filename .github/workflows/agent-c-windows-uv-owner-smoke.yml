@@ -1,0 +1,23 @@
+name: Agent C Windows inherited uv staging owner smoke
+on:
+  push:
+    branches:
+      - bridge/test-agent-c166-windows-lock-20261107
+permissions:
+  contents: read
+jobs:
+  windows-lock:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/test-agent-c166-windows-lock-20261107
+          fetch-depth: 1
+      - name: Verify Windows std File lock inheritance with Rust 1.98.1
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 rustc --edition=2024 .github/agent-c-tests/windows-uv-owner-lock.rs -o c3-owner-lock-windows.exe
+          .\c3-owner-lock-windows.exe
