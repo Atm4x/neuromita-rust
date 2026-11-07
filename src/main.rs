@@ -74,8 +74,6 @@ async fn run(logging: &neuromita::diagnostics::DiagnosticBootstrap) -> Result<()
         return Ok(());
     }
     if command.as_deref() == Some(std::ffi::OsStr::new("settings")) {
-        let root = neuromita::portable::PortableDataRoot::resolve(None)?;
-        logging.attach(&root)?;
         neuromita::diagnostics::boundary(
             neuromita::diagnostics::Boundary::CliStart,
             neuromita::diagnostics::Outcome::Started,

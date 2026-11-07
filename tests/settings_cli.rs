@@ -386,3 +386,36 @@ fn python_preview_alias_and_source_backup_stay_with_portable_rust_target() {
         );
     }
 }
+
+#[test]
+fn offline_settings_import_with_explicit_paths_does_not_create_implicit_portable_root() {
+    let directory = TempDir::new();
+    let source = directory.path("python-settings.json");
+    let destination = directory.path("imported-settings.json");
+    let unrelated_root = directory.path("unrelated-portable-userdata");
+    fs::write(&source, br#"{"LANGUAGE":"EN"}"#).unwrap();
+
+    let execute = |extra: &[&str]| {
+        Command::new(BINARY)
+            .args(["settings", "import", "--format", "python", "--source"])
+            .arg(&source)
+            .arg("--destination")
+            .arg(&destination)
+            .args(extra)
+            .env("NEUROMITA_DATA_DIR", &unrelated_root)
+            .current_dir(&directory.path)
+            .output()
+            .unwrap()
+    };
+
+    let preview = execute(&["--preview"]);
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    assert!(!destination.exists());
+    assert!(!unrelated_root.exists());
+
+    let imported = execute(&[]);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+    assert!(destination.exists());
+    assert!(!unrelated_root.exists());
+    assert_eq!(fs::read(&source).unwrap(), br#"{"LANGUAGE":"EN"}"#);
+}
