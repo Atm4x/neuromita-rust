@@ -902,3 +902,111 @@ fn python_verified_archive_imports_into_sqlite_and_survives_reopen() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_sqlite_import_rolls_back_events_receipts_and_provenance_on_write_faults() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let root =
+        std::env::temp_dir().join(format!("nm-python-sqlite-fault-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("timeline.sqlite");
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut destination = SqliteTimelineRepository::open(&path).unwrap();
+    let bound = source
+        .bind_sqlite(&destination, &explicit_observers())
+        .unwrap();
+    let session = bound.native_session();
+
+    for (name, trigger) in [
+        (
+            "fail_event",
+            "CREATE TRIGGER fail_event BEFORE INSERT ON timeline_events BEGIN SELECT RAISE(ABORT, 'test event failure'); END;",
+        ),
+        (
+            "fail_provenance",
+            "CREATE TRIGGER fail_provenance BEFORE INSERT ON timeline_session_provenance BEGIN SELECT RAISE(ABORT, 'test provenance failure'); END;",
+        ),
+    ] {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(trigger)
+            .unwrap();
+        assert!(bound.import_sqlite(&mut destination, &assets).is_err());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        for table in [
+            "timeline_branches",
+            "timeline_events",
+            "timeline_observers",
+            "timeline_receipts",
+            "timeline_session_provenance",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "partial write to {table} after {name}");
+        }
+        connection
+            .execute_batch(&format!("DROP TRIGGER {name}"))
+            .unwrap();
+        drop(connection);
+        let reopened = SqliteTimelineRepository::open(&path).unwrap();
+        assert!(export_sqlite(&reopened, session, &assets).is_err());
+    }
+
+    assert_eq!(
+        bound.import_sqlite(&mut destination, &assets).unwrap(),
+        session
+    );
+    let expected = export_sqlite(&destination, session, &assets).unwrap();
+    drop(destination);
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert_eq!(
+        export_sqlite(&reopened, session, &assets).unwrap(),
+        expected
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_sqlite_import_stale_binding_cannot_overwrite_another_writer() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let root =
+        std::env::temp_dir().join(format!("nm-python-sqlite-writers-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("timeline.sqlite");
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut first = SqliteTimelineRepository::open(&path).unwrap();
+    let mut second = SqliteTimelineRepository::open(&path).unwrap();
+    let stale = source.bind_sqlite(&second, &explicit_observers()).unwrap();
+    let fresh = source.bind_sqlite(&first, &explicit_observers()).unwrap();
+    let session = fresh.import_sqlite(&mut first, &assets).unwrap();
+    let original = export_sqlite(&first, session, &assets).unwrap();
+    assert!(stale.import_sqlite(&mut second, &assets).is_err());
+    assert_eq!(export_sqlite(&second, session, &assets).unwrap(), original);
+    drop(first);
+    drop(second);
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert_eq!(
+        export_sqlite(&reopened, session, &assets).unwrap(),
+        original
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
