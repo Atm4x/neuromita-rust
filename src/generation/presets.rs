@@ -444,6 +444,10 @@ impl StoredPresets {
             .collect()
     }
 
+    pub(crate) fn validate_for_activation(&self) -> Result<(), PresetCatalogError> {
+        self.validate()
+    }
+
     fn empty(next_id: u32) -> Self {
         Self {
             schema_version: 1,
