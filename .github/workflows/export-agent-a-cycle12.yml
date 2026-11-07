@@ -1,0 +1,35 @@
+name: Agent A Cycle 12 Incremental Source Export
+on:
+  push:
+    branches:
+      - bridge/export-agent-a-cycle12-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export verified incremental source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=66e603d7ae3916c6f1f74089ecff3a8b40db2049
+          HEAD=71a9bc948cb5ad889363bbffa93d2d0954589950
+          git fetch --no-tags origin "refs/heads/codex/knowledge-explicit-recall-selection-20261107:refs/heads/export-agent-a-target"
+          test "$(git rev-parse export-agent-a-target)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git bundle create agent-a-cycle12-incremental.bundle refs/heads/export-agent-a-target "^$BASE"
+          git bundle verify agent-a-cycle12-incremental.bundle
+          sha256sum agent-a-cycle12-incremental.bundle > agent-a-cycle12-incremental.bundle.sha256
+          printf 'base=%s\nhead=%s\n' "$BASE" "$HEAD" > agent-a-cycle12-incremental.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle12-incremental
+          path: |
+            agent-a-cycle12-incremental.bundle
+            agent-a-cycle12-incremental.bundle.sha256
+            agent-a-cycle12-incremental.manifest
+          retention-days: 3
