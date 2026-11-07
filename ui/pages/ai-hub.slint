@@ -23,6 +23,8 @@ export component AiHubPage inherits Rectangle {
     in property <[int]> category-counts;
     in property <bool> can-refresh: false;
     in property <int> discovery-warning-count: 0;
+    in property <string> loaded-tts-id: "";
+    in property <string> loaded-asr-id: "";
     callback refresh-requested();
     pure function matches(item: HubModel) -> bool {
         return (item.category == root.category
@@ -340,6 +342,8 @@ export component AiHubPage inherits Rectangle {
                             if root.matches(model): HubModelCard {
                                 horizontal-stretch: 1;
                                 entry: model;
+                                inference-ready: (model.category == "tts" && root.loaded-tts-id != "" && model.id == root.loaded-tts-id)
+                                    || (model.category == "asr" && root.loaded-asr-id != "" && model.id == root.loaded-asr-id);
                                 open-settings => { root.open-details(index); }
                             }
                         }
@@ -379,6 +383,10 @@ export component AiHubPage inherits Rectangle {
                         Text { text: root.selected-model.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                         HorizontalLayout { spacing: 8px; height: 28px;
                             HubPill { caption: root.selected-model.backend; accent: true; }
+                            if (root.selected-model.category == "tts" && root.loaded-tts-id != "" && root.selected-model.id == root.loaded-tts-id)
+                                || (root.selected-model.category == "asr" && root.loaded-asr-id != "" && root.selected-model.id == root.loaded-asr-id): HubPill {
+                                caption: "Модель загружена"; accent: true;
+                            }
                             if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
                             HubPill { caption: root.selected-model.state == "ready" ? "Установлено"
                                 : root.selected-model.state == "package-assets" ? "Окружение и файлы проверены"

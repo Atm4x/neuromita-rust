@@ -53,6 +53,7 @@ export component HubAction inherits ActionSurface {
 
 export component HubModelCard inherits Rectangle {
     in property <HubModel> entry;
+    in property <bool> inference-ready: false;
     callback open-settings();
     preferred-height: 84px;
     min-height: 84px;
@@ -104,7 +105,16 @@ export component HubModelCard inherits Rectangle {
             }
         }
 
-        if root.entry.state == "ready": VerticalLayout {
+        if root.inference-ready: VerticalLayout {
+            width: 82px;
+            alignment: center;
+            Label {
+                text: "Загружена";
+                font-size: 11px; font-weight: 700;
+                color: Theme.success;
+            }
+        }
+        if !root.inference-ready && root.entry.state == "ready": VerticalLayout {
             width: 82px;
             alignment: center;
             Label {
@@ -113,7 +123,7 @@ export component HubModelCard inherits Rectangle {
                 color: Theme.success;
             }
         }
-        if root.entry.state != "ready": VerticalLayout {
+        if !root.inference-ready && root.entry.state != "ready": VerticalLayout {
             width: 18px;
             alignment: center;
             HorizontalLayout {

@@ -1,6 +1,10 @@
 //! Read-only speech catalog projection shared by GUI adapters and executable tests.
 
-use crate::ai_runtime::speech_catalog::{SpeechInventory, SpeechModelOption};
+use crate::ai_runtime::{
+    AiService,
+    runtime_status::{RuntimePhase, RuntimeSnapshot},
+    speech_catalog::{SpeechInventory, SpeechModelOption},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeechHubCategory {
@@ -43,6 +47,28 @@ pub struct SpeechHubEntry {
     pub title: String,
     pub description: &'static str,
     pub state: SpeechHubResourceState,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpeechHubLoadedModels {
+    pub tts: Option<String>,
+    pub asr: Option<String>,
+}
+
+impl SpeechHubLoadedModels {
+    pub fn from_runtime(snapshot: &RuntimeSnapshot) -> Self {
+        fn active_id(snapshot: &RuntimeSnapshot, service: AiService) -> Option<String> {
+            let status = snapshot.service(service);
+            if status.phase != RuntimePhase::ModelReady {
+                return None;
+            }
+            status.active_model.map(|model| model.plugin_id)
+        }
+        Self {
+            tts: active_id(snapshot, AiService::Tts),
+            asr: active_id(snapshot, AiService::Asr),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +139,66 @@ mod tests {
                 vec![]
             },
         }
+    }
+
+    #[test]
+    fn loaded_model_requires_matching_service_and_confirmed_model_ready_phase() {
+        use crate::ai_runtime::runtime_status::{LoadedModel, ServiceRuntimeStatus};
+
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.services.insert(
+            AiService::Tts,
+            ServiceRuntimeStatus {
+                phase: RuntimePhase::WorkerRunning,
+                active_model: Some(LoadedModel {
+                    plugin_id: "shared".into(),
+                    asset_revision: None,
+                }),
+                ..Default::default()
+            },
+        );
+        snapshot.services.insert(
+            AiService::Asr,
+            ServiceRuntimeStatus {
+                phase: RuntimePhase::ModelReady,
+                active_model: Some(LoadedModel {
+                    plugin_id: "shared".into(),
+                    asset_revision: Some("rev-2".into()),
+                }),
+                ..Default::default()
+            },
+        );
+        let projected = SpeechHubLoadedModels::from_runtime(&snapshot);
+        assert_eq!(projected.tts, None);
+        assert_eq!(projected.asr.as_deref(), Some("shared"));
+
+        snapshot.services.get_mut(&AiService::Tts).unwrap().phase = RuntimePhase::ModelReady;
+        let projected = SpeechHubLoadedModels::from_runtime(&snapshot);
+        assert_eq!(projected.tts.as_deref(), Some("shared"));
+        assert_eq!(projected.asr.as_deref(), Some("shared"));
+
+        snapshot.services.get_mut(&AiService::Tts).unwrap().phase = RuntimePhase::Failed;
+        snapshot.services.get_mut(&AiService::Asr).unwrap().phase = RuntimePhase::Stopped;
+        assert_eq!(
+            SpeechHubLoadedModels::from_runtime(&snapshot),
+            SpeechHubLoadedModels::default()
+        );
+    }
+
+    #[test]
+    fn model_ready_without_confirmed_active_identity_is_not_exposed() {
+        use crate::ai_runtime::runtime_status::ServiceRuntimeStatus;
+        let mut snapshot = RuntimeSnapshot::default();
+        snapshot.services.insert(
+            AiService::Tts,
+            ServiceRuntimeStatus {
+                phase: RuntimePhase::ModelReady,
+                active_model: None,
+                pending_model: Some("tts_next".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(SpeechHubLoadedModels::from_runtime(&snapshot).tts, None);
     }
 
     #[test]

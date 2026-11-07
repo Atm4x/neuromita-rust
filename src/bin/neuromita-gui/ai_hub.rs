@@ -1,8 +1,8 @@
 //! Read-only projection of Core's speech inventory into the AI Hub view.
 
 use neuromita::{
-    ai_runtime::speech_catalog::SpeechInventory,
-    presentation::ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry},
+    ai_runtime::{runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory},
+    presentation::ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::rc::Rc;
@@ -37,8 +37,16 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory) {
     window.set_ai_hub_can_refresh(true);
 }
 
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    let loaded = SpeechHubLoadedModels::from_runtime(snapshot);
+    window.set_ai_hub_loaded_tts_id(loaded.tts.unwrap_or_default().into());
+    window.set_ai_hub_loaded_asr_id(loaded.asr.unwrap_or_default().into());
+}
+
 pub fn stopped(window: &AppWindow) {
     window.set_ai_hub_can_refresh(false);
+    window.set_ai_hub_loaded_tts_id("".into());
+    window.set_ai_hub_loaded_asr_id("".into());
 }
 
 fn model(entry: SpeechHubEntry) -> HubModel {
