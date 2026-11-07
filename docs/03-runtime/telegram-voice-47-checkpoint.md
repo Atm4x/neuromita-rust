@@ -1,32 +1,41 @@
-# Telegram Voice #47 — implementation checkpoint
+# Telegram Voice #47 — implementation and verification checkpoint
 
-This document describes the **unfinished** implementation branch. It is not evidence of a working Telegram integration.
+## Implemented in this branch
 
-## Implemented and exercised by the fake transport
+- `TelegramVoiceService` implements `VoiceProvider`, serializes bot conversations, enforces a rolling 20-message/minute budget (including commands), speaker selection, polling, per-reply media limits, timeouts and owned WAV results.
+- `FfmpegTelegramDecoder` converts MP3 and Telegram voice OGG to stereo PCM16/44.1 kHz WAV using an explicitly provisioned FFmpeg executable, with bounded duration and output.
+- `TelethonSession` is a production-intended user-MTProto adapter over an explicit JSON-line Python sidecar (`tools/telegram_sidecar.py`). **It does not use Bot API.**
+- The sidecar implements persistent Telethon user sessions, Telegram login code requests, code submission, optional 2FA, readiness, message send/receive, audio filtering and bounded download.
+- Rust GUI voice settings have explicit connect, code, 2FA and disconnect actions. A `DynamicTelegramVoice` provider allows the application to activate a user-authorized Telegram TTS session without rebuilding Core.
+- A headless executable `telegram-voice-smoke` exercises the full network/auth/synthesis-to-WAV path when the user supplies real credentials. This is **not** a completed live integration test.
+- Offline fake transport tests cover stale/foreign message rejection, no-reply failure, speaker command suppression, rolling send limit, missing decoder and typed authorization error mapping.
 
-- `TelegramVoiceService` is a `VoiceProvider`, returns owned `AudioArtifact` in WAV format or an error, never a fake successful silence.
-- An async mutex serializes a single bot conversation, including speaker selection, messages, response polling, download, and decoding.
-- A fresh per-request watermark rejects older messages; outgoing messages, messages from the wrong peer, and non-audio messages are ignored.
-- Speaker commands are not resent when unchanged.
-- Minimum request interval, timeout, media download size bounds, and cancellation by dropping the in-flight future are represented in the coordinator.
-- Fake tests cover an owned WAV response, stale/foreign media rejection, repeated speaker selection, and a no-reply timeout.
+## External prerequisites
 
-## Critical work still required — do not merge as a TTS implementation
+- Python with Telethon installed, plus FFmpeg in PATH or `NEUROMITA_FFMPEG`.
+- Telegram `api_id`, `api_hash`, phone number, interactive code and optionally 2FA, and a writable protected data directory for the persistent Telethon session file.
+- The GUI currently locates the sidecar in the repository's `tools` directory unless `NEUROMITA_TELEGRAM_SIDECAR` is set. Packaging/installer distribution of the Python runtime and sidecar is not implemented.
 
-- **No production MTProto adapter** is wired. An authorized Telegram user session (Telethon adapter or a validated Rust MTProto implementation), code/2FA coordinator, persistence, and session lifecycle are missing.
-- **No real decoder** is wired for MP3/OGG to WAV. The decoder is an injection boundary; fake tests must not be confused with audio decoding.
-- No Core-owned credentials, secure session storage, start/stop status, autoconnect, or settings reconciliation yet.
-- The Slint Telegram settings still use preview/disabled actions, with no authorization modal integration.
-- `ApplicationConfig` does not yet select this service as the live voice backend. The Core-to-Unity/local-consumer vertical path has **not** been tested.
-- The service currently knows only the `/speaker` selection form. Silero startup, `/mp3`, `/hd`, and `/videonotes` require tested capability-specific command handling. External bot behavior is unconfirmed.
-- The current watermark strategy is **not a server-side request correlation ID**. A late response to an earlier request can still overtake a new request; a stronger drain/quarantine protocol is needed.
-- No rolling 20-messages/minute rate policy, token-aware auth cancellation, start/stop generation guard, explicit queue bounds, 2FA prompts, headless error flows, multi-character routing tests, or incoming voice support.
-- Tests are synthetic only. Live Telegram behavior was not tested.
+## Headless smoke route
 
-## Architecture constraint
+Run the compiled `telegram-voice-smoke` binary with arguments:
+`<sidecar.py> <text> <speaker> <output.wav>`.
 
-`TelegramTransport` represents a user-authenticated MTProto transport. Replacing it with the Telegram **Bot API** would violate the required authorization model. Keep transport, auth, codec, voice queue, Core settings, and Slint presenter as separate owners.
+Required environment variables: `NEUROMITA_TG_API_ID`, `NEUROMITA_TG_API_HASH`, `NEUROMITA_TG_PHONE`, `NEUROMITA_TG_SESSION`. On first login, also set `NEUROMITA_TG_CODE` and, if needed, `NEUROMITA_TG_2FA`. These are optional when an authorized session is already on disk. Never commit or print credentials or the session file. The session basename must reside in the user data directory, not the repository.
 
-## Validation
+## Remaining critical review blockers
 
-The branch CI workflow runs Cargo fmt, offline tests, and offline Clippy. An incomplete or failing CI run is not a successful validation. No credential is required for the fake transport tests.
+- No live Telegram auth, bot setup or media decoding test with real credentials. Bot commands and response formats may change.
+- No complete multi-character/speaker protocol adaptation for each supported bot, and no proof of `/start`, `/mp3`, `/hd`, `/videonotes` setup compatibility. Only `/speaker` is implemented in the coordinator.
+- Telegram incoming voice is received and exposed at transport level but is **not** routed into Core ASR/chat. Issue #47 is not complete until this is wired.
+- No durable deduplication checkpoint for incoming messages or backend-owned session rehydration/autoconnect from saved application settings. GUI credentials are currently transient; stored Telethon sessions are persisted separately.
+- No secure user-credentials settings store, installer provision of the Telethon sidecar, 2FA modal/prompt-id queue, or clean recovery when the Telegram session expires during generation.
+- Polling with message-ID watermarks is not strict correlation to a specific bot response. A very late response to a timed-out request could be misattributed.
+- The current GUI integration needs successful feature-`gui` compilation and review of Core routing, turn cancellation, stop/start races and Unity/local playback. A test passing with a fake decoder is not a full audio-route integration test.
+- No mock tests of invalid/expired auth request sequence, 2FA retries or GUI prompt closure; classified errors are not equivalent to state-machine coverage.
+
+## Verification policy
+
+`cargo fmt --all -- --check`, `cargo test --locked --offline`, `cargo clippy --locked --offline --all-targets -- -D warnings`, plus GUI feature compilation on Rust 1.92 are run by the branch CI. Track their actual results; the upstream suite includes at least one previously observed failure in `ai_runtime::assets::generation` that is unrelated to Telegram. Never report that all tests pass unless CI confirms it.
+
+This PR remains **Draft** while review blockers above remain. The purpose of this checkpoint is to keep the code and its verification boundary honest.
