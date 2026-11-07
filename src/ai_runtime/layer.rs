@@ -126,7 +126,7 @@ pub fn validate_lock(packages: &[LockedPackage], python_version: &str) -> Result
     Ok(())
 }
 
-fn reject_symlinked_layer_components(destination: &Path) -> Result<(), LayerError> {
+pub(super) fn reject_symlinked_layer_components(destination: &Path) -> Result<(), LayerError> {
     for component in destination.ancestors().take(3) {
         match std::fs::symlink_metadata(component) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
