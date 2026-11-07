@@ -180,7 +180,7 @@ fn local_content(draft: &EventDraft) -> Option<&Value> {
     })
 }
 
-fn references(
+fn collect_references(
     branches: &[ArchivedBranch],
 ) -> Result<BTreeMap<String, TimelineAssetRef>, SessionArchiveError> {
     let mut refs = BTreeMap::new();
@@ -198,6 +198,13 @@ fn references(
             }
         }
     }
+    Ok(refs)
+}
+
+fn references(
+    branches: &[ArchivedBranch],
+) -> Result<BTreeMap<String, TimelineAssetRef>, SessionArchiveError> {
+    let refs = collect_references(branches)?;
     if refs.len() > MAX_ASSETS {
         return Err(SessionArchiveError::Invalid("asset count"));
     }
@@ -426,6 +433,42 @@ fn validate_envelope(
     let refs = references(&envelope.branches)?;
     let binaries = checked_binaries(envelope, &refs)?;
     Ok((ordered, binaries))
+}
+
+/// Read-only retention manifest across every canonical session/branch and each
+/// explicitly supplied, integrity-checked external archive. Includes hidden,
+/// revised and historical facts; never derives retention from current MitaView.
+/// Does not delete files or claim that the caller supplied every external archive.
+pub fn retention_manifest_memory(
+    store: &TimelineStore,
+    retained_archives: &[&[u8]],
+) -> Result<Vec<TimelineAssetRef>, SessionArchiveError> {
+    let local = store
+        .persisted_branches()
+        .into_iter()
+        .map(ArchivedBranch::from_branch)
+        .collect::<Vec<_>>();
+    let mut retained = collect_references(&local)?;
+    for archive in retained_archives {
+        let (_, _, binaries) = prepare_import(archive)?;
+        for (reference, _) in binaries {
+            if retained
+                .insert(reference.digest.clone(), reference.clone())
+                .is_some_and(|previous| previous != reference)
+            {
+                return Err(SessionArchiveError::Invalid("inconsistent asset identity"));
+            }
+        }
+    }
+    Ok(retained.into_values().collect())
+}
+
+#[cfg(feature = "sqlite-system")]
+pub fn retention_manifest_sqlite(
+    store: &SqliteTimelineRepository,
+    retained_archives: &[&[u8]],
+) -> Result<Vec<TimelineAssetRef>, SessionArchiveError> {
+    retention_manifest_memory(&store.archive_snapshot()?, retained_archives)
 }
 
 /// Export a selected session, including its own branch facts and receipts (not
