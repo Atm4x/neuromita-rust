@@ -717,6 +717,132 @@ async fn fts_generation_fuses_memory_and_archived_history_without_keyword_fallba
     app.shutdown().await.unwrap();
 }
 
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn fts_generation_uses_scoped_unicode61_for_memory_and_history_and_excludes_hidden() {
+    use neuromita::{
+        api::CharacterApi,
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let active = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Normal,
+        "A quiet café beside the river",
+    );
+    let mut rag_only = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Normal,
+        "The café serves breakfast at dawn",
+    );
+    rag_only.kind = neuromita::memory::MemoryKind::RagOnly;
+    let rag_only_id = rag_only.id;
+    let hidden = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::High,
+        "A forgotten café on the hill",
+    );
+    let unrelated = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "A mountain without any matching terms",
+    );
+    let active_id = active.id;
+    let hidden_id = hidden.id;
+    let unrelated_id = unrelated.id;
+    let result = owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![
+                MemoryCommand::ImportRecord { record: active },
+                MemoryCommand::ImportRecord { record: rag_only },
+                MemoryCommand::ImportRecord { record: hidden },
+                MemoryCommand::ImportRecord { record: unrelated },
+            ],
+        )
+        .await
+        .unwrap();
+    owner
+        .edit_memories(
+            result.snapshot,
+            vec![MemoryCommand::Forget { id: hidden_id }],
+        )
+        .await
+        .unwrap();
+    let other = CharacterApi::get(CharacterId::Kind).unwrap();
+    let other_memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Another character's café",
+    );
+    let other_id = other_memory.id;
+    other
+        .edit_memories(
+            other.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord {
+                record: other_memory,
+            }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("The cafe opened yesterday".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("A new morning begins".into()).unwrap(),
+    )
+    .unwrap();
+
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Fts,
+            max_results: 3,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "cafe",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&active_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&rag_only_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&hidden_id.0.to_string()), "{evidence}");
+    assert!(
+        !evidence.contains(&unrelated_id.0.to_string()),
+        "{evidence}"
+    );
+    assert!(!evidence.contains(&other_id.0.to_string()), "{evidence}");
+    call.reply
+        .send("Found archived source evidence".into())
+        .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    app.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn reply_and_react_share_lexical_memory_history_admission_without_cross_character_evidence() {
     use neuromita::{

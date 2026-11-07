@@ -43,3 +43,10 @@
 ## Formal conclusion
 
 **R5 PARTIAL.** Python mode defaults/presets, all-source candidate admission, missing-vector semantics, history lifecycle, CE failure policy, templates, and Documents/Sentence paths are not equivalent. Do not enable Python-like default RAG or introduce a silent fallback based solely on this static audit. **R6 OPEN, D4 PARTIAL**; no formal acceptance slot has changed in Cycle36.
+
+## Cycle37 — source-qualified FTS engineering delta
+
+- On the original stacked PR #280 baseline, `HistoryGenerationMode::Fts` previously used `Fts`/BM25 for archived Timeline History but `Keyword`/token intersection for Memory. The latter was **not** FTS equivalence even though it reached the same generation selector.
+- Cycle37 introduces one ephemeral `scoped_fts::rank` engine for *both* already-authorized source slices. The History result keeps `History(EventId)`, branch and window metadata; Memory uses `Memory(MemoryId)` with only active `Fact|RagOnly` from the captured caller-owned snapshot. The buckets remain independently ranked `Fts` candidates and are combined by one global RRF/result budget. `unicode61` stemming/diacritics are tested directly; no keyword fallback exists on FTS errors.
+- Bounds: 1024 indexed rows **per source**, no persistent table or write path. `HistorySearchError::{FtsUnavailable,FtsFailure,CorpusLimit}` remains a stable public contract. Memory-side failures are `GenerationFusionError::Fts`, before the model call. History generation setting remains opt-in and defaults to `Off`.
+- This does **not** port Python's `keyword_only` missing-embedding admission, user-selected preset transforms, automatic/explicit RAG gating, CE fallback, forgotten scope, or query-builder morphology. In particular `LlmConversation::memory_query` includes a recent-history tail, so comparing complete prompts while assuming the user input is the *only* query term is invalid; deterministic mode comparisons must pin the **effective query** and authorized source sets. R5 is still PARTIAL.

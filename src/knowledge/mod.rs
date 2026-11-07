@@ -15,6 +15,7 @@ pub mod memory_transfer;
 pub mod portable_transfer;
 pub mod reranking;
 pub mod retrieval_fusion;
+mod scoped_fts;
 pub mod semantic_memory;
 pub mod variable_transfer;
 

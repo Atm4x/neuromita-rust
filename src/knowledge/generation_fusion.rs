@@ -26,6 +26,7 @@ use super::{
         FusedHit, FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit,
         RetrievalKey, RetrievalMethod, RetrievalSource, fuse,
     },
+    scoped_fts::{ScopedFtsError, rank as rank_scoped_fts},
     semantic_memory::{RetrievalCost, SemanticMemoryRetriever},
 };
 
@@ -43,6 +44,15 @@ pub enum GenerationFusionError {
     HistorySearch(#[from] HistorySearchError),
     #[error(transparent)]
     Embedding(#[from] EmbeddingError),
+    #[error(transparent)]
+    Fts(#[from] ScopedFtsError),
+}
+
+fn active_retrieval_facts(memories: &[MemoryRecord]) -> impl Iterator<Item = &MemoryRecord> {
+    memories.iter().filter(|record| {
+        record.state == MemoryState::Active
+            && matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+    })
 }
 
 /// Choose one bounded set of source-qualified candidates *before* rendering
@@ -76,22 +86,50 @@ pub(crate) fn select_lexical_generation(
         return Err(GenerationFusionError::InvalidEvidence);
     }
 
-    let searchable = tokens(query);
-    let memory_hits = lexical_ranked_scoped(memories, query, false)
-        .into_iter()
-        .filter(|record| record.state == MemoryState::Active)
-        .filter(|record| !tokens(&record.content).is_disjoint(&searchable))
-        .map(|record| RetrievalHit {
-            key: RetrievalKey {
-                character,
-                source: RetrievalSource::Memory,
-                id: record.id.0.to_string(),
-            },
-            content: record.content.clone(),
-            raw_score: None,
-            metadata: BTreeMap::new(),
-        })
-        .collect::<Vec<_>>();
+    let memory_hits = match history_method {
+        RetrievalMethod::Keyword => {
+            let searchable = tokens(query);
+            lexical_ranked_scoped(memories, query, false)
+                .into_iter()
+                .filter(|record| record.state == MemoryState::Active)
+                .filter(|record| !tokens(&record.content).is_disjoint(&searchable))
+                .map(|record| RetrievalHit {
+                    key: RetrievalKey {
+                        character,
+                        source: RetrievalSource::Memory,
+                        id: record.id.0.to_string(),
+                    },
+                    content: record.content.clone(),
+                    raw_score: None,
+                    metadata: BTreeMap::new(),
+                })
+                .collect::<Vec<_>>()
+        }
+        RetrievalMethod::Fts => {
+            let scoped = active_retrieval_facts(memories).collect::<Vec<_>>();
+            let content = scoped
+                .iter()
+                .map(|record| record.content.as_str())
+                .collect::<Vec<_>>();
+            rank_scoped_fts(query, &content)?
+                .into_iter()
+                .map(|(index, score)| {
+                    let record = scoped[index];
+                    RetrievalHit {
+                        key: RetrievalKey {
+                            character,
+                            source: RetrievalSource::Memory,
+                            id: record.id.0.to_string(),
+                        },
+                        content: record.content.clone(),
+                        raw_score: Some(score),
+                        metadata: BTreeMap::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        }
+        _ => return Err(GenerationFusionError::InvalidEvidence),
+    };
     let history_hits = history
         .hits
         .iter()
@@ -113,7 +151,7 @@ pub(crate) fn select_lexical_generation(
         .collect::<Result<Vec<_>, _>>()?;
     let buckets = [
         RetrievalBucket {
-            method: RetrievalMethod::Keyword,
+            method: history_method,
             hits: memory_hits,
         },
         RetrievalBucket {
@@ -163,13 +201,7 @@ pub(crate) async fn select_semantic_generation(
     if config.limit > 8 || config.max_content_chars > 1200 {
         return Err(GenerationFusionError::InvalidEvidence);
     }
-    let facts = memories
-        .iter()
-        .filter(|record| {
-            matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
-                && record.state == MemoryState::Active
-        })
-        .collect::<Vec<_>>();
+    let facts = active_retrieval_facts(memories).collect::<Vec<_>>();
     let messages =
         history_retrieval::scoped_candidates(view, config.max_content_chars, Some(window))?;
     if facts.len() + messages.len() > 1024 {

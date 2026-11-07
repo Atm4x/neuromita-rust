@@ -3,6 +3,9 @@
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "sqlite-system")]
+use super::scoped_fts::{ScopedFtsError, rank as rank_scoped_fts};
+
 use crate::{
     identity::CharacterId,
     timeline::{
@@ -311,68 +314,22 @@ fn search_history_fts_sqlite(
     config: HistorySearchConfig,
     messages: &[ProjectedMessage],
 ) -> Result<HistorySearchResult, HistorySearchError> {
-    use rusqlite::{Connection, params};
-
-    let mut connection = Connection::open_in_memory()
-        .map_err(|_| HistorySearchError::FtsFailure("cannot open derived index"))?;
-    connection
-        .execute_batch(
-            "CREATE VIRTUAL TABLE scoped_history_fts USING fts5(content, tokenize='unicode61');",
-        )
-        .map_err(|_| HistorySearchError::FtsUnavailable)?;
-    {
-        let transaction = connection
-            .transaction()
-            .map_err(|_| HistorySearchError::FtsFailure("cannot start derived indexing"))?;
-        {
-            let mut insert = transaction
-                .prepare("INSERT INTO scoped_history_fts(rowid, content) VALUES (?1, ?2)")
-                .map_err(|_| HistorySearchError::FtsFailure("cannot prepare derived indexing"))?;
-            for (index, message) in messages.iter().enumerate() {
-                insert
-                    .execute(params![index as i64 + 1, &message.content])
-                    .map_err(|_| HistorySearchError::FtsFailure("cannot build derived index"))?;
-            }
-        }
-        transaction
-            .commit()
-            .map_err(|_| HistorySearchError::FtsFailure("cannot finalize derived index"))?;
-    }
-    let match_query = tokens(query)
+    let documents = messages
+        .iter()
+        .map(|item| item.content.as_str())
+        .collect::<Vec<_>>();
+    let scores = rank_scoped_fts(query, &documents).map_err(|error| match error {
+        ScopedFtsError::Unavailable => HistorySearchError::FtsUnavailable,
+        ScopedFtsError::CorpusLimit => HistorySearchError::CorpusLimit {
+            found: documents.len(),
+            maximum: 1024,
+        },
+        ScopedFtsError::Failure(message) => HistorySearchError::FtsFailure(message),
+    })?;
+    let hits = scores
         .into_iter()
-        .map(|term| format!("\"{term}\""))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let mut statement = connection
-        .prepare("SELECT rowid, bm25(scoped_history_fts) AS rank FROM scoped_history_fts WHERE scoped_history_fts MATCH ?1 ORDER BY rank, rowid LIMIT 1024")
-        .map_err(|_| HistorySearchError::FtsFailure("cannot prepare FTS query"))?;
-    let rows = statement
-        .query_map([match_query], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
-        })
-        .map_err(|_| HistorySearchError::FtsFailure("FTS query failed"))?;
-    let mut hits = Vec::new();
-    for result in rows {
-        let (row_id, bm25) =
-            result.map_err(|_| HistorySearchError::FtsFailure("invalid FTS row"))?;
-        let Some(index) = row_id
-            .checked_sub(1)
-            .and_then(|id| usize::try_from(id).ok())
-        else {
-            return Err(HistorySearchError::FtsFailure(
-                "invalid derived source identity",
-            ));
-        };
-        let Some(message) = messages.get(index) else {
-            return Err(HistorySearchError::FtsFailure(
-                "out-of-range derived source identity",
-            ));
-        };
-        if !bm25.is_finite() {
-            return Err(HistorySearchError::FtsFailure("invalid FTS rank"));
-        }
-        hits.push(hit(character, view, message, bm25));
-    }
+        .map(|(index, score)| hit(character, view, &messages[index], score))
+        .collect::<Vec<_>>();
     let ranked = fuse(
         character,
         &[RetrievalBucket {
