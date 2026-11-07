@@ -1,0 +1,55 @@
+name: Agent B48 verified chat source + isolated Slint test
+on:
+  push:
+    branches: [bridge/agent-b48-verified-patch-20261107]
+    paths: [bridge/agent-b48.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify transport and publish exact B48 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=a182c77686926482cd5d946f4c30d681eb405fee
+          tree=9b76d9b37c7b65e824e4cd6e0a2c8c28fa16da87
+          branch=codex/timeline-b48-chat-asr-cancel-20261107
+          base64 -d bridge/agent-b48.patch.gz.b64 > /tmp/b48.patch.gz
+          echo "fe7aaebe6108583a858259e24fdf784c057093585c7153ecf3c20350777143d6  /tmp/b48.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b48.patch.gz
+          gzip -dc /tmp/b48.patch.gz > /tmp/b48.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b48.patch
+          git apply --index /tmp/b48.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(chat): scope delayed speech and cancel feedback to selection revision"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B48 branch exists; no overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "REMOTE_SHA=$remote"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute isolated Slint chat callback regression
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD^{tree})" = 9b76d9b37c7b65e824e4cd6e0a2c8c28fa16da87
+          cargo test --locked --offline --features gui --bin neuromita-gui chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision -- --test-threads=1
