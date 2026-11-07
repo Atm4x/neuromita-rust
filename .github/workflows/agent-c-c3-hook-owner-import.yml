@@ -1,0 +1,49 @@
+name: Agent C C3 installer hook ownership import and native tests
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-hook-owner-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-hook-owner-20261107
+          fetch-depth: 0
+      - name: Verify exact bundle and publish fast forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=b58ff4487efe4eb96addbeeef27e3b3a747a9eb8
+          HEAD=7dad4f4f51541c8fe7c69181d11213b638400197
+          TARGET=codex/ai-platform-hub-c3-generation-hook-leases-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-generation-hook-owner.bundle.b64 > /tmp/c3-hook-owner.bundle
+          echo '2e04031769e78d52a19fd407fd3964fc519382cd127901f97d9a2c405210818d  /tmp/c3-hook-owner.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-hook-owner.bundle
+          git fetch --no-tags /tmp/c3-hook-owner.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows-hook-owner:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-generation-hook-leases-20261107
+      - name: Windows Rust 1.98.1 native Python hook ownership regression
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::assets::generation::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::revision_lease::tests -- --nocapture
