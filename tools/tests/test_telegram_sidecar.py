@@ -166,6 +166,29 @@ class TelegramSidecarTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_reconnect_does_not_reuse_a_previous_account_code(self):
+        async def scenario():
+            s = self.sidecar
+            await self.call(1, "connect", api_id=1234, api_hash="first",
+                            phone="+1000000000", session="/tmp/mock-tg-one")
+            await self.call(2, "request_code")
+            self.assertEqual(s.phone_code_hash, "mock-hash")
+            self.assertEqual((await self.call(3, "disconnect"))["result"],
+                             {"disconnected": True})
+            self.assertIsNone(s.client)
+            self.assertIsNone(s.phone_code_hash)
+            self.assertEqual((await self.call(4, "sign_in", code="valid-code"))["error"],
+                             "not_connected")
+            await self.call(5, "connect", api_id=4567, api_hash="second",
+                            phone="+1999999999", session="/tmp/mock-tg-two")
+            self.assertEqual((await self.call(6, "sign_in", code="valid-code"))["error"],
+                             "code_not_requested")
+            await self.call(7, "request_code")
+            self.assertTrue((await self.call(8, "sign_in", code="valid-code"))
+                            ["result"]["authorized"])
+
+        asyncio.run(scenario())
+
     def test_malformed_rpc_does_not_echo_credentials(self):
         async def scenario():
             result = await self.sidecar.respond(
@@ -173,7 +196,7 @@ class TelegramSidecarTest(unittest.TestCase):
             )
             self.assertFalse(result["ok"])
             self.assertNotIn("secret-password", repr(result))
-            self.assertIs(result["request_id"], True)
+            self.assertIsNone(result["request_id"])
 
         asyncio.run(scenario())
 
