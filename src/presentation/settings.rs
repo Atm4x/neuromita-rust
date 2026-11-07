@@ -6,10 +6,10 @@ use crate::{
     character::CharacterId,
     generation::ToolSettings,
     settings::{
-        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
-        PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
-        SettingsSnapshot, SettingsTransfer, SpeechSettings, StructuredDisplayMode, TtsPreferences,
-        VoiceSettings, Volume,
+        AppSettings, AsrPreferences, CharactersSettings, GuideLevel, InterfaceSettings,
+        OnboardingSettings, OperationPresets, PresetId, PresetSelection, PresetSettings,
+        SettingsArea, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
+        SpeechSettings, StructuredDisplayMode, TtsPreferences, VoiceSettings, Volume,
     },
 };
 
@@ -222,6 +222,10 @@ impl CharactersSettingsPresenter {
     }
 }
 
+pub struct OnboardingSettingsPresenter {
+    pub guide_level: BoundProperty<GuideLevel>,
+}
+
 pub struct InterfaceSettingsPresenter {
     owner: Arc<SettingsOwner>,
     pub hide_private: BoundProperty<bool>,
@@ -238,6 +242,7 @@ impl InterfaceSettingsPresenter {
 
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub onboarding: OnboardingSettingsPresenter,
     pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
     pub tts: TtsSettingsPresenter,
@@ -250,6 +255,17 @@ impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            onboarding: OnboardingSettingsPresenter {
+                guide_level: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_level,
+                    |owner, level| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| settings.guide_level = level)
+                            .map(|_| ())
+                    },
+                ),
+            },
             interface: InterfaceSettingsPresenter {
                 owner: Arc::clone(&owner),
                 hide_private: BoundProperty::new(
@@ -398,6 +414,26 @@ mod tests {
     use crate::settings::{
         MemorySettingsRepository, SettingsConfig, SettingsLifecycle, SettingsSource,
     };
+
+    #[tokio::test]
+    async fn guide_level_changes_through_onboarding_owner_without_extra_settings_store() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut observed = presenter.onboarding.guide_level.observe();
+        assert_eq!(observed.next().await.unwrap(), GuideLevel::Basic);
+        presenter.onboarding.guide_level.set(GuideLevel::Full).unwrap();
+        assert_eq!(observed.next().await.unwrap(), GuideLevel::Full);
+        assert_eq!(owner.snapshot_all().unwrap().revision, 1);
+        presenter.onboarding.guide_level.set(GuideLevel::Full).unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, 1);
+        assert!(!owner.snapshot_all().unwrap().values.onboarding.eula_accepted);
+    }
 
     #[tokio::test]
     async fn tts_asr_preferences_round_trip_through_settings_owner() {

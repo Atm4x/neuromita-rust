@@ -24,7 +24,7 @@ use neuromita::{
         PresetSlot,
     },
     request::{CancelResult, RequestId},
-    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
+    settings::{AsrPreferences, GuideLevel, PresetId, PresetSelection, TtsPreferences, Volume},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -73,6 +73,7 @@ pub enum Command {
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
+    SetGuideLevel(GuideLevel),
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
     Select(CharacterId),
@@ -428,7 +429,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetGuideLevel(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),

@@ -53,6 +53,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let initial_code = options.locale.as_str();
     window.set_onboarding_language(initial_code.into());
     window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
+    window.set_onboarding_guide_level(
+        neuromita::onboarding::selected_guide_level(&options.data_directory)?.index(),
+    );
     update_guide(&window, 0);
     let desktop = Rc::new(RefCell::new(None));
     if !requires_consent {
@@ -144,15 +147,25 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         }
     });
     let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
     window.on_onboarding_guide_select_level(move |index| {
-        if let Some(window) = guide_window.upgrade() {
-            use neuromita::onboarding::guide::{self, GuideLevel};
-            let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
-            let level = GuideLevel::from_index(index);
-            let destination =
-                guide::remap_index(previous, window.get_onboarding_guide_page() as usize, level);
-            window.set_onboarding_guide_level(level.index());
-            update_guide(&window, destination as i32);
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        let level = neuromita::onboarding::guide::GuideLevel::from_index(index);
+        if level.index() == window.get_onboarding_guide_level() {
+            return;
+        }
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide settings are unavailable until the runtime starts".into());
+            return;
+        };
+        if let Err(error) = runtime
+            .commands
+            .try_send(super::runtime::Command::SetGuideLevel(level))
+        {
+            window.set_notice(format!("Failed to queue Guide level change: {error}").into());
         }
     });
     let language_window = window.as_weak();
@@ -257,6 +270,25 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     result?;
     shutdown.map_err(std::io::Error::other)?;
     Ok(())
+}
+
+pub(super) fn sync_guide_level(
+    window: &AppWindow,
+    next: neuromita::onboarding::guide::GuideLevel,
+) {
+    use neuromita::onboarding::guide::{self, GuideLevel};
+
+    let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
+    if previous == next {
+        return;
+    }
+    let destination = guide::remap_index(
+        previous,
+        window.get_onboarding_guide_page() as usize,
+        next,
+    );
+    window.set_onboarding_guide_level(next.index());
+    update_guide(window, destination as i32);
 }
 
 fn update_guide(window: &AppWindow, requested_index: i32) {

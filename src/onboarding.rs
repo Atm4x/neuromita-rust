@@ -25,6 +25,17 @@ pub fn pending(data_dir: &Path) -> Result<bool, io::Error> {
     Ok(!stored.settings.onboarding.eula_accepted)
 }
 
+pub fn selected_guide_level(data_dir: &Path) -> Result<guide::GuideLevel, io::Error> {
+    let path = data_dir.join("settings.json");
+    if !path.exists() {
+        return Ok(guide::GuideLevel::default());
+    }
+    let stored = JsonSettingsRepository::new(path)
+        .load()
+        .map_err(io::Error::other)?;
+    Ok(stored.settings.onboarding.guide_level)
+}
+
 pub fn accept(data_dir: &Path, language: &str) -> Result<(), io::Error> {
     use crate::settings::Language;
 
@@ -107,6 +118,26 @@ mod tests {
         assert_eq!(accepted.settings.voice.voice, "existing-custom-voice");
         accept(&dir.0, "ru").unwrap();
         assert_eq!(repo.load().unwrap(), accepted);
+    }
+
+    #[test]
+    fn guide_level_survives_restart_and_eula_acceptance() {
+        let dir = Directory::new();
+        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Basic);
+        assert!(!dir.0.join("settings.json").exists());
+        let repo = JsonSettingsRepository::new(dir.0.join("settings.json"));
+        let mut stored = StoredSettings {
+            revision: 4,
+            settings: AppSettings::initial_profile(),
+        };
+        stored.settings.onboarding.guide_level = guide::GuideLevel::Full;
+        repo.save(&stored).unwrap();
+        assert!(pending(&dir.0).unwrap());
+        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Full);
+        accept(&dir.0, "ru").unwrap();
+        assert_eq!(repo.load().unwrap().revision, 5);
+        assert_eq!(selected_guide_level(&dir.0).unwrap(), guide::GuideLevel::Full);
+        assert!(!pending(&dir.0).unwrap());
     }
 
     #[test]

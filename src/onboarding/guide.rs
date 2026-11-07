@@ -1,30 +1,7 @@
 //! Historical Python Guide page content, read-only import at Python revision 5f3d061f.
 //! The Rust catalog is the single source of truth for displayed guide pages.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuideLevel {
-    Basic,
-    Advanced,
-    Full,
-}
-
-impl GuideLevel {
-    pub fn from_index(index: i32) -> Self {
-        match index {
-            1 => Self::Advanced,
-            2 => Self::Full,
-            _ => Self::Basic,
-        }
-    }
-
-    pub const fn index(self) -> i32 {
-        match self {
-            Self::Basic => 0,
-            Self::Advanced => 1,
-            Self::Full => 2,
-        }
-    }
-}
+pub use crate::settings::GuideLevel;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GuidePage {

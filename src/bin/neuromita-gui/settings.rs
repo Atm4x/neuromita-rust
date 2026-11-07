@@ -188,6 +188,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .structured_display
             .set(mode)
             .map_err(|e| e.to_string())?,
+        Command::SetGuideLevel(level) => api
+            .settings
+            .onboarding
+            .guide_level
+            .set(level)
+            .map_err(|e| e.to_string())?,
         Command::SetToolOption(option, enabled) => {
             let mut settings = api.settings.tools.state.get();
             match option {

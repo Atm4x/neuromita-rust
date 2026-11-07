@@ -23,11 +23,17 @@ Levels match Python's cumulative filters:
 
 Selecting another level attempts to retain the same page, otherwise the closest
 preceding page that is visible at the new level. Navigation is bounded by the
-actual filtered list size. Restarting after EULA acceptance does not re-show the
-modal; users can reopen the Guide from Settings. The EULA decision and settings
-persistence remain unchanged.
+actual filtered list size. The chosen level is now persisted as the typed
+`onboarding.guide_level` setting through the active SettingsPresenter/runtime
+command, not by a second GUI JSON writer. Runtime administration snapshots
+synchronize the displayed level. Historical Rust settings without the new field
+deserialize as Basic; invalid values fail decoding. The Python settings import
+recognizes `GUIDE_LEVEL` as exactly `basic`, `advanced`, or `full`. Old
+`INTERFACE_MODE` is intentionally not mirrored into a second guide preference.
+Restarting after EULA acceptance does not re-show the modal; users can reopen
+the Guide from Settings. The EULA consent field and acceptance flow are unchanged.
 
-**Not implemented:** persistence of `GUIDE_LEVEL`/`INTERFACE_MODE`, per-control
+**Not implemented:** per-control
 focus rectangles and hotspots, image crop/zoom, direct page-specific local Wiki
 navigation, contents menu / section progress, advanced keyboard/accessibility
 polish, and Windows GUI behavioral E2E. The Help button still opens the
@@ -41,3 +47,8 @@ format/diff checks. Library unit tests check level membership, unique IDs,
 nonempty bilingual content, screenshot assets, fallback locale, and retaining a
 visible page across level changes. A successful Linux GUI *compile* does not
 certify mouse-driven Slint or Windows behavior.
+
+D15 persistence checks: historical onboarding JSON compatibility, strict level
+round-trips, selected-level restart/EULA independence, presenter-owned mutation
+with observable revision, and GUI command/snapshot wiring. Visual acceptance
+still requires an adequately provisioned Slint GUI runner.

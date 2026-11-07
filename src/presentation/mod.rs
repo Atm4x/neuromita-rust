@@ -31,8 +31,9 @@ pub use releases::{
 pub use runtime::RuntimeStatePresenter;
 pub use settings::{
     AsrSettingsPresenter, BoundProperty, CharacterSettingsPresenter, CharactersSettingsPresenter,
-    InterfaceSettingsPresenter, PresetSlot, PresetsSettingsPresenter, PropertyObserver,
-    SettingsPresenter, TtsSettingsPresenter, VoiceSettingsPresenter,
+    InterfaceSettingsPresenter, OnboardingSettingsPresenter, PresetSlot,
+    PresetsSettingsPresenter, PropertyObserver, SettingsPresenter, TtsSettingsPresenter,
+    VoiceSettingsPresenter,
 };
 pub use speech::SpeechSessionPresenter;
 

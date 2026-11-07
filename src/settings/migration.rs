@@ -1,5 +1,6 @@
 use super::{
-    Language, SettingsRepository, SettingsTransfer, SettingsTransferError, StoredSettings, Volume,
+    GuideLevel, Language, SettingsRepository, SettingsTransfer, SettingsTransferError,
+    StoredSettings, Volume,
 };
 use crate::migration::{Migration, MigrationError, StartupMigration};
 use serde::{
@@ -103,6 +104,19 @@ impl PythonSettingsMigration {
                 }
                 "LOCAL_VOICE_INIT_ON_REQUEST" => {
                     proposed.settings.speech.tts.local_lazy_init = python_bool(key, value)?;
+                }
+                "GUIDE_LEVEL" => {
+                    proposed.settings.onboarding.guide_level = match value.as_str() {
+                        Some("basic") => GuideLevel::Basic,
+                        Some("advanced") => GuideLevel::Advanced,
+                        Some("full") => GuideLevel::Full,
+                        _ => {
+                            return Err(invalid_python(
+                                key,
+                                "expected basic, advanced or full",
+                            ));
+                        }
+                    };
                 }
                 "EULA_ACCEPTED" => {
                     proposed.settings.onboarding.eula_accepted = value
