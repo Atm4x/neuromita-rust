@@ -832,3 +832,73 @@ fn python_revision_converts_verified_binary_attachments_without_cross_character_
             .contains(&neuromita::character::CharacterId::Crazy)
     );
 }
+
+#[test]
+fn python_verified_archive_imports_atomically_into_memory_and_refuses_reimport() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::export_memory;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let mut destination = TimelineStore::new();
+    let bound = source
+        .bind_memory(&destination, &explicit_observers())
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-b31-memory-{}", uuid::Uuid::new_v4()));
+    let store = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut destination, &store).unwrap();
+    assert_eq!(session, bound.native_session());
+    assert_eq!(
+        destination.session_provenance(session),
+        Some(&bound.provenance())
+    );
+    let native_archive = export_memory(&destination, session, &store).unwrap();
+    assert!(!native_archive.is_empty());
+    assert!(bound.import_memory(&mut destination, &store).is_err());
+    assert_eq!(
+        destination.session_provenance(session),
+        Some(&bound.provenance())
+    );
+    assert_eq!(
+        export_memory(&destination, session, &store).unwrap(),
+        native_archive
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_verified_archive_imports_into_sqlite_and_survives_reopen() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-b31-sqlite-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("timeline.sqlite");
+    let store = TimelineAssetStore::new(&root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let session;
+    let native_archive;
+    {
+        let mut destination = SqliteTimelineRepository::open(&path).unwrap();
+        let bound = source
+            .bind_sqlite(&destination, &explicit_observers())
+            .unwrap();
+        session = bound.import_sqlite(&mut destination, &store).unwrap();
+        native_archive = export_sqlite(&destination, session, &store).unwrap();
+        assert!(bound.import_sqlite(&mut destination, &store).is_err());
+    }
+    {
+        let reopened = SqliteTimelineRepository::open(&path).unwrap();
+        assert_eq!(
+            export_sqlite(&reopened, session, &store).unwrap(),
+            native_archive
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -180,3 +180,24 @@ verified binary manifest; only typed native `Image` parts are produced. The
 archive remains detached: `prepare_canonical()` does not publish a session
 or upload binary data. Python `EventObserved` and an atomic native importer
 remain separate blockers for full issue #9 acceptance.
+
+## Atomic Python import for representable events (B31)
+
+An explicitly bound and fully validated `BoundPythonArchive` may now call
+`import_memory` or (under `sqlite-system`) `import_sqlite` with an injected
+`TimelineAssetStore`. The importer rebinds against the destination snapshot,
+replays the complete native conversion and receipts, stages all verified
+content-addressed assets, then uses the **existing** atomic native session
+installer. Memory swaps its validated state only on success; SQLite publishes
+branches, facts, receipts and provenance in the same write transaction,
+revalidating conflicts there. Repeating an import fails with a conflict
+instead of replacing existing data. A failed installation may leave only
+orphan binary files, never half-published canonical Timeline history.
+
+The import remains deliberately **partial in source coverage**: unrepresentable
+Python events (especially `EventObserved` disclosure) are rejected before
+staging or native publication. The Python archive is not a second historical
+storage layer and no external identifier or timestamp precision is discarded:
+the exact source values live in `SessionProvenance`. Both adapters require
+caller-supplied root and character bindings; no `cwd`, profile directory or
+implicit observer mapping is used.
