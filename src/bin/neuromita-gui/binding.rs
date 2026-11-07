@@ -299,11 +299,15 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
     let index = requested_index.clamp(0, (count - 1) as i32);
     let page = guide::page(level, index as usize).expect("guide has a visible page");
     let language = window.get_onboarding_language();
+    if window.get_onboarding_guide_page() != index {
+        window.set_onboarding_guide_zoom(1.0);
+    }
     window.set_onboarding_guide_count(count as i32);
     window.set_onboarding_guide_page(index);
     window.set_onboarding_guide_title(page.title(&language).into());
     window.set_onboarding_guide_description(page.description(&language).into());
     window.set_onboarding_guide_image(page.image_key.into());
+    window.set_onboarding_guide_wiki_url(page.wiki_url(&language).unwrap_or_default().into());
 }
 
 fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {

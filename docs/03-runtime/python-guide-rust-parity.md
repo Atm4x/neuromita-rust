@@ -33,13 +33,16 @@ recognizes `GUIDE_LEVEL` as exactly `basic`, `advanced`, or `full`. Old
 Restarting after EULA acceptance does not re-show the modal; users can reopen
 the Guide from Settings. The EULA consent field and acceptance flow are unchanged.
 
-**Not implemented:** per-control
-focus rectangles and hotspots, image crop/zoom, direct page-specific local Wiki
-navigation, contents menu / section progress, advanced keyboard/accessibility
-polish, and Windows GUI behavioral E2E. The Help button still opens the
-existing general Wiki URL. Historical screenshots might depict Python UI
-rather than the current Slint layout. These limitations are deliberate and
-should remain visible until explicit parity acceptance.
+**Not implemented:** per-control focus rectangles and hotspots, advanced
+image focus/crop hotspots, direct page-specific *local* Wiki navigation,
+contents menu / section progress, advanced keyboard/accessibility polish, and
+Windows GUI behavioral E2E. The Help button now links to the exact historical
+RU/EN Wiki article for the current page using the pinned read-only Python
+documentation revision; pages without an article hide Help. Centered screenshot
+zoom is supported at 1×–2.5× with explicit buttons and clipping; this is not
+equivalent to the PyQt per-hotspot focus walkthrough. Historical screenshots
+might depict Python UI rather than the current Slint layout. These limitations
+remain visible until explicit parity acceptance.
 
 Verification: `cargo test --locked --offline --lib onboarding::guide::tests`,
 `cargo check --locked --offline --features gui --bin neuromita-gui`, and

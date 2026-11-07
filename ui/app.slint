@@ -39,6 +39,8 @@ export component AppWindow inherits Window {
     in property <string> onboarding-guide-title;
     in property <string> onboarding-guide-description;
     in property <string> onboarding-guide-image;
+    in property <string> onboarding-guide-wiki-url;
+    in-out property <float> onboarding-guide-zoom: 1.0;
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
@@ -226,78 +228,150 @@ export component AppWindow inherits Window {
                     }
                 }
                 Rectangle {
-                    vertical-stretch: 1; background: Theme.background; border-radius: 12px;
+                    vertical-stretch: 1; background: Theme.background; border-radius: 12px; clip: true;
                     if root.onboarding-guide-image == "welcome" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_welcome.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "welcome" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_welcome1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "preset" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_preset.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "preset" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_preset1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "voice" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_voice.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "voice" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_voice1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "microphone" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_microphone.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "microphone" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_microphone1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "memory" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_memory.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "memory" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_memory1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "screen" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_screen.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "screen" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_screen1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "models" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_models.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "models" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_models1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "sandbox" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_sandbox.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "sandbox" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_sandbox1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "next" && root.onboarding-language == "ru": Image {
                         source: @image-url("../assets/guide/guide_next.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                     if root.onboarding-guide-image == "next" && root.onboarding-language == "en": Image {
                         source: @image-url("../assets/guide/guide_next1.png");
-                        image-fit: contain; width: parent.width; height: parent.height;
+                        image-fit: contain;
+                        width: parent.width * root.onboarding-guide-zoom;
+                        height: parent.height * root.onboarding-guide-zoom;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
                     }
                 }
                 Rectangle {
@@ -316,8 +390,26 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     ActionSurface {
                         width: 145px; height: 38px; label: "Documentation"; background: Theme.hover;
+                        visible: root.onboarding-guide-wiki-url != "";
                         Label { text: "Wiki / Help"; horizontal-alignment: center; }
-                        activated => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
+                        activated => { root.external-link(root.onboarding-guide-wiki-url); }
+                    }
+                    ActionSurface {
+                        width: 38px; height: 38px; label: "Zoom out";
+                        enabled: root.onboarding-guide-zoom > 1.0; background: Theme.hover;
+                        Label { text: "−"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-zoom = max(1.0, root.onboarding-guide-zoom - 0.25); }
+                    }
+                    ActionSurface {
+                        width: 55px; height: 38px; label: "Reset image zoom"; background: Theme.hover;
+                        Label { text: "1:1"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-zoom = 1.0; }
+                    }
+                    ActionSurface {
+                        width: 38px; height: 38px; label: "Zoom in";
+                        enabled: root.onboarding-guide-zoom < 2.5; background: Theme.hover;
+                        Label { text: "+"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-zoom = min(2.5, root.onboarding-guide-zoom + 0.25); }
                     }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Text { text: (root.onboarding-guide-page + 1) + " / " + root.onboarding-guide-count; color: Theme.muted; vertical-alignment: center; }

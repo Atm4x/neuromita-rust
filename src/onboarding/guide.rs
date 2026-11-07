@@ -31,6 +31,19 @@ impl GuidePage {
             self.description_en
         }
     }
+
+    pub fn wiki_url(self, language: &str) -> Option<String> {
+        let language = if language.eq_ignore_ascii_case("ru") {
+            "ru"
+        } else {
+            "en"
+        };
+        self.wiki_target.map(|target| {
+            format!(
+                "https://github.com/Atm4x/NeuroMita/blob/5f3d061f523d9abefa6a264bb2953048a935fa65/docs/wiki/{language}/{target}"
+            )
+        })
+    }
 }
 
 pub fn pages(level: GuideLevel) -> impl Iterator<Item = &'static GuidePage> {
@@ -458,6 +471,14 @@ mod tests {
             assert!(ru.is_file(), "missing {}", ru.display());
             assert!(en.is_file(), "missing {}", en.display());
         }
+    }
+
+    #[test]
+    fn wiki_links_resolve_to_the_page_document_and_language() {
+        let welcome = page(GuideLevel::Basic, 0).unwrap();
+        assert!(welcome.wiki_url("ru").unwrap().ends_with("/ru/getting-started.md"));
+        assert!(welcome.wiki_url("en").unwrap().ends_with("/en/getting-started.md"));
+        assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
     }
 
     #[test]
