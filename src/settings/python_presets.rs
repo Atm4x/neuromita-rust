@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
     de::{MapAccess, SeqAccess, Visitor},
 };
 use serde_json::{Map, Value};
@@ -44,6 +44,21 @@ impl PythonPresetStagePreview {
     pub fn blocked_count(&self) -> usize {
         self.blocked_ids.len() + self.blocked_without_id
     }
+}
+
+/// A verified review of Python-only preferences. It is deliberately not a
+/// persisted Rust settings document or a request to activate a preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PythonPresetPreferencesReview {
+    /// Python's LAST_API_PRESET_ID, if explicitly configured and valid.
+    pub selected_user_id: Option<u32>,
+    /// True when Python explicitly stored this key, even as JSON null.
+    pub selection_explicit: bool,
+    /// Complete Python user-preset display order after Python-style completion.
+    pub user_order: Vec<u32>,
+    pub order_explicit: bool,
+    /// These preferences are not atomically installed with the two preset files.
+    pub activation_not_performed: bool,
 }
 
 pub struct PythonPresetStage {
@@ -152,6 +167,112 @@ impl PythonPresetStage {
             Vec::new()
         };
         Ok(Self { preview, files })
+    }
+
+    /// Verify Python's last active *user* preset and explicit display order.
+    /// This does not change Rust AppSettings or activate the selected preset.
+    pub fn preview_preferences(
+        &self,
+        python_settings: &[u8],
+    ) -> Result<PythonPresetPreferencesReview, PythonPresetStageError> {
+        if self.preview.blocked_count() != 0 {
+            return Err(PythonPresetStageError::Blocked(
+                self.preview.blocked_count(),
+            ));
+        }
+        if python_settings.len() > MAX_SOURCE_BYTES {
+            return Err(PythonPresetStageError::Invalid(
+                "Python settings exceed 8 MiB".into(),
+            ));
+        }
+        let settings = parse_unique_json(python_settings)?;
+        let document = settings.as_object().ok_or_else(|| {
+            PythonPresetStageError::Invalid("Python settings must be an object".into())
+        })?;
+        if document.contains_key("revision") && document.contains_key("settings") {
+            return Err(PythonPresetStageError::Invalid(
+                "Rust settings envelope is not Python settings".into(),
+            ));
+        }
+        let selection_explicit = document.contains_key("LAST_API_PRESET_ID");
+        let selected_user_id = match document.get("LAST_API_PRESET_ID") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(user_id(value).ok_or_else(|| {
+                PythonPresetStageError::Invalid(
+                    "LAST_API_PRESET_ID must be a positive numeric user preset ID".into(),
+                )
+            })?),
+        };
+        let user_ids: BTreeSet<u32> = self.preview.converted_ids.iter().copied().collect();
+        if selected_user_id.is_some_and(|id| !user_ids.contains(&id)) {
+            return Err(PythonPresetStageError::Invalid(
+                "selected Python preset is not a converted user preset".into(),
+            ));
+        }
+        let source = self.file("python-source-api-presets.json")?;
+        let source = parse_unique_json(source)?;
+        let source = source.as_object().ok_or_else(|| {
+            PythonPresetStageError::Invalid("Python preset source must be an object".into())
+        })?;
+        let raw_order = source.get("order");
+        let order_explicit = raw_order.is_some_and(|value| !value.is_null());
+        let mut order = Vec::with_capacity(user_ids.len());
+        let mut seen = BTreeSet::new();
+        if let Some(raw) = raw_order.filter(|value| !value.is_null()) {
+            let values = raw.as_array().ok_or_else(|| {
+                PythonPresetStageError::Invalid("Python preset order must be a list".into())
+            })?;
+            for value in values {
+                let id = user_id(value).ok_or_else(|| {
+                    PythonPresetStageError::Invalid("Python preset order has invalid ID".into())
+                })?;
+                if !user_ids.contains(&id) || !seen.insert(id) {
+                    return Err(PythonPresetStageError::Invalid(
+                        "Python preset order references an unknown or duplicate user ID".into(),
+                    ));
+                }
+                order.push(id);
+            }
+        }
+        // Python appends any missing user IDs in ascending order.
+        order.extend(user_ids.into_iter().filter(|id| !seen.contains(id)));
+        Ok(PythonPresetPreferencesReview {
+            selected_user_id,
+            selection_explicit,
+            user_order: order,
+            order_explicit,
+            activation_not_performed: true,
+        })
+    }
+
+    /// Include the inspected Python settings source and non-secret preferences
+    /// review in the *new* staging directory. No AppSettings is mutated.
+    pub fn with_preferences(
+        &self,
+        python_settings: &[u8],
+    ) -> Result<(Self, PythonPresetPreferencesReview), PythonPresetStageError> {
+        if self
+            .files
+            .iter()
+            .any(|(name, _)| *name == "python-source-settings.json")
+        {
+            return Err(PythonPresetStageError::Invalid(
+                "Python preferences already reviewed".into(),
+            ));
+        }
+        let review = self.preview_preferences(python_settings)?;
+        let serialized = serde_json::to_vec_pretty(&review).map_err(|_| {
+            PythonPresetStageError::Invalid("cannot encode Python preferences review".into())
+        })?;
+        let mut plan = Self {
+            preview: self.preview.clone(),
+            files: self.files.clone(),
+        };
+        plan.files
+            .push(("python-source-settings.json", python_settings.to_vec()));
+        plan.files
+            .push(("python-preset-preferences-review.json", serialized));
+        Ok((plan, review))
     }
 
     /// Merge into a new review directory, never into the running profile.
@@ -306,6 +427,15 @@ impl PythonPresetStage {
         }
         result
     }
+}
+
+fn user_id(value: &Value) -> Option<u32> {
+    let number = match value {
+        Value::Number(number) => number.as_u64()?,
+        Value::String(value) => value.trim().parse::<u64>().ok()?,
+        _ => return None,
+    };
+    u32::try_from(number).ok().filter(|id| *id > 0)
 }
 
 pub(super) fn parse_credentials(

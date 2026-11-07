@@ -5,6 +5,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let dry_run = arguments.iter().any(|argument| argument == "--dry-run");
     arguments.retain(|argument| argument != "--dry-run");
+    let preferences =
+        if let Some(index) = arguments.iter().position(|arg| arg == "--python-settings") {
+            if arguments.len() <= index + 1 {
+                return Err("--python-settings requires a Python settings.json path".into());
+            }
+            let path = PathBuf::from(arguments.remove(index + 1));
+            arguments.remove(index);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err("Python settings source must be a regular file".into());
+            }
+            Some(std::fs::read(path)?)
+        } else {
+            None
+        };
     let existing = if let Some(index) = arguments.iter().position(|arg| arg == "--existing-dir") {
         if arguments.len() <= index + 1 {
             return Err("--existing-dir requires a directory".into());
@@ -20,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     if arguments.len() != 3 {
-        return Err("usage: import_python_presets <api_presets.json> <api_templates.json> <new-output-directory> [--dry-run] [--existing-dir DIR]".into());
+        return Err("usage: import_python_presets <api_presets.json> <api_templates.json> <new-output-directory> [--dry-run] [--existing-dir DIR] [--python-settings PYTHON_SETTINGS.json]".into());
     }
     let plan = PythonPresetStage::prepare(
         &std::fs::read(&arguments[0])?,
@@ -33,6 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("existing directory has no preset or credential store".into());
         }
         plan.merge_with_existing(existing_catalog.as_deref(), existing_credentials.as_deref())?
+    } else {
+        plan
+    };
+    let plan = if let Some(ref bytes) = preferences {
+        let (plan, review) = plan.with_preferences(bytes)?;
+        println!(
+            "Python selected user preset: {:?}; display order: {:?}; applied: false",
+            review.selected_user_id, review.user_order
+        );
+        plan
     } else {
         plan
     };
