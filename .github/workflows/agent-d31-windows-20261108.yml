@@ -1,0 +1,37 @@
+name: Agent D31 pinned native Windows import approval
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d31-windows-20261108
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D31 source and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e 7b166a718eebfb03ec099a83112a673c6a9b46c0^{commit}
+          test "$(git rev-parse 7b166a718eebfb03ec099a83112a673c6a9b46c0^{tree})" = 9120a8ce266ffadc42839af05ea6edae9e56b58c
+          git checkout --detach 7b166a718eebfb03ec099a83112a673c6a9b46c0
+          test "$(git rev-parse HEAD)" = 7b166a718eebfb03ec099a83112a673c6a9b46c0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows standalone review and diagnostic concurrency
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_settings_import -- --test-threads=8
+          cargo test --locked --offline --test settings_cli -- --test-threads=8
+          cargo test --locked --offline --lib diagnostics::tests -- --test-threads=8
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo check --locked --offline --all-targets
