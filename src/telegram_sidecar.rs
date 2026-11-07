@@ -24,8 +24,10 @@ pub struct TelethonSession {
 
 fn error_code(text: &str) -> TelegramError {
     match text {
-        "unauthorized" | "invalid_code" | "expired_code" | "invalid_password"
-        | "code_not_requested" => TelegramError::Unauthorized,
+        "invalid_code" => TelegramError::InvalidCode,
+        "expired_code" => TelegramError::ExpiredCode,
+        "invalid_password" => TelegramError::InvalidPassword,
+        "unauthorized" | "code_not_requested" => TelegramError::Unauthorized,
         "not_connected" => TelegramError::Disconnected,
         "media_too_large" => TelegramError::MediaTooLarge,
         "missing_media" => TelegramError::InvalidMedia,
@@ -226,8 +228,8 @@ mod tests {
     use super::*;
     #[test]
     fn auth_errors_are_classified_without_disclosing_secrets() {
-        assert_eq!(error_code("invalid_code"), TelegramError::Unauthorized);
-        assert_eq!(error_code("expired_code"), TelegramError::Unauthorized);
+        assert_eq!(error_code("invalid_code"), TelegramError::InvalidCode);
+        assert_eq!(error_code("expired_code"), TelegramError::ExpiredCode);
         assert_eq!(error_code("media_too_large"), TelegramError::MediaTooLarge);
         assert_eq!(error_code("telegram_failure"), TelegramError::Network);
     }
