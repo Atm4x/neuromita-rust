@@ -1,0 +1,38 @@
+name: Agent B47 verified chat fence patch
+on:
+  push:
+    branches: [bridge/agent-b47-chat-fence-20261107]
+    paths: [bridge/agent-b47.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact B47 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=b98177f5c1c792720d5042e9ef3590e99fb8946b
+          tree=2ce2cf6a34ea1796a892eeca89a455040c644668
+          branch=codex/timeline-b47-chat-late-attachment-fence-20261107
+          base64 -d bridge/agent-b47.patch.gz.b64 > /tmp/b47.patch.gz
+          echo "2fadf619114ef85928c6227f0d0c20a89d1acaffa8f651fc74cdc4ae6a29ab31  /tmp/b47.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b47.patch.gz
+          gzip -dc /tmp/b47.patch.gz > /tmp/b47.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b47.patch
+          git apply --index /tmp/b47.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(chat): fence stale Slint attachment and send feedback by selection revision"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B47 branch exists: refuse overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_HEAD=$remote"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
