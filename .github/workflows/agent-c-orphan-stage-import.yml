@@ -1,0 +1,39 @@
+name: Agent C orphan staging ownership bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-orphan-lock-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-orphan-lock-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=d24a60d2915a96320ea23fe24ca7c1bd7744aab7
+          HEAD=3053afe08e70d2a705276e3323d0512ff0647b35
+          SOURCE=codex/ai-platform-hub-c3-concurrent-revision-20261107
+          TARGET=codex/ai-platform-hub-c3-orphan-lock-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-orphan-lock-20261107.bundle.b64 > /tmp/agent-c-orphan.bundle
+          echo 'e6b853feab6fd12f093627f6939421e9a5e7392122cbcee0c6c2421abc319fe4  /tmp/agent-c-orphan.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-orphan.bundle
+          git fetch --no-tags /tmp/agent-c-orphan.bundle "refs/heads/$SOURCE:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected target: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
