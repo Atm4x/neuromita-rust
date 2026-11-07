@@ -277,6 +277,7 @@ impl TelegramTransport for TelethonSession {
                         peer: actual_peer.into(),
                         outgoing,
                         kind,
+                        reply_to_id: row["reply_to_id"].as_i64(),
                     })
                 })
                 .collect()
