@@ -1634,3 +1634,116 @@ fn python_session_note_without_content_preserves_original_payload_in_native_time
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn contentless_python_message(kind: &str) -> Vec<u8> {
+    alter(|document| {
+        let event = &mut document["events"][1];
+        event["kind"] = json!(kind);
+        if kind != "PlayerMessage" {
+            event["actor_id"] = json!("A");
+        }
+        event["payload"].as_object_mut().unwrap().remove("content");
+        let kind = event["kind"].clone();
+        let actor = event["actor_id"].clone();
+        let payload = event["payload"].clone();
+        let intent = &mut document["operations"][1]["intent"]["events"][0];
+        intent["kind"] = kind;
+        intent["actor_id"] = actor;
+        intent["payload"] = payload;
+    })
+}
+
+#[test]
+fn python_contentless_message_kinds_preserve_payload_and_receipt_in_memory() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::{export_memory, import_memory};
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    for kind in ["PlayerMessage", "CharacterMessage", "CharacterObservation"] {
+        let source = inspect_python_archive(&contentless_python_message(kind)).unwrap();
+        let mut destination = TimelineStore::new();
+        let bound = source
+            .bind_memory(&destination, &explicit_observers())
+            .unwrap();
+        let prepared = bound.prepare_canonical().unwrap();
+        let event_id = neuromita::timeline::EventId(
+            source
+                .identities
+                .events
+                .iter()
+                .find(|item| item.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+                .unwrap()
+                .candidate_uuid,
+        );
+        let fact = prepared.fact(event_id).unwrap();
+        assert_eq!(
+            fact.draft.payload["message_id"],
+            json!("message:παράδειγμα")
+        );
+        assert!(!fact.draft.payload.contains_key("content"));
+        assert_eq!(prepared.receipt_count(), 2);
+
+        let root =
+            std::env::temp_dir().join(format!("nm-python-contentless-{}", uuid::Uuid::new_v4()));
+        let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+        let session = bound.import_memory(&mut destination, &assets).unwrap();
+        let archive = export_memory(&destination, session, &assets).unwrap();
+        let mut restored = TimelineStore::new();
+        import_memory(&mut restored, &archive, &assets).unwrap();
+        assert_eq!(export_memory(&restored, session, &assets).unwrap(), archive);
+        let root_branch = neuromita::timeline::domain::BranchId(
+            source
+                .identities
+                .branches
+                .iter()
+                .find(|item| item.source == "main")
+                .unwrap()
+                .candidate_uuid,
+        );
+        assert!(
+            !restored
+                .world(root_branch)
+                .unwrap()
+                .iter()
+                .find(|fact| fact.draft.id == event_id)
+                .unwrap()
+                .draft
+                .payload
+                .contains_key("content")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_contentless_messages_survive_sqlite_reopen_without_synthesized_text() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    for kind in ["PlayerMessage", "CharacterMessage", "CharacterObservation"] {
+        let source = inspect_python_archive(&contentless_python_message(kind)).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "nm-python-contentless-sqlite-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+        let path = root.join("timeline.sqlite");
+        let (session, first) = {
+            let mut timeline = SqliteTimelineRepository::open(&path).unwrap();
+            let bound = source
+                .bind_sqlite(&timeline, &explicit_observers())
+                .unwrap();
+            let session = bound.import_sqlite(&mut timeline, &assets).unwrap();
+            (session, export_sqlite(&timeline, session, &assets).unwrap())
+        };
+        let timeline = SqliteTimelineRepository::open(&path).unwrap();
+        let after = export_sqlite(&timeline, session, &assets).unwrap();
+        assert_eq!(after, first);
+        assert!(serde_json::from_slice::<Value>(&after).unwrap()["provenance"].is_object());
+        drop(timeline);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
