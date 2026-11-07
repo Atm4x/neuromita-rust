@@ -1,0 +1,29 @@
+name: Export D20 Wiki source assets
+on:
+  push:
+    branches:
+      - bridge/agent-d20-wiki-docs-20261107
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-offline-wiki-20261107
+          persist-credentials: false
+      - name: Verify source and bundle Wiki assets
+        shell: bash
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "288f5904d316d967b5255edcc211db07328082f5"
+          zip -q -r agent-d20-wiki-docs.zip docs/wiki
+          sha256sum agent-d20-wiki-docs.zip > agent-d20-wiki-docs.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d20-wiki-docs
+          path: |
+            agent-d20-wiki-docs.zip
+            agent-d20-wiki-docs.sha256
+          retention-days: 2
