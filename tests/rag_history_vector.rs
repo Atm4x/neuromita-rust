@@ -11,9 +11,10 @@ use neuromita::{
             EmbeddingSpace,
         },
         history_retrieval::{
-            HistorySearchConfig, HistorySearchError, HistorySearchStatus, search_history,
-            search_history_semantic,
+            HistorySearchConfig, HistorySearchError, HistorySearchStatus,
+            search_archived_history_semantic, search_history, search_history_semantic,
         },
+        history_window::HistoryWindow,
         retrieval_fusion::{FusionMode, RetrievalMethod},
         semantic_memory::SemanticMemoryRetriever,
     },
@@ -513,4 +514,69 @@ async fn history_revision_reindexes_only_changed_visible_document_and_confirmed_
     .unwrap();
     assert_eq!(historical.hits.len(), 1);
     assert_eq!(historical.hits[0].content, "tea in kitchen");
+}
+
+#[tokio::test]
+async fn vector_archived_window_only_embeds_excluded_history_and_never_active() {
+    let (fixture, retriever) = setup(Fault::None);
+    let (mut repo, branch) = fixture_timeline();
+    let old = append(&mut repo, branch, &[CharacterId::Crazy], "tea in kitchen");
+    let active = append(
+        &mut repo,
+        branch,
+        &[CharacterId::Crazy],
+        "tea in current window",
+    );
+    let view = messages(&repo, branch, CharacterId::Crazy);
+    let window = HistoryWindow::capture(&view, None, 1);
+    assert!(window.is_archived(old));
+    assert!(window.is_active(active));
+    let result = search_archived_history_semantic(
+        &retriever,
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "warm",
+        HistorySearchConfig::default(),
+        FusionMode::VectorOnly,
+        Some(0.8),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].key.id, old.0.to_string());
+    assert_eq!(fixture.document_calls.load(Ordering::SeqCst), 1);
+    let repeated = search_archived_history_semantic(
+        &retriever,
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "warm",
+        HistorySearchConfig::default(),
+        FusionMode::Union,
+        Some(0.8),
+    )
+    .await
+    .unwrap();
+    assert!(
+        repeated
+            .hits
+            .iter()
+            .all(|hit| hit.key.id == old.0.to_string())
+    );
+    assert_eq!(fixture.document_calls.load(Ordering::SeqCst), 1);
+    let focused = HistoryWindow::capture(&view, Some(old), 1);
+    let none = search_archived_history_semantic(
+        &retriever,
+        CharacterId::Crazy,
+        &view,
+        &focused,
+        "warm",
+        HistorySearchConfig::default(),
+        FusionMode::VectorOnly,
+        Some(0.8),
+    )
+    .await
+    .unwrap();
+    assert_eq!(none.status, HistorySearchStatus::EmptyCorpus);
 }

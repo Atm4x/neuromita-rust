@@ -1,10 +1,14 @@
+#[cfg(feature = "sqlite-system")]
+use neuromita::knowledge::history_retrieval::search_archived_history_fts;
 use neuromita::{
     character::CharacterId,
     knowledge::{
+        history_generation::{HistoryEvidenceError, render_archived_history_evidence},
         history_retrieval::{
-            HistorySearchConfig, HistorySearchError, HistorySearchStatus, search_history,
-            search_history_fts,
+            HistorySearchConfig, HistorySearchError, HistorySearchStatus, search_archived_history,
+            search_history, search_history_fts,
         },
+        history_window::HistoryWindow,
         retrieval_fusion::{RetrievalMethod, RetrievalSource},
     },
     timeline::{
@@ -588,4 +592,174 @@ fn explicit_fts_mode_rejects_missing_backend_without_lexical_substitution() {
         .unwrap_err(),
         HistorySearchError::FtsUnavailable
     );
+}
+
+#[test]
+fn archived_history_is_absent_from_active_window_and_retrievable_once() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let old = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Old jasmine recipe hidden from active context"),
+    );
+    let recent = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Current schedule"),
+    );
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let window = HistoryWindow::capture(&view, None, 1);
+    assert_eq!(window.archived_count(), 1);
+    assert!(window.is_archived(old));
+    assert!(window.is_active(recent));
+    let result = search_archived_history(
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "jasmine recipe",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(result.status, HistorySearchStatus::Selected);
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].key.id, old.0.to_string());
+    let evidence =
+        render_archived_history_evidence(CharacterId::Crazy, &view, &window, &result, 4, 1200)
+            .unwrap()
+            .unwrap();
+    assert!(evidence.contains("Old jasmine recipe"));
+    let active_query = search_archived_history(
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "schedule",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(active_query.status, HistorySearchStatus::NoMatches);
+
+    let old_focus = HistoryWindow::capture(&view, Some(old), 1);
+    assert!(old_focus.is_active(old));
+    assert_eq!(old_focus.archived_count(), 0);
+    let focused = search_archived_history(
+        CharacterId::Crazy,
+        &view,
+        &old_focus,
+        "jasmine",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(focused.status, HistorySearchStatus::EmptyCorpus);
+    assert_eq!(
+        render_archived_history_evidence(CharacterId::Crazy, &view, &old_focus, &result, 4, 1200),
+        Err(HistoryEvidenceError::InvalidEvidence)
+    );
+}
+
+#[test]
+fn archived_history_scope_is_invalidated_by_revision_and_privacy() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let old = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Private tea archive"),
+    );
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Current session"),
+    );
+    let before = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let window = HistoryWindow::capture(&before, None, 1);
+    let other = TimelineMessageQueries::capture(&repo, branch, CharacterId::Kind, None).unwrap();
+    assert!(!window.matches(&other));
+    assert_eq!(
+        search_archived_history(
+            CharacterId::Kind,
+            &other,
+            &window,
+            "tea",
+            HistorySearchConfig::default()
+        )
+        .unwrap_err(),
+        HistorySearchError::StaleWindow
+    );
+    update_message(
+        &mut repo,
+        branch,
+        CharacterId::Crazy,
+        old,
+        EventKind::MessageRevised,
+        "Updated private tea archive",
+    );
+    let after = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert!(!window.matches(&after));
+    assert_eq!(
+        search_archived_history(
+            CharacterId::Crazy,
+            &after,
+            &window,
+            "tea",
+            HistorySearchConfig::default()
+        )
+        .unwrap_err(),
+        HistorySearchError::StaleWindow
+    );
+    let current = HistoryWindow::capture(&after, None, 1);
+    let result = search_archived_history(
+        CharacterId::Crazy,
+        &after,
+        &current,
+        "Updated private",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].key.id, old.0.to_string());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn archived_history_fts_indexes_only_messages_outside_active_context() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let old = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Cinnamon archive menu"),
+    );
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Cinnamon today fresh"),
+    );
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let window = HistoryWindow::capture(&view, None, 1);
+    let result = search_archived_history_fts(
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "cinnamon",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.hits[0].key.id, old.0.to_string());
 }

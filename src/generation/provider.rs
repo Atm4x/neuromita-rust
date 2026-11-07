@@ -12,8 +12,8 @@ use super::{
     GenerationPreset, ModelMemoryAddPolicy, ProviderKind, ProviderTemplate, StructuredResponse,
     ToolSettings,
 };
-use crate::character::CharacterContext;
 use crate::prompts::PostDslProgram;
+use crate::{character::CharacterContext, knowledge::history_window::HistoryWindow};
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum GenerationError {
@@ -62,6 +62,7 @@ pub struct GenerationRequest {
     pub post_dsl: Option<PostDslProgram>,
     pub preset: GenerationPreset,
     pub prepared_knowledge: Option<String>,
+    pub history_window: Option<HistoryWindow>,
     pub tools: ToolSettings,
     pub model_memory_policy: ModelMemoryAddPolicy,
 }
@@ -78,6 +79,7 @@ impl GenerationRequest {
             post_dsl: None,
             preset,
             prepared_knowledge,
+            history_window: None,
             tools: ToolSettings::default(),
             model_memory_policy: ModelMemoryAddPolicy::Ordinary,
         }
@@ -86,6 +88,11 @@ impl GenerationRequest {
     /// Capture the model-write policy with this request, never from mutable global state.
     pub fn with_model_memory_policy(mut self, policy: ModelMemoryAddPolicy) -> Self {
         self.model_memory_policy = policy;
+        self
+    }
+
+    pub fn with_history_window(mut self, window: Option<HistoryWindow>) -> Self {
+        self.history_window = window;
         self
     }
 
@@ -114,6 +121,7 @@ pub struct GenerationInput {
     pub context: CharacterContext,
     pub prompt: Option<PreparedPrompt>,
     pub prepared_knowledge: Option<String>,
+    pub history_window: Option<HistoryWindow>,
     pub tool_history: Vec<PromptMessage>,
     pub(crate) native_tool_history: Vec<NativeToolExchange>,
     pub tool_settings: ToolSettings,
@@ -279,6 +287,15 @@ impl ResponseGenerator {
         observer: &mut dyn GenerationObserver,
     ) -> Result<ProposedResponse, GenerationError> {
         request.model_memory_policy.validate()?;
+        if request
+            .history_window
+            .as_ref()
+            .is_some_and(|window| !window.matches(&request.context.view))
+        {
+            return Err(GenerationError::Response(
+                "history window does not match the admitted Timeline".into(),
+            ));
+        }
         let template = request.preset.template().clone();
         let post_dsl = request.post_dsl;
         let model_memory_policy = request.model_memory_policy;
@@ -294,6 +311,7 @@ impl ResponseGenerator {
             context: request.context,
             prompt: request.prompt,
             prepared_knowledge: request.prepared_knowledge,
+            history_window: request.history_window,
             tool_history: Vec::new(),
             native_tool_history: Vec::new(),
             tool_settings: tools.clone(),

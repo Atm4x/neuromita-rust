@@ -124,12 +124,13 @@ async fn generation_history_is_opt_in_captured_at_admission_and_scoped_to_live_c
     let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
     let selected = HistoryGenerationSettings {
         mode: HistoryGenerationMode::Keyword,
+        active_messages: 1,
         ..previous.value
     };
     SettingsApi::replace(previous.revision, selected).unwrap();
-    let handle = ChatApi::reply(ReplyRequest::new(
+    let handle = ChatApi::initiate(InitiateRequest::new(
         CharacterId::Crazy,
-        first,
+        "Jasmine tea",
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -151,6 +152,9 @@ async fn generation_history_is_opt_in_captured_at_admission_and_scoped_to_live_c
     assert!(evidence.contains(&first.0.to_string()));
     assert!(evidence.contains("Jasmine tea is only for Crazy"));
     assert!(!evidence.contains("[FORGOTTEN]"));
+    let window = call.input.history_window.as_ref().unwrap();
+    assert!(window.is_archived(first));
+    assert!(!window.is_active(first));
     call.reply.send("Confirmed".into()).unwrap();
     let finished = timeout(Duration::from_secs(5), handle.wait())
         .await
@@ -262,6 +266,22 @@ fn generation_history_defaults_off_and_rejects_invalid_budgets() {
         .validate()
         .is_err()
     );
+    assert!(
+        HistoryGenerationSettings {
+            active_messages: 0,
+            ..settings
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        HistoryGenerationSettings {
+            active_messages: 65,
+            ..settings
+        }
+        .validate()
+        .is_err()
+    );
     let deserialized: HistoryGenerationSettings = serde_json::from_str("{}").unwrap();
     assert_eq!(deserialized, settings);
 }
@@ -292,12 +312,14 @@ async fn timeline_change_before_provider_reply_rejects_selected_history_at_accep
     ))
     .unwrap();
     let call = next_call(&mut calls).await;
+    assert!(call.input.history_window.is_some());
     assert!(
         call.input
             .prepared_knowledge
             .as_deref()
             .unwrap_or("")
-            .contains("Tea on the balcony")
+            .find("[RETRIEVED TIMELINE EVIDENCE]")
+            .is_none()
     );
     ChatApi::publish_message(
         CharacterId::Crazy,
@@ -340,6 +362,7 @@ async fn user_selected_fts_reaches_the_live_provider_with_scoped_bm25_evidence()
         settings.revision,
         HistoryGenerationSettings {
             mode: HistoryGenerationMode::Fts,
+            active_messages: 1,
             ..settings.value
         },
     )
@@ -349,9 +372,14 @@ async fn user_selected_fts_reaches_the_live_provider_with_scoped_bm25_evidence()
         UserInput::new("Jasmine and pine needles".into()).unwrap(),
     )
     .unwrap();
-    let request = ChatApi::reply(ReplyRequest::new(
+    ChatApi::publish_message(
         CharacterId::Crazy,
-        event,
+        UserInput::new("Today's plans".into()).unwrap(),
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Jasmine pine",
         RequestSource::Presenter,
     ))
     .unwrap();
@@ -423,18 +451,24 @@ async fn changing_timeline_during_vector_search_cancels_before_provider_invocati
         settings.revision,
         HistoryGenerationSettings {
             mode: HistoryGenerationMode::Vector,
+            active_messages: 1,
             ..settings.value
         },
     )
     .unwrap();
-    let source = ChatApi::publish_message(
+    let _source = ChatApi::publish_message(
         CharacterId::Crazy,
         UserInput::new("Tea on balcony".into()).unwrap(),
     )
     .unwrap();
+    let current = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("New topic before search".into()).unwrap(),
+    )
+    .unwrap();
     let request = ChatApi::reply(ReplyRequest::new(
         CharacterId::Crazy,
-        source,
+        current,
         RequestSource::Presenter,
     ))
     .unwrap();

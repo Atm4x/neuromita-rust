@@ -3,7 +3,7 @@
 
 use crate::{identity::CharacterId, timeline::view::MitaView};
 
-use super::history_retrieval::HistorySearchResult;
+use super::{history_retrieval::HistorySearchResult, history_window::HistoryWindow};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum HistoryEvidenceError {
@@ -20,6 +20,45 @@ pub fn render_history_evidence(
     max_results: usize,
     max_content_chars: usize,
 ) -> Result<Option<String>, HistoryEvidenceError> {
+    render_history_evidence_with_window(
+        character,
+        view,
+        result,
+        max_results,
+        max_content_chars,
+        None,
+    )
+}
+
+pub fn render_archived_history_evidence(
+    character: CharacterId,
+    view: &MitaView,
+    window: &HistoryWindow,
+    result: &HistorySearchResult,
+    max_results: usize,
+    max_content_chars: usize,
+) -> Result<Option<String>, HistoryEvidenceError> {
+    render_history_evidence_with_window(
+        character,
+        view,
+        result,
+        max_results,
+        max_content_chars,
+        Some(window),
+    )
+}
+
+fn render_history_evidence_with_window(
+    character: CharacterId,
+    view: &MitaView,
+    result: &HistorySearchResult,
+    max_results: usize,
+    max_content_chars: usize,
+    window: Option<&HistoryWindow>,
+) -> Result<Option<String>, HistoryEvidenceError> {
+    if window.is_some_and(|window| !window.matches(view)) {
+        return Err(HistoryEvidenceError::StaleSelection);
+    }
     if view.character() != character
         || view.branch != result.branch
         || view.through != result.through
@@ -39,6 +78,12 @@ pub fn render_history_evidence(
     ];
     for hit in &result.hits {
         if hit.key.character != character
+            || window.is_some_and(|window| {
+                !current.iter().any(|message| {
+                    message.event_id.0.to_string() == hit.key.id
+                        && window.is_archived(message.event_id)
+                })
+            })
             || hit.key.source != super::retrieval_fusion::RetrievalSource::History
             || hit.content.chars().count() > max_content_chars
             || !current.iter().any(|message| {

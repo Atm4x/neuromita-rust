@@ -36,6 +36,7 @@ impl GeminiProvider {
             context.context,
             &template,
             &context.prepared_knowledge,
+            context.history_window.as_ref(),
             context.prompt.as_ref(),
             &context.tool_history,
             &context.native_tool_history,

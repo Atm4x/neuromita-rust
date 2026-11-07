@@ -15,10 +15,14 @@ use crate::{
         GenerationError, GenerationObserver, GenerationRequest, LlmConversation, PreparedRequest,
         PresetCatalog, ProviderReply, ResponseGenerator,
     },
+    interaction::TurnIntent,
     knowledge::{
         KnowledgeRetrieval,
-        history_generation::render_history_evidence,
-        history_retrieval::{HistorySearchConfig, search_history, search_history_fts},
+        history_generation::render_archived_history_evidence,
+        history_retrieval::{
+            HistorySearchConfig, search_archived_history, search_archived_history_fts,
+        },
+        history_window::HistoryWindow,
         retrieval_fusion::FusionMode,
     },
     settings::HistoryGenerationMode,
@@ -242,7 +246,15 @@ impl MessageHandler {
                     ))?;
                 let history_policy = settings.values.history_generation;
                 let mut selected = selected;
+                let mut history_window = None;
                 if history_policy.mode != HistoryGenerationMode::Off {
+                    let focus = match context.focus.intent {
+                        TurnIntent::Reply(id) | TurnIntent::React(id) => Some(id),
+                        TurnIntent::Initiate => None,
+                    };
+                    let window = HistoryWindow::capture(
+                        &context.view, focus, usize::from(history_policy.active_messages),
+                    );
                     let history_query = query.chars().take(512).collect::<String>();
                     let config = HistorySearchConfig {
                         limit: usize::from(history_policy.max_results),
@@ -251,20 +263,20 @@ impl MessageHandler {
                     let history_result = match history_policy.mode {
                         HistoryGenerationMode::Off => unreachable!(),
                         HistoryGenerationMode::Keyword => {
-                            search_history(context.character_id, &context.view, &history_query, config)
+                            search_archived_history(context.character_id, &context.view, &window, &history_query, config)
                         }
                         HistoryGenerationMode::Fts => {
-                            search_history_fts(context.character_id, &context.view, &history_query, config)
+                            search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
                         }
                         HistoryGenerationMode::Vector => {
-                            self.knowledge.search_history_semantic(
-                                context.character_id, &context.view, &history_query,
+                            self.knowledge.search_archived_history_semantic(
+                                context.character_id, &context.view, &window, &history_query,
                                 config, FusionMode::VectorOnly, None,
                             ).await
                         }
                         HistoryGenerationMode::Fusion => {
-                            self.knowledge.search_history_semantic(
-                                context.character_id, &context.view, &history_query,
+                            self.knowledge.search_archived_history_semantic(
+                                context.character_id, &context.view, &window, &history_query,
                                 config, FusionMode::Union, None,
                             ).await
                         }
@@ -272,8 +284,8 @@ impl MessageHandler {
                     .map_err(|error| GenerationError::Response(format!(
                         "selected history retrieval failed: {error}"
                     )))?;
-                    if let Some(evidence) = render_history_evidence(
-                        context.character_id, &context.view, &history_result,
+                    if let Some(evidence) = render_archived_history_evidence(
+                        context.character_id, &context.view, &window, &history_result,
                         usize::from(history_policy.max_results),
                         usize::from(history_policy.max_content_chars),
                     ).map_err(|error| GenerationError::Response(format!(
@@ -284,6 +296,7 @@ impl MessageHandler {
                             None => selected = Some(evidence),
                         }
                     }
+                    history_window = Some(window);
                 }
                 if history_policy.mode != HistoryGenerationMode::Off {
                     let latest = self.character.memories().await.map_err(|error| {
@@ -294,6 +307,7 @@ impl MessageHandler {
                     }
                 }
                 let request = GenerationRequest::new(context, preset, selected)
+                    .with_history_window(history_window)
                     .with_model_memory_policy(settings.values.memory.model_add_policy())
                     .with_prompt(prompt)
                     .with_post_dsl(post_dsl)

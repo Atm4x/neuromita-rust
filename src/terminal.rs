@@ -46,7 +46,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion], /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -569,7 +569,7 @@ enum HistoryCommand<'a> {
 fn parse_history_generation_mode(
     line: &str,
 ) -> Result<Option<HistoryGenerationMode>, &'static str> {
-    const USAGE: &str = "Используй /rag generation [off|keyword|fts|vector|fusion]";
+    const USAGE: &str = "Используй /rag generation [off|keyword|fts|vector|fusion|window N]";
     match line.split_whitespace().collect::<Vec<_>>().as_slice() {
         ["/rag", "generation"] => Ok(None),
         ["/rag", "generation", "off"] => Ok(Some(HistoryGenerationMode::Off)),
@@ -581,23 +581,52 @@ fn parse_history_generation_mode(
     }
 }
 
+fn parse_history_generation_window(line: &str) -> Result<Option<u8>, &'static str> {
+    const USAGE: &str = "Используй /rag generation window N (1..64)";
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.get(2) != Some(&"window") {
+        return Ok(None);
+    }
+    let ["/rag", "generation", "window", count] = parts.as_slice() else {
+        return Err(USAGE);
+    };
+    let count = count.parse::<u8>().map_err(|_| USAGE)?;
+    if !(1..=64).contains(&count) {
+        return Err(USAGE);
+    }
+    Ok(Some(count))
+}
+
 fn history_generation_command(line: &str) -> Result<String, String> {
-    let requested = parse_history_generation_mode(line).map_err(str::to_owned)?;
+    let requested_window = parse_history_generation_window(line).map_err(str::to_owned)?;
+    let requested = if requested_window.is_some() {
+        None
+    } else {
+        parse_history_generation_mode(line).map_err(str::to_owned)?
+    };
     let current =
         SettingsApi::snapshot::<HistoryGenerationSettings>().map_err(|error| error.to_string())?;
-    let value = match requested {
-        None => current.value,
-        Some(mode) => {
-            let mut next = current.value;
-            next.mode = mode;
-            SettingsApi::replace(current.revision, next)
-                .map_err(|error| error.to_string())?
-                .value
+    let value = if let Some(count) = requested_window {
+        let mut next = current.value;
+        next.active_messages = count;
+        SettingsApi::replace(current.revision, next)
+            .map_err(|error| error.to_string())?
+            .value
+    } else {
+        match requested {
+            None => current.value,
+            Some(mode) => {
+                let mut next = current.value;
+                next.mode = mode;
+                SettingsApi::replace(current.revision, next)
+                    .map_err(|error| error.to_string())?
+                    .value
+            }
         }
     };
     Ok(format!(
-        "Генерация: History RAG {:?}, {} результатов, {} символов на запись; изменение влияет только на новые запросы.",
-        value.mode, value.max_results, value.max_content_chars
+        "Генерация: History RAG {:?}, {} активных сообщений, {} результатов, {} символов на запись; изменение влияет только на новые запросы.",
+        value.mode, value.active_messages, value.max_results, value.max_content_chars
     ))
 }
 
@@ -718,6 +747,20 @@ mod forgotten_recall_command_tests {
         );
         assert!(parse_history_generation_mode("/rag generation not-a-mode").is_err());
         assert!(parse_history_generation_mode("/rag generation fusion extra").is_err());
+        assert_eq!(
+            parse_history_generation_window("/rag generation window 3"),
+            Ok(Some(3))
+        );
+        assert_eq!(parse_history_generation_window("/rag generation"), Ok(None));
+        for invalid in [
+            "/rag generation window",
+            "/rag generation window 0",
+            "/rag generation window 65",
+            "/rag generation window 2 extra",
+            "/rag generation window x",
+        ] {
+            assert!(parse_history_generation_window(invalid).is_err());
+        }
         assert_eq!(
             parse_history_generation_mode("/rag\tgeneration fusion"),
             Ok(Some(HistoryGenerationMode::Fusion))
