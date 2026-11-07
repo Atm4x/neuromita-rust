@@ -40,13 +40,20 @@ pub fn attach(
         if let Err(error) = commands.try_send(command)
             && let Some(window) = weak.upgrade()
         {
-            if let Command::MemoryEdit(edit_id, ..) = error.into_inner() {
-                super::memory::failed(
+            match error.into_inner() {
+                Command::MemoryEdit(edit_id, ..) => super::memory::failed(
                     &window,
                     &queue_editor,
                     edit_id,
                     "Desktop command queue is full or closed".into(),
-                );
+                ),
+                Command::MemoryRecall(request_id, ..) => super::memory::recalled(
+                    &window,
+                    &queue_editor,
+                    request_id,
+                    Err("Desktop command queue is full or closed".into()),
+                ),
+                _ => {}
             }
             window.set_chat_sending(false);
             window.set_core_connecting(false);
@@ -216,6 +223,9 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::MemorySaved(edit_id) => super::memory::saved(window, memory_editor, edit_id),
         Update::MemoryEditError(edit_id, error) => {
             super::memory::failed(window, memory_editor, edit_id, error)
+        }
+        Update::MemoryRecallResult(request_id, result) => {
+            super::memory::recalled(window, memory_editor, request_id, result)
         }
         Update::Confirmation(preview) => {
             let ui = window.global::<ConversationUi>();

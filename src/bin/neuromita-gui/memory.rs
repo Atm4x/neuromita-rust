@@ -18,10 +18,13 @@ use super::{
 #[derive(Default)]
 pub struct MemoryEditor {
     current: Option<CharacterMemorySnapshot>,
+    selected_character: Option<neuromita::character::CharacterId>,
     draft: Option<CharacterMemorySnapshot>,
     draft_id: Option<uuid::Uuid>,
     offset: usize,
     search: String,
+    recall_id: Option<uuid::Uuid>,
+    recall_record: Option<MemoryId>,
 }
 
 pub type EditorState = Arc<Mutex<MemoryEditor>>;
@@ -34,10 +37,13 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
     ui.on_select(move |id| {
         let mut editor = selected.lock().expect("memory editor mutex");
         editor.current = None;
+        editor.selected_character = neuromita::character::CharacterId::from_index(id);
         editor.draft = None;
         editor.draft_id = None;
         editor.offset = 0;
         editor.search.clear();
+        editor.recall_id = None;
+        editor.recall_record = None;
         if let Some(window) = weak.upgrade() {
             let ui = window.global::<MemoryUi>();
             ui.set_character(id);
@@ -46,6 +52,10 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_content("".into());
             ui.set_error("".into());
             ui.set_delete_confirm(false);
+            ui.set_selected_forgotten(false);
+            ui.set_recall_query("".into());
+            ui.set_recall_result("".into());
+            ui.set_recall_pending(false);
             ui.set_search("".into());
             ui.set_offset(0);
             ui.set_next(-1);
@@ -96,6 +106,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_error("Memory snapshot is unavailable".into());
             return;
         };
+        editor.recall_id = None;
+        editor.recall_record = None;
+        ui.set_recall_pending(false);
+        ui.set_recall_result("".into());
+        ui.set_recall_query("".into());
+        ui.set_selected_forgotten(false);
         if id.is_empty() {
             ui.set_edit_id("".into());
             ui.set_content("".into());
@@ -108,6 +124,10 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
                 ui.set_error("Memory is no longer available".into());
                 return;
             };
+            ui.set_selected_forgotten(
+                record.kind == neuromita::memory::MemoryKind::Fact
+                    && record.state == neuromita::memory::MemoryState::Forgotten,
+            );
             ui.set_edit_id(id);
             ui.set_content(record.content.as_str().into());
         }
@@ -118,6 +138,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
     });
     let editor = state.clone();
     let weak = window.as_weak();
+    let apply_send = dispatch.clone();
     ui.on_apply(move |action| {
         let Some(component) = weak.upgrade() else {
             return;
@@ -167,17 +188,97 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         match result {
             Ok(command) => {
                 ui.set_editing(false);
-                dispatch(Command::MemoryEdit(edit_id, expected, vec![command]));
+                apply_send(Command::MemoryEdit(edit_id, expected, vec![command]));
             }
             Err(error) => ui.set_error(error.into()),
         }
+    });
+    let selected = state.clone();
+    let weak = window.as_weak();
+    ui.on_recall(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<MemoryUi>();
+        let query = ui.get_recall_query().trim().to_owned();
+        if query.is_empty() {
+            ui.set_error("Enter a search query for this forgotten memory".into());
+            return;
+        }
+        let id = ui.get_edit_id();
+        let mut editor = selected.lock().expect("memory editor mutex");
+        let Some(snapshot) = editor.current.as_ref() else {
+            ui.set_error("Memory snapshot is unavailable".into());
+            return;
+        };
+        let Some(record) = snapshot
+            .records()
+            .iter()
+            .find(|record| record.id.0.to_string() == id.as_str())
+        else {
+            ui.set_error("Memory is no longer available".into());
+            return;
+        };
+        if record.kind != neuromita::memory::MemoryKind::Fact
+            || record.state != neuromita::memory::MemoryState::Forgotten
+        {
+            ui.set_error("Only a forgotten fact can be inspected".into());
+            return;
+        }
+        let character = snapshot.character();
+        let memory_id = record.id;
+        let request_id = uuid::Uuid::new_v4();
+        editor.recall_id = Some(request_id);
+        editor.recall_record = Some(memory_id);
+        drop(editor);
+        ui.set_recall_result("".into());
+        ui.set_recall_pending(true);
+        ui.set_error("".into());
+        dispatch(Command::MemoryRecall(
+            request_id, character, memory_id, query,
+        ));
     });
 }
 
 pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
     let (offset, search) = {
         let mut state = state.lock().expect("memory editor mutex");
+        if state
+            .selected_character
+            .is_some_and(|id| id != page.snapshot().character())
+        {
+            return;
+        }
+        let revised = state.current.as_ref().is_some_and(|previous| {
+            previous.anchor() != page.snapshot().anchor()
+                || previous.records() != page.snapshot().records()
+        });
         state.current = Some(page.snapshot().clone());
+        let selected_is_still_forgotten = !revised
+            && state.recall_record.is_some_and(|id| {
+                page.snapshot().records().iter().any(|record| {
+                    record.id == id
+                        && record.kind == neuromita::memory::MemoryKind::Fact
+                        && record.state == neuromita::memory::MemoryState::Forgotten
+                })
+            });
+        if !selected_is_still_forgotten {
+            state.recall_id = None;
+            state.recall_record = None;
+            window.global::<MemoryUi>().set_recall_pending(false);
+            window.global::<MemoryUi>().set_recall_result("".into());
+        }
+        if revised {
+            window.global::<MemoryUi>().set_recall_result("".into());
+        }
+        let selected_id = window.global::<MemoryUi>().get_edit_id();
+        window
+            .global::<MemoryUi>()
+            .set_selected_forgotten(page.snapshot().records().iter().any(|record| {
+                record.id.0.to_string() == selected_id.as_str()
+                    && record.kind == neuromita::memory::MemoryKind::Fact
+                    && record.state == neuromita::memory::MemoryState::Forgotten
+            }));
         (state.offset, state.search.clone())
     };
     let query = neuromita::presentation::MemoryListQuery {
@@ -251,4 +352,30 @@ pub fn failed(window: &AppWindow, state: &EditorState, edit_id: uuid::Uuid, erro
     let ui = window.global::<MemoryUi>();
     ui.set_editing(true);
     ui.set_error(error.into());
+}
+
+pub fn recalled(
+    window: &AppWindow,
+    state: &EditorState,
+    request_id: uuid::Uuid,
+    result: Result<Option<String>, String>,
+) {
+    let mut editor = state.lock().expect("memory editor mutex");
+    if editor.recall_id != Some(request_id) {
+        return;
+    }
+    editor.recall_id = None;
+    let ui = window.global::<MemoryUi>();
+    if editor
+        .recall_record
+        .is_none_or(|id| ui.get_edit_id().as_str() != id.0.to_string())
+    {
+        return;
+    }
+    ui.set_recall_pending(false);
+    match result {
+        Ok(Some(text)) => ui.set_recall_result(text.into()),
+        Ok(None) => ui.set_recall_result("No matching forgotten memory".into()),
+        Err(error) => ui.set_error(error.into()),
+    }
 }

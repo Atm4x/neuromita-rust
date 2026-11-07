@@ -793,6 +793,69 @@ fn memory_render_and_contract(window: &AppWindow) {
         assert!(ui.get_editing());
         memory::failed(window, &state, edit_id, "old error".into());
         assert!(ui.get_error().is_empty());
+
+        let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
+        let forgotten_id = snapshot
+            .records()
+            .iter()
+            .find(|record| record.content == "Игрок любит зелёный чай.")
+            .unwrap()
+            .id;
+        characters
+            .edit_memories(
+                CharacterId::Crazy,
+                snapshot,
+                vec![MemoryCommand::Forget { id: forgotten_id }],
+            )
+            .await
+            .unwrap();
+        let page = characters
+            .list_memories(CharacterId::Crazy, Default::default())
+            .await
+            .unwrap();
+        memory::render(window, &state, &page);
+        ui.invoke_edit(forgotten_id.0.to_string().into());
+        assert!(ui.get_selected_forgotten());
+        ui.set_recall_query("чай".into());
+        ui.invoke_recall();
+        assert!(ui.get_recall_pending());
+        let Command::MemoryRecall(request_id, character, id, query) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected explicit forgotten recall command");
+        };
+        assert_eq!(character, CharacterId::Crazy);
+        assert_eq!(id, forgotten_id);
+        assert_eq!(query, "чай");
+        memory::recalled(
+            window,
+            &state,
+            uuid::Uuid::new_v4(),
+            Ok(Some("wrong request".into())),
+        );
+        assert!(ui.get_recall_pending());
+        assert!(ui.get_recall_result().is_empty());
+        memory::recalled(
+            window,
+            &state,
+            request_id,
+            Ok(Some("[FORGOTTEN] Игрок любит зелёный чай.".into())),
+        );
+        assert!(!ui.get_recall_pending());
+        assert!(ui.get_recall_result().contains("[FORGOTTEN]"));
+        ui.invoke_edit(
+            page.records()
+                .iter()
+                .find(|record| record.id != forgotten_id)
+                .unwrap()
+                .id
+                .0
+                .to_string()
+                .into(),
+        );
+        assert!(!ui.get_selected_forgotten());
+        assert!(ui.get_recall_result().is_empty());
+
         for (width, height) in [(1560, 918), (1200, 760)] {
             window
                 .window()
@@ -810,6 +873,19 @@ fn memory_render_and_contract(window: &AppWindow) {
                 .unwrap();
             }
         }
+        ui.invoke_edit(forgotten_id.0.to_string().into());
+        ui.set_recall_query("чай".into());
+        ui.invoke_recall();
+        let Command::MemoryRecall(delayed_id, _, _, _) = commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected delayed historical inspection command");
+        };
+        ui.invoke_select(CharacterId::Kind.index() as i32);
+        memory::recalled(window, &state, delayed_id, Ok(Some("stale secret".into())));
+        assert!(ui.get_recall_result().is_empty());
+        assert!(!ui.get_recall_pending());
+        memory::render(window, &state, &page);
+        assert_eq!(ui.get_character(), CharacterId::Kind.index() as i32);
         ui.set_open(false);
         app.shutdown().await.unwrap();
     });

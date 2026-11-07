@@ -46,6 +46,7 @@ pub enum Command {
         neuromita::character::CharacterMemorySnapshot,
         Vec<neuromita::memory::MemoryCommand>,
     ),
+    MemoryRecall(uuid::Uuid, CharacterId, neuromita::memory::MemoryId, String),
     Preview(ConversationChange),
     Confirm,
     Abort,
@@ -104,6 +105,7 @@ pub enum Update {
     MemoryError(String),
     MemorySaved(uuid::Uuid),
     MemoryEditError(uuid::Uuid, String),
+    MemoryRecallResult(uuid::Uuid, Result<Option<String>, String>),
     Confirmation(Option<(ConversationChange, usize)>),
     Diagnostics(String),
     Connections(std::sync::Arc<neuromita::server::ServerSnapshot>),
@@ -366,6 +368,7 @@ async fn observe(
     let presenter = &administration.conversation;
     let mut connections = administration.connections.observe();
     let mut memories = MemoryWatch::start(administration, CharacterId::Crazy)?;
+    let (recall_updates, mut recall_results) = mpsc::unbounded_channel();
     let mut pending: Option<ConversationChangePreview> = None;
     let mut character = CharacterId::Crazy;
     let mut debug_character = CharacterId::Crazy;
@@ -501,6 +504,21 @@ async fn observe(
                         Ok(_) => publish(Update::MemorySaved(edit_id)), Err(error) => publish(Update::MemoryEditError(edit_id, error.to_string())),
                     }
                 },
+                Some(Command::MemoryRecall(request_id, character, memory_id, query)) => {
+                    let sender = recall_updates.clone();
+                    let cancelled = stop.clone();
+                    tokio::spawn(async move {
+                        let result = tokio::select! {
+                            _ = cancelled.cancelled() => return,
+                            result = neuromita::api::HistoricalRecallApi::inspect(
+                                character,
+                                neuromita::knowledge::forgotten_recall::RecallSelector::Ids(vec![memory_id]),
+                                &query,
+                            ) => result.map_err(|error| error.to_string()),
+                        };
+                        let _ = sender.send(Update::MemoryRecallResult(request_id, result));
+                    });
+                },
                 Some(Command::Preview(operation)) => match presenter.preview_change(character, operation).await {
                     Ok(preview) => { publish(Update::Confirmation(Some((preview.operation(), preview.message_count())))); pending = Some(preview); },
                     Err(error) => publish(Update::Error(error.to_string())),
@@ -538,6 +556,9 @@ async fn observe(
                     Ok(()) => {},
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+            },
+            result = recall_results.recv() => {
+                if let Some(result) = result { publish(result); }
             },
             transcript = transcript_updates.recv() => {
                 if let Some(transcript) = transcript {

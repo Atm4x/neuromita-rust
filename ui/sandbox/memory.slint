@@ -21,6 +21,11 @@ export global MemoryUi {
     in-out property <string> content;
     in-out property <string> error;
     in-out property <bool> delete-confirm;
+    in-out property <bool> selected-forgotten;
+    in-out property <string> recall-query;
+    in-out property <string> recall-result;
+    in-out property <bool> recall-pending;
+    callback recall();
     callback select(int);
     callback edit(string);
     callback apply(int);
@@ -114,6 +119,40 @@ export component MemoryPanel inherits Rectangle {
                                 color: SandboxTheme.text; font-family: SandboxTheme.font-family;
                                 font-size: 12px; wrap: word-wrap; single-line: false;
                             }
+                        }
+                    }
+                }
+                if MemoryUi.selected-forgotten: VerticalLayout {
+                    spacing: 6px;
+                    Caption {
+                        text: I18n.i18n("memory.recall.title", "Просмотр забытого воспоминания (без восстановления)");
+                        color: SandboxTheme.muted;
+                        font-size: 11px;
+                    }
+                    Field {
+                        text <=> MemoryUi.recall-query;
+                        placeholder: I18n.i18n("memory.recall.query", "Поисковый запрос");
+                    }
+                    QuickAction {
+                        text: I18n.i18n("memory.recall.inspect", "Просмотреть забытое");
+                        enabled: !MemoryUi.recall-pending && MemoryUi.recall-query != "";
+                        activated => { MemoryUi.recall(); }
+                    }
+                    if MemoryUi.recall-pending: Caption {
+                        text: I18n.i18n("memory.recall.loading", "Проверка Timeline и поиск…");
+                        color: SandboxTheme.muted;
+                    }
+                    if MemoryUi.recall-result != "": ScrollView {
+                        height: 96px;
+                        content-width: self.visible-width;
+                        background: SandboxTheme.input;
+                        Text {
+                            width: parent.width;
+                            text: MemoryUi.recall-result;
+                            color: SandboxTheme.text;
+                            font-family: SandboxTheme.font-family;
+                            font-size: 12px;
+                            wrap: word-wrap;
                         }
                     }
                 }
