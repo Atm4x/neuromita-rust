@@ -16,7 +16,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND},
-    System::Threading::{GetCurrentProcessId, ProcessIdToSessionId},
+    System::{RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId},
 };
 
 const JOB_QUERY_ACCESS: u32 = 0x0004;
