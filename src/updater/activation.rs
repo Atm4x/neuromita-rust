@@ -20,6 +20,7 @@ const WORKSPACE: &str = ".neuromita-update";
 const CANDIDATE: &str = "candidate";
 const BACKUP: &str = "backup";
 const JOURNAL: &str = "activation.json";
+const LOCK: &str = ".neuromita-update.lock";
 
 #[derive(Debug, Error)]
 pub enum ActivationError {
@@ -118,6 +119,18 @@ impl SingleFileActivator {
         })
     }
 
+    pub fn install_root(&self) -> &Path {
+        &self.install_root
+    }
+
+    pub fn target_path(&self) -> PathBuf {
+        self.target()
+    }
+
+    pub fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
     pub fn prepare(
         &self,
         asset: &UpdateAsset,
@@ -153,6 +166,7 @@ impl SingleFileActivator {
         if old_size == 0 {
             return Err(ActivationError::InvalidDigest("installed"));
         }
+        let _lock = lock_installation(&self.install_root)?;
         let workspace = self.workspace();
         match fs::create_dir(&workspace) {
             Ok(()) => {}
@@ -171,6 +185,8 @@ impl SingleFileActivator {
             io::copy(&mut input, &mut output)?;
             output.sync_all()?;
             drop(output);
+            fs::set_permissions(&candidate, fs::metadata(&target)?.permissions())?;
+            File::open(&candidate)?.sync_all()?;
             verify(&candidate, artifact.size(), artifact.sha256(), "candidate")?;
             let journal = ActivationJournal {
                 target_name: self.target_name.clone(),
@@ -197,6 +213,19 @@ impl SingleFileActivator {
     }
 
     pub fn apply(&self) -> Result<RecoveryOutcome, ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        self.apply_unlocked()
+    }
+
+    pub fn apply_or_resume(&self) -> Result<RecoveryOutcome, ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        match self.recover_unlocked()? {
+            RecoveryOutcome::Prepared => self.apply_unlocked(),
+            outcome => Ok(outcome),
+        }
+    }
+
+    fn apply_unlocked(&self) -> Result<RecoveryOutcome, ActivationError> {
         let journal = self.load_journal()?;
         if std::env::current_exe()
             .ok()
@@ -220,17 +249,22 @@ impl SingleFileActivator {
         fs::rename(self.target(), self.workspace().join(BACKUP))?;
         sync_directory(&self.install_root)?;
         if let Err(error) = fs::rename(self.workspace().join(CANDIDATE), self.target()) {
-            let _ = self.recover();
+            let _ = self.recover_unlocked();
             return Err(error.into());
         }
         sync_directory(&self.install_root)?;
-        match self.recover()? {
+        match self.recover_unlocked()? {
             RecoveryOutcome::NewVersionVerified => Ok(RecoveryOutcome::NewVersionVerified),
             _ => Err(ActivationError::Conflict("activation not confirmed")),
         }
     }
 
     pub fn recover(&self) -> Result<RecoveryOutcome, ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        self.recover_unlocked()
+    }
+
+    fn recover_unlocked(&self) -> Result<RecoveryOutcome, ActivationError> {
         match fs::symlink_metadata(self.workspace()) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(RecoveryOutcome::NoTransaction);
@@ -363,6 +397,54 @@ impl SingleFileActivator {
     }
 }
 
+fn lock_installation(root: &Path) -> Result<File, ActivationError> {
+    let path = root.join(LOCK);
+    let file = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            OpenOptions::new().read(true).write(true).open(&path)?
+        }
+        Ok(_) => return Err(ActivationError::UnsafeTarget),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?,
+        Err(error) => return Err(error.into()),
+    };
+    file.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "updater transaction locked")
+        }
+        fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
+pub(crate) fn prepared_target_name(install_root: &Path) -> Result<String, ActivationError> {
+    let workspace = fs::canonicalize(install_root)?.join(WORKSPACE);
+    let metadata = fs::symlink_metadata(&workspace)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ActivationError::UnsafeTarget);
+    }
+    let journal_path = workspace.join(JOURNAL);
+    regular_file(&journal_path)?;
+    let bytes = fs::read(journal_path)?;
+    if bytes.len() > 2048 {
+        return Err(ActivationError::Conflict("journal too large"));
+    }
+    let journal: ActivationJournal = serde_json::from_slice(&bytes)?;
+    let name = &journal.target_name;
+    if !matches!(
+        name.as_str(),
+        "neuromita" | "neuromita-gui" | "neuromita.exe" | "neuromita-gui.exe"
+    ) || !valid_digest(&journal.previous_sha256)
+        || !valid_digest(&journal.next_sha256)
+    {
+        return Err(ActivationError::UnsafeTarget);
+    }
+    Ok(name.clone())
+}
+
 fn valid_digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -490,6 +572,88 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(self.install.parent().unwrap());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_mode_is_preserved_when_candidate_replaces_target() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        fs::set_permissions(f.target(), fs::Permissions::from_mode(0o755)).unwrap();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        assert_eq!(
+            fs::metadata(f.workspace().join(CANDIDATE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        f.activation.apply().unwrap();
+        assert_eq!(
+            fs::metadata(f.target()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn installation_lock_is_exclusive_and_recovers_after_drop() {
+        let f = Fixture::new();
+        let held = lock_installation(&f.install).unwrap();
+        let second = lock_installation(&f.install).err().unwrap();
+        assert!(
+            matches!(second, ActivationError::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        lock_installation(&f.install).unwrap();
+    }
+
+    #[test]
+    fn activation_can_resume_without_separate_recover_window() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        assert_eq!(prepared_target_name(&f.install).unwrap(), "neuromita.exe");
+        assert_eq!(
+            f.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::NewVersionVerified
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"new version");
+        assert_eq!(
+            f.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::NoTransaction
+        );
+        assert_eq!(
+            fs::read(f.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+    }
+
+    #[test]
+    fn malformed_journal_refuses_helper_target_selection() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        fs::write(
+            f.workspace().join(JOURNAL),
+            b"{\"target_name\":\"../../outside\"}",
+        )
+        .unwrap();
+        assert!(prepared_target_name(&f.install).is_err());
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_activation_lock_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::new();
+        let outside = f.install.parent().unwrap().join("outside.lock");
+        fs::write(&outside, b"untouched").unwrap();
+        symlink(&outside, f.install.join(LOCK)).unwrap();
+        assert!(matches!(
+            lock_installation(&f.install),
+            Err(ActivationError::UnsafeTarget)
+        ));
+        assert_eq!(fs::read(outside).unwrap(), b"untouched");
     }
 
     #[test]
