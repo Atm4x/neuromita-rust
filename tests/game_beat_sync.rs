@@ -138,7 +138,11 @@ async fn game_link_really_delivers_beats_and_blocks_out_of_root_media() {
     )
     .await;
     assert_eq!(receive(&mut reader).await["type"], "hello_ack");
-    send(&mut write, json!({"command":"get_music_beat_status","command_id":Uuid::new_v4()})).await;
+    send(
+        &mut write,
+        json!({"command":"get_music_beat_status","command_id":Uuid::new_v4()}),
+    )
+    .await;
     let status = receive(&mut reader).await;
     assert_eq!(status["type"], "music_beats_status");
     assert_eq!(status["enabled"], true);
