@@ -85,7 +85,7 @@ async fn run(logging: &neuromita::diagnostics::DiagnosticBootstrap) -> Result<()
     let Some(options) = terminal::Options::parse()? else {
         return Ok(());
     };
-    let root = neuromita::portable::PortableDataRoot::explicit(options.data_dir.clone())?;
+    let root = neuromita::portable::PortableDataRoot::resolve(Some(&options.data_dir))?;
     logging.attach(&root)?;
     neuromita::diagnostics::boundary(
         neuromita::diagnostics::Boundary::CliStart,

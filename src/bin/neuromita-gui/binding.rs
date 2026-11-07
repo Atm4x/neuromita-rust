@@ -33,7 +33,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 fn run_inner() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
     let diagnostics = neuromita::diagnostics::init().map_err(std::io::Error::other)?;
-    let root = neuromita::portable::PortableDataRoot::explicit(options.data_directory.clone())?;
+    let root = neuromita::portable::PortableDataRoot::resolve(Some(&options.data_directory))?;
     diagnostics.attach(&root)?;
     neuromita::diagnostics::boundary(
         neuromita::diagnostics::Boundary::GuiStart,
@@ -480,7 +480,7 @@ impl Options {
             unity_directory: None,
             launcher_config: None,
         };
-        let mut explicit_data_directory = None;
+        let mut explicit_data_directory: Option<PathBuf> = None;
         let mut explicit_language = false;
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
@@ -550,9 +550,10 @@ impl Options {
                 }
             }
         }
-        let root = neuromita::portable::PortableDataRoot::resolve(explicit_data_directory)?;
+        let root =
+            neuromita::portable::PortableDataRoot::resolve(explicit_data_directory.as_deref())?;
         root.ensure_writable()?;
-        options.data_directory = root.into_path_buf();
+        options.data_directory = root.path().to_path_buf();
         if !explicit_language {
             let path = options.data_directory.join("settings.json");
             if path.exists() {

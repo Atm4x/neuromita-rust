@@ -99,3 +99,38 @@ D17 source reference: `GuideWidget._rebuild_progress_steps` and
 `GuideWidget._show_contents_menu` from the pinned Python Guide source.
 The Slint popup is scoped to the active Guide screen rather than a
 new application-global route or a second settings store.
+
+## D18 — executable compilation gates (2026-11-07)
+
+The source migration is kept inside the existing core-owned Guide catalog and
+Slint presentation boundary. The D18 patch updates Slint 1.18.1 image crop
+expressions to implicit numeric conversions (Slint does not support Rust's
+`as float` / `as int` syntax), preserving all 64 focus targets and six crops.
+The GUI argument parser now retains an owned optional explicit directory and
+passes `as_deref()` to `PortableDataRoot::resolve()`, then copies the resolved
+`root.path()`. Runtime diagnostics and active CLI initialization also use the
+canonical portable-root API; these changes do not change EULA acceptance or
+settings ownership.
+
+Verification on the **full checked source** with Rust 1.98.1, vendored Cargo
+packages and isolated Linux linker/pkg-config shims (outside the repository):
+
+- `cargo fmt --all -- --check`: PASS.
+- `git diff --check`: PASS.
+- `cargo test --locked --offline --lib onboarding::guide`: 10 PASS.
+- `cargo check --locked --offline --features gui --bin neuromita-gui`: PASS.
+- `cargo check --locked --offline --bin neuromita`: PASS.
+- `CARGO_BUILD_JOBS=1 cargo check --locked --offline --all-targets --features gui`: PASS.
+- Full library suite: 395 PASS, one **environment-dependent failure** in
+  `ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets`.
+  That test explicitly requires Python 3.12, while this runner has Python 3.13.5.
+  Repeating with that test explicitly excluded gives 395 PASS, zero failures;
+  the excluded case is NOT considered verified.
+- Full library Clippy with `-D warnings`: FAIL on nine existing issues in
+  `src/prompts/{dsl,expression,post_dsl,mod}.rs` and
+  `src/request/prompt_preparation.rs`; none occur in the D18 modified source.
+
+These are compilation and source-level proofs, **not** Windows/desktop E2E or
+pixel-accurate image focus acceptance. GUI interaction tests, Python 3.12
+fixture verification, local Wiki routing and inline rich-text step hotspots
+remain open. Issue #41 must stay open until those are validated.

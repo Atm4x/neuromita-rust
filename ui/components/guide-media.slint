@@ -34,8 +34,8 @@ export component GuideMedia inherits Rectangle {
         root.image-key == "next" ? (root.language == "ru" ? @image-url("../../assets/guide/guide_next.png") : @image-url("../../assets/guide/guide_next1.png")) :
         @image-url("");
 
-    private property <float> cropped-width: max(1.0, (root.picture.width as float) * (root.crop-right - root.crop-left));
-    private property <float> cropped-height: max(1.0, (root.picture.height as float) * (root.crop-bottom - root.crop-top));
+    private property <float> cropped-width: max(1.0, (root.picture.width) * (root.crop-right - root.crop-left));
+    private property <float> cropped-height: max(1.0, (root.picture.height) * (root.crop-bottom - root.crop-top));
     private property <float> crop-ratio: root.cropped-width / root.cropped-height;
     private property <length> fitted-width: min(root.width, root.height * root.crop-ratio);
     private property <length> fitted-height: min(root.height, root.width / root.crop-ratio);
@@ -45,10 +45,10 @@ export component GuideMedia inherits Rectangle {
 
     snapshot := Image {
         source: root.picture;
-        source-clip-x: ((root.picture.width as float) * root.crop-left) as int;
-        source-clip-y: ((root.picture.height as float) * root.crop-top) as int;
-        source-clip-width: max(1, ((root.picture.width as float) * (root.crop-right - root.crop-left)) as int);
-        source-clip-height: max(1, ((root.picture.height as float) * (root.crop-bottom - root.crop-top)) as int);
+        source-clip-x: ((root.picture.width) * root.crop-left);
+        source-clip-y: ((root.picture.height) * root.crop-top);
+        source-clip-width: max(1, ((root.picture.width) * (root.crop-right - root.crop-left)));
+        source-clip-height: max(1, ((root.picture.height) * (root.crop-bottom - root.crop-top)));
         image-fit: fill;
         accessible-label: root.description;
         width: root.fitted-width * root.zoom;
