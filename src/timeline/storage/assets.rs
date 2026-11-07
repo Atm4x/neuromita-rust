@@ -97,6 +97,34 @@ fn valid_media_type(media_type: &str) -> bool {
         })
 }
 
+fn real_directory(path: &Path) -> Result<(), TimelineAssetError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(TimelineAssetError::Missing);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(TimelineAssetError::InvalidReference);
+    }
+    Ok(())
+}
+
+fn real_regular_file(path: &Path) -> Result<(), TimelineAssetError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(TimelineAssetError::Missing);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(TimelineAssetError::Corrupt);
+    }
+    Ok(())
+}
+
 fn digest_hex(digest: ring::digest::Digest) -> String {
     use std::fmt::Write as _;
     let mut hex = String::with_capacity(64);
@@ -113,6 +141,7 @@ impl TimelineAssetStore {
         }
         let directory = directory.as_ref().to_owned();
         fs::create_dir_all(&directory)?;
+        real_directory(&directory)?;
         Ok(Self {
             directory,
             max_bytes,
@@ -131,8 +160,10 @@ impl TimelineAssetStore {
         if !valid_media_type(media_type) {
             return Err(TimelineAssetError::InvalidReference);
         }
+        real_directory(&self.directory)?;
         let staging = self.directory.join("staging");
         fs::create_dir_all(&staging)?;
+        real_directory(&staging)?;
         let staged = StagedFile {
             path: staging.join(format!("{}.tmp", Uuid::new_v4())),
         };
@@ -171,6 +202,7 @@ impl TimelineAssetStore {
         };
         let destination = self.path_for(&reference)?;
         fs::create_dir_all(destination.parent().expect("asset has parent"))?;
+        self.check_object_directories(&destination)?;
         match fs::hard_link(&staged.path, &destination) {
             Ok(()) => {
                 // The file is durable before the link becomes visible. A crash
@@ -278,8 +310,17 @@ impl TimelineAssetStore {
             .join(&reference.digest))
     }
 
+    fn check_object_directories(&self, path: &Path) -> Result<(), TimelineAssetError> {
+        real_directory(&self.directory)?;
+        real_directory(&self.directory.join("objects"))?;
+        real_directory(path.parent().expect("asset has parent"))?;
+        Ok(())
+    }
+
     fn read_checked(&self, reference: &TimelineAssetRef) -> Result<Vec<u8>, TimelineAssetError> {
         let path = self.path_for(reference)?;
+        self.check_object_directories(&path)?;
+        real_regular_file(&path)?;
         let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
