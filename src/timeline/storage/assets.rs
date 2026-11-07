@@ -3,6 +3,7 @@
 //! never chooses an installation path or owns message/branch visibility.
 
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -57,6 +58,22 @@ pub enum TimelineAttachmentCommitError {
 pub struct TimelineAssetStore {
     directory: PathBuf,
     max_bytes: u64,
+}
+
+/// On-disk object without a reference in the supplied retention manifest.
+/// Its MIME type cannot be inferred from the digest; it is not verified content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanAssetCandidate {
+    pub digest: String,
+    pub size: u64,
+}
+
+/// Read-only observation, not a GC authorization or a stable filesystem snapshot.
+/// The caller is responsible for accounting for every external retained archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineAssetInventory {
+    pub retained: Vec<TimelineAssetRef>,
+    pub orphan_candidates: Vec<OrphanAssetCandidate>,
 }
 
 struct StagedFile {
@@ -123,6 +140,12 @@ fn real_regular_file(path: &Path) -> Result<(), TimelineAssetError> {
         return Err(TimelineAssetError::Corrupt);
     }
     Ok(())
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn digest_hex(digest: ring::digest::Digest) -> String {
@@ -216,6 +239,84 @@ impl TimelineAssetStore {
             Err(error) => return Err(error.into()),
         }
         Ok(reference)
+    }
+
+    /// Inventory complete local object files against caller-supplied canonical
+    /// retention roots. No data is removed. A malformed filesystem layout,
+    /// symlink, or missing/corrupt retained blob fails the entire observation.
+    /// Concurrent imports/appends or external archives not supplied by the
+    /// caller may make an apparent orphan reachable; this cannot authorize GC.
+    pub fn inventory(
+        &self,
+        retained: &[TimelineAssetRef],
+    ) -> Result<TimelineAssetInventory, TimelineAssetError> {
+        let mut roots = BTreeMap::new();
+        for reference in retained {
+            reference.validate()?;
+            if reference.size > self.max_bytes {
+                return Err(TimelineAssetError::TooLarge);
+            }
+            if roots
+                .insert(reference.digest.clone(), reference.clone())
+                .is_some_and(|previous| previous != *reference)
+            {
+                return Err(TimelineAssetError::InvalidReference);
+            }
+        }
+
+        real_directory(&self.directory)?;
+        let objects = self.directory.join("objects");
+        let mut on_disk = BTreeMap::new();
+        match fs::symlink_metadata(&objects) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if !roots.is_empty() {
+                    return Err(TimelineAssetError::Missing);
+                }
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                real_directory(&objects)?;
+                for shard in fs::read_dir(&objects)? {
+                    let shard = shard?;
+                    let name = shard.file_name();
+                    let name = name.to_str().ok_or(TimelineAssetError::InvalidReference)?;
+                    if name.len() != 2 || !is_lower_hex(name) {
+                        return Err(TimelineAssetError::InvalidReference);
+                    }
+                    real_directory(&shard.path())?;
+                    for entry in fs::read_dir(shard.path())? {
+                        let entry = entry?;
+                        let digest = entry.file_name();
+                        let digest = digest
+                            .to_str()
+                            .ok_or(TimelineAssetError::InvalidReference)?;
+                        if digest.len() != 64 || !digest.starts_with(name) || !is_lower_hex(digest)
+                        {
+                            return Err(TimelineAssetError::InvalidReference);
+                        }
+                        real_regular_file(&entry.path())?;
+                        let metadata = fs::symlink_metadata(entry.path())?;
+                        on_disk.insert(digest.to_owned(), metadata.len());
+                    }
+                }
+            }
+        }
+
+        for reference in roots.values() {
+            if !on_disk.contains_key(&reference.digest) {
+                return Err(TimelineAssetError::Missing);
+            }
+            self.verify(reference)?;
+        }
+        let orphan_candidates = on_disk
+            .into_iter()
+            .filter(|(digest, _)| !roots.contains_key(digest))
+            .map(|(digest, size)| OrphanAssetCandidate { digest, size })
+            .collect();
+        Ok(TimelineAssetInventory {
+            retained: roots.into_values().collect(),
+            orphan_candidates,
+        })
     }
 
     /// Validate all uploaded parts before making the canonical append attempt.
