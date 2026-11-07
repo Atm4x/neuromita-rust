@@ -157,6 +157,31 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         set_guide_focus(&window, number);
     });
     let guide_window = window.as_weak();
+    window.on_onboarding_guide_select_image_mode(move |mode| {
+        if let Some(window) = guide_window.upgrade() {
+            if (0..=2).contains(&mode) {
+                window.set_onboarding_guide_sizing_mode(mode);
+                window.set_onboarding_guide_zoom(1.0);
+                window.set_onboarding_guide_pan_x(0.0);
+                window.set_onboarding_guide_pan_y(0.0);
+            }
+        }
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_link_activated(move |link| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        use neuromita::onboarding::guide::{self, GuideLevel};
+        let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+        let Some(page) = guide::page(level, window.get_onboarding_guide_page() as usize) else {
+            return;
+        };
+        if let Some(number) = page.step_from_link(&link) {
+            set_guide_focus(&window, i32::from(number));
+        }
+    });
+    let guide_window = window.as_weak();
     let guide_runtime = desktop.clone();
     window.on_onboarding_guide_select_level(move |index| {
         let Some(window) = guide_window.upgrade() else {
@@ -300,7 +325,10 @@ pub(super) fn sync_guide_level(window: &AppWindow, next: neuromita::onboarding::
 }
 
 fn reset_guide_image_view(window: &AppWindow) {
+    window.set_onboarding_guide_sizing_mode(0);
     window.set_onboarding_guide_zoom(1.0);
+    window.set_onboarding_guide_pan_x(0.0);
+    window.set_onboarding_guide_pan_y(0.0);
     window.set_onboarding_guide_focus_step(0);
     window.set_onboarding_guide_focus_x(0.5);
     window.set_onboarding_guide_focus_y(0.5);
@@ -320,6 +348,8 @@ fn set_guide_focus(window: &AppWindow, number: i32) {
     });
     match chosen {
         Some(step) => {
+            window.set_onboarding_guide_pan_x(0.0);
+            window.set_onboarding_guide_pan_y(0.0);
             window.set_onboarding_guide_focus_step(i32::from(step.number));
             window.set_onboarding_guide_focus_x(step.rect.left + step.rect.width / 2.0);
             window.set_onboarding_guide_focus_y(step.rect.top + step.rect.height / 2.0);
@@ -348,6 +378,10 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
     window.set_onboarding_guide_page(index);
     window.set_onboarding_guide_title(page.title(&language).into());
     window.set_onboarding_guide_description(page.description(&language).into());
+    window.set_onboarding_guide_description_rich(
+        slint::StyledText::from_markdown(&page.description_markdown(&language))
+            .expect("static Guide description Markdown must be valid"),
+    );
     window.set_onboarding_guide_image(page.image_key.into());
     window.set_onboarding_guide_wiki_url(page.wiki_url(&language).unwrap_or_default().into());
     let crop = page.image_crop();
