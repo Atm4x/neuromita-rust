@@ -1,0 +1,51 @@
+name: Agent C C3.2 exact owned settings writer import and Windows tests
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-settings-owned-writer-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-settings-owned-writer-20261107
+          fetch-depth: 0
+      - name: Verify bundle and publish exact new commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=733250ceacdb8630c2ed6e6c15008cf9e0763ce7
+          HEAD=30e8b9d6d3e44e279023be7c1b55b4268bdf7469
+          TARGET=codex/ai-platform-hub-c3-settings-owned-writer-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-settings-owned-writer.bundle.b64 >/tmp/agent-c-writer.bundle
+          echo 'b4b6504b53edbd1d07ed1ff0576aceecfa3d1ac0cc4119a2855e2b59ba055747  /tmp/agent-c-writer.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-writer.bundle
+          git fetch --no-tags /tmp/agent-c-writer.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-settings-owned-writer-20261107
+      - name: Native Windows Rust 1.98.1 root-locked JSON writer and app tests
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::storage::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib app::settings_instance_tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --test settings_cli -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --test settings_migrations -- --nocapture
