@@ -27,3 +27,40 @@ The current bounded in-memory representation limits the incoming JSON envelope t
 ## Contract tests
 
 `tests/timeline_archive.rs` covers memory and SQLite fork/receipts/causal/external-message-ID round trips, deterministic re-export, SQLite reopen, unknown or corrupt envelopes, binary integrity, cross-session ID collisions, failed import atomicity (including injected SQL error mid-write), and exact-scope export. Compile/run with existing `--locked --offline` dependencies. This does not claim Python fixture validation or production UI integration.
+
+## Python SessionArchive parity boundary (verified 2026-11-07)
+
+Read-only comparison against `Atm4x/NeuroMita` at
+`5f3d061f523d9abefa6a264bb2953048a935fa65` (`bridge/session-timeline-reexport-20261103`),
+using `src/domain/timeline/{archive,models,assets}.py` and
+`tests/test_timeline_transfer.py`:
+
+- Python envelope is `archive_version: 1` with flat `branches`, `events`,
+  `operations`, `assets`. Rust's current native envelope uses
+  `format/version`, branch-local facts/receipts and different binary fields.
+  Equal version numbers **do not mean compatible formats**.
+- Python `session_id`, `branch_id`, `checkpoint_id`, `event_id` and observer IDs
+  are validated as arbitrary nonempty canonical strings. Rust session, branch
+  and event IDs are UUIDs and observers are known `CharacterId`s. A lossless
+  converter must retain **all original external identities** alongside any
+  internal UUID mapping and reject collisions/unknown character mappings.
+- Python `occurred_at` is timezone-aware ISO 8601 at **microsecond** precision;
+  native Rust facts use Unix **milliseconds**. Exact re-export requires
+  retaining the source timestamp, not a destructive conversion alone.
+- Python images refer to `type: image_ref`, `asset_id: sha256:<64 hex>`,
+  `media_type`, `byte_size`; Rust typed parts use `type: image` with an
+  `asset: {digest,size,media_type}`. Both compute SHA-256 over MIME, a zero
+  separator, and bytes, but the reference schema and accepted edge cases
+  differ. Validate every binary before publishing any converted session.
+- Python operations preserve an `intent` document and event ID lists;
+  Rust receipts preserve typed drafts, command and fact results. A converter
+  must prove equivalence of replay/idempotency, not merely copy JSON keys.
+
+`tests/fixtures/python_session_archive_20261103.json` is a genuine canonical
+Python SQLite export generated with the above source revision, including
+Unicode session/message identities and a fork. The current Rust importer
+**rejects** it without publishing a partial session. The fixture is a
+regression input for a future explicit Python-to-Rust import boundary, not a
+claimed implementation of Python parity. Do not add a schema migration chain
+or synthesize lossy UUIDs. The existing Python app import/onboarding pipeline
+is tracked separately by agent D; the archive identity contract belongs here.
