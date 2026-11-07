@@ -1,0 +1,37 @@
+name: Agent C PR210 exact source snapshot export
+on:
+  push:
+    branches:
+      - bridge/export-agent-c-pr210-source-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/export-agent-c-pr210-source-20261107
+          fetch-depth: 0
+      - name: Export verified exact branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=edf2ebd9ec352f9709f27ad364c69307a34dd08c
+          TARGET=codex/ai-platform-hub-c3-windows-hook-job-20261107
+          git fetch --no-tags origin "refs/heads/$TARGET"
+          test "$(git rev-parse FETCH_HEAD)" = "$SHA"
+          git update-ref refs/heads/agent-c-pr210-export "$SHA"
+          mkdir -p snapshot
+          git bundle create snapshot/NEUROMITA_AGENT_C_PR210_FULL.bundle refs/heads/agent-c-pr210-export
+          git bundle verify snapshot/NEUROMITA_AGENT_C_PR210_FULL.bundle
+          git fsck --full
+          sha256sum snapshot/NEUROMITA_AGENT_C_PR210_FULL.bundle > snapshot/SHA256SUMS
+          printf 'PR 210\nSHA %s\n' "$SHA" > snapshot/MANIFEST.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-c-pr210-full-source
+          path: snapshot/*
+          compression-level: 0
+          retention-days: 7
