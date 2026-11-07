@@ -233,6 +233,7 @@ impl TelegramVoiceService {
             config,
             conversation: Mutex::new(Conversation {
                 last_send: None,
+                send_times: VecDeque::new(),
                 speaker: None,
             }),
         })
