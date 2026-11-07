@@ -146,9 +146,9 @@ UUIDs. It does not mutate Memory, SQLite or the AssetStore. The entire detached
 result must satisfy native receipt replay and provenance validation.
 
 This is a deliberately restricted compatibility boundary: Python
-`EventObserved` disclosure, message presentation mutations and media references
-remain **unsupported** until their semantics are translated without broadening
-MitaView access or dropping content. The conversion errors rather than erasing
+`EventObserved` disclosure remains **unsupported** because its semantics cannot
+be translated without broadening MitaView access. Other unrepresentable event
+shapes fail rather than being silently dropped. The conversion errors rather than erasing
 those events. No Python archive can be committed by B28; an atomic importer and
 complete coverage of Python event kinds are still required for #9.
 
@@ -161,3 +161,22 @@ payload. Unsupported placement, unknown keys, non-image MIME, and unrecognized
 media formats reject the entire conversion; `stage_assets()` remains the
 separate integrity-checked binary upload step. No canonical session is
 published and no Python re-export equivalence is asserted.
+
+## Python message presentation compatibility (B30)
+
+The detached Python canonical converter now maps `MessageHidden`, `MessageRevised`
+and `MessageRestored` to the corresponding Rust event kinds. The operation's
+source event IDs become native `EventId` references; each draft and receipt is
+revalidated with native Timeline replay, including the observing character's
+previous knowledge of the target. A revision's only replacement content lives
+in `payload.message.content`. When Python includes an unchanged external
+`message_id` in the replacement, the redundant value is validated against the
+original fact and removed: native presentation changes cannot rewrite message
+identity. Conflicting or extra outer payload fields are rejected explicitly.
+
+The confirmed Python `attachments/image_ref` layout is also supported inside
+a revision's nested `message`. Each reference must match the preflight's
+verified binary manifest; only typed native `Image` parts are produced. The
+archive remains detached: `prepare_canonical()` does not publish a session
+or upload binary data. Python `EventObserved` and an atomic native importer
+remain separate blockers for full issue #9 acceptance.

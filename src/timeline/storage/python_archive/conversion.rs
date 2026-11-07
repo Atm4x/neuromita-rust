@@ -46,8 +46,8 @@ impl PreparedPythonCanonical {
 impl BoundPythonArchive<'_> {
     /// Transform only known semantically equivalent Python events to native drafts
     /// and receipts. Verify the detached result with the *native* replay validator.
-    /// Python `EventObserved`, presentation revisions and binary media require
-    /// separate semantic translation; they are never flattened or discarded.
+    /// Python `EventObserved` remains unsupported: disclosure of an old world
+    /// event cannot be approximated as a native private observation.
     pub fn prepare_canonical(&self) -> Result<PreparedPythonCanonical, PythonArchiveError> {
         let id_map = self
             .source
@@ -93,6 +93,7 @@ impl BoundPythonArchive<'_> {
                 &self.observers,
                 &branch_map,
                 &self.source.envelope.branches,
+                &event_lookup,
                 &asset_catalog,
             )?;
             drafts.insert(event.event_id.as_str(), draft);
@@ -210,12 +211,101 @@ impl BoundPythonArchive<'_> {
     }
 }
 
+/// Convert Python's only verified media layout into the canonical typed content.
+/// The same operation serves original messages and presentation revisions.
+fn convert_message_content(
+    payload: &mut serde_json::Map<String, Value>,
+    assets: &HashMap<&str, (&str, usize)>,
+) -> Result<(), PythonArchiveError> {
+    let attachments = payload.remove("attachments");
+    if contains_python_media(&Value::Object(payload.clone())) {
+        return Err(PythonArchiveError::Invalid(
+            "Python media requires typed native conversion",
+        ));
+    }
+    let Some(attachments) = attachments else {
+        let content = payload.get("content").ok_or(PythonArchiveError::Invalid(
+            "Python message content missing",
+        ))?;
+        let parts = crate::timeline::domain::parse_message_content(content).map_err(|_| {
+            PythonArchiveError::Invalid("Python message content is not representable")
+        })?;
+        if parts.iter().any(|part| part.asset().is_some()) {
+            return Err(PythonArchiveError::Invalid(
+                "Python media requires typed native conversion",
+            ));
+        }
+        return Ok(());
+    };
+    let list = attachments
+        .as_array()
+        .filter(|list| !list.is_empty() && list.len() <= 31)
+        .ok_or(PythonArchiveError::Invalid("Python attachment count"))?;
+    let text =
+        payload
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or(PythonArchiveError::Invalid(
+                "Python attachment text missing",
+            ))?;
+    let mut parts = vec![TimelineMessagePart::Text {
+        text: text.to_owned(),
+    }];
+    for entry in list {
+        let object = entry
+            .as_object()
+            .filter(|value| value.len() == 4)
+            .ok_or(PythonArchiveError::Invalid("Python attachment shape"))?;
+        if object.get("type").and_then(Value::as_str) != Some("image_ref") {
+            return Err(PythonArchiveError::Invalid(
+                "unsupported Python attachment type",
+            ));
+        }
+        let external = object
+            .get("asset_id")
+            .and_then(Value::as_str)
+            .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
+        let digest = external
+            .strip_prefix("sha256:")
+            .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
+        let mime = object
+            .get("media_type")
+            .and_then(Value::as_str)
+            .ok_or(PythonArchiveError::Invalid("Python attachment MIME"))?;
+        let size = object
+            .get("byte_size")
+            .and_then(Value::as_u64)
+            .ok_or(PythonArchiveError::Invalid("Python attachment size"))?;
+        if !mime.starts_with("image/")
+            || assets
+                .get(external)
+                .map(|(catalog_mime, len)| *catalog_mime != mime || *len as u64 != size)
+                .unwrap_or(true)
+        {
+            return Err(PythonArchiveError::Invalid("Python attachment mismatch"));
+        }
+        parts.push(TimelineMessagePart::Image {
+            asset: TimelineAssetRef {
+                digest: digest.to_owned(),
+                size,
+                media_type: mime.to_owned(),
+            },
+        });
+    }
+    payload.insert(
+        "content".into(),
+        serde_json::to_value(parts).map_err(|_| PythonArchiveError::Encoding)?,
+    );
+    Ok(())
+}
+
 fn native_draft(
     event: &PythonEvent,
     identities: &HashMap<&str, EventId>,
     observers: &BTreeMap<String, CharacterId>,
     branches: &HashMap<&str, BranchId>,
     branch_info: &[super::PythonBranch],
+    events: &HashMap<&str, &PythonEvent>,
     assets: &HashMap<&str, (&str, usize)>,
 ) -> Result<EventDraft, PythonArchiveError> {
     let kind = match event.kind.as_str() {
@@ -234,6 +324,9 @@ fn native_draft(
         "CharacterJoined" => EventKind::CharacterJoined,
         "CharacterLeft" => EventKind::CharacterLeft,
         "CharacterContextReset" => EventKind::CharacterContextReset,
+        "MessageHidden" => EventKind::MessageHidden,
+        "MessageRevised" => EventKind::MessageRevised,
+        "MessageRestored" => EventKind::MessageRestored,
         _ => {
             return Err(PythonArchiveError::Invalid(
                 "Python event semantics not representable in Rust",
@@ -245,96 +338,83 @@ fn native_draft(
         .as_object()
         .cloned()
         .ok_or(PythonArchiveError::Invalid("event payload not an object"))?;
-    let attachments = payload.remove("attachments");
-    if contains_python_media(&Value::Object(payload.clone())) {
-        return Err(PythonArchiveError::Invalid(
-            "Python media requires typed native conversion",
-        ));
-    }
-    let is_message = matches!(
+    if matches!(
         kind,
         EventKind::PlayerMessage
             | EventKind::CharacterMessage
             | EventKind::CharacterObservation
             | EventKind::SessionNote
-    );
-    if let Some(attachments) = attachments {
-        if !is_message {
+    ) {
+        convert_message_content(&mut payload, assets)?;
+    } else if kind == EventKind::MessageHidden {
+        if payload.len() != 1 {
             return Err(PythonArchiveError::Invalid(
-                "attachments on non-message event",
+                "unsupported Python hide payload",
             ));
         }
-        let list = attachments
-            .as_array()
-            .filter(|list| !list.is_empty() && list.len() <= 31)
-            .ok_or(PythonArchiveError::Invalid("Python attachment count"))?;
-        let text =
+        let source_ids = payload
+            .get("event_ids")
+            .and_then(Value::as_array)
+            .ok_or(PythonArchiveError::Invalid("Python hide targets missing"))?;
+        let targets = source_ids
+            .iter()
+            .map(|id| {
+                let source = id
+                    .as_str()
+                    .ok_or(PythonArchiveError::Invalid("Python hide target invalid"))?;
+                identities
+                    .get(source)
+                    .map(|id| id.0.to_string())
+                    .ok_or(PythonArchiveError::Invalid("Python hide target missing"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        payload.insert("event_ids".into(), json!(targets));
+    } else if matches!(kind, EventKind::MessageRevised | EventKind::MessageRestored) {
+        let required_fields = if kind == EventKind::MessageRevised {
+            2
+        } else {
+            1
+        };
+        if payload.len() != required_fields {
+            return Err(PythonArchiveError::Invalid(
+                "unsupported Python presentation payload",
+            ));
+        }
+        let source =
             payload
-                .get("content")
+                .get("event_id")
                 .and_then(Value::as_str)
                 .ok_or(PythonArchiveError::Invalid(
-                    "Python attachment text missing",
+                    "Python presentation target missing",
                 ))?;
-        let mut parts = vec![TimelineMessagePart::Text {
-            text: text.to_owned(),
-        }];
-        for entry in list {
-            let object = entry
-                .as_object()
-                .filter(|value| value.len() == 4)
-                .ok_or(PythonArchiveError::Invalid("Python attachment shape"))?;
-            if object.get("type").and_then(Value::as_str) != Some("image_ref") {
-                return Err(PythonArchiveError::Invalid(
-                    "unsupported Python attachment type",
-                ));
-            }
-            let external = object
-                .get("asset_id")
-                .and_then(Value::as_str)
-                .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
-            let digest = external
-                .strip_prefix("sha256:")
-                .ok_or(PythonArchiveError::Invalid("Python attachment id"))?;
-            let mime = object
-                .get("media_type")
-                .and_then(Value::as_str)
-                .ok_or(PythonArchiveError::Invalid("Python attachment MIME"))?;
-            let size = object
-                .get("byte_size")
-                .and_then(Value::as_u64)
-                .ok_or(PythonArchiveError::Invalid("Python attachment size"))?;
-            if !mime.starts_with("image/")
-                || assets
-                    .get(external)
-                    .map(|(catalog_mime, len)| *catalog_mime != mime || *len as u64 != size)
-                    .unwrap_or(true)
-            {
-                return Err(PythonArchiveError::Invalid("Python attachment mismatch"));
-            }
-            parts.push(TimelineMessagePart::Image {
-                asset: TimelineAssetRef {
-                    digest: digest.to_owned(),
-                    size,
-                    media_type: mime.to_owned(),
-                },
-            });
-        }
-        payload.insert(
-            "content".into(),
-            serde_json::to_value(parts).map_err(|_| PythonArchiveError::Encoding)?,
-        );
-    } else if is_message {
-        let content = payload.get("content").ok_or(PythonArchiveError::Invalid(
-            "Python message content missing",
+        let target = identities.get(source).ok_or(PythonArchiveError::Invalid(
+            "Python presentation target unknown",
         ))?;
-        let parts = crate::timeline::domain::parse_message_content(content).map_err(|_| {
-            PythonArchiveError::Invalid("Python message content is not representable")
-        })?;
-        if parts.iter().any(|part| part.asset().is_some()) {
-            return Err(PythonArchiveError::Invalid(
-                "Python media requires typed native conversion",
-            ));
+        if kind == EventKind::MessageRevised {
+            let original = events.get(source).ok_or(PythonArchiveError::Invalid(
+                "Python revision original missing",
+            ))?;
+            let changes = payload
+                .get_mut("message")
+                .and_then(Value::as_object_mut)
+                .ok_or(PythonArchiveError::Invalid(
+                    "Python revision changes missing",
+                ))?;
+            if let Some(external_id) = changes.get("message_id") {
+                if original.payload.get("message_id") != Some(external_id) {
+                    return Err(PythonArchiveError::Invalid(
+                        "Python revision identity changed",
+                    ));
+                }
+                changes.remove("message_id");
+            }
+            convert_message_content(changes, assets)?;
         }
+        payload.insert("event_id".into(), json!(target.0.to_string()));
+    } else if contains_python_media(&Value::Object(payload.clone())) {
+        return Err(PythonArchiveError::Invalid(
+            "Python media requires typed native conversion",
+        ));
     }
     let actor = event
         .actor_id
