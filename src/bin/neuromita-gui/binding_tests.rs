@@ -756,7 +756,71 @@ fn memory_render_and_contract(window: &AppWindow) {
             .global::<super::super::view::SettingsUi>()
             .set_character_prompt_expanded(false);
         ui.invoke_edit(page.records()[0].id.0.to_string().into());
+        assert!(ui.get_graph_eligible());
+        ui.invoke_graph_preview();
+        assert!(ui.get_graph_pending());
+        let Command::GraphPreview(graph_request, graph_character, graph_memory) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected graph maintenance preview")
+        };
+        assert_eq!(graph_character, CharacterId::Crazy);
+        assert_eq!(graph_memory, page.records()[0].id);
+        memory::graph_previewed(window, &state, uuid::Uuid::new_v4(), Ok(9));
+        assert!(ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        memory::graph_previewed(window, &state, graph_request, Ok(2));
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_graph_confirm_ready());
+        assert!(ui.get_graph_summary().contains("2 derived"));
+        ui.invoke_graph_confirm();
+        assert!(ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        let Command::GraphApply(applied_id, applied_character) =
+            commands.borrow_mut().pop().unwrap()
+        else {
+            panic!("expected confirmed graph maintenance")
+        };
+        assert_eq!(applied_id, graph_request);
+        assert_eq!(applied_character, CharacterId::Crazy);
+        memory::graph_applied(window, &state, uuid::Uuid::new_v4(), Ok(()));
+        assert!(ui.get_graph_pending());
+        memory::graph_applied(
+            window,
+            &state,
+            graph_request,
+            Err("stale graph preview".into()),
+        );
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_error().contains("stale graph preview"));
+        assert!(!ui.get_graph_confirm_ready());
+        ui.invoke_graph_preview();
+        let Command::GraphPreview(aborted_id, _, _) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected second graph preview")
+        };
+        ui.invoke_graph_cancel();
+        let Command::GraphAbort(id) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected abort command")
+        };
+        assert_eq!(id, aborted_id);
+        memory::graph_previewed(window, &state, aborted_id, Ok(2));
+        assert!(!ui.get_graph_pending());
+        assert!(!ui.get_graph_confirm_ready());
+        assert!(ui.get_graph_summary().is_empty());
         ui.set_content("Изменённый текст".into());
+        ui.invoke_graph_preview();
+        let Command::GraphPreview(in_flight_id, _, _) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected in-flight graph preview")
+        };
+        memory::graph_previewed(window, &state, in_flight_id, Ok(1));
+        ui.invoke_graph_confirm();
+        let Command::GraphApply(confirmed_id, _) = commands.borrow_mut().pop().unwrap() else {
+            panic!("expected in-flight confirmed graph apply")
+        };
+        assert_eq!(confirmed_id, in_flight_id);
+        assert!(ui.get_graph_applying());
+        ui.invoke_graph_cancel();
+        assert!(ui.get_graph_applying());
         let snapshot = characters.memories(CharacterId::Crazy).await.unwrap();
         characters
             .edit_memories(
@@ -774,6 +838,10 @@ fn memory_render_and_contract(window: &AppWindow) {
             .await
             .unwrap();
         memory::render(window, &state, &page);
+        assert!(ui.get_graph_applying());
+        memory::graph_applied(window, &state, confirmed_id, Ok(()));
+        assert!(!ui.get_graph_pending());
+        assert!(ui.get_graph_summary().contains("Canonical memory retained"));
         assert_eq!(ui.get_content(), "Изменённый текст");
         ui.invoke_apply(0);
         let command = commands.borrow_mut().pop().unwrap();
@@ -816,6 +884,7 @@ fn memory_render_and_contract(window: &AppWindow) {
         memory::render(window, &state, &page);
         ui.invoke_edit(forgotten_id.0.to_string().into());
         assert!(ui.get_selected_forgotten());
+        assert!(!ui.get_graph_eligible());
         ui.set_recall_query("чай".into());
         ui.invoke_recall();
         assert!(ui.get_recall_pending());

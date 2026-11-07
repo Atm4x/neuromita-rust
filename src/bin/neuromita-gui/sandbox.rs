@@ -53,6 +53,18 @@ pub fn attach(
                     request_id,
                     Err("Desktop command queue is full or closed".into()),
                 ),
+                Command::GraphPreview(request_id, ..) => super::memory::graph_previewed(
+                    &window,
+                    &queue_editor,
+                    request_id,
+                    Err("Desktop command queue is full or closed".into()),
+                ),
+                Command::GraphApply(request_id, ..) => super::memory::graph_applied(
+                    &window,
+                    &queue_editor,
+                    request_id,
+                    Err("Desktop command queue is full or closed".into()),
+                ),
                 _ => {}
             }
             window.set_chat_sending(false);
@@ -226,6 +238,12 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         }
         Update::MemoryRecallResult(request_id, result) => {
             super::memory::recalled(window, memory_editor, request_id, result)
+        }
+        Update::GraphPreviewResult(request_id, result) => {
+            super::memory::graph_previewed(window, memory_editor, request_id, result)
+        }
+        Update::GraphApplyResult(request_id, result) => {
+            super::memory::graph_applied(window, memory_editor, request_id, result)
         }
         Update::Confirmation(preview) => {
             let ui = window.global::<ConversationUi>();

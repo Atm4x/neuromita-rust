@@ -25,6 +25,14 @@ export global MemoryUi {
     in-out property <string> recall-query;
     in-out property <string> recall-result;
     in-out property <bool> recall-pending;
+    in-out property <bool> graph-eligible;
+    in-out property <bool> graph-pending;
+    in-out property <bool> graph-applying;
+    in-out property <bool> graph-confirm-ready;
+    in-out property <string> graph-summary;
+    callback graph-preview();
+    callback graph-confirm();
+    callback graph-cancel();
     callback recall();
     callback select(int);
     callback edit(string);
@@ -153,6 +161,34 @@ export component MemoryPanel inherits Rectangle {
                             font-size: 12px;
                             wrap: word-wrap;
                         }
+                    }
+                }
+                if MemoryUi.graph-eligible: VerticalLayout {
+                    spacing: 5px;
+                    Caption {
+                        text: I18n.i18n("memory.graph.title", "Связи графа знаний (только производные данные)");
+                        color: SandboxTheme.muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        QuickAction {
+                            text: I18n.i18n("memory.graph.preview", "Проверить связи");
+                            enabled: !MemoryUi.graph-pending && !MemoryUi.graph-confirm-ready;
+                            activated => { MemoryUi.graph-preview(); }
+                        }
+                        if MemoryUi.graph-confirm-ready: QuickAction {
+                            text: I18n.i18n("memory.graph.confirm", "Подтвердить очистку");
+                            enabled: !MemoryUi.graph-pending;
+                            activated => { MemoryUi.graph-confirm(); }
+                        }
+                        if MemoryUi.graph-confirm-ready || (MemoryUi.graph-pending && !MemoryUi.graph-applying): QuickAction {
+                            text: I18n.i18n("memory.graph.cancel", "Отмена");
+                            activated => { MemoryUi.graph-cancel(); }
+                        }
+                    }
+                    if MemoryUi.graph-summary != "": Caption {
+                        text: MemoryUi.graph-summary;
+                        color: SandboxTheme.muted;
                     }
                 }
                 QuickAction {

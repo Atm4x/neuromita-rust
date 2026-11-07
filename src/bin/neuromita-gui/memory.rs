@@ -25,6 +25,8 @@ pub struct MemoryEditor {
     search: String,
     recall_id: Option<uuid::Uuid>,
     recall_record: Option<MemoryId>,
+    graph_id: Option<uuid::Uuid>,
+    graph_record: Option<MemoryId>,
 }
 
 pub type EditorState = Arc<Mutex<MemoryEditor>>;
@@ -44,6 +46,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         editor.search.clear();
         editor.recall_id = None;
         editor.recall_record = None;
+        editor.graph_id = None;
+        editor.graph_record = None;
         if let Some(window) = weak.upgrade() {
             let ui = window.global::<MemoryUi>();
             ui.set_character(id);
@@ -56,6 +60,11 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_recall_query("".into());
             ui.set_recall_result("".into());
             ui.set_recall_pending(false);
+            ui.set_graph_eligible(false);
+            ui.set_graph_pending(false);
+            ui.set_graph_applying(false);
+            ui.set_graph_confirm_ready(false);
+            ui.set_graph_summary("".into());
             ui.set_search("".into());
             ui.set_offset(0);
             ui.set_next(-1);
@@ -96,6 +105,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
     });
     let editor = state.clone();
     let weak = window.as_weak();
+    let abort_send = dispatch.clone();
     ui.on_edit(move |id| {
         let Some(component) = weak.upgrade() else {
             return;
@@ -108,6 +118,15 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         };
         editor.recall_id = None;
         editor.recall_record = None;
+        if let Some(id) = editor.graph_id.take() {
+            abort_send(Command::GraphAbort(id));
+        }
+        editor.graph_record = None;
+        ui.set_graph_pending(false);
+        ui.set_graph_applying(false);
+        ui.set_graph_confirm_ready(false);
+        ui.set_graph_summary("".into());
+        ui.set_graph_eligible(false);
         ui.set_recall_pending(false);
         ui.set_recall_result("".into());
         ui.set_recall_query("".into());
@@ -127,6 +146,12 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_selected_forgotten(
                 record.kind == neuromita::memory::MemoryKind::Fact
                     && record.state == neuromita::memory::MemoryState::Forgotten,
+            );
+            ui.set_graph_eligible(
+                matches!(
+                    record.kind,
+                    neuromita::memory::MemoryKind::Fact | neuromita::memory::MemoryKind::RagOnly
+                ) && record.state == neuromita::memory::MemoryState::Active,
             );
             ui.set_edit_id(id);
             ui.set_content(record.content.as_str().into());
@@ -187,6 +212,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         })();
         match result {
             Ok(command) => {
+                drop(editor);
+                ui.invoke_graph_cancel();
                 ui.set_editing(false);
                 apply_send(Command::MemoryEdit(edit_id, expected, vec![command]));
             }
@@ -195,6 +222,7 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
     });
     let selected = state.clone();
     let weak = window.as_weak();
+    let recall_send = dispatch.clone();
     ui.on_recall(move || {
         let Some(component) = weak.upgrade() else {
             return;
@@ -234,10 +262,175 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
         ui.set_recall_result("".into());
         ui.set_recall_pending(true);
         ui.set_error("".into());
-        dispatch(Command::MemoryRecall(
+        recall_send(Command::MemoryRecall(
             request_id, character, memory_id, query,
         ));
     });
+    let editor = state.clone();
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_graph_preview(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<MemoryUi>();
+        let mut editor = editor.lock().expect("memory editor mutex");
+        let Some(snapshot) = editor.current.as_ref() else {
+            ui.set_error("Memory snapshot is unavailable".into());
+            return;
+        };
+        let Some(record) = snapshot
+            .records()
+            .iter()
+            .find(|r| r.id.0.to_string() == ui.get_edit_id().as_str())
+        else {
+            ui.set_error("Select a memory source first".into());
+            return;
+        };
+        if record.state != neuromita::memory::MemoryState::Active
+            || !matches!(
+                record.kind,
+                neuromita::memory::MemoryKind::Fact | neuromita::memory::MemoryKind::RagOnly
+            )
+        {
+            ui.set_error("Only active facts or RAG sources can be maintained".into());
+            return;
+        }
+        let character = snapshot.character();
+        let id = record.id;
+        let request_id = uuid::Uuid::new_v4();
+        editor.graph_id = Some(request_id);
+        editor.graph_record = Some(id);
+        drop(editor);
+        ui.set_graph_pending(true);
+        ui.set_graph_applying(false);
+        ui.set_graph_confirm_ready(false);
+        ui.set_graph_summary("".into());
+        ui.set_error("".into());
+        send(Command::GraphPreview(request_id, character, id));
+    });
+    let editor = state.clone();
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_graph_confirm(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        let ui = component.global::<MemoryUi>();
+        if !ui.get_graph_confirm_ready() || ui.get_graph_pending() {
+            return;
+        }
+        let editor = editor.lock().expect("memory editor mutex");
+        let (Some(request_id), Some(record), Some(character)) = (
+            editor.graph_id,
+            editor.graph_record,
+            editor.current.as_ref().map(|snapshot| snapshot.character()),
+        ) else {
+            return;
+        };
+        if ui.get_edit_id().as_str() != record.0.to_string() {
+            return;
+        }
+        drop(editor);
+        ui.set_graph_confirm_ready(false);
+        ui.set_graph_pending(true);
+        ui.set_graph_applying(true);
+        ui.set_graph_summary("Applying confirmed graph cleanup…".into());
+        send(Command::GraphApply(request_id, character));
+    });
+    let editor = state.clone();
+    let weak = window.as_weak();
+    ui.on_graph_cancel(move || {
+        let Some(component) = weak.upgrade() else {
+            return;
+        };
+        if component.global::<MemoryUi>().get_graph_applying() {
+            return;
+        }
+        let id = {
+            let mut editor = editor.lock().expect("memory editor mutex");
+            editor.graph_record = None;
+            editor.graph_id.take()
+        };
+        let ui = component.global::<MemoryUi>();
+        ui.set_graph_pending(false);
+        ui.set_graph_applying(false);
+        ui.set_graph_confirm_ready(false);
+        ui.set_graph_summary("".into());
+        if let Some(id) = id {
+            dispatch(Command::GraphAbort(id));
+        }
+    });
+}
+
+pub fn graph_previewed(
+    window: &AppWindow,
+    state: &EditorState,
+    request_id: uuid::Uuid,
+    result: Result<usize, String>,
+) {
+    let mut editor = state.lock().expect("memory editor mutex");
+    if editor.graph_id != Some(request_id) {
+        return;
+    }
+    let ui = window.global::<MemoryUi>();
+    if editor
+        .graph_record
+        .is_none_or(|id| ui.get_edit_id().as_str() != id.0.to_string())
+    {
+        return;
+    }
+    ui.set_graph_pending(false);
+    ui.set_graph_applying(false);
+    match result {
+        Ok(count) => {
+            ui.set_graph_summary(
+                format!("{count} derived graph relations selected for clear. Confirm to proceed.")
+                    .into(),
+            );
+            ui.set_graph_confirm_ready(true);
+        }
+        Err(error) => {
+            editor.graph_id = None;
+            editor.graph_record = None;
+            ui.set_graph_confirm_ready(false);
+            ui.set_error(error.into());
+        }
+    }
+}
+
+pub fn graph_applied(
+    window: &AppWindow,
+    state: &EditorState,
+    request_id: uuid::Uuid,
+    result: Result<(), String>,
+) {
+    let mut editor = state.lock().expect("memory editor mutex");
+    if editor.graph_id != Some(request_id) {
+        return;
+    }
+    let ui = window.global::<MemoryUi>();
+    if editor
+        .graph_record
+        .is_none_or(|id| ui.get_edit_id().as_str() != id.0.to_string())
+    {
+        return;
+    }
+    editor.graph_id = None;
+    editor.graph_record = None;
+    ui.set_graph_pending(false);
+    ui.set_graph_applying(false);
+    ui.set_graph_confirm_ready(false);
+    match result {
+        Ok(()) => {
+            ui.set_error("".into());
+            ui.set_graph_summary("Graph relations cleared. Canonical memory retained.".into());
+        }
+        Err(error) => {
+            ui.set_graph_summary("".into());
+            ui.set_error(error.into());
+        }
+    }
 }
 
 pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
@@ -269,7 +462,17 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
             window.global::<MemoryUi>().set_recall_result("".into());
         }
         if revised {
-            window.global::<MemoryUi>().set_recall_result("".into());
+            let ui = window.global::<MemoryUi>();
+            ui.set_recall_result("".into());
+            if !ui.get_graph_applying() {
+                let pending = state.graph_id.take().is_some();
+                state.graph_record = None;
+                ui.set_graph_pending(false);
+                ui.set_graph_confirm_ready(false);
+                if pending {
+                    ui.set_graph_summary("".into());
+                }
+            }
         }
         let selected_id = window.global::<MemoryUi>().get_edit_id();
         window
@@ -278,6 +481,17 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
                 record.id.0.to_string() == selected_id.as_str()
                     && record.kind == neuromita::memory::MemoryKind::Fact
                     && record.state == neuromita::memory::MemoryState::Forgotten
+            }));
+        window
+            .global::<MemoryUi>()
+            .set_graph_eligible(page.snapshot().records().iter().any(|record| {
+                record.id.0.to_string() == selected_id.as_str()
+                    && record.state == neuromita::memory::MemoryState::Active
+                    && matches!(
+                        record.kind,
+                        neuromita::memory::MemoryKind::Fact
+                            | neuromita::memory::MemoryKind::RagOnly
+                    )
             }));
         (state.offset, state.search.clone())
     };
