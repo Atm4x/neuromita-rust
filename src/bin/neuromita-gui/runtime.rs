@@ -328,13 +328,17 @@ async fn run(
         }
     };
     publish(Update::Connected(app.server().address().to_string()));
-    match app.presenter().audio_input.devices().await {
-        Ok(devices) => publish(Update::SpeechInventory(
-            Box::new(catalog.snapshot().await),
-            devices,
-        )),
-        Err(error) => publish(Update::AdminError(error.to_string())),
-    }
+    let devices = match app.presenter().audio_input.devices().await {
+        Ok(devices) => devices,
+        Err(error) => {
+            publish(Update::AdminError(error.to_string()));
+            Vec::new()
+        }
+    };
+    publish(Update::SpeechInventory(
+        Box::new(catalog.snapshot().await),
+        devices,
+    ));
     if let Some(problem) = app.speech_startup_warning() {
         publish(Update::AdminError(format!("Speech runtime: {problem}")));
     }
@@ -486,10 +490,14 @@ async fn observe(
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
                 Some(Command::RefreshSpeechInventory) => {
-                    match administration.audio_input.devices().await {
-                        Ok(devices) => publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices)),
-                        Err(error) => publish(Update::AdminError(error.to_string())),
-                    }
+                    let devices = match administration.audio_input.devices().await {
+                        Ok(devices) => devices,
+                        Err(error) => {
+                            publish(Update::AdminError(error.to_string()));
+                            Vec::new()
+                        }
+                    };
+                    publish(Update::SpeechInventory(Box::new(catalog.snapshot().await), devices));
                 },
                 Some(Command::RefreshReleases) => { if let Err(error) = administration.releases.refresh() { publish(Update::ReleaseError(error.to_string())); } },
                 None => return Ok(()),

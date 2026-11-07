@@ -60,6 +60,7 @@ pub fn attach(
     super::ai_engine::bind(window, dispatch.clone());
     super::voice::bind(window, dispatch.clone());
     super::asr::bind(window, dispatch.clone());
+    super::ai_hub::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     let send = dispatch.clone();
@@ -208,6 +209,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
             super::asr::inventory(window, &catalog, &devices);
+            super::ai_hub::inventory(window, &catalog);
         }
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
@@ -263,6 +265,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::AdminSaved => super::settings::saved(window, None),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            super::ai_hub::stopped(window);
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);
             super::asr::runtime_status(window, &stopped);

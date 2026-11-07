@@ -9,6 +9,8 @@ export component AiHubPage inherits Rectangle {
     private property <string> category: "tts";
     private property <string> runtime-filter: "all";
     private property <string> search-text: "";
+    private property <int> category-slot: root.category == "tts" ? 0 : root.category == "asr" ? 1 : root.category == "core" ? 2 : root.category == "rag" ? 3 : 4;
+    private property <int> category-total: root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
     private property <string> selected-id: "";
     private property <bool> settings-open: false;
     private property <bool> confirm-discard: false;
@@ -122,17 +124,22 @@ export component AiHubPage inherits Rectangle {
                             }
                             Label { text: cat.subtitle; height: 14px; font-size: 10px; color: Theme.muted; }
                         }
-                        Rectangle {
+                        VerticalLayout {
                             width: max(25px, count-label.preferred-width + 12px);
-                            height: 23px;
-                            border-radius: 7px;
-                            background: root.category == cat.id ? Theme.accent.with-alpha(0.21) : Theme.text.with-alpha(0.045);
-                            border-width: 1px;
-                            border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
-                            count-label := Label {
-                                text: root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
-                                horizontal-alignment: center; font-size: 10px; font-weight: 650;
-                                color: root.category == cat.id ? Theme.text : Theme.muted;
+                            height: 100%;
+                            alignment: center;
+                            Rectangle {
+                                width: parent.width;
+                                height: 23px;
+                                border-radius: 7px;
+                                background: root.category == cat.id ? Theme.accent.with-alpha(0.21) : Theme.text.with-alpha(0.045);
+                                border-width: 1px;
+                                border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
+                                count-label := Label {
+                                    text: root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
+                                    horizontal-alignment: center; font-size: 10px; font-weight: 650;
+                                    color: root.category == cat.id ? Theme.text : Theme.muted;
+                                }
                             }
                         }
                     }
@@ -299,14 +306,23 @@ export component AiHubPage inherits Rectangle {
                     }
                 }
             }
-            if root.entries.length == 0: Rectangle {
+            if root.entries.length == 0 || root.category-total == 0: Rectangle {
                 vertical-stretch: 1; background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 14px;
                 VerticalLayout { alignment: center; padding: 24px; spacing: 10px;
-                    Label { text: "Каталог моделей пока не подключён"; font-size: 17px; font-weight: 700; horizontal-alignment: center; }
-                    Label { text: "AI Hub ожидает данные каталога; действия установки и настройки временно недоступны."; font-size: 12px; color: Theme.muted; horizontal-alignment: center; wrap: word-wrap; }
+                    Label {
+                        text: root.category != "tts" && root.category != "asr" ? "Каталог категории пока не подключён"
+                            : root.can-refresh ? "В этой категории нет обнаруженных моделей" : "Каталог моделей пока не подключён";
+                        font-size: 17px; font-weight: 700; horizontal-alignment: center;
+                    }
+                    Label {
+                        text: root.category != "tts" && root.category != "asr" ? "Для этого раздела пока нет Core-owned источника моделей."
+                            : root.can-refresh ? "Список обновлён; для этой категории Core не обнаружил доступных плагинов."
+                            : "AI Hub ожидает каталог; установка и настройка пока недоступны.";
+                        font-size: 12px; color: Theme.muted; horizontal-alignment: center; wrap: word-wrap;
+                    }
                 }
             }
-            if root.entries.length > 0: Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
+            if root.entries.length > 0 && root.category-total > 0: Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
                 ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
                     VerticalLayout {
                         padding-right: 9px; padding-top: 2px; padding-bottom: 4px;
@@ -360,16 +376,20 @@ export component AiHubPage inherits Rectangle {
                         HorizontalLayout { spacing: 8px; height: 28px;
                             HubPill { caption: root.selected-model.backend; accent: true; }
                             if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
-                            HubPill { caption: root.selected-model.state == "ready" ? "Установлено" : "Статус не проверен"; }
+                            HubPill { caption: root.selected-model.state == "ready" ? "Установлено"
+                                : root.selected-model.state == "package-assets" ? "Окружение и файлы проверены"
+                                : root.selected-model.state == "package-only" ? "Окружение обнаружено"
+                                : root.selected-model.state == "assets-only" ? "Файлы проверены"
+                                : root.selected-model.state == "discovered" ? "Не установлено" : "Статус не проверен"; }
                         }
-                        Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.hover; height: 66px;
+                        if root.selected-model.location != "": Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.hover; height: 66px;
                             VerticalLayout { padding: 12px; spacing: 6px;
                                 Label { text: "Расположение на диске (типовой каталог)"; color: Theme.muted; font-size: 10px; }
                                 Label { text: root.selected-model.location; font-size: 12px; font-weight: 600; }
                             }
                         }
                         Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }
-                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.text.with-alpha(0.028);
+                        if root.selected-model.setting-one != "" && root.selected-model.setting-two != "": Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.text.with-alpha(0.028);
                             VerticalLayout { padding: 15px; spacing: 12px;
                                 VerticalLayout { spacing: 5px;
                                     Label { text: root.selected-model.setting-one; font-size: 12px; font-weight: 600; }
@@ -393,14 +413,14 @@ export component AiHubPage inherits Rectangle {
                                 }
                             }
                         }
-                        Text { text: "Демонстрационная форма. Поля и валидаторы будут построены из settings_schema установленного плагина; сейчас значения не сохраняются.";
+                        Text { text: root.selected-model.setting-one == "" ? "Параметры не загружены: модель обнаружена в каталоге, но схема настроек и сохранение ещё не подключены." : "Демонстрационная форма. Поля и валидаторы будут построены из settings_schema установленного плагина; сейчас значения не сохраняются.";
                             color: Theme.muted; font-size: 11px; wrap: word-wrap;
                         }
                     }
                 }
                 HorizontalLayout { height: 42px; spacing: 10px;
                     Label { text: root.dirty ? "Черновик изменён · не сохранён" : "Демо без подключения к каталогу"; color: Theme.muted; font-size: 11px; horizontal-stretch: 1; }
-                    HubAction { caption: "Сбросить"; activated => { root.field-one = root.selected-model.setting-one-value; root.field-two = root.selected-model.setting-two-value; root.dirty = false; } }
+                    HubAction { caption: "Сбросить"; enabled: root.selected-model.setting-one != ""; activated => { root.field-one = root.selected-model.setting-one-value; root.field-two = root.selected-model.setting-two-value; root.dirty = false; } }
                     HubAction { caption: "Сохранить"; primary: true; enabled: false; }
                 }
                 if root.confirm-discard: Rectangle {

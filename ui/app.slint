@@ -6,6 +6,7 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
+import { HubModel } from "ai-hub/components.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -16,7 +17,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -62,6 +63,10 @@ export component AppWindow inherits Window {
     in property <int> chat-active;
     in property <int> chat-volume;
     in property <bool> chat-voice;
+    in property <[HubModel]> ai-hub-entries;
+    in property <[int]> ai-hub-category-counts;
+    in property <bool> ai-hub-can-refresh: false;
+    callback ai-hub-refresh();
     in property <string> chat-attitude: "—";
     in property <string> chat-boredom: "—";
     in property <string> chat-stress: "—";
@@ -99,7 +104,13 @@ export component AppWindow inherits Window {
         }
         Rectangle {
             horizontal-stretch: 1; min-width: 0px; max-width: 10000px; clip: true;
-            if root.ai-hub-open: AiHubPage { width: parent.width; height: parent.height; }
+            if root.ai-hub-open: AiHubPage {
+                width: parent.width; height: parent.height;
+                entries: root.ai-hub-entries;
+                category-counts: root.ai-hub-category-counts;
+                can-refresh: root.ai-hub-can-refresh;
+                refresh-requested => { root.ai-hub-refresh(); }
+            }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;
                 backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };

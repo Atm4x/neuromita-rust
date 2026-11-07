@@ -132,7 +132,10 @@ export component HubModelCard inherits Rectangle {
             alignment: center;
             HubAction {
                 compact: true;
-                caption: root.entry.state == "ready" ? "Установлено" : root.entry.state == "incompatible" ? "Недоступно" : "Установить";
+                caption: root.entry.state == "ready" ? "Установлено"
+                    : root.entry.state == "package-assets" || root.entry.state == "package-only"
+                        || root.entry.state == "assets-only" || root.entry.state == "discovered" ? "Нет операции"
+                    : root.entry.state == "incompatible" ? "Недоступно" : "Установить";
                 primary: root.entry.state != "ready";
                 enabled: false;
             }
