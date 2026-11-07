@@ -1010,3 +1010,54 @@ fn python_sqlite_import_stale_binding_cannot_overwrite_another_writer() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_sqlite_import_reexports_losslessly_through_native_memory_and_sqlite() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::{
+        export_memory, export_sqlite, import_memory as import_native_memory,
+        import_sqlite as import_native_sqlite,
+    };
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let root =
+        std::env::temp_dir().join(format!("nm-python-cross-storage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let original_path = root.join("original.sqlite");
+    let mut original = SqliteTimelineRepository::open(&original_path).unwrap();
+    let bound = source
+        .bind_sqlite(&original, &explicit_observers())
+        .unwrap();
+    let provenance = bound.provenance();
+    let session = bound.import_sqlite(&mut original, &assets).unwrap();
+    let archive = export_sqlite(&original, session, &assets).unwrap();
+
+    let mut memory = TimelineStore::new();
+    assert_eq!(
+        import_native_memory(&mut memory, &archive, &assets).unwrap(),
+        session
+    );
+    assert_eq!(memory.session_provenance(session), Some(&provenance));
+    assert_eq!(export_memory(&memory, session, &assets).unwrap(), archive);
+    assert!(import_native_memory(&mut memory, &archive, &assets).is_err());
+
+    let cloned_path = root.join("cloned.sqlite");
+    let mut cloned = SqliteTimelineRepository::open(&cloned_path).unwrap();
+    assert_eq!(
+        import_native_sqlite(&mut cloned, &archive, &assets).unwrap(),
+        session
+    );
+    assert_eq!(export_sqlite(&cloned, session, &assets).unwrap(), archive);
+    drop(original);
+    drop(cloned);
+    let reopened = SqliteTimelineRepository::open(&cloned_path).unwrap();
+    assert_eq!(export_sqlite(&reopened, session, &assets).unwrap(), archive);
+    std::fs::remove_dir_all(root).unwrap();
+}
