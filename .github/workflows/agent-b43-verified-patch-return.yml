@@ -1,0 +1,38 @@
+name: Agent B43 verified patch return
+on:
+  push:
+    branches: [bridge/agent-b43-patch-20261107]
+    paths: [bridge/agent-b43.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify B43 source patch and publish exact tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=e57245c16d7fbaac59f01499a54b1811eb4513f2
+          tree=11e2156dc3ce4fe14b47fe529237d8ae4378edfe
+          branch=codex/timeline-b43-sse-multimodal-privacy-20261107
+          base64 -d bridge/agent-b43.patch.gz.b64 > /tmp/b43.patch.gz
+          echo "d93efde7fd85da13a8c43be8dab1e02d6e9c3136167d58d600226d45b1a0d802  /tmp/b43.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b43.patch.gz
+          gzip -dc /tmp/b43.patch.gz > /tmp/b43.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b43.patch
+          git apply --index /tmp/b43.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "test(timeline): certify live streaming multimodal privacy on all providers"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "branch already exists"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_REMOTE_HEAD=$remote"
+          echo "SOURCE_TREE=$(git rev-parse HEAD^{tree})"
