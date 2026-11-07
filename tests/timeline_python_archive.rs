@@ -367,3 +367,31 @@ fn python_import_binding_rejects_unrecognized_player_author_before_mutation() {
     assert!(source.bind_memory(&target, &explicit_observers()).is_err());
     assert!(source.bind_memory(&target, &explicit_observers()).is_err());
 }
+
+#[test]
+fn python_import_stages_real_archive_asset_into_existing_content_store() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+    let source = inspect_python_archive(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    let bindings = std::collections::BTreeMap::from([(
+        "A".to_string(),
+        neuromita::character::CharacterId::Crazy,
+    )]);
+    let plan = source
+        .bind_memory(&TimelineStore::new(), &bindings)
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("nm-b25-staged-{}", uuid::Uuid::new_v4()));
+    let store = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let first = plan.stage_assets(&store).unwrap();
+    assert_eq!(first.len(), 1);
+    let second = plan.stage_assets(&store).unwrap();
+    assert_eq!(first, second);
+    for (external, reference) in &first {
+        assert_eq!(external, &format!("sha256:{}", reference.digest));
+        store.verify(reference).unwrap();
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
