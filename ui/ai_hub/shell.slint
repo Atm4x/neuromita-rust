@@ -5,7 +5,11 @@ import { SettingsTheme } from "../settings/theme.slint";
 import { SettingsLabel, SettingsField } from "../settings/form-controls.slint";
 import { SettingsScrollView } from "../settings/scroll-view.slint";
 import { AiHubCard } from "cards.slint";
-import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase, AiHubTruth } from "contract.slint";
+import { AiHubSettingsPanel } from "settings-panel.slint";
+import { AiHubOperationsPanel, AiHubOperationSnapshot, AiHubOperationCapabilities } from "operations.slint";
+import { AiHubQueuePopup } from "operations-popup.slint";
+import { AiHubDecisionSnapshot } from "dialogs.slint";
+import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase, AiHubTruth, AiHubSettingValue } from "contract.slint";
 
 // GUI-only workspace. Agent 2 owns cards, agent 3 owns the schema editor,
 // agent 4 owns operation/queue widgets. No backend intents are emitted here.
@@ -14,6 +18,15 @@ export component AiHubShell inherits Rectangle {
     in property <[AiHubComponent]> components;
     in property <AiHubSettingsState> settings;
     in property <[AiHubOperation]> operations;
+    // Adapter flags come only from the host. False until genuine Core bindings exist.
+    in property <bool> settings-adapter-connected: false;
+    in property <bool> operation-adapter-connected: false;
+    in property <[AiHubOperationSnapshot]> operation-snapshots;
+    in property <AiHubOperationCapabilities> operation-capabilities;
+    in property <AiHubDecisionSnapshot> operation-decision;
+    in property <string> session-token;
+    in-out property <bool> queue-open: false;
+    property <AiHubComponent> operation-target;
     in-out property <string> selected-category: "tts";
     in-out property <int> active-tab: 0; // 0 = Install, 1 = Settings
     in-out property <string> search-text;
@@ -24,6 +37,13 @@ export component AiHubShell inherits Rectangle {
     callback component-action-requested(string, string, int, string);
     callback settings-save-requested(string, int, string);
     callback operation-cancel-requested(string, string, int, string);
+    callback settings-load-requested(string, int, string);
+    callback settings-values-save-requested(string, [AiHubSettingValue], int, string);
+    callback operation-prepare-requested(string, string, int, string);
+    callback operation-confirm-requested(string, string, string, int, string);
+    callback operation-dismiss-requested(string, string, int, string);
+    callback operation-cancel-queued-requested(string, string, int, string);
+    callback operation-cancel-running-requested(string, string, int, string);
 
     // The source translation catalog can lag a new UI key. Provide exact EN
     // fallbacks while retaining the existing runtime I18n path for RU/overrides.
@@ -90,9 +110,12 @@ export component AiHubShell inherits Rectangle {
                 width: 86px; height: 36px;
                 label: root.localized("common.close", "Закрыть", "Close");
                 background: SettingsTheme.button;
-                enabled: !root.settings.dirty && root.settings.save-phase != AiHubSavePhase.saving;
+                enabled: root.settings.save-phase != AiHubSavePhase.saving && !settings-editor.saving;
                 SettingsLabel { text: root.localized("common.close", "Закрыть", "Close"); horizontal-alignment: center; }
-                activated => { root.close-requested(); }
+                activated => {
+                    if root.active-tab == 1 { settings-editor.request-close(); }
+                    else { root.close-requested(); }
+                }
             }
         }
         Rectangle { height: 1px; background: Theme.divider; }
@@ -138,7 +161,10 @@ export component AiHubShell inherits Rectangle {
                                     horizontal-alignment: left;
                                     x: 10px; width: parent.width - 20px;
                                 }
-                                activated => { root.selected-category = category.key; }
+                                activated => {
+                                    if root.active-tab == 1 { settings-editor.request-category(category.key); }
+                                    else { root.selected-category = category.key; }
+                                }
                             }
                         }
                     }
@@ -169,7 +195,11 @@ export component AiHubShell inherits Rectangle {
                             width: 132px; height: 36px; label: tab.label;
                             selected: root.active-tab == tab.id;
                             SettingsLabel { text: tab.label; horizontal-alignment: center; font-weight: 700; }
-                            activated => { root.active-tab = tab.id; }
+                            activated => {
+                                if root.active-tab == 1 && tab.id != 1 {
+                                    settings-editor.request-tab("install");
+                                } else { root.active-tab = tab.id; }
+                            }
                         }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
@@ -229,16 +259,63 @@ export component AiHubShell inherits Rectangle {
                                         for component in root.components: AiHubCard {
                                             component: component;
                                             operations: root.operations;
+                                            action-adapter-connected: root.operation-adapter-connected;
                                             card-visible: root.show-component(component) && root.card-rank(component) == rank;
                                             action-requested(id, verb, revision, token) => {
+                                                root.operation-target = component;
                                                 root.component-action-requested(id, verb, revision, token);
                                             }
                                         }
                                     }
                                 }
-                                if root.catalog.available && root.components.length > 0 && root.active-tab == 1: SettingsLabel {
-                                    text: root.localized("ai-hub.shell.settings-placeholder", "Параметры компонентов (редактор подключит следующий агент)", "Component settings (editor will be added by the next agent)");
-                                    color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
+                                // Keep the editor alive when switching tabs: local dirty
+                                // state survives until the explicit Discard/Cancel decision.
+                                settings-editor := AiHubSettingsPanel {
+                                    width: parent.width;
+                                    height: root.active-tab == 1 && root.catalog.available ? 470px : 0px;
+                                    visible: root.active-tab == 1 && root.catalog.available;
+                                    adapter-connected: root.settings-adapter-connected;
+                                    components: root.components;
+                                    category: root.selected-category;
+                                    session-token: root.session-token;
+                                    incoming: root.settings;
+                                    active-component-present: root.catalog.available;
+                                    navigation-approved(action, target) => {
+                                        if action == "category" { root.selected-category = target; }
+                                        if action == "tab" { root.active-tab = target == "install" ? 0 : 1; }
+                                        if action == "close" { root.close-requested(); }
+                                    }
+                                    load-requested(id, rev, tok) => { root.settings-load-requested(id, rev, tok); }
+                                    save-requested(id, values, rev, tok) => {
+                                        root.settings-values-save-requested(id, values, rev, tok);
+                                    }
+                                }
+                                if root.catalog.available && root.active-tab == 0: AiHubOperationsPanel {
+                                    width: parent.width;
+                                    height: 335px;
+                                    connected: root.operation-adapter-connected;
+                                    component-id: root.operation-target.component-id;
+                                    component-title: root.operation-target.title;
+                                    supported: root.operation-target.supported;
+                                    unsupported-reason: root.operation-target.unsupported-reason;
+                                    revision: root.operation-target.revision;
+                                    token: root.operation-target.token;
+                                    capabilities: root.operation-capabilities;
+                                    decision: root.operation-decision;
+                                    operations: root.operation-snapshots;
+                                    prepare-requested(id, action, rev, tok) => { root.operation-prepare-requested(id, action, rev, tok); }
+                                    confirm-requested(id, component, action, rev, tok) => {
+                                        root.operation-confirm-requested(id, component, action, rev, tok);
+                                    }
+                                    dismiss-preview-requested(id, component, rev, tok) => {
+                                        root.operation-dismiss-requested(id, component, rev, tok);
+                                    }
+                                    cancel-queued-requested(id, component, rev, tok) => {
+                                        root.operation-cancel-queued-requested(id, component, rev, tok);
+                                    }
+                                    cancel-running-requested(id, component, rev, tok) => {
+                                        root.operation-cancel-running-requested(id, component, rev, tok);
+                                    }
                                 }
                             }
                         }
@@ -258,11 +335,11 @@ export component AiHubShell inherits Rectangle {
                                             : root.localized("ai-hub.shell.available", "Статус: каталог получен", "Status: catalog received");
                                 color: SettingsTheme.muted;
                             }
-                            SettingsLabel {
-                                text: root.operations.length > 0
-                                    ? root.localized("ai-hub.shell.operations", "Операции: ", "Operations: ") + root.operations.length
-                                    : root.localized("ai-hub.shell.no-operations", "Нет операций", "No operations");
-                                color: SettingsTheme.muted;
+                            ActionSurface {
+                                width: 158px; height: 34px;
+                                label: root.localized("ai-hub.shell.queue", "Очередь и журнал", "Queue and log");
+                                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                                activated => { root.queue-open = true; }
                             }
                         }
                     }
@@ -272,6 +349,21 @@ export component AiHubShell inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    AiHubQueuePopup {
+        width: parent.width; height: parent.height;
+        open: root.queue-open;
+        connected: root.operation-adapter-connected;
+        can-show-logs: root.operation-capabilities.can-show-logs;
+        operations: root.operation-snapshots;
+        close-requested => { root.queue-open = false; }
+        cancel-queued-requested(id, component, rev, tok) => {
+            root.operation-cancel-queued-requested(id, component, rev, tok);
+        }
+        cancel-running-requested(id, component, rev, tok) => {
+            root.operation-cancel-running-requested(id, component, rev, tok);
         }
     }
 }

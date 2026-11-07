@@ -12,6 +12,7 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
     let hub_window = window.as_weak();
     window.global::<AiEngineUi>().on_open_hub(move || {
         if let Some(window) = hub_window.upgrade() {
+            window.set_ai_hub_session_epoch(window.get_ai_hub_session_epoch().wrapping_add(1));
             window.set_ai_hub_open(true);
         }
     });

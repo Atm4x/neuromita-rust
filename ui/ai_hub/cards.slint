@@ -54,6 +54,7 @@ export component AiHubCard inherits Rectangle {
     in property <AiHubComponent> component;
     in property <[AiHubOperation]> operations;
     in property <bool> card-visible: true;
+    in property <bool> action-adapter-connected: false;
     // V1 has no can-update/can-reinstall. The eventual presenter must explicitly
     // authorize these verbs before they become active; can-install is NOT enough.
     in property <bool> can-update: false;
@@ -190,7 +191,7 @@ export component AiHubCard inherits Rectangle {
                 width: action.id == "reinstall" ? 124px : 103px;
                 height: 31px;
                 label: root.localized("ai-hub.action." + action.id, action.ru, action.en);
-                enabled: !root.blocked && root.component.component-id != ""
+                enabled: root.action-adapter-connected && !root.blocked && root.component.component-id != ""
                     && (action.id == "settings" ? root.component.can-open-settings
                         : root.component.supported
                             && (action.id == "install" ? root.component.can-install

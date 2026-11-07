@@ -1,0 +1,718 @@
+// AI Hub Settings — GUI-only, intentionally not imported by shell v1 until
+// its navigation/close callbacks and the presenter adapter are coordinated.
+// Never writes settings to disk, initializes a model or compiles anything.
+import { LineEdit, CheckBox } from "std-widgets.slint";
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
+import {
+    AiHubComponent, AiHubTruth, AiHubLoadPhase, AiHubSavePhase,
+    AiHubSettingKind, AiHubSettingField, AiHubSettingValue, AiHubSettingsState
+} from "contract.slint";
+
+// Optional GUI-only extensions to v1, aligned with schema by key AND index.
+// The Rust adapter must project the actual plugin schema; never invent options.
+// No hints means ordinary v1 controls; unknown-type is explicit and read-only.
+export struct AiHubSettingUiHints {
+    key: string,
+    raw-type: string,
+    secret: bool,
+    unknown-type: bool,
+    bounded: bool,
+    minimum: float,
+    maximum: float,
+    step: float,
+    suffix: string,
+    has-dependency: bool,
+    dependency-index: int,
+    dependency-value: string,
+}
+
+export struct AiHubCompileView {
+    available: bool,
+    runtime-data-present: bool,
+    target-device: string,
+    target-status: string,
+    cache-summary: string,
+    metadata-state: string,
+    error: string,
+    busy: bool,
+    can-compile: bool,
+    can-clear: bool,
+    docs-available: bool,
+}
+
+export component AiHubSettingsPanel inherits Rectangle {
+    // components are catalog data. Installation/readiness are NOT inferred here.
+    in property <[AiHubComponent]> components;
+    in property <bool> adapter-connected: false;
+    in property <string> category: "all";
+    in property <string> session-token; // host must change for each open/reopen
+    in property <bool> active-component-present: true;
+    in property <AiHubSettingsState> incoming;
+    in property <[AiHubSettingUiHints]> hints;
+    in property <AiHubCompileView> compilation;
+
+    // Observable local draft for a future shell/presenter adapter.
+    out property <string> active-component-id: active-id;
+    out property <bool> dirty: dirty-count > 0;
+    out property <bool> navigation-confirmation-open: guard-open;
+    out property <bool> saving: save-phase == AiHubSavePhase.saving;
+
+    callback load-requested(string, int, string); // ID, component revision, request token
+    callback save-requested(string, [AiHubSettingValue], int, string);
+    callback navigation-approved(string, string); // "category" / "tab" / "close", target
+    callback compile-requested(string, [AiHubSettingValue], int, string);
+    callback clear-compilation-requested(string, int, string);
+    callback compile-documentation-requested(string);
+
+    property <string> active-id: "";
+    property <string> active-token: "";
+    property <int> request-sequence: 0;
+    property <int> accepted-revision: -1;
+    property <AiHubLoadPhase> load-phase: AiHubLoadPhase.idle;
+    property <AiHubSavePhase> save-phase: AiHubSavePhase.idle;
+    property <[AiHubSettingField]> active-schema: [];
+    property <[AiHubSettingValue]> draft-values: [];
+    property <[AiHubSettingValue]> saved-values: [];
+    property <[AiHubSettingValue]> server-errors: [];
+    property <int> dirty-count: 0;
+    property <bool> attempted-save: false;
+    property <string> global-error: "";
+    property <bool> guard-open: false;
+    property <string> pending-action: "";
+    property <string> pending-target: "";
+    property <int> pending-revision: 0;
+    property <bool> operation-confirm-open: false;
+    property <string> pending-operation: "";
+
+    pure function tr(ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : ru;
+    }
+
+    pure function candidate-visible(c: AiHubComponent) -> bool {
+        return (c.installed == AiHubTruth.yes || c.can-open-settings)
+            && (root.category == "all" || c.category == root.category
+                || (root.category == "extras" && c.category == "beats")
+                || (root.category == "deps" && c.category == "dependency")
+                || (root.category == "other"
+                    && c.category != "tts" && c.category != "voices"
+                    && c.category != "asr" && c.category != "rag"
+                    && c.category != "extras" && c.category != "beats"
+                    && c.category != "backend" && c.category != "deps"
+                    && c.category != "dependency"));
+    }
+
+    pure function can-edit(index: int, field: AiHubSettingField) -> bool {
+        let hint = root.hints[index];
+        return root.adapter-connected && root.load-phase == AiHubLoadPhase.loaded
+            && root.save-phase != AiHubSavePhase.saving
+            && root.active-component-present
+            && field.enabled
+            && !(hint.key == field.key && hint.unknown-type)
+            && (!(hint.key == field.key && hint.has-dependency)
+                || (hint.dependency-index >= 0
+                    && hint.dependency-index < root.draft-values.length
+                    && root.draft-values[hint.dependency-index].value == hint.dependency-value));
+    }
+
+    pure function field-error(index: int, field: AiHubSettingField) -> string {
+        let current = root.draft-values[index].value;
+        let hint = root.hints[index];
+        let backend = root.server-errors[index];
+        if backend.key == field.key && backend.error != "" { return backend.error; }
+        if root.attempted-save && field.required && current == "" {
+            return root.tr("Обязательное поле", "Required field");
+        }
+        if current != "" && (field.kind == AiHubSettingKind.integer || field.kind == AiHubSettingKind.decimal) {
+            if !current.is-float() { return root.tr("Введите число", "Enter a number"); }
+            if hint.key == field.key && hint.bounded
+                && (current.to-float() < hint.minimum || current.to-float() > hint.maximum) {
+                return root.tr("Вне разрешённого диапазона", "Outside allowed range");
+            }
+        }
+        return "";
+    }
+
+    // The presenter supplies values ordered to match schema keys. The full
+    // values array is retained for callbacks; unknown keys are never stripped.
+    // A late response MUST match the current selection's epoch/token/revision.
+    function apply-incoming() {
+        if root.active-id == "" || root.incoming.component-id != root.active-id
+            || root.incoming.token != root.active-token
+            || root.incoming.revision < root.accepted-revision {
+            return;
+        }
+        root.accepted-revision = root.incoming.revision;
+        if root.incoming.save-phase == AiHubSavePhase.saved
+            && root.save-phase == AiHubSavePhase.saving {
+            root.active-schema = root.incoming.schema;
+            root.saved-values = root.incoming.values;
+            root.draft-values = root.incoming.values;
+            root.server-errors = [];
+            root.dirty-count = 0;
+            root.attempted-save = false;
+            root.global-error = "";
+            root.load-phase = AiHubLoadPhase.loaded;
+            root.save-phase = AiHubSavePhase.saved;
+            return;
+        }
+        if root.incoming.save-phase == AiHubSavePhase.failed
+            && root.save-phase == AiHubSavePhase.saving {
+            // Never replace the draft with an error result.
+            root.server-errors = root.incoming.values;
+            root.global-error = root.incoming.error;
+            root.save-phase = AiHubSavePhase.failed;
+            return;
+        }
+        // A catalog refresh must not overwrite a dirty editor.
+        if root.dirty-count > 0 || root.save-phase == AiHubSavePhase.saving {
+            return;
+        }
+        if root.incoming.phase == AiHubLoadPhase.loaded {
+            root.active-schema = root.incoming.schema;
+            root.draft-values = root.incoming.values;
+            root.saved-values = root.incoming.values;
+            root.server-errors = [];
+            root.dirty-count = 0;
+            root.attempted-save = false;
+            root.global-error = root.incoming.error;
+            root.load-phase = AiHubLoadPhase.loaded;
+            root.save-phase = AiHubSavePhase.idle;
+        } else if root.incoming.phase == AiHubLoadPhase.failed {
+            root.load-phase = AiHubLoadPhase.failed;
+            root.global-error = root.incoming.error;
+        }
+    }
+
+    changed incoming => { root.apply-incoming(); }
+    changed session-token => {
+        // A reopened dialog must not accept responses from an old session.
+        root.active-id = "";
+        root.active-token = "";
+        root.request-sequence += 1;
+        root.accepted-revision = -1;
+        root.load-phase = AiHubLoadPhase.idle;
+        root.save-phase = AiHubSavePhase.idle;
+        root.active-schema = [];
+        root.draft-values = [];
+        root.saved-values = [];
+        root.server-errors = [];
+        root.dirty-count = 0;
+        root.global-error = "";
+        root.guard-open = false;
+        root.operation-confirm-open = false;
+    }
+
+    function begin-load(id: string, revision: int) {
+        if !root.adapter-connected { return; }
+        root.request-sequence += 1;
+        root.active-id = id;
+        root.active-token = root.session-token + ":" + root.request-sequence;
+        root.accepted-revision = revision;
+        root.active-schema = [];
+        root.draft-values = [];
+        root.saved-values = [];
+        root.server-errors = [];
+        root.dirty-count = 0;
+        root.attempted-save = false;
+        root.global-error = "";
+        root.load-phase = AiHubLoadPhase.loading;
+        root.save-phase = AiHubSavePhase.idle;
+        root.load-requested(id, revision, root.active-token);
+    }
+
+    function edit-value(index: int, key: string, value: string) {
+        if index < 0 || index >= root.draft-values.length
+            || root.draft-values[index].key != key
+            || root.save-phase == AiHubSavePhase.saving { return; }
+        let was = root.draft-values[index].value != root.saved-values[index].value;
+        let now = value != root.saved-values[index].value;
+        if was && !now { root.dirty-count -= 1; }
+        if !was && now { root.dirty-count += 1; }
+        root.draft-values[index] = { key: key, value: value, error: "" };
+        if root.server-errors[index].key == key {
+            root.server-errors[index] = { key: key, value: "", error: "" };
+        }
+        root.save-phase = AiHubSavePhase.idle;
+    }
+
+    function nudge(index: int, key: string, direction: int) {
+        let hint = root.hints[index];
+        let current = root.draft-values[index].value;
+        if current.is-float() {
+            let step = hint.key == key && hint.step > 0 ? hint.step : 1.0;
+            let proposed = current.to-float() + direction * step;
+            let next = hint.key == key && hint.bounded
+                ? clamp(proposed, hint.minimum, hint.maximum) : proposed;
+            root.edit-value(index, key, "" + next);
+        }
+    }
+
+    function reset-to-saved() {
+        root.draft-values = root.saved-values;
+        root.dirty-count = 0;
+        root.attempted-save = false;
+        root.server-errors = [];
+        root.global-error = "";
+        root.save-phase = AiHubSavePhase.idle;
+    }
+
+    function commit-navigation(action: string, target: string, revision: int) {
+        if action == "component" {
+            root.begin-load(target, revision);
+        } else {
+            root.navigation-approved(action, target);
+        }
+    }
+
+    function navigate(action: string, target: string, revision: int) {
+        if root.save-phase == AiHubSavePhase.saving { return; }
+        if action == "component" && target == root.active-id { return; }
+        if root.dirty-count > 0 {
+            root.pending-action = action;
+            root.pending-target = target;
+            root.pending-revision = revision;
+            root.guard-open = true;
+        } else {
+            root.commit-navigation(action, target, revision);
+        }
+    }
+
+    // Host MUST route category/tab/native-close/hide through these functions.
+    // Default of the visible dirty dialog is Cancel.
+    public function request-category(category-id: string) {
+        root.navigate("category", category-id, root.accepted-revision);
+    }
+    public function request-tab(tab-id: string) {
+        root.navigate("tab", tab-id, root.accepted-revision);
+    }
+    public function request-close() {
+        root.navigate("close", "", root.accepted-revision);
+    }
+
+    function save() {
+        if !root.adapter-connected || root.active-id == "" || root.dirty-count == 0 || !root.active-component-present
+            || root.load-phase != AiHubLoadPhase.loaded
+            || root.save-phase == AiHubSavePhase.saving { return; }
+        root.attempted-save = true;
+        // Backend remains authoritative for domain validation.
+        root.save-phase = AiHubSavePhase.saving;
+        root.global-error = "";
+        root.save-requested(root.active-id, root.draft-values, root.accepted-revision, root.active-token);
+    }
+
+    function finish-operation-confirm() {
+        if root.pending-operation == "compile" {
+            // Presenter must save pending device settings and prepare runtime.
+            root.compile-requested(root.active-id, root.draft-values, root.accepted-revision, root.active-token);
+        } else if root.pending-operation == "clear" {
+            root.clear-compilation-requested(root.active-id, root.accepted-revision, root.active-token);
+        }
+        root.operation-confirm-open = false;
+        root.pending-operation = "";
+    }
+
+    background: transparent;
+    HorizontalLayout {
+        padding: 0px; spacing: 14px;
+        Rectangle {
+            width: 265px; min-width: 218px;
+            background: SettingsTheme.panel;
+            border-radius: 10px;
+            border-width: 1px; border-color: SettingsTheme.border;
+            VerticalLayout {
+                padding: 12px; spacing: 10px;
+                SettingsLabel {
+                    height: 30px; font-size: 14px; font-weight: 700;
+                    text: root.tr("Установленные модели", "Installed models");
+                }
+                if !root.adapter-connected: SettingsLabel {
+                    text: root.tr("Редактор Core не подключён", "Core settings adapter unavailable");
+                    color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap;
+                }
+                list-scroll := SettingsScrollView {
+                    vertical-stretch: 1;
+                    content-height: list-content.preferred-height;
+                    list-content := VerticalLayout {
+                        width: list-scroll.visible-width; spacing: 5px; padding: 0px;
+                        alignment: start;
+                        for c in root.components: ActionSurface {
+                            visible: root.candidate-visible(c);
+                            height: root.candidate-visible(c) ? 44px : 0px;
+                            label: c.title;
+                            selected: c.component-id == root.active-id;
+                            enabled: root.adapter-connected && root.save-phase != AiHubSavePhase.saving;
+                            SettingsLabel {
+                                width: parent.width - 18px; x: 9px;
+                                text: c.title;
+                                font-weight: parent.selected ? 700 : 500;
+                                overflow: elide;
+                            }
+                            activated => { root.navigate("component", c.component-id, c.revision); }
+                        }
+                    }
+                }
+                if root.components.length == 0: SettingsLabel {
+                    text: root.tr("Нет компонентов для настройки", "No configurable components");
+                    color: SettingsTheme.muted; wrap: word-wrap;
+                }
+            }
+        }
+        Rectangle {
+            horizontal-stretch: 1; min-width: 0px;
+            background: SettingsTheme.panel; border-radius: 10px;
+            border-width: 1px; border-color: SettingsTheme.border;
+            VerticalLayout {
+                padding: 16px; spacing: 11px;
+                HorizontalLayout {
+                    height: 34px; spacing: 10px;
+                    SettingsLabel {
+                        text: root.active-id == "" ? root.tr("Выберите модель", "Select a model") : root.active-id;
+                        font-size: 19px; font-weight: 700; horizontal-stretch: 1;
+                    }
+                    if root.dirty: SettingsLabel {
+                        text: "● " + root.tr("Изменено", "Modified");
+                        color: SettingsTheme.error-text; font-size: 12px;
+                    }
+                }
+                if root.active-id != "" && !root.active-component-present: SettingsLabel {
+                    text: root.tr("Компонент исчез из каталога. Черновик сохранён; отмените изменения для выхода.", "Component disappeared from catalog. Draft retained; discard changes before leaving.");
+                    color: SettingsTheme.error-text; wrap: word-wrap;
+                }
+                if root.global-error != "": Rectangle {
+                    height: max(54px, error-label.preferred-height + 20px);
+                    background: SettingsTheme.error-background;
+                    border-radius: 7px;
+                    error-label := SettingsLabel {
+                        x: 10px; y: 8px; width: parent.width - 20px;
+                        text: root.global-error; color: SettingsTheme.error-text;
+                        wrap: word-wrap; overflow: clip;
+                    }
+                }
+                if root.active-id == "": SettingsLabel {
+                    text: root.tr("Выберите установленный компонент слева.", "Select an installed component on the left.");
+                    color: SettingsTheme.muted; wrap: word-wrap;
+                }
+                if root.active-id != "" && root.load-phase == AiHubLoadPhase.loading: SettingsLabel {
+                    text: root.tr("Загрузка схемы и параметров…", "Loading schema and values…");
+                    color: SettingsTheme.muted;
+                }
+                if root.active-id != "" && root.load-phase == AiHubLoadPhase.failed: SettingsLabel {
+                    text: root.tr("Не удалось загрузить настройки.", "Could not load settings.");
+                    color: SettingsTheme.error-text;
+                }
+                if root.active-id != "" && root.load-phase == AiHubLoadPhase.loaded && root.active-schema.length == 0: SettingsLabel {
+                    text: root.tr("Для этого компонента нет схемы настроек.", "This component has no settings schema.");
+                    color: SettingsTheme.muted; wrap: word-wrap;
+                }
+                if root.load-phase == AiHubLoadPhase.loaded
+                    && (root.active-schema.length > 0 || root.active-id == "tts:medium+"
+                        || root.active-id == "tts:medium+low"): form-scroll := SettingsScrollView {
+                    vertical-stretch: 1;
+                    content-height: form-content.preferred-height;
+                    form-content := VerticalLayout {
+                        width: form-scroll.visible-width;
+                        spacing: 12px; padding: 2px;
+                        alignment: start;
+                        for field[index] in root.active-schema: field-frame := Rectangle {
+                            property <bool> choices-open: false;
+                            property <bool> editable: root.can-edit(index, field);
+                            property <bool> unsupported: root.hints[index].key == field.key && root.hints[index].unknown-type;
+                            property <string> validation-message: root.field-error(index, field);
+                            height: field-row.preferred-height + 18px;
+                            background: SettingsTheme.field; border-radius: 8px;
+                            border-width: 1px;
+                            border-color: self.validation-message == "" ? SettingsTheme.field-border : SettingsTheme.error-text;
+                            field-row := VerticalLayout {
+                                x: 10px; y: 9px; width: parent.width - 20px;
+                                spacing: 7px; padding: 0px;
+                                SettingsLabel {
+                                    text: field.title + (field.required ? " *" : "");
+                                    font-weight: 600; wrap: word-wrap;
+                                    color: SettingsTheme.text;
+                                }
+                                if field.kind == AiHubSettingKind.boolean: CheckBox {
+                                    height: 30px;
+                                    enabled: editable;
+                                    checked: root.draft-values[index].value.to-lowercase() == "true"
+                                        || root.draft-values[index].value == "1";
+                                    text: root.tr("Включено", "Enabled");
+                                    toggled => { root.edit-value(index, field.key, self.checked ? "True" : "False"); }
+                                }
+                                if field.kind == AiHubSettingKind.choice: VerticalLayout {
+                                    spacing: 4px; padding: 0px;
+                                    ActionSurface {
+                                        height: 34px;
+                                        enabled: editable && field.options.length > 0;
+                                        label: field.title;
+                                        background: SettingsTheme.input;
+                                        SettingsLabel {
+                                            x: 10px; width: parent.width - 20px;
+                                            text: root.draft-values[index].value + "  ▾";
+                                            overflow: elide;
+                                        }
+                                        activated => { choices-open = !choices-open; }
+                                    }
+                                    if choices-open: VerticalLayout {
+                                        spacing: 2px; padding: 0px;
+                                        for choice in field.options: ActionSurface {
+                                            height: 31px;
+                                            label: choice.label;
+                                            selected: root.draft-values[index].value == choice.value;
+                                            SettingsLabel {
+                                                x: 10px; width: parent.width - 20px;
+                                                text: choice.label; overflow: elide;
+                                            }
+                                            activated => {
+                                                root.edit-value(index, field.key, choice.value);
+                                                choices-open = false;
+                                            }
+                                        }
+                                    }
+                                    if field.options.length == 0: SettingsLabel {
+                                        text: root.tr("Нет доступных вариантов", "No choices available");
+                                        color: SettingsTheme.muted; font-size: 11px;
+                                    }
+                                }
+                                if field.kind == AiHubSettingKind.text
+                                    || field.kind == AiHubSettingKind.integer
+                                    || field.kind == AiHubSettingKind.decimal: HorizontalLayout {
+                                    spacing: 6px; height: 36px;
+                                    LineEdit {
+                                        horizontal-stretch: 1;
+                                        enabled: editable;
+                                        read-only: unsupported;
+                                        text: root.draft-values[index].value;
+                                        input-type: root.hints[index].key == field.key && root.hints[index].secret
+                                            ? InputType.password
+                                            : field.kind == AiHubSettingKind.decimal ? InputType.decimal : InputType.text;
+                                        edited(value) => { root.edit-value(index, field.key, value); }
+                                    }
+                                    if field.kind == AiHubSettingKind.integer || field.kind == AiHubSettingKind.decimal: ActionSurface {
+                                        width: 30px; height: 34px;
+                                        enabled: editable;
+                                        label: root.tr("Уменьшить", "Decrease");
+                                        background: SettingsTheme.button;
+                                        SettingsLabel { text: "−"; horizontal-alignment: center; }
+                                        activated => { root.nudge(index, field.key, -1); }
+                                    }
+                                    if field.kind == AiHubSettingKind.integer || field.kind == AiHubSettingKind.decimal: ActionSurface {
+                                        width: 30px; height: 34px;
+                                        enabled: editable;
+                                        label: root.tr("Увеличить", "Increase");
+                                        background: SettingsTheme.button;
+                                        SettingsLabel { text: "+"; horizontal-alignment: center; }
+                                        activated => { root.nudge(index, field.key, 1); }
+                                    }
+                                }
+                                if unsupported: SettingsLabel {
+                                    text: root.tr("Неизвестный тип схемы: ", "Unsupported schema type: ") + root.hints[index].raw-type
+                                        + root.tr(" (только чтение)", " (read only)");
+                                    font-size: 11px; color: SettingsTheme.muted; wrap: word-wrap;
+                                }
+                                if field.description != "": SettingsLabel {
+                                    text: field.description;
+                                    color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap;
+                                }
+                                if field-frame.validation-message != "": SettingsLabel {
+                                    text: field-frame.validation-message;
+                                    color: SettingsTheme.error-text; font-size: 11px; wrap: word-wrap;
+                                }
+                            }
+                        }
+                        if root.active-id == "tts:medium+" || root.active-id == "tts:medium+low": Rectangle {
+                            height: compile-card.preferred-height + 24px;
+                            background: SettingsTheme.section; border-width: 1px;
+                            border-color: SettingsTheme.border; border-radius: 10px;
+                            compile-card := VerticalLayout {
+                                x: 12px; y: 12px; width: parent.width - 24px;
+                                padding: 0px; spacing: 9px;
+                                SettingsLabel {
+                                    text: root.tr("GPU-компиляция Fish Speech+", "Fish Speech+ GPU compilation");
+                                    font-weight: 700; font-size: 16px;
+                                }
+                                SettingsLabel {
+                                    text: root.compilation.runtime-data-present
+                                        ? root.compilation.target-device
+                                        : root.tr("Сведения об устройстве недоступны.", "Device information unavailable.");
+                                    wrap: word-wrap; color: SettingsTheme.muted;
+                                }
+                                if root.compilation.runtime-data-present: SettingsLabel {
+                                    text: root.compilation.target-status + "  " + root.compilation.cache-summary
+                                        + "  " + root.compilation.metadata-state;
+                                    color: SettingsTheme.muted; wrap: word-wrap;
+                                }
+                                if root.compilation.error != "": SettingsLabel {
+                                    text: root.compilation.error; color: SettingsTheme.error-text; wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px; height: 36px;
+                                    ActionSurface {
+                                        width: 116px; height: 34px;
+                                        enabled: root.compilation.docs-available;
+                                        label: root.tr("Документация", "Documentation");
+                                        SettingsLabel {
+                                            text: root.tr("Документация", "Documentation");
+                                            horizontal-alignment: center;
+                                        }
+                                        activated => { root.compile-documentation-requested(root.active-id); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                    ActionSurface {
+                                        width: 126px; height: 34px;
+                                        enabled: root.compilation.available && root.compilation.runtime-data-present
+                                            && root.compilation.can-clear && !root.compilation.busy;
+                                        label: root.tr("Удалить кэш", "Clear cache");
+                                        SettingsLabel {
+                                            text: root.tr("Удалить кэш", "Clear cache");
+                                            horizontal-alignment: center;
+                                        }
+                                        activated => { root.pending-operation = "clear"; root.operation-confirm-open = true; }
+                                    }
+                                    ActionSurface {
+                                        width: 140px; height: 34px;
+                                        enabled: root.compilation.available && root.compilation.runtime-data-present
+                                            && root.compilation.can-compile && !root.compilation.busy
+                                            && root.save-phase != AiHubSavePhase.saving;
+                                        label: root.tr("Скомпилировать", "Compile");
+                                        background: SettingsTheme.button-hover;
+                                        SettingsLabel {
+                                            text: root.tr("Скомпилировать", "Compile");
+                                            horizontal-alignment: center;
+                                        }
+                                        activated => { root.pending-operation = "compile"; root.operation-confirm-open = true; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: root.load-phase == AiHubLoadPhase.loaded ? 0 : 1;
+                    background: transparent;
+                }
+                HorizontalLayout {
+                    height: 42px; spacing: 9px;
+                    SettingsLabel {
+                        horizontal-stretch: 1;
+                        text: root.save-phase == AiHubSavePhase.saving
+                            ? root.tr("Сохранение…", "Saving…")
+                            : root.save-phase == AiHubSavePhase.saved
+                                ? root.tr("Сохранено", "Saved")
+                                : root.save-phase == AiHubSavePhase.failed
+                                    ? root.tr("Не удалось сохранить", "Save failed")
+                                    : root.dirty ? root.tr("Не сохранено", "Unsaved") : "";
+                        color: SettingsTheme.muted;
+                    }
+                    ActionSurface {
+                        width: 108px; height: 36px;
+                        label: root.tr("Сбросить", "Reset");
+                        enabled: root.dirty && root.save-phase != AiHubSavePhase.saving;
+                        SettingsLabel { text: root.tr("Сбросить", "Reset"); horizontal-alignment: center; }
+                        activated => { root.reset-to-saved(); }
+                    }
+                    ActionSurface {
+                        width: 120px; height: 36px;
+                        label: root.tr("Сохранить", "Save");
+                        background: SettingsTheme.button-hover;
+                        enabled: root.dirty && root.active-component-present
+                            && root.save-phase != AiHubSavePhase.saving;
+                        SettingsLabel { text: root.tr("Сохранить", "Save"); horizontal-alignment: center; }
+                        activated => { root.save(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // The overlay intercepts all underlying clicks; "Cancel" is the safe default.
+    if root.guard-open: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #070914e5;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: min(420px, parent.width - 40px);
+            height: 184px; x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: SettingsTheme.panel; border-radius: 12px;
+            border-width: 1px; border-color: SettingsTheme.border;
+            VerticalLayout {
+                padding: 20px; spacing: 12px;
+                SettingsLabel {
+                    text: root.tr("Несохранённые изменения", "Unsaved changes");
+                    font-size: 18px; font-weight: 700;
+                }
+                SettingsLabel {
+                    text: root.tr("Отменить изменения перед переходом?", "Discard changes before leaving?");
+                    wrap: word-wrap; color: SettingsTheme.muted;
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 132px; height: 36px;
+                        label: root.tr("Сбросить", "Discard");
+                        SettingsLabel { text: root.tr("Сбросить", "Discard"); horizontal-alignment: center; }
+                        activated => {
+                            root.reset-to-saved();
+                            root.guard-open = false;
+                            root.commit-navigation(root.pending-action, root.pending-target, root.pending-revision);
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 132px; height: 36px;
+                        label: root.tr("Отмена", "Cancel");
+                        selected: true;
+                        SettingsLabel { text: root.tr("Отмена", "Cancel"); horizontal-alignment: center; }
+                        activated => { root.guard-open = false; }
+                    }
+                }
+            }
+        }
+    }
+    if root.operation-confirm-open: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #070914e5;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: min(460px, parent.width - 40px); height: 200px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: SettingsTheme.panel; border-radius: 12px;
+            border-width: 1px; border-color: SettingsTheme.border;
+            VerticalLayout {
+                padding: 20px; spacing: 12px;
+                SettingsLabel {
+                    text: root.pending-operation == "clear"
+                        ? root.tr("Удалить кэш компиляции?", "Delete compilation cache?")
+                        : root.tr("Запустить компиляцию?", "Start compilation?");
+                    font-size: 18px; font-weight: 700;
+                }
+                SettingsLabel {
+                    text: root.tr("Это только запрос. Выполнение и проверка устройства принадлежат backend.", "This only requests an action. Backend owns execution and device validation.");
+                    color: SettingsTheme.muted; wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 126px; height: 36px;
+                        label: root.tr("Отмена", "Cancel"); selected: true;
+                        SettingsLabel { text: root.tr("Отмена", "Cancel"); horizontal-alignment: center; }
+                        activated => { root.operation-confirm-open = false; }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 132px; height: 36px;
+                        label: root.tr("Подтвердить", "Confirm");
+                        SettingsLabel { text: root.tr("Подтвердить", "Confirm"); horizontal-alignment: center; }
+                        activated => { root.finish-operation-confirm(); }
+                    }
+                }
+            }
+        }
+    }
+}

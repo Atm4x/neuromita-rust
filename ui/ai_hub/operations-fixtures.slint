@@ -1,0 +1,139 @@
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { AiHubOperationsPanel, AiHubOperationStage } from "operations.slint";
+import { AiHubDecisionKind } from "dialogs.slint";
+
+// MANUAL UI TEST FIXTURE ONLY. Not imported by app.slint, no production catalog
+// or live backend. Switch scenes to inspect the operation/action matrix in
+// a Slint viewer or a dedicated UI harness when a Rust toolchain is available.
+// 0 offline, 1 incompatible, 2 uninstall confirm, 3 backend preview,
+// 4 queued+running/double-click, 5 cancelling, 6 failure/log persistence,
+// 7 obsolete completion/new op, 8 success 100% != model-ready,
+// 9 not-recommended warning, 10 metadata-only voice hint, 11 logs unavailable,\n// 12 clean reinstall confirmation.
+// Backend cancel/submit callbacks intentionally have no side effects.
+export component AiHubOperationsFixture inherits Window {
+    title: "AI Hub UI operations · isolated fixture";
+    width: 940px;
+    height: 690px;
+    in-out property <int> scene: 0;
+    background: SettingsTheme.canvas;
+    VerticalLayout {
+        padding: 14px; spacing: 10px;
+        HorizontalLayout {
+            height: 36px; spacing: 8px;
+            ActionSurface {
+                label: "Previous"; width: 100px; height: 34px;
+                enabled: root.scene > 0;
+                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                activated => { root.scene = max(0, root.scene - 1); }
+            }
+            SettingsLabel {
+                text: "Fixture " + root.scene + " / 12 — demo data only";
+                horizontal-stretch: 1;
+                horizontal-alignment: center;
+                font-size: 14px;
+            }
+            ActionSurface {
+                label: "Next"; width: 100px; height: 34px;
+                enabled: root.scene < 12;
+                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                activated => { root.scene = min(11, root.scene + 1); }
+            }
+        }
+        AiHubOperationsPanel {
+            vertical-stretch: 1;
+            connected: root.scene != 0;
+            component-id: "fixture.component";
+            component-title: "Fixture component";
+            supported: root.scene != 1;
+            unsupported-reason: "Fixture: incompatible hardware";
+            revision: root.scene + 1;
+            token: "fixture-session";
+            capabilities: {
+                can-install: true,
+                can-update: true,
+                can-reinstall: true,
+                can-uninstall: true,
+                can-clear-cache: root.scene != 11,
+                can-open-models-folder: root.scene != 11,
+                can-open-settings: true,
+                can-open-backend: root.scene == 3,
+                can-show-logs: root.scene != 11,
+            };
+            decision: root.scene == 2 ? {
+                available: true, decision-id: "remove-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                action: "uninstall", kind: AiHubDecisionKind.uninstall,
+                revision: root.scene + 1, token: "fixture-session", can-confirm: true
+            } : root.scene == 3 ? {
+                available: true, decision-id: "backend-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                action: "install", kind: AiHubDecisionKind.backend-preview,
+                revision: root.scene + 1, token: "fixture-session", can-confirm: true, can-open-backend: true,
+                backend-title: "Fixture backend", hardware: "Fixture GPU",
+                plan-items: ["Fixture component", "Fixture backend"],
+                dependencies: ["Fixture dependency"],
+                packages: ["fixture-package"]
+            } : root.scene == 9 ? {
+                available: true, decision-id: "warn-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                action: "install", kind: AiHubDecisionKind.not-recommended,
+                revision: root.scene + 1, token: "fixture-session", can-confirm: true,
+                warning: "Fixture: GPU does not meet recommended memory"
+            } : root.scene == 12 ? {
+                available: true, decision-id: "clean-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                action: "reinstall", kind: AiHubDecisionKind.reinstall,
+                revision: root.scene + 1, token: "fixture-session", can-confirm: true
+            } : root.scene == 10 ? {
+                available: true, decision-id: "hint-1",
+                component-id: "fixture.component", component-title: "Fixture component",
+                kind: AiHubDecisionKind.voice-hint, revision: root.scene + 1,
+                token: "fixture-session", can-confirm: false,
+                message: "Fixture metadata-only voice assets hint"
+            } : {};
+            operations: root.scene == 4 ? [
+                { operation-id: "requested-4", component-id: "fixture.a", action: "install",
+                    stage: AiHubOperationStage.requested, revision: 4, token: "fixture-session" },
+                { operation-id: "preparing-4", component-id: "fixture.b", action: "install",
+                    stage: AiHubOperationStage.preparing, revision: 4, token: "fixture-session" },
+                { operation-id: "admitted-4", component-id: "fixture.c", action: "install",
+                    stage: AiHubOperationStage.admitted, revision: 4, token: "fixture-session" },
+                { operation-id: "queued-4", component-id: "fixture.component", action: "install",
+                    stage: AiHubOperationStage.queued, revision: 4, token: "fixture-session",
+                    can-cancel-queued: true, detail: "Waiting for admission" },
+                { operation-id: "running-4", component-id: "fixture.other", action: "update",
+                    stage: AiHubOperationStage.running, revision: 4, token: "fixture-session",
+                    progress-known: true, progress: 48, can-cancel-running: true,
+                    detail: "Downloading resources" },
+            ] : root.scene == 5 ? [
+                { operation-id: "running-4", component-id: "fixture.other", action: "update",
+                    stage: AiHubOperationStage.cancelling, revision: 5, token: "fixture-session",
+                    progress-known: true, progress: 48, detail: "Awaiting backend stop confirmation" }
+            ] : root.scene == 6 ? [
+                { operation-id: "failed-6", component-id: "fixture.component", action: "install",
+                    stage: AiHubOperationStage.failed, revision: 6, token: "fixture-session",
+                    error: "Fixture: backend rejected operation", logs: "step one\nstep two\nfailed",
+                    can-view-logs: true }
+            ] : root.scene == 7 ? [
+                { operation-id: "obsolete-7", component-id: "fixture.component", action: "install",
+                    stage: AiHubOperationStage.succeeded, revision: 1, token: "obsolete",
+                    detail: "Old result retained as history only" },
+                { operation-id: "new-7", component-id: "fixture.component", action: "install",
+                    stage: AiHubOperationStage.running, revision: 7, token: "fixture-session",
+                    progress-known: true, progress: 29, can-cancel-running: true }
+            ] : root.scene == 8 ? [
+                { operation-id: "finish-8", component-id: "fixture.component", action: "install",
+                    stage: AiHubOperationStage.succeeded, revision: 8, token: "fixture-session",
+                    progress-known: true, progress: 100,
+                    detail: "Task finished; model status remains unknown" }
+            ] : root.scene == 11 ? [
+                { operation-id: "failure-11", component-id: "fixture.component", action: "uninstall",
+                    stage: AiHubOperationStage.failed, revision: 11, token: "fixture-session",
+                    error: "Fixture: retained failure; log action not authorized",
+                    can-view-logs: true }
+            ] : [];
+        }
+    }
+}

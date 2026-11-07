@@ -4,6 +4,8 @@ import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { AiHubShell } from "ai_hub/shell.slint";
+import { AiHubOperationSnapshot, AiHubOperationCapabilities } from "ai_hub/operations.slint";
+import { AiHubDecisionSnapshot } from "ai_hub/dialogs.slint";
 import { AiHubTruth, AiHubLoadPhase, AiHubSavePhase, AiHubOperationPhase, AiHubSettingKind, AiHubCatalogState, AiHubComponent, AiHubSettingOption, AiHubSettingField, AiHubSettingValue, AiHubSettingsState, AiHubOperation } from "ai_hub/contract.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
@@ -22,7 +24,7 @@ import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
 export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
-export { AiHubTruth, AiHubLoadPhase, AiHubSavePhase, AiHubOperationPhase, AiHubSettingKind, AiHubCatalogState, AiHubComponent, AiHubSettingOption, AiHubSettingField, AiHubSettingValue, AiHubSettingsState, AiHubOperation }
+export { AiHubTruth, AiHubLoadPhase, AiHubSavePhase, AiHubOperationPhase, AiHubSettingKind, AiHubCatalogState, AiHubComponent, AiHubSettingOption, AiHubSettingField, AiHubSettingValue, AiHubSettingsState, AiHubOperation, AiHubOperationSnapshot, AiHubOperationCapabilities, AiHubDecisionSnapshot }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 
@@ -36,6 +38,12 @@ export component AppWindow inherits Window {
     default-font-size: Theme.body-size;
     in property <PageId> page: home;
     in-out property <bool> ai-hub-open: false;
+    in-out property <int> ai-hub-session-epoch: 0;
+    in property <bool> ai-hub-settings-connected: false;
+    in property <bool> ai-hub-operations-connected: false;
+    in property <[AiHubOperationSnapshot]> ai-hub-operation-snapshots;
+    in property <AiHubOperationCapabilities> ai-hub-operation-capabilities;
+    in property <AiHubDecisionSnapshot> ai-hub-decision;
     in property <AiHubCatalogState> ai-hub-catalog;
     in property <[AiHubComponent]> ai-hub-components;
     in property <AiHubSettingsState> ai-hub-settings;
@@ -282,6 +290,12 @@ export component AppWindow inherits Window {
             components: root.ai-hub-components;
             settings: root.ai-hub-settings;
             operations: root.ai-hub-operations;
+            session-token: "" + root.ai-hub-session-epoch;
+            settings-adapter-connected: root.ai-hub-settings-connected;
+            operation-adapter-connected: root.ai-hub-operations-connected;
+            operation-snapshots: root.ai-hub-operation-snapshots;
+            operation-capabilities: root.ai-hub-operation-capabilities;
+            operation-decision: root.ai-hub-decision;
             close-requested => {
                 if !root.ai-hub-settings.dirty && root.ai-hub-settings.save-phase != AiHubSavePhase.saving {
                     root.ai-hub-open = false;
