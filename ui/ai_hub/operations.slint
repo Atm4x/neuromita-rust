@@ -1,0 +1,460 @@
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
+import { AiHubDecisionSnapshot, AiHubOperationDialog } from "dialogs.slint";
+
+// Agent 4's additive GUI read model. The v1 shared AiHubOperation does not
+// express requested/preparing/admission/cancelled, separate cancel rights or
+// retained logs; the Rust presenter must adapt its existing snapshots rather
+// than changing contract.slint or inferring success from a card status.
+// All operation IDs, revisions and tokens are Core-issued and immutable.
+export enum AiHubOperationStage {
+    requested, preparing, admitted, queued, running, cancelling, succeeded, failed, cancelled
+}
+export struct AiHubOperationSnapshot {
+    operation-id: string,
+    component-id: string,
+    action: string,
+    stage: AiHubOperationStage,
+    progress-known: bool,
+    progress: int,
+    detail: string,
+    logs: string,
+    error: string,
+    revision: int,
+    token: string,
+    can-cancel-queued: bool,
+    can-cancel-running: bool,
+    can-view-logs: bool,
+}
+export struct AiHubOperationCapabilities {
+    can-install: bool,
+    can-update: bool,
+    can-reinstall: bool,
+    can-uninstall: bool,
+    can-clear-cache: bool,
+    can-open-models-folder: bool,
+    can-open-settings: bool,
+    can-open-backend: bool,
+    can-show-logs: bool,
+}
+
+// A single task row is a projection of ONE owner-issued operation ID.
+// No local completion, queue admission or model-ready status is synthesized.
+component AiHubOperationRow inherits Rectangle {
+    in property <AiHubOperationSnapshot> task;
+    in property <bool> showing: true;
+    in property <bool> connected: false;
+    in-out property <bool> expanded: false;
+    callback cancel-queued(string, string, int, string);
+    callback cancel-running(string, string, int, string);
+    callback view-logs(string, string, int, string);
+
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+    }
+    pure function stage-label(stage: AiHubOperationStage) -> string {
+        if stage == AiHubOperationStage.requested {
+            return root.localized("ai-hub.ops.requested", "Запрошено", "Requested");
+        }
+        if stage == AiHubOperationStage.preparing {
+            return root.localized("ai-hub.ops.preparing", "Подготовка", "Preparing");
+        }
+        if stage == AiHubOperationStage.admitted {
+            return root.localized("ai-hub.ops.admitted", "Принято очередью", "Admitted");
+        }
+        if stage == AiHubOperationStage.queued {
+            return root.localized("ai-hub.ops.queued", "В очереди", "Queued");
+        }
+        if stage == AiHubOperationStage.running {
+            return root.localized("ai-hub.ops.running", "Выполняется", "Running");
+        }
+        if stage == AiHubOperationStage.cancelling {
+            return root.localized("ai-hub.ops.cancelling", "Отмена запрошена", "Cancellation requested");
+        }
+        if stage == AiHubOperationStage.succeeded {
+            return root.localized("ai-hub.ops.succeeded", "Операция завершена", "Operation completed");
+        }
+        if stage == AiHubOperationStage.cancelled {
+            return root.localized("ai-hub.ops.cancelled", "Отменено", "Cancelled");
+        }
+        return root.localized("ai-hub.ops.failed", "Ошибка операции", "Operation failed");
+    }
+    property <bool> active: root.task.stage == AiHubOperationStage.requested
+        || root.task.stage == AiHubOperationStage.preparing
+        || root.task.stage == AiHubOperationStage.admitted
+        || root.task.stage == AiHubOperationStage.queued
+        || root.task.stage == AiHubOperationStage.running
+        || root.task.stage == AiHubOperationStage.cancelling;
+    property <bool> can-cancel-pending: root.connected && root.task.operation-id != ""
+        && root.task.can-cancel-queued && root.task.stage == AiHubOperationStage.queued;
+    property <bool> can-cancel-active: root.connected && root.task.operation-id != ""
+        && root.task.can-cancel-running && root.task.stage == AiHubOperationStage.running;
+
+    visible: root.showing;
+    height: root.showing ? max(98px, detail-layout.preferred-height + 18px) : 0px;
+    background: SettingsTheme.field;
+    border-width: 1px;
+    border-color: root.task.stage == AiHubOperationStage.failed ? SettingsTheme.danger-border : SettingsTheme.field-border;
+    border-radius: 10px;
+    detail-layout := VerticalLayout {
+        padding: 9px; spacing: 6px; alignment: start;
+        HorizontalLayout {
+            height: 23px; spacing: 7px;
+            SettingsLabel {
+                text: root.task.component-id + " · " + root.task.action;
+                horizontal-stretch: 1;
+                font-size: 13px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            SettingsLabel {
+                text: root.stage-label(root.task.stage);
+                color: root.task.stage == AiHubOperationStage.failed ? SettingsTheme.error-text
+                    : root.task.stage == AiHubOperationStage.succeeded ? SettingsTheme.status-success
+                    : SettingsTheme.muted;
+                font-size: 11px; font-weight: 700;
+            }
+        }
+        if root.active: HorizontalLayout {
+            height: 19px; spacing: 8px;
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 7px;
+                border-radius: 4px;
+                background: SettingsTheme.border;
+                Rectangle {
+                    width: root.task.progress-known ? parent.width * max(0, min(100, root.task.progress)) / 100 : 0px;
+                    height: parent.height;
+                    background: SettingsTheme.accent;
+                    border-radius: 4px;
+                }
+            }
+            SettingsLabel {
+                width: 90px;
+                horizontal-alignment: right;
+                font-size: 11px;
+                text: root.task.progress-known
+                    ? root.task.progress + "%"
+                    : root.localized("ai-hub.ops.indeterminate", "Ожидание…", "In progress…");
+                color: SettingsTheme.muted;
+            }
+        }
+        if root.task.stage == AiHubOperationStage.succeeded && root.task.progress-known && root.task.progress == 100: SettingsLabel {
+            text: root.localized("ai-hub.ops.not-ready",
+                "100% выполнения ≠ модель готова к инференсу. Статус проверяется отдельно.",
+                "100% progress does not mean inference-ready. Model status is checked separately.");
+            color: SettingsTheme.muted;
+            font-size: 11px; wrap: word-wrap; overflow: clip; height: max(18px, self.preferred-height);
+        }
+        if root.task.detail != "": SettingsLabel {
+            text: root.task.detail;
+            color: SettingsTheme.muted;
+            wrap: word-wrap; overflow: clip;
+            font-size: 11px; height: max(19px, self.preferred-height);
+        }
+        if root.task.error != "": SettingsLabel {
+            text: root.task.error;
+            color: SettingsTheme.error-text;
+            wrap: word-wrap; overflow: clip;
+            font-size: 11px; height: max(22px, self.preferred-height);
+        }
+        if root.expanded && root.task.logs != "": Rectangle {
+            height: max(60px, log-text.preferred-height + 16px);
+            background: SettingsTheme.input;
+            border-radius: 7px;
+            log-text := SettingsLabel {
+                x: 8px; y: 6px;
+                width: parent.width - 16px;
+                text: root.task.logs;
+                color: SettingsTheme.muted;
+                font-size: 11px;
+                wrap: word-wrap;
+                overflow: clip;
+            }
+        }
+        HorizontalLayout {
+            height: 30px; spacing: 7px;
+            ActionSurface {
+                width: 114px; height: 29px;
+                label: root.localized("ai-hub.ops.details", "Подробности", "Details");
+                enabled: root.task.detail != "" || root.task.error != "" || root.task.logs != "";
+                SettingsLabel {
+                    text: parent.label; horizontal-alignment: center;
+                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                    font-size: 11px;
+                }
+                activated => { root.expanded = !root.expanded; }
+            }
+            if root.task.can-view-logs: ActionSurface {
+                width: 103px; height: 29px;
+                label: root.localized("ai-hub.ops.logs", "Журнал", "Logs");
+                enabled: root.connected && root.task.operation-id != "";
+                SettingsLabel { text: parent.label; font-size: 11px; horizontal-alignment: center; }
+                activated => {
+                    root.view-logs(root.task.operation-id, root.task.component-id,
+                        root.task.revision, root.task.token);
+                }
+            }
+            Rectangle { horizontal-stretch: 1; background: transparent; }
+            if root.task.stage == AiHubOperationStage.queued: ActionSurface {
+                width: 151px; height: 29px;
+                label: root.localized("ai-hub.ops.cancel-queued", "Убрать из очереди", "Cancel queued");
+                enabled: root.can-cancel-pending;
+                background: self.enabled ? SettingsTheme.button : SettingsTheme.input;
+                SettingsLabel {
+                    text: parent.label; horizontal-alignment: center; font-size: 11px;
+                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                }
+                activated => {
+                    root.cancel-queued(root.task.operation-id, root.task.component-id,
+                        root.task.revision, root.task.token);
+                }
+            }
+            if root.task.stage == AiHubOperationStage.running || root.task.stage == AiHubOperationStage.cancelling: ActionSurface {
+                width: 143px; height: 29px;
+                label: root.task.stage == AiHubOperationStage.cancelling
+                    ? root.localized("ai-hub.ops.wait-stop", "Ожидаем отмену", "Awaiting stop")
+                    : root.localized("ai-hub.ops.stop", "Остановить", "Cancel running");
+                enabled: root.can-cancel-active;
+                background: self.enabled ? SettingsTheme.button : SettingsTheme.input;
+                SettingsLabel {
+                    text: parent.label; horizontal-alignment: center; font-size: 11px;
+                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                }
+                activated => {
+                    root.cancel-running(root.task.operation-id, root.task.component-id,
+                        root.task.revision, root.task.token);
+                }
+            }
+        }
+    }
+}
+
+// This reusable panel is not connected to app.slint until a Core/presenter
+// adapter supplies typed capabilities, correlated decisions and operation rows.
+// "Prepare" is a read-only preflight intent, NOT installation admission.
+// "Confirm" is the sole mutating-operation submission intent.
+export component AiHubOperationsPanel inherits Rectangle {
+    in property <bool> connected: false;
+    in property <string> component-id;
+    in property <string> component-title;
+    in property <bool> supported: false;
+    in property <string> unsupported-reason;
+    in property <[AiHubOperationSnapshot]> operations;
+    in property <AiHubOperationCapabilities> capabilities;
+    in property <AiHubDecisionSnapshot> decision;
+    in property <int> revision;
+    in property <string> token;
+
+    callback prepare-requested(string, string, int, string);
+    callback confirm-requested(string, string, string, int, string);
+    callback dismiss-preview-requested(string, string, int, string);
+    callback cancel-queued-requested(string, string, int, string);
+    callback cancel-running-requested(string, string, int, string);
+    callback clear-cache-requested(int, string);
+    callback open-models-folder-requested(int, string);
+    callback open-settings-requested(string, int, string);
+    callback open-backend-requested(string, int, string);
+    callback view-logs-requested(string, string, int, string);
+
+    property <bool> preflight-pending: false;
+    property <int> preflight-revision: -1;
+    property <string> preflight-component-id;
+    property <string> preflight-token;
+    property <bool> decision-visible: root.connected && root.decision.available
+        && root.decision.decision-id != "" && root.decision.component-id == root.component-id
+        && root.decision.token == root.token;
+    property <bool> can-mutate: root.connected && root.supported && root.component-id != ""
+        && !root.preflight-pending && !root.decision-visible;
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+    }
+    function prepare(action: string) {
+        if root.can-mutate {
+            root.preflight-pending = true;
+            root.preflight-component-id = root.component-id;
+            root.preflight-revision = root.revision;
+            root.preflight-token = root.token;
+            root.prepare-requested(root.component-id, action, root.revision, root.token);
+        }
+    }
+    // A new presenter snapshot or explicit decision ends the double-click
+    // latch. Neither transition is interpreted as admitted or succeeded.
+    changed revision => {
+        if root.preflight-pending && root.revision > root.preflight-revision
+            && root.component-id == root.preflight-component-id
+            && root.token == root.preflight-token {
+            root.preflight-pending = false;
+        }
+    }
+    changed decision => {
+        if root.preflight-pending && root.decision.available
+            && root.decision.component-id == root.preflight-component-id
+            && root.decision.token == root.preflight-token {
+            root.preflight-pending = false;
+        }
+    }
+    changed component-id => { root.preflight-pending = false; }
+    background: SettingsTheme.panel;
+    border-color: SettingsTheme.border;
+    border-width: 1px;
+    border-radius: 12px;
+    clip: true;
+
+    VerticalLayout {
+        padding: 12px; spacing: 10px;
+        HorizontalLayout {
+            height: 32px;
+            SettingsLabel {
+                text: root.localized("ai-hub.ops.title", "Операции и очередь", "Operations and queue");
+                font-size: 16px; font-weight: 750; horizontal-stretch: 1;
+            }
+            SettingsLabel {
+                text: root.connected
+                    ? root.localized("ai-hub.ops.connected", "Данные Core", "Core snapshot")
+                    : root.localized("ai-hub.ops.offline", "Функция не подключена", "Not connected");
+                color: SettingsTheme.muted; font-size: 11px;
+            }
+        }
+        if !root.connected: SettingsLabel {
+            text: root.localized("ai-hub.ops.no-backend",
+                "Действия отключены до подключения Core. Файлы, процессы и модели не изменяются.",
+                "Actions are disabled until Core is connected. No files, processes or models are changed.");
+            color: SettingsTheme.muted; wrap: word-wrap; overflow: clip; height: 38px;
+        }
+        if root.connected && !root.supported: SettingsLabel {
+            text: root.unsupported-reason != "" ? root.unsupported-reason
+                : root.localized("ai-hub.ops.incompatible", "Несовместимо: запуск запрещён.", "Incompatible: operation disabled.");
+            color: SettingsTheme.error-text; wrap: word-wrap; overflow: clip; height: 33px;
+        }
+        HorizontalLayout {
+            height: 34px; spacing: 6px;
+            for action in [
+                {id:"install", ru:"Установить", en:"Install"},
+                {id:"update", ru:"Обновить", en:"Update"},
+                {id:"reinstall", ru:"Переустановить", en:"Reinstall"},
+                {id:"uninstall", ru:"Удалить", en:"Uninstall"}
+            ]: ActionSurface {
+                width: action.id == "reinstall" ? 133px : 104px;
+                height: 32px;
+                label: I18n.locale == "en" ? action.en : action.ru;
+                enabled: root.can-mutate && (action.id == "install" ? root.capabilities.can-install
+                    : action.id == "update" ? root.capabilities.can-update
+                    : action.id == "reinstall" ? root.capabilities.can-reinstall
+                    : root.capabilities.can-uninstall);
+                background: self.enabled ? SettingsTheme.button : SettingsTheme.input;
+                SettingsLabel {
+                    text: parent.label; font-size: 11px; horizontal-alignment: center;
+                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                }
+                activated => { root.prepare(action.id); }
+            }
+        }
+        if root.preflight-pending: SettingsLabel {
+            text: root.localized("ai-hub.ops.preflight",
+                "Запрос отправлен. Ожидание подтверждения подготовки от Core…",
+                "Request sent. Awaiting Core preflight response…");
+            color: SettingsTheme.muted; font-size: 11px; height: 22px;
+        }
+        HorizontalLayout {
+            height: 31px; spacing: 7px;
+            for action in [
+                {id:"cache", ru:"Очистить кэш", en:"Clear cache"},
+                {id:"folder", ru:"Папка моделей", en:"Models folder"},
+                {id:"settings", ru:"Настройки", en:"Settings"},
+                {id:"backend", ru:"Backend", en:"Backend"}
+            ]: ActionSurface {
+                width: action.id == "folder" ? 132px : 115px;
+                height: 30px;
+                label: I18n.locale == "en" ? action.en : action.ru;
+                enabled: root.connected && (action.id == "cache" ? root.capabilities.can-clear-cache
+                    : action.id == "folder" ? root.capabilities.can-open-models-folder
+                    : action.id == "settings" ? root.capabilities.can-open-settings && root.component-id != ""
+                    : root.capabilities.can-open-backend);
+                background: self.enabled ? SettingsTheme.button : SettingsTheme.input;
+                SettingsLabel {
+                    text: parent.label; font-size: 11px; horizontal-alignment: center;
+                    color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                }
+                activated => {
+                    if action.id == "cache" { root.clear-cache-requested(root.revision, root.token); }
+                    if action.id == "folder" { root.open-models-folder-requested(root.revision, root.token); }
+                    if action.id == "settings" { root.open-settings-requested(root.component-id, root.revision, root.token); }
+                    if action.id == "backend" { root.open-backend-requested(root.component-id, root.revision, root.token); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: SettingsTheme.border; }
+        queue-scroll := SettingsScrollView {
+            vertical-stretch: 1;
+            content-height: queue-content.preferred-height;
+            queue-content := VerticalLayout {
+                width: queue-scroll.visible-width;
+                padding: 3px; spacing: 9px; alignment: start;
+                SettingsLabel {
+                    text: root.localized("ai-hub.ops.running-section", "Выполняются / отменяются", "Running / cancelling");
+                    font-size: 12px; font-weight: 700; height: 24px;
+                }
+                for op in root.operations: AiHubOperationRow {
+                    task: op;
+                    connected: root.connected;
+                    showing: op.stage == AiHubOperationStage.running || op.stage == AiHubOperationStage.cancelling;
+                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                }
+                SettingsLabel {
+                    text: root.localized("ai-hub.ops.pending-section", "Подготовка и очередь", "Preparing and queued");
+                    font-size: 12px; font-weight: 700; height: 24px;
+                }
+                for op in root.operations: AiHubOperationRow {
+                    task: op;
+                    connected: root.connected;
+                    showing: op.stage == AiHubOperationStage.requested || op.stage == AiHubOperationStage.preparing
+                        || op.stage == AiHubOperationStage.admitted || op.stage == AiHubOperationStage.queued;
+                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                }
+                SettingsLabel {
+                    text: root.localized("ai-hub.ops.history-section", "Результаты и журнал ошибок", "Results and error history");
+                    font-size: 12px; font-weight: 700; height: 24px;
+                }
+                for op in root.operations: AiHubOperationRow {
+                    task: op;
+                    connected: root.connected;
+                    showing: op.stage == AiHubOperationStage.succeeded
+                        || op.stage == AiHubOperationStage.failed || op.stage == AiHubOperationStage.cancelled;
+                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                }
+                if root.operations.length == 0: SettingsLabel {
+                    text: root.localized("ai-hub.ops.empty", "Нет подтверждённых событий операций.", "No confirmed operation events.");
+                    color: SettingsTheme.muted; height: 25px;
+                }
+            }
+        }
+    }
+
+    // Caller supplies the preflight decision, including optional required
+    // backend plan, hardware metadata, compatibility warning or voice hint.
+    // No model list or voice hint is generated from UI constants.
+    AiHubOperationDialog {
+        width: parent.width;
+        height: parent.height;
+        decision: root.decision;
+        open: root.decision-visible;
+        confirmed(decision-id, component, action, rev, tok) => {
+            root.confirm-requested(decision-id, component, action, rev, tok);
+        }
+        dismissed(decision-id, component, rev, tok) => {
+            root.dismiss-preview-requested(decision-id, component, rev, tok);
+        }
+        open-backend-requested(component, rev, tok) => { root.open-backend-requested(component, rev, tok); }
+        open-settings-requested(component, rev, tok) => { root.open-settings-requested(component, rev, tok); }
+    }
+}
