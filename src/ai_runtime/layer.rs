@@ -1,6 +1,7 @@
 //! Filesystem publication and uv execution shared by backend layers and plugin overlays.
 
 use std::{
+    fs::{File, OpenOptions},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -33,29 +34,130 @@ pub enum LayerError {
     Corrupted(String),
 }
 
-fn remove_abandoned_staging(path: &Path) {
-    if let Err(error) = std::fs::remove_dir_all(path)
+const STAGING_LOCK_SUFFIX: &str = ".lock";
+
+fn staging_lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_os_string();
+    lock.push(STAGING_LOCK_SUFFIX);
+    PathBuf::from(lock)
+}
+
+fn remove_abandoned_staging(path: &Path) -> bool {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to clean abandoned Python layer staging");
+            false
+        }
+    }
+}
+
+fn remove_stage_lock(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path)
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        tracing::warn!(path = %path.display(), error = %error, "failed to clean abandoned Python layer staging");
+        tracing::warn!(path = %path.display(), error = %error, "failed to remove Python layer staging lock");
     }
+}
+
+fn is_owned_stage_name(name: &str) -> bool {
+    name.strip_prefix(".staging-")
+        .and_then(|id| {
+            Uuid::parse_str(id)
+                .ok()
+                .filter(|uuid| uuid.to_string() == id)
+        })
+        .is_some()
+}
+
+fn open_stage_owner(lock_path: &Path) -> Option<File> {
+    if !std::fs::symlink_metadata(lock_path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == 0)
+    {
+        return None;
+    }
+    let owner = match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::warn!(path = %lock_path.display(), error = %error, "cannot open staging ownership lock");
+            return None;
+        }
+    };
+    match owner.try_lock() {
+        Ok(()) => Some(owner),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(error) => {
+            tracing::warn!(path = %lock_path.display(), error = %error, "cannot lock abandoned staging");
+            None
+        }
+    }
+}
+
+fn reclaim_abandoned_staging(parent: &Path) -> Result<(), LayerError> {
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_owned_stage_name(name) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let stage_path = entry.path();
+        let lock_path = staging_lock_path(&stage_path);
+        let Some(owner) = open_stage_owner(&lock_path) else {
+            continue;
+        };
+        match std::fs::symlink_metadata(&stage_path) {
+            Ok(metadata) if metadata.is_dir() => {
+                if !remove_abandoned_staging(&stage_path) {
+                    continue;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => continue,
+        }
+        remove_stage_lock(&lock_path);
+        drop(owner);
+    }
+    Ok(())
 }
 
 struct StagingCleanup {
     path: PathBuf,
+    lock_path: PathBuf,
+    owner: Option<File>,
     published: bool,
 }
 
 impl StagingCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            published: false,
+    fn new(path: PathBuf) -> Result<Self, LayerError> {
+        let lock_path = staging_lock_path(&path);
+        let owner = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        if let Err(error) = owner.lock() {
+            remove_stage_lock(&lock_path);
+            return Err(LayerError::Io(error));
         }
+        if let Err(error) = std::fs::create_dir(&path) {
+            remove_stage_lock(&lock_path);
+            return Err(LayerError::Io(error));
+        }
+        Ok(Self {
+            path,
+            lock_path,
+            owner: Some(owner),
+            published: false,
+        })
     }
 
     fn disarm(&mut self) {
         self.published = true;
+        remove_stage_lock(&self.lock_path);
     }
 }
 
@@ -65,10 +167,18 @@ impl Drop for StagingCleanup {
             return;
         }
         let path = std::mem::take(&mut self.path);
+        let lock_path = std::mem::take(&mut self.lock_path);
+        let owner = self.owner.take();
+        let cleanup = move || {
+            if remove_abandoned_staging(&path) {
+                remove_stage_lock(&lock_path);
+            }
+            drop(owner);
+        };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn_blocking(move || remove_abandoned_staging(&path));
+            runtime.spawn_blocking(cleanup);
         } else {
-            remove_abandoned_staging(&path);
+            cleanup();
         }
     }
 }
@@ -250,10 +360,13 @@ impl LayerInstaller<'_> {
             .parent()
             .ok_or_else(|| LayerError::Invalid("missing parent".into()))?;
         tokio::fs::create_dir_all(parent).await?;
+        let scan_parent = parent.to_owned();
+        tokio::task::spawn_blocking(move || reclaim_abandoned_staging(&scan_parent))
+            .await
+            .map_err(|error| LayerError::Invalid(format!("staging recovery failed: {error}")))??;
         tokio::fs::create_dir_all(self.cache_directory).await?;
         let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
-        std::fs::create_dir(&staging)?;
-        let mut cleanup = StagingCleanup::new(staging.clone());
+        let mut cleanup = StagingCleanup::new(staging.clone())?;
         let result = async {
             if !packages.is_empty() {
                 let mut cmd = Command::new(self.uv_executable);
@@ -346,5 +459,123 @@ impl LayerInstaller<'_> {
             cleanup.disarm();
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reclaims_crashed_staging_without_touching_another_process_install() {
+        use std::process::{Child, Command as StdCommand, Stdio};
+
+        struct OwnerProcess(Child);
+        impl Drop for OwnerProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        async fn spawn_owner(path: &Path) -> OwnerProcess {
+            let script = r#"
+import fcntl, os, sys, time
+stage = sys.argv[1]
+with open(stage + '.lock', 'xb') as owner:
+    fcntl.flock(owner.fileno(), fcntl.LOCK_EX)
+    os.makedirs(stage)
+    with open(os.path.join(stage, 'ready'), 'w') as ready:
+        ready.write('alive')
+    while True:
+        time.sleep(0.1)
+"#;
+            let child = StdCommand::new("python3")
+                .arg("-c")
+                .arg(script)
+                .arg(path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !path.join("ready").is_file() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("separate owner must lock its stage");
+            OwnerProcess(child)
+        }
+
+        let root = std::env::temp_dir().join(format!("nm-staging-recovery-{}", Uuid::new_v4()));
+        let parent = root.join("layers");
+        std::fs::create_dir_all(&parent).unwrap();
+        let live_stage = parent.join(format!(".staging-{}", Uuid::new_v4()));
+        let dead_stage = parent.join(format!(".staging-{}", Uuid::new_v4()));
+        let unowned_stage = parent.join(format!(".staging-{}", Uuid::new_v4()));
+        let mut live = spawn_owner(&live_stage).await;
+        let mut dead = spawn_owner(&dead_stage).await;
+        dead.0.kill().unwrap();
+        dead.0.wait().unwrap();
+        std::fs::create_dir(&unowned_stage).unwrap();
+        std::fs::write(unowned_stage.join("unowned"), "preserve").unwrap();
+
+        let uv = root.join("uv");
+        let python = root.join("python");
+        std::fs::write(&uv, "fake uv").unwrap();
+        std::fs::write(&python, "fake python").unwrap();
+        let cache = root.join("cache");
+        let installer = LayerInstaller {
+            uv_executable: &uv,
+            python_executable: &python,
+            cache_directory: &cache,
+            timeout: Duration::from_secs(3),
+        };
+        let spec = serde_json::json!({"revision": 1});
+        let first = parent.join("rev1");
+        installer
+            .publish(&first, ".receipt.json", &spec, &[], &[])
+            .await
+            .unwrap();
+        assert!(!dead_stage.exists(), "dead worker stage must be reclaimed");
+        assert!(
+            live_stage.join("ready").exists(),
+            "active worker stage must survive"
+        );
+        assert!(
+            unowned_stage.join("unowned").exists(),
+            "unowned legacy stage must not be guessed dead"
+        );
+        assert!(
+            !staging_lock_path(&first).exists(),
+            "published layer must not carry stage lock"
+        );
+
+        live.0.kill().unwrap();
+        live.0.wait().unwrap();
+        let second = parent.join("rev2");
+        installer
+            .publish(&second, ".receipt.json", &spec, &[], &[])
+            .await
+            .unwrap();
+        assert!(
+            !live_stage.exists(),
+            "recovery after owner exit must remove its stage"
+        );
+        assert!(
+            installer
+                .installed(&first, ".receipt.json", &spec, &[], &[])
+                .await
+                .unwrap()
+        );
+        assert!(
+            installer
+                .installed(&second, ".receipt.json", &spec, &[], &[])
+                .await
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

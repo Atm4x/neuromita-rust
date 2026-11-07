@@ -426,10 +426,12 @@ exec sleep 120
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .filter(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with(".staging-")
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with(".staging-")
                 })
                 .collect()
         };
