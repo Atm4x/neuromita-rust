@@ -1,4 +1,4 @@
-name: Import Agent A Explicit Forgotten RAG Scope
+name: Import Agent A Verified Historical Recall
 on:
   push:
     branches:
@@ -12,22 +12,71 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish Agent A explicit scoped RAG
+      - name: Verify exact transported bundle and publish original commit
         shell: bash
         run: |
           set -euo pipefail
-          BASE=caf94d9b1243ebba5b44751b426aa71334210d0c
-          TARGET=0bfeb0d7589739344c240ef429bba88e08069428
-          BRANCH=codex/knowledge-forgotten-rag-scope-20261107
+          BASE=0bfeb0d7589739344c240ef429bba88e08069428
+          TARGET=71a9bc948cb5ad889363bbffa93d2d0954589950
+          BRANCH=codex/knowledge-explicit-recall-selection-20261107
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib
+          alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+          expected = {
+              1: "0718a9dd9e85482c623be5dfdb4f784158c64d5a",
+              2: "e3353e33811214a906e22285aa42c02ec31c06f3",
+              3: "aeddcdc82200050be338f1d27d2987376ea9dae1",
+              4: "39944ebfa20062707d9411dbfb3c06115189ec6e",
+              5: "365777d5fff9ff53fd69772b8dee26b51e218087",
+          }
+          def git_blob_hash(value):
+              blob = value.encode("ascii")
+              return hashlib.sha1(b"blob " + str(len(blob)).encode() + b"\0" + blob).hexdigest()
+          repaired = []
+          for index in range(1, 6):
+              value = Path(f".bridge/agent-a-explicit-recall.b64.part{index}").read_text()
+              target_hash = expected[index]
+              if git_blob_hash(value) != target_hash:
+                  result = None
+                  if len(value) == 1999:
+                      for pos in range(len(value) + 1):
+                          for symbol in alphabet:
+                              test = value[:pos] + symbol + value[pos:]
+                              if git_blob_hash(test) == target_hash:
+                                  result = test
+                                  break
+                          if result is not None:
+                              break
+                  elif len(value) == 2000:
+                      for pos in range(len(value)):
+                          for symbol in alphabet:
+                              if value[pos] == symbol:
+                                  continue
+                              test = value[:pos] + symbol + value[pos + 1:]
+                              if git_blob_hash(test) == target_hash:
+                                  result = test
+                                  break
+                          if result is not None:
+                              break
+                  if result is None:
+                      raise SystemExit(f"Transmitted part {index} failed strict content checksum")
+                  value = result
+              repaired.append(value)
+          data = base64.b64decode("".join(repaired), validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          if digest != "aff2ef908cbcbe0baba0bf7d5496ad3c6b3ea8c7ec51e6794484dc7f248f050d":
+              raise SystemExit(f"Bundle SHA256 mismatch {digest}")
+          Path("/tmp/agent-a-explicit-recall-selection.bundle").write_bytes(data)
+          print("Exact source bundle SHA256 and all 5 Git blob checksums verified")
+          PY
           git cat-file -e "$BASE^{commit}"
-          cat .bridge/agent-a-forgotten-rag-scope.b64.part{1,2,3,4} | base64 -d > /tmp/agent-a-forgotten-rag-scope.bundle
-          echo "963cd929eeccaa780ed69ab2ae12c56fca2718ee25ea31a60098007a4f9b682b  /tmp/agent-a-forgotten-rag-scope.bundle" | sha256sum -c -
-          git bundle verify /tmp/agent-a-forgotten-rag-scope.bundle
-          git fetch --no-tags /tmp/agent-a-forgotten-rag-scope.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          git bundle verify /tmp/agent-a-explicit-recall-selection.bundle
+          git fetch --no-tags /tmp/agent-a-explicit-recall-selection.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target exists, refusing overwrite"
+            echo "Target branch exists; refusing overwrite"
             exit 1
           fi
           git push origin "$TARGET:refs/heads/$BRANCH"
