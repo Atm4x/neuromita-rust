@@ -1,0 +1,85 @@
+name: Agent C backend receipt containment bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-backend-receipt-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-overlay-receipt-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7bef656069c3e7e1f1ff496beb48b5222bf54d5d
+          HEAD=101e8e4c604e08c2f3d93fd60a51797a662e704d
+          TARGET=codex/ai-platform-hub-c3-backend-receipt-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          cat <<'BUNDLE' | base64 -d > /tmp/agent-c-backend.bundle
+          IyB2MiBnaXQgYnVuZGxlCi03YmVmNjU2MDY5YzNlN2UxZjFmZjQ5NmJlYjQ4YjUyMjJiZjU0ZDVk
+          IGZpeChhaSk6IGFwcGx5IG1hbmFnZWQgc3ltbGluayBwb2xpY3kgdG8gaW5zdGFsbGVkIG92ZXJs
+          YXkgcmVjZWlwdCByZWFkcwoxMDFlOGU0YzYwNGUwOGMyZjNkOTNmZDYwYTUxNzk3YTY2MmU3MDRk
+          IHJlZnMvaGVhZHMvY29kZXgvYWktcGxhdGZvcm0taHViLWMzLWJhY2tlbmQtcmVjZWlwdC0yMDI2
+          MTEwNwoKUEFDSwAAAAIAAAAInRN4nK2PTUoEMRCF932KWipik/8YEVFc6x0qSWU6OJ00mepBb2/P
+          HXyrx4Pvg8eDCLJXOiZKiMHnkEzWwnuyBtEVT7oYMlIrh9OGgxqDj1ScdcKFpMmTLLIUE1ykaJ6i
+          VUrFYk22ecKdlz7gi/bRPysjvJ9u/Ae84K08prf9QuMytz5oO//Op8rLHufU11eQPhghhbUCHsSR
+          6VjXykz/5ZtK/bnDev8MVzzXjEywYjtEGSKmb2oZBiWqG8OGvMBx+tACJq5X5Nrb9AfqFWY++QOj
+          zxrAQQjymv93kPiHozltZmEdE3icATkAxv//Bf8FsKABFFRptC6DSINt7Ow2pDHS5LnIHI0Bk7QB
+          uRTzLeFCkmmBY/tHU1wu+qUjGcBuN5OBAn4Y1Bq2/gGZ6eTPoVEc2jIv1cuI1trCA8yhNXicAR4A
+          4f/wAvACkH8U143QiWuiJ3HhwaCgB5zLWdhM/HiRk9314xCs+gKCjKk39Xnywsps2IaPSLx4PxZ5
+          PXicASoA1f+hHO4ckEUHYmFja2VuZJG+GxTkfVx3U7JiPhQcaA2UlN/sS62lO7Eu8w10PBIStVZ4
+          nGVUwY7aMBC98xUj9bKLgFW7l6o97XLaVuoeyp6XIZmAwbFT24HN3/eNTYCqElJIbL95780bf6IX
+          FxNbKzVtuDqIqylIJaZL1HHaUeVdYuNacYnunrb6WNIDLR/vJ5O19Vy/mxHg/Qxwd78mE6mPijnQ
+          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
+          bQDB0SMOyHnmTeEKcYA=
+          BUNDLE
+          echo '93c803e6d43d39aa23c8516540d21b6ee76ffe61c834c0a58d91650f2a7776e7  /tmp/agent-c-backend.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-backend.bundle
+          git fetch --no-tags /tmp/agent-c-backend.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected existing ref: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          REMOTE="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          test "$REMOTE" = "$HEAD"
