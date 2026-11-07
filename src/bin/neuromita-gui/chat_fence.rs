@@ -27,4 +27,19 @@ mod tests {
         assert!(!accepts(2, 2, 1, 2));
         assert!(accepts(1, 3, 1, 3));
     }
+    #[test]
+    fn delayed_asr_and_cancel_origin_do_not_survive_a_b_a() {
+        let at_original_a = (0, 17);
+        let at_b = (1, 18);
+        let at_reselected_a = (0, 19);
+        assert!(accepts(at_original_a.0, at_original_a.1, 0, 17));
+        assert!(!accepts(at_original_a.0, at_original_a.1, at_b.0, at_b.1));
+        assert!(!accepts(
+            at_original_a.0,
+            at_original_a.1,
+            at_reselected_a.0,
+            at_reselected_a.1,
+        ));
+        assert!(accepts(at_reselected_a.0, at_reselected_a.1, 0, 19));
+    }
 }

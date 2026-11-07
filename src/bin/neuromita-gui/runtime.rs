@@ -86,7 +86,7 @@ pub enum Command {
     Select(ChatOrigin),
     Send(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
-    Cancel(RequestId),
+    Cancel(ChatOrigin, RequestId),
     Refresh,
     Volume(u8),
     SpeechSessionEnabled(bool),
@@ -99,6 +99,7 @@ pub enum Update {
     SpeechSessionStatus(SpeechSessionSnapshot),
     MicrophoneTestStatus(MonitorSnapshot),
     RecognizedText {
+        origin: ChatOrigin,
         text: String,
         auto_send_after: Option<Duration>,
         merge_with_draft: bool,
@@ -593,11 +594,21 @@ async fn observe(
                         Err(error) => publish(Update::ChatError(origin, error)),
                     }
                 },
-                Some(Command::Cancel(id)) => match presenter.cancel(id) {
-                    Ok(CancelResult::Cancelled | CancelResult::Requested) => {},
-                    Ok(CancelResult::TooLate | CancelResult::AlreadyFinished) =>
-                        publish(Update::Error("The result has already been accepted; cancellation is too late".into())),
-                    Err(error) => publish(Update::Error(error.to_string())),
+                Some(Command::Cancel(origin, id)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    match presenter.cancel(id) {
+                        Ok(CancelResult::Cancelled | CancelResult::Requested) => {},
+                        Ok(CancelResult::TooLate | CancelResult::AlreadyFinished) =>
+                            publish(Update::ChatError(origin, "The result has already been accepted; cancellation is too late".into())),
+                        Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                    }
                 },
                 Some(Command::Volume(value)) => match Volume::new(value).and_then(|v| presenter.set_volume(v)) {
                     Ok(()) => {},
@@ -610,6 +621,10 @@ async fn observe(
                     if !text.is_empty() {
                         let preferences = administration.settings.asr.preferences.get();
                         publish(Update::RecognizedText {
+                            origin: ChatOrigin {
+                                character,
+                                selection_revision,
+                            },
                             text: text.to_owned(),
                             auto_send_after: dispatch_policy(&preferences),
                             merge_with_draft: preferences.merge_chat,

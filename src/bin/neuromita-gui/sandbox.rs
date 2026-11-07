@@ -93,15 +93,21 @@ pub fn attach(
         .global::<ConversationUi>()
         .on_trace(move || send(Command::Diagnostics));
 
-    bind_chat_actions(window, dispatch.clone(), selection_revision);
+    bind_chat_actions(window, dispatch.clone(), selection_revision.clone());
     let send = dispatch.clone();
     let weak = window.as_weak();
-    window.on_chat_cancel(move |id| match uuid::Uuid::parse_str(&id) {
-        Ok(id) => send(Command::Cancel(RequestId(id))),
-        Err(error) => {
-            if let Some(window) = weak.upgrade() {
-                window.set_chat_error(error.to_string().into());
-            }
+    let revision = selection_revision.clone();
+    window.on_chat_cancel(move |id| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        match (
+            current_origin(&window, &revision),
+            uuid::Uuid::parse_str(&id),
+        ) {
+            (Some(origin), Ok(id)) => send(Command::Cancel(origin, RequestId(id))),
+            (None, _) => window.set_chat_error("Unknown chat character selection".into()),
+            (_, Err(error)) => window.set_chat_error(error.to_string().into()),
         }
     });
     let send = dispatch.clone();
@@ -220,14 +226,18 @@ pub(super) fn apply(
     window: &AppWindow,
     update: Update,
     memory_editor: &super::memory::EditorState,
-    revision: &AtomicU64,
+    revision: &Arc<AtomicU64>,
 ) {
     match update {
         Update::RecognizedText {
+            origin,
             text,
             auto_send_after,
             merge_with_draft,
         } => {
+            if !matches_origin(window, origin, revision) {
+                return;
+            }
             let previous = window.get_chat_draft();
             let combined = if previous.trim().is_empty() {
                 text
@@ -245,8 +255,10 @@ pub(super) fn apply(
                     window.invoke_chat_send(combined.into());
                 } else {
                     let weak = window.as_weak();
+                    let revision = Arc::clone(revision);
                     slint::Timer::single_shot(delay, move || {
                         if let Some(window) = weak.upgrade()
+                            && matches_origin(&window, origin, &revision)
                             && window.get_chat_draft() == combined
                             && !window.get_chat_sending()
                         {

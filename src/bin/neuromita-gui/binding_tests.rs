@@ -423,6 +423,14 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.window().take_snapshot().unwrap();
     settings_render_and_bindings(&window);
     memory_render_and_contract(&window);
+    window.hide().unwrap();
+}
+
+#[test]
+fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
     let editor = std::sync::Arc::new(std::sync::Mutex::new(
         super::super::memory::MemoryEditor::default(),
     ));
@@ -465,6 +473,19 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
         "late A completion must not clear B draft"
     );
     assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
+    let old_draft = window.get_chat_draft();
+    super::super::sandbox::apply(
+        &window,
+        Update::RecognizedText {
+            origin: first,
+            text: "obsolete ASR".into(),
+            auto_send_after: Some(std::time::Duration::ZERO),
+            merge_with_draft: true,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), old_draft);
     window.set_chat_error("B error".into());
     super::super::sandbox::apply(
         &window,
@@ -501,6 +522,34 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     assert_eq!(window.get_chat_attachment_path(), "/test/identical.png");
     super::super::sandbox::apply(
         &window,
+        Update::RecognizedText {
+            origin: first,
+            text: "old A ASR".into(),
+            auto_send_after: Some(std::time::Duration::ZERO),
+            merge_with_draft: false,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "identical draft");
+    super::super::sandbox::apply(
+        &window,
+        Update::RecognizedText {
+            origin: ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            text: "current ASR".into(),
+            auto_send_after: None,
+            merge_with_draft: true,
+        },
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_draft(), "identical draft current ASR");
+    window.set_chat_draft("identical draft".into());
+    super::super::sandbox::apply(
+        &window,
         Update::FileAttached(
             ChatOrigin {
                 character: CharacterId::Crazy,
@@ -514,6 +563,8 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     );
     assert_eq!(window.get_chat_draft(), "");
     assert_eq!(window.get_chat_attachment_path(), "");
+    let cancel_id = uuid::Uuid::new_v4();
+    window.invoke_chat_cancel(cancel_id.to_string().into());
     let recorded = commands.borrow();
     assert!(matches!(&recorded[0], Command::AttachFile(origin, _, _) if *origin == first));
     assert!(
@@ -524,6 +575,9 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     );
     assert!(
         matches!(&recorded[3], Command::Select(origin) if origin.character == CharacterId::Crazy && origin.selection_revision == 2)
+    );
+    assert!(
+        matches!(&recorded[4], Command::Cancel(origin, id) if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && id.0 == cancel_id)
     );
     window.hide().unwrap();
 }
