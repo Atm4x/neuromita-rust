@@ -195,14 +195,18 @@ fn batch_indexes_only_wav_and_reuses_existing_entries() {
     fs::write(media.join("ignored.mp3"), b"unsupported").unwrap();
     let service = BeatRuntime::new(BeatCache::new(tmp.0.join("cache")));
     let mut updates = Vec::new();
-    let first = service.index_wav_directory(&media, &job(false), &|| false, |s| updates.push(s)).unwrap();
+    let first = service
+        .index_wav_directory(&media, &job(false), &|| false, |s| updates.push(s))
+        .unwrap();
     assert_eq!(first.scanned, 2);
     // Equal bytes intentionally share a content-addressed cache entry.
     assert_eq!(first.generated, 1);
     assert_eq!(first.cache_hits, 1);
     assert_eq!(first.failed, 0);
     assert_eq!(updates.len(), 2);
-    let second = service.index_wav_directory(&media, &job(false), &|| false, |_| {}).unwrap();
+    let second = service
+        .index_wav_directory(&media, &job(false), &|| false, |_| {})
+        .unwrap();
     assert_eq!(second.cache_hits, 2);
     assert_eq!(second.generated, 0);
 }
