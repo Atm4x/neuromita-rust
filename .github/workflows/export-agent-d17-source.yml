@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED=54b3d605ac73963081fde22ea70326edafb60bc5
+          EXPECTED=70588d58115a85271f7f5d83c8dd93a3cfce0877
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           git update-ref refs/heads/agent-d17-pinned-export "$EXPECTED"
           git bundle create neuromita-d17-pinned.bundle refs/heads/agent-d17-pinned-export
