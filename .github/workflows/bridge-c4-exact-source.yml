@@ -1,0 +1,34 @@
+name: Bridge C4 exact-ref source export
+on:
+  push:
+    branches:
+      - bridge/c4-single-ref-source-20261108
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c4-pyqt-card-parity-20261107
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact C4 HEAD and build self-contained Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=138908049b9c1f970877381bbb69b503cc0f8393
+          test "$(git rev-parse HEAD)" = "$expected"
+          git update-ref refs/heads/c4-exact "$expected"
+          mkdir -p /tmp/c4-exact-source
+          git bundle create /tmp/c4-exact-source/c4-exact.bundle refs/heads/c4-exact
+          git bundle verify /tmp/c4-exact-source/c4-exact.bundle
+          (cd /tmp/c4-exact-source && sha256sum c4-exact.bundle > c4-exact.bundle.sha256)
+          printf 'repo=Atm4x/neuromita-rust\nhead=%s\n' "$expected" > /tmp/c4-exact-source/source.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c4-exact-source-1389080
+          path: /tmp/c4-exact-source/
+          compression-level: 0
+          retention-days: 1
