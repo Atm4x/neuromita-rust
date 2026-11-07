@@ -1,0 +1,42 @@
+name: Publish Agent B16 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b16-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7d5202d6542350dfb2a1a046846e045fb1dec380
+          fetch-depth: 0
+      - name: Verify B16 checksum and publish exact Git commit without force
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7d5202d6542350dfb2a1a046846e045fb1dec380
+          EXPECTED=eb526c6ce26d1f8e3a0d326df097125c2da949b2
+          SHA256=3d916f82cd1992513579cd07f1384cf32d25253101dc5459bbce6224646192a6
+          TARGET=refs/heads/codex/timeline-asset-directory-durability-20261107
+          git fetch origin refs/heads/bridge/agent-b16-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b16-20261107.bundle.b64 | base64 --decode > /tmp/agent-b16.bundle
+          echo "$SHA256  /tmp/agent-b16.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b16.bundle
+          git fetch /tmp/agent-b16.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination ref has unexpected commit: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET @ $IMPORTED"
