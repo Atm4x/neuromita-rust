@@ -697,3 +697,46 @@ fn sqlite_provenance_write_failure_rolls_back_branch_facts_and_receipts() {
         serde_json::from_slice::<Value>(&archive).unwrap()
     );
 }
+
+#[test]
+fn repeated_external_session_identity_with_different_native_uuid_is_rejected() {
+    let tmp = TestDir::new();
+    let assets = TimelineAssetStore::new(tmp.path().join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut original = TimelineStore::new();
+    let (first, _, _, _, _, _) = build_session(&mut original, &assets);
+    let (second, second_root, _, _, _, _) = build_session(&mut original, &assets);
+    let first_archive =
+        with_external_provenance(&export_memory(&original, first, &assets).unwrap());
+    let second_archive =
+        with_external_provenance(&export_memory(&original, second, &assets).unwrap());
+    let mut memory = TimelineStore::new();
+    assert_eq!(
+        import_memory(&mut memory, &first_archive, &assets).unwrap(),
+        first
+    );
+    assert!(import_memory(&mut memory, &second_archive, &assets).is_err());
+    assert!(memory.branch(second_root).is_err());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&export_memory(&memory, first, &assets).unwrap()).unwrap(),
+        serde_json::from_slice::<Value>(&first_archive).unwrap()
+    );
+
+    #[cfg(feature = "sqlite-system")]
+    {
+        let path = tmp.path().join("duplicate-source.sqlite");
+        let mut target = SqliteTimelineRepository::open(&path).unwrap();
+        assert_eq!(
+            import_sqlite(&mut target, &first_archive, &assets).unwrap(),
+            first
+        );
+        assert!(import_sqlite(&mut target, &second_archive, &assets).is_err());
+        drop(target);
+        let reopened = SqliteTimelineRepository::open(&path).unwrap();
+        assert!(export_sqlite(&reopened, second, &assets).is_err());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&export_sqlite(&reopened, first, &assets).unwrap())
+                .unwrap(),
+            serde_json::from_slice::<Value>(&first_archive).unwrap()
+        );
+    }
+}

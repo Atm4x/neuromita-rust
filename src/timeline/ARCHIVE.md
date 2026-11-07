@@ -127,3 +127,10 @@ Python importer must still convert every event and receipt without altering
 visibility or semantics (`EventObserved` is not yet representable), and pass
 both canonical facts and provenance to the existing atomic installer. No
 Python-to-Rust SessionArchive import is claimed by B26.
+
+A second canonical session cannot reuse the same `(external source kind,
+external session ID)` even when its native UUID differs. The check is made
+when constructing the detached Memory candidate or inside the SQLite write
+transaction and covers the metadata of existing sessions. This prevents
+ambiguous re-import of one Python source under a different native identity;
+it does not replace the final importer’s collision checks.

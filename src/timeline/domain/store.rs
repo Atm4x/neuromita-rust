@@ -96,7 +96,13 @@ impl TimelineStore {
     }
 
     fn validate_provenance(&self) -> Result<(), TimelineError> {
+        let mut external_sessions = HashSet::new();
         for (session, provenance) in &self.provenance {
+            if !external_sessions.insert((provenance.source, &provenance.external_session_id)) {
+                return Err(TimelineError::Storage(
+                    "external session identity collision".into(),
+                ));
+            }
             if provenance.external_session_id.is_empty()
                 || provenance.external_session_id.trim() != provenance.external_session_id
                 || provenance
