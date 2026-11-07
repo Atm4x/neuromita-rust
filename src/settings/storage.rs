@@ -1,7 +1,7 @@
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -102,6 +102,25 @@ impl JsonSettingsRepository {
         })
     }
 
+    pub(crate) fn save_with_owner(
+        &self,
+        settings: &StoredSettings,
+        lease: &SettingsInstanceLease,
+    ) -> Result<(), SettingsError> {
+        if !lease
+            .matches_root(self.path.parent().ok_or_else(|| {
+                SettingsError::Storage("settings path has no portable root".into())
+            })?)
+            .map_err(|error| SettingsError::Storage(error.to_string()))?
+        {
+            return Err(SettingsError::Storage(
+                "settings writer does not own the destination data root".into(),
+            ));
+        }
+        let transfer = SettingsTransfer::new(settings.clone())?;
+        atomic_write(&self.path, &transfer.encode()?)
+    }
+
     fn maintenance_lock(&self) -> Result<SettingsInstanceLease, SettingsError> {
         let root = self
             .path
@@ -137,8 +156,43 @@ impl SettingsRepository for JsonSettingsRepository {
         Ok(SettingsTransfer::decode(&bytes)?.into_stored())
     }
     fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError> {
+        let _lease = self.maintenance_lock()?;
         let transfer = SettingsTransfer::new(settings.clone())?;
         atomic_write(&self.path, &transfer.encode()?)
+    }
+}
+
+/// Application-only writer. Its explicit lease covers the entire operation and
+/// cannot be recreated by a standalone JSON repository in another process.
+pub(crate) struct LeasedJsonSettingsRepository {
+    inner: JsonSettingsRepository,
+    lease: Arc<SettingsInstanceLease>,
+}
+
+impl LeasedJsonSettingsRepository {
+    pub(crate) fn new(path: PathBuf, lease: Arc<SettingsInstanceLease>) -> Self {
+        Self {
+            inner: JsonSettingsRepository::new(path),
+            lease,
+        }
+    }
+}
+
+impl SettingsRepository for LeasedJsonSettingsRepository {
+    fn lifecycle_root(&self) -> Option<&Path> {
+        self.inner.lifecycle_root()
+    }
+
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.inner.migrate()
+    }
+
+    fn load(&self) -> Result<StoredSettings, SettingsError> {
+        self.inner.load()
+    }
+
+    fn save(&self, settings: &StoredSettings) -> Result<(), SettingsError> {
+        self.inner.save_with_owner(settings, &self.lease)
     }
 }
 
@@ -205,6 +259,106 @@ mod tests {
         assert!(repo.migrate().is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn direct_save_cannot_bypass_running_application_and_owned_writer_can_save() {
+        let root = std::env::temp_dir().join(format!("nm-settings-write-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        let direct = JsonSettingsRepository::new(path.clone());
+        let initial = StoredSettings {
+            revision: 1,
+            settings: AppSettings::initial_profile(),
+        };
+        direct.save(&initial).unwrap();
+        let prior = std::fs::read(&path).unwrap();
+        let lease = Arc::new(SettingsInstanceLease::acquire(&root).unwrap());
+        let updated = StoredSettings {
+            revision: 2,
+            settings: AppSettings::initial_profile(),
+        };
+        assert!(direct.save(&updated).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), prior);
+        let owned = LeasedJsonSettingsRepository::new(path.clone(), Arc::clone(&lease));
+        owned.save(&updated).unwrap();
+        assert_eq!(direct.load().unwrap(), updated);
+        assert!(direct.save(&initial).is_err());
+        drop(owned);
+        drop(lease);
+        direct.save(&initial).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn independent_process_cannot_save_directly_until_root_owner_exits() {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+
+        let root =
+            std::env::temp_dir().join(format!("nm-settings-writer-os-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ready = root.join("owner-ready");
+        let repository = JsonSettingsRepository::new(root.join("settings.json"));
+        let initial = StoredSettings {
+            revision: 1,
+            settings: AppSettings::initial_profile(),
+        };
+        let later = StoredSettings {
+            revision: 2,
+            settings: AppSettings::initial_profile(),
+        };
+        repository.save(&initial).unwrap();
+        let before = std::fs::read(root.join("settings.json")).unwrap();
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings::instance_lease::tests::subprocess_owner_fixture",
+            ])
+            .env("NM_SETTINGS_INSTANCE_CHILD_ROOT", &root)
+            .env("NM_SETTINGS_INSTANCE_CHILD_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "owner never acquired root lease");
+            assert!(
+                owner.try_wait().unwrap().is_none(),
+                "owner exited before lock test"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(repository.save(&later).is_err());
+        assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), before);
+        owner.kill().unwrap();
+        owner.wait().unwrap();
+        repository.save(&later).unwrap();
+        assert_eq!(repository.load().unwrap(), later);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owned_writer_refuses_foreign_data_root() {
+        let root =
+            std::env::temp_dir().join(format!("nm-settings-other-root-{}", uuid::Uuid::new_v4()));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let lease = Arc::new(SettingsInstanceLease::acquire(&first).unwrap());
+        let foreign = LeasedJsonSettingsRepository::new(second.join("settings.json"), lease);
+        let stored = StoredSettings {
+            revision: 1,
+            settings: AppSettings::initial_profile(),
+        };
+        assert!(foreign.save(&stored).is_err());
+        assert!(!second.join("settings.json").exists());
+        drop(foreign);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

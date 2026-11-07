@@ -54,9 +54,9 @@ use crate::{
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
-        AppSettings, JsonSettingsRepository, MemorySettingsRepository, SettingsConfig,
-        SettingsError, SettingsInstanceLease, SettingsLifecycle, SettingsSource,
-        SettingsStartupMigration,
+        AppSettings, JsonSettingsRepository, LeasedJsonSettingsRepository,
+        MemorySettingsRepository, SettingsConfig, SettingsError, SettingsInstanceLease,
+        SettingsLifecycle, SettingsSource, SettingsStartupMigration,
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
@@ -106,7 +106,7 @@ pub struct ApplicationConfig {
     pub ai_hardware: Option<std::path::PathBuf>,
     pub ai_knowledge: Option<AiKnowledgeSelection>,
     pub settings: SettingsConfig,
-    settings_instance: Option<SettingsInstanceLease>,
+    settings_instance: Option<Arc<SettingsInstanceLease>>,
     pub timeline: TimelineConfig,
     pub server: ServerConfig,
     pub game_link: Option<GameLinkConfig>,
@@ -223,8 +223,10 @@ impl ApplicationConfig {
         data_directory: &Path,
     ) -> Result<Self, ApplicationError> {
         std::fs::create_dir_all(data_directory)?;
-        let instance = SettingsInstanceLease::acquire(data_directory)
-            .map_err(|error| SettingsError::Storage(error.to_string()))?;
+        let instance = Arc::new(
+            SettingsInstanceLease::acquire(data_directory)
+                .map_err(|error| SettingsError::Storage(error.to_string()))?,
+        );
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
@@ -250,7 +252,10 @@ impl ApplicationConfig {
         )?;
         config.settings = SettingsConfig {
             source,
-            repository: Arc::new(JsonSettingsRepository::new(settings_path)),
+            repository: Arc::new(LeasedJsonSettingsRepository::new(
+                settings_path,
+                Arc::clone(&instance),
+            )),
         };
         config.settings_instance = Some(instance);
         let finetune_path = data_directory.join("finetune.json");
@@ -392,7 +397,7 @@ struct ApplicationOwner {
     server_task: Option<JoinHandle<std::io::Result<()>>>,
     game_link_task: Option<JoinHandle<std::io::Result<()>>>,
     lease: RuntimeLease,
-    _settings_instance: Option<SettingsInstanceLease>,
+    _settings_instance: Option<Arc<SettingsInstanceLease>>,
     ai_runtime: Option<RunningAiApplication>,
     live_speech: Option<Arc<LiveSpeechRuntime>>,
     speech_watch_task: Option<JoinHandle<()>>,
@@ -443,10 +448,10 @@ impl ApplicationLifecycle {
                 )
                 .into());
             }
-            (None, Some(root)) => Some(
+            (None, Some(root)) => Some(Arc::new(
                 SettingsInstanceLease::acquire(root)
                     .map_err(|error| SettingsError::Storage(error.to_string()))?,
-            ),
+            )),
             (None, None) => None,
         };
         if let (Some(instance), Some(environment)) = (&settings_instance, &ai_installed_speech)
