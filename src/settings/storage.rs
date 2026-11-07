@@ -25,6 +25,9 @@ pub trait SettingsRepository: Send + Sync + 'static {
     fn lifecycle_root(&self) -> Option<&Path> {
         None
     }
+    fn json_path_for_owned_lifecycle(&self) -> Option<&Path> {
+        None
+    }
 }
 
 pub struct MemorySettingsRepository {
@@ -146,6 +149,9 @@ impl SettingsMaintenanceSnapshot {
 impl SettingsRepository for JsonSettingsRepository {
     fn lifecycle_root(&self) -> Option<&Path> {
         self.path.parent()
+    }
+    fn json_path_for_owned_lifecycle(&self) -> Option<&Path> {
+        Some(&self.path)
     }
     fn migrate(&self) -> Result<(), SettingsError> {
         self.load().map(|_| ())

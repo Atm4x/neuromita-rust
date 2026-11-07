@@ -275,7 +275,12 @@ fn a_locked_destination_keeps_the_previous_file_and_allows_retry() {
     assert_eq!(fs::read(&path).unwrap(), before);
     repository.import(&bytes).unwrap();
     assert_eq!(repository.load().unwrap(), next);
-    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
+    assert!(
+        directory
+            .path(".neuromita-settings-lifecycle.lock")
+            .exists()
+    );
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 3);
 }
 
 #[test]

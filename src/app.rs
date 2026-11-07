@@ -54,9 +54,9 @@ use crate::{
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
     settings::{
-        AppSettings, JsonSettingsRepository, LeasedJsonSettingsRepository,
-        MemorySettingsRepository, SettingsConfig, SettingsError, SettingsInstanceLease,
-        SettingsLifecycle, SettingsSource, SettingsStartupMigration,
+        AppSettings, LeasedJsonSettingsRepository, MemorySettingsRepository, SettingsConfig,
+        SettingsError, SettingsInstanceLease, SettingsLifecycle, SettingsSource,
+        SettingsStartupMigration,
     },
     timeline::{
         SessionTimeline, TimelineConfig, TimelineEvent,
@@ -425,7 +425,7 @@ impl ApplicationLifecycle {
             ai_installed_speech,
             ai_hardware,
             ai_knowledge,
-            settings,
+            mut settings,
             settings_instance,
             timeline,
             server,
@@ -454,6 +454,14 @@ impl ApplicationLifecycle {
             )),
             (None, None) => None,
         };
+        if let Some(instance) = &settings_instance
+            && let Some(path) = settings.repository.json_path_for_owned_lifecycle()
+        {
+            settings.repository = Arc::new(LeasedJsonSettingsRepository::new(
+                path.to_path_buf(),
+                Arc::clone(instance),
+            ));
+        }
         if let (Some(instance), Some(environment)) = (&settings_instance, &ai_installed_speech)
             && !instance
                 .matches_root(&environment.data_directory)
@@ -1262,6 +1270,7 @@ impl Lifecycle for ApplicationLifecycle {
 mod settings_instance_tests {
     use super::*;
     use crate::generation::GenerationProvider;
+    use crate::settings::JsonSettingsRepository;
 
     fn config(root: &Path) -> Result<ApplicationConfig, ApplicationError> {
         ApplicationConfig::persistent_unconfigured(
