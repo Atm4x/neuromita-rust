@@ -249,17 +249,17 @@ impl PresetActivation {
         let result = (|| -> Result<(), PresetActivationError> {
             // Refuse stale snapshots before the first mutation. This is not a
             // replacement for ensuring the application has been shut down.
-            for i in 0..old.len() {
+            for (i, previous) in old.iter().enumerate() {
                 if read_file(
                     &active.join(target_names(with_settings)[i]),
                     target_limit(i),
-                )? != old[i]
+                )? != *previous
                 {
                     return Err(PresetActivationError::SnapshotConflict);
                 }
             }
-            for i in 0..new.len() {
-                install_bytes(&journal, active, target_names(with_settings)[i], &new[i])?;
+            for (i, bytes) in new.iter().enumerate() {
+                install_bytes(&journal, active, target_names(with_settings)[i], bytes)?;
                 crash_test_checkpoint(match i {
                     0 => "installed-0",
                     1 => "installed-1",
@@ -333,7 +333,7 @@ impl PresetActivation {
             }
         } else if prepared {
             let mut old = Vec::with_capacity(names.len());
-            for i in 0..names.len() {
+            for (i, name) in names.iter().enumerate() {
                 let limit = target_limit(i);
                 let snapshot = read_file(&journal.join(format!("old-{i}")), limit)?;
                 let present = read_file(&journal.join(format!("present-{i}")), 0)?.is_some();
@@ -342,7 +342,7 @@ impl PresetActivation {
                 }
                 let next = read_file(&journal.join(format!("new-{i}")), limit)?
                     .ok_or(PresetActivationError::RecoveryRequired)?;
-                let current = read_file(&active.join(names[i]), limit)?;
+                let current = read_file(&active.join(name), limit)?;
                 if let Some(current) = current.as_deref()
                     && Some(current) != snapshot.as_deref()
                     && current != next
@@ -353,10 +353,10 @@ impl PresetActivation {
                 }
                 old.push(snapshot);
             }
-            for i in 0..names.len() {
-                match &old[i] {
-                    Some(bytes) => install_bytes(&journal, active, names[i], bytes)?,
-                    None => remove_target(&journal, active, names[i])?,
+            for (i, (name, previous)) in names.iter().zip(&old).enumerate() {
+                match previous {
+                    Some(bytes) => install_bytes(&journal, active, name, bytes)?,
+                    None => remove_target(&journal, active, name)?,
                 }
                 if i == 0 {
                     crash_test_checkpoint("recovered-0");
