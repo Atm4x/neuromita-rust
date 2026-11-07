@@ -534,3 +534,166 @@ fn export_aborts_when_referenced_binary_was_tampered() {
         Err(SessionArchiveError::Asset(_))
     ));
 }
+
+fn with_external_provenance(original: &[u8]) -> Vec<u8> {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    let mut document: Value = serde_json::from_slice(original).unwrap();
+    let mut branches = serde_json::Map::new();
+    let mut events = serde_json::Map::new();
+    for branch in document["branches"].as_array().unwrap() {
+        let id = branch["info"]["id"].as_str().unwrap();
+        branches.insert(id.into(), json!(format!("исходная-ветка:{id}")));
+        for fact in branch["events"].as_array().unwrap() {
+            let id = fact["draft"]["id"].as_str().unwrap();
+            let ms = fact["draft"]["occurred_at_unix_ms"].as_u64().unwrap() as i64;
+            let micros = ms * 1000 + 917;
+            events.insert(
+                id.into(),
+                json!({
+                    "external_event_id": format!("событие:{id}"),
+                    "occurred_at_iso8601": DateTime::<Utc>::from_timestamp_micros(micros)
+                        .unwrap().to_rfc3339_opts(SecondsFormat::Micros, true),
+                    "occurred_at_unix_us": micros,
+                }),
+            );
+        }
+    }
+    document["provenance"] = json!({
+        "source": "python_session_archive",
+        "external_session_id": "сессия:παράδειγμα",
+        "external_branches": branches,
+        "external_events": events,
+        "observer_bindings": {"Пользователь А": "Crazy"}
+    });
+    serde_json::to_vec(&document).unwrap()
+}
+
+#[test]
+fn external_provenance_is_atomic_and_lossless_in_memory_and_sqlite() {
+    let tmp = TestDir::new();
+    let assets = TimelineAssetStore::new(tmp.path().join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut original = TimelineStore::new();
+    let (session, _, _, _, _, _) = build_session(&mut original, &assets);
+    let native = export_memory(&original, session, &assets).unwrap();
+    let with_source = with_external_provenance(&native);
+    let mut memory = TimelineStore::new();
+    assert_eq!(
+        import_memory(&mut memory, &with_source, &assets).unwrap(),
+        session
+    );
+    let reexport = export_memory(&memory, session, &assets).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&reexport).unwrap(),
+        serde_json::from_slice::<Value>(&with_source).unwrap()
+    );
+    assert_eq!(
+        memory
+            .session_provenance(session)
+            .unwrap()
+            .external_session_id,
+        "сессия:παράδειγμα"
+    );
+
+    #[cfg(feature = "sqlite-system")]
+    {
+        let path = tmp.path().join("timeline.db");
+        let mut sql = SqliteTimelineRepository::open(&path).unwrap();
+        assert_eq!(
+            import_sqlite(&mut sql, &with_source, &assets).unwrap(),
+            session
+        );
+        drop(sql);
+        let sql = SqliteTimelineRepository::open(&path).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&export_sqlite(&sql, session, &assets).unwrap())
+                .unwrap(),
+            serde_json::from_slice::<Value>(&with_source).unwrap()
+        );
+    }
+}
+
+#[test]
+fn rejected_provenance_never_publishes_a_partial_session() {
+    let tmp = TestDir::new();
+    let assets = TimelineAssetStore::new(tmp.path().join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut original = TimelineStore::new();
+    let (session, root, _, _, _, _) = build_session(&mut original, &assets);
+    let with_source =
+        with_external_provenance(&export_memory(&original, session, &assets).unwrap());
+    for corrupt in [
+        bytes_with_change(&with_source, |doc| {
+            let provenance = doc["provenance"]["external_events"]
+                .as_object_mut()
+                .unwrap();
+            let key = provenance.keys().next().unwrap().clone();
+            provenance[&key]["occurred_at_unix_us"] = json!(0);
+        }),
+        bytes_with_change(&with_source, |doc| {
+            doc["provenance"]["external_branches"] = json!({});
+        }),
+        bytes_with_change(&with_source, |doc| {
+            doc["provenance"]["external_events"].as_object_mut().unwrap().insert(
+                Uuid::new_v4().to_string(),
+                json!({"external_event_id":"forged", "occurred_at_iso8601":"2026-01-01T00:00:00Z", "occurred_at_unix_us":1767225600000000_i64}),
+            );
+        }),
+    ] {
+        let mut memory = TimelineStore::new();
+        assert!(import_memory(&mut memory, &corrupt, &assets).is_err());
+        assert!(memory.branch(root).is_err());
+        assert_eq!(
+            import_memory(&mut memory, &with_source, &assets).unwrap(),
+            session
+        );
+
+        #[cfg(feature = "sqlite-system")]
+        {
+            let path = tmp.path().join(format!("invalid-{}.db", Uuid::new_v4()));
+            let mut sql = SqliteTimelineRepository::open(&path).unwrap();
+            assert!(import_sqlite(&mut sql, &corrupt, &assets).is_err());
+            drop(sql);
+            let mut sql = SqliteTimelineRepository::open(&path).unwrap();
+            assert_eq!(
+                import_sqlite(&mut sql, &with_source, &assets).unwrap(),
+                session
+            );
+        }
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_provenance_write_failure_rolls_back_branch_facts_and_receipts() {
+    let tmp = TestDir::new();
+    let assets = TimelineAssetStore::new(tmp.path().join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, _, _, _, _, _) = build_session(&mut origin, &assets);
+    let archive = with_external_provenance(&export_memory(&origin, session, &assets).unwrap());
+    let db = tmp.path().join("provenance-failure.sqlite");
+    let mut target = SqliteTimelineRepository::open(&db).unwrap();
+    {
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_provenance BEFORE INSERT ON timeline_session_provenance BEGIN SELECT RAISE(ABORT, 'forced failure'); END;").unwrap();
+    }
+    assert!(import_sqlite(&mut target, &archive, &assets).is_err());
+    drop(target);
+    let snapshot = SqliteTimelineRepository::open(&db).unwrap();
+    assert!(export_sqlite(&snapshot, session, &assets).is_err());
+    drop(snapshot);
+    {
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER fail_provenance")
+            .unwrap();
+    }
+    let mut target = SqliteTimelineRepository::open(&db).unwrap();
+    assert_eq!(
+        import_sqlite(&mut target, &archive, &assets).unwrap(),
+        session
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&export_sqlite(&target, session, &assets).unwrap())
+            .unwrap(),
+        serde_json::from_slice::<Value>(&archive).unwrap()
+    );
+}

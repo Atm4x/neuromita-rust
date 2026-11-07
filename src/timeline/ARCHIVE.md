@@ -96,3 +96,34 @@ read-only orphan inventory is allowed, destructive GC is not. Callers must not
 show these binaries as attached to a canonical event until the later Timeline
 transaction succeeds. This API does not make Python SessionArchive directly
 importable into native Memory or SQLite.
+
+## Atomic session provenance persistence (B26)
+
+Native SessionArchive now has an optional, strictly typed `provenance` field.
+It is **metadata, not another event history**: it records external session,
+branch and event keys, original RFC-3339 timestamps with Unix microseconds,
+and explicit external observer-to-`CharacterId` bindings. Each mapped event
+must exist in the canonical session and its microsecond timestamp must agree
+with the fact's stored millisecond bucket. The root branch must be mapped.
+Later native-only events and branches may remain unmapped; mapped external
+identities are never fabricated for them.
+
+Memory publication validates this metadata against the complete canonical
+session before swapping the in-memory state. SQLite uses the same validation
+inside `BEGIN IMMEDIATE` and writes `timeline_session_provenance` within the
+same transaction as facts, receipts and branch rows. A failed provenance write
+rolls back *all* of those rows; the SQL error-injection regression proves it.
+Reopening SQLite reloads and validates provenance; native SessionArchive
+export/import round-trips it without truncating Unicode IDs, offsets or
+microseconds. The existing native archive format label stays unchanged; absent
+provenance remains valid for native-only sessions. The new table is created by
+normal pre-release database initialization, without a versioned migration
+sequence.
+
+`BoundPythonArchive::provenance()` produces this metadata detached from storage
+using the earlier explicit binding. **It does not publish or convert Python
+facts**, and staging Python assets remains a separate operation. The final
+Python importer must still convert every event and receipt without altering
+visibility or semantics (`EventObserved` is not yet representable), and pass
+both canonical facts and provenance to the existing atomic installer. No
+Python-to-Rust SessionArchive import is claimed by B26.

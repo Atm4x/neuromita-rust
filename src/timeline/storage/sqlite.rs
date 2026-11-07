@@ -6,7 +6,8 @@ use uuid::Uuid;
 use crate::identity::{CharacterId, EventId};
 use crate::timeline::domain::{
     AppendGuard, Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt,
-    SessionId, TimelineError, TimelineFact, TimelineRepository, TimelineStore, WorldLookup,
+    SessionId, SessionProvenance, TimelineError, TimelineFact, TimelineRepository, TimelineStore,
+    WorldLookup,
 };
 use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
 
@@ -20,6 +21,10 @@ CREATE TABLE IF NOT EXISTS timeline_revision(
     revision INTEGER NOT NULL CHECK(revision>=0)
 );
 INSERT OR IGNORE INTO timeline_revision(slot,revision) VALUES(1,0);
+CREATE TABLE IF NOT EXISTS timeline_session_provenance(
+    session_id TEXT PRIMARY KEY,
+    metadata_json TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS timeline_branches(
     branch_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -180,15 +185,28 @@ impl SqliteTimelineRepository {
 
     /// Publish every new branch in the same SQLite transaction; a failed
     /// validation or storage write leaves no partially restored session.
-    pub(crate) fn archive_install(&mut self, branches: Vec<Branch>) -> Result<(), TimelineError> {
+    pub(crate) fn archive_install_with_provenance(
+        &mut self,
+        branches: Vec<Branch>,
+        provenance: Option<SessionProvenance>,
+    ) -> Result<(), TimelineError> {
+        let session = branches.first().map(|branch| branch.info.session_id);
         let ids = branches
             .iter()
             .map(|branch| branch.info.id)
             .collect::<Vec<_>>();
         self.with_write(move |connection, store| {
-            store.install_archive_branches(branches)?;
+            store.install_archive_branches_with_provenance(branches, provenance)?;
             for id in ids {
                 save_branch(connection, store, id)?;
+            }
+            if let Some(session) = session
+                && let Some(provenance) = store.session_provenance(session)
+            {
+                connection.write(
+                    "INSERT INTO timeline_session_provenance(session_id,metadata_json) VALUES(?,?)",
+                    &[&session.0.to_string(), &encode(provenance)?],
+                )?;
             }
             Ok(())
         })
@@ -301,7 +319,17 @@ fn load(connection: &Connection) -> Result<TimelineStore, TimelineError> {
         }
         branches.push(Branch { info, events, receipts });
     }
-    TimelineStore::load_persisted(branches)
+    let mut provenance = Vec::new();
+    for row in connection.query(
+        "SELECT session_id,metadata_json FROM timeline_session_provenance",
+        &[],
+    )? {
+        provenance.push((
+            SessionId(parse_uuid(&row[0])?),
+            decode::<SessionProvenance>(&row[1])?,
+        ));
+    }
+    TimelineStore::load_persisted_with_provenance(branches, provenance)
 }
 
 /// Materialized *facts*, not domain decisions. These indexes are derived from

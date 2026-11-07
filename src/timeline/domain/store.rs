@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -12,6 +13,7 @@ use super::{
         TimelineError, TimelineFact,
     },
     projection::{character_view, present_characters},
+    provenance::SessionProvenance,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,6 +36,7 @@ pub(crate) struct Branch {
 pub struct TimelineStore {
     branches: HashMap<BranchId, Branch>,
     indexes: HashMap<BranchId, WorldIndex>,
+    provenance: HashMap<SessionId, SessionProvenance>,
 }
 
 impl Receipt {
@@ -70,6 +73,118 @@ impl TimelineStore {
         let mut branches: Vec<_> = self.branches.values().cloned().collect();
         branches.sort_by_key(|branch| branch.info.id.0);
         branches
+    }
+
+    pub fn session_provenance(&self, session: SessionId) -> Option<&SessionProvenance> {
+        self.provenance.get(&session)
+    }
+
+    pub(crate) fn load_persisted_with_provenance(
+        branches: Vec<Branch>,
+        provenance: Vec<(SessionId, SessionProvenance)>,
+    ) -> Result<Self, TimelineError> {
+        let mut store = Self::load_persisted(branches)?;
+        for (session, source) in provenance {
+            if store.provenance.insert(session, source).is_some() {
+                return Err(TimelineError::Storage(
+                    "duplicate session provenance".into(),
+                ));
+            }
+        }
+        store.validate_provenance()?;
+        Ok(store)
+    }
+
+    fn validate_provenance(&self) -> Result<(), TimelineError> {
+        for (session, provenance) in &self.provenance {
+            if provenance.external_session_id.is_empty()
+                || provenance.external_session_id.trim() != provenance.external_session_id
+                || provenance
+                    .external_branches
+                    .values()
+                    .any(|id| id.is_empty() || id.trim() != id)
+                || provenance.external_events.values().any(|entry| {
+                    entry.external_event_id.is_empty()
+                        || entry.external_event_id.trim() != entry.external_event_id
+                })
+                || provenance
+                    .observer_bindings
+                    .keys()
+                    .any(|id| id.is_empty() || id.trim() != id)
+            {
+                return Err(TimelineError::Storage(
+                    "invalid external provenance identity".into(),
+                ));
+            }
+            let branches = self
+                .branches
+                .values()
+                .filter(|branch| branch.info.session_id == *session)
+                .collect::<Vec<_>>();
+            if branches.is_empty() {
+                return Err(TimelineError::Storage("provenance session missing".into()));
+            }
+            let root = branches
+                .iter()
+                .find(|branch| branch.info.parent.is_none())
+                .ok_or_else(|| TimelineError::Storage("provenance session root missing".into()))?;
+            if !provenance.external_branches.contains_key(&root.info.id.0) {
+                return Err(TimelineError::Storage("provenance root not mapped".into()));
+            }
+            let mut mapped_branches = 0;
+            let mut mapped_events = 0;
+            let mut branch_sources = HashSet::new();
+            for branch in branches {
+                if let Some(source) = provenance.external_branches.get(&branch.info.id.0) {
+                    mapped_branches += 1;
+                    if !branch_sources.insert(source) {
+                        return Err(TimelineError::Storage(
+                            "duplicate external branch identity".into(),
+                        ));
+                    }
+                }
+                for fact in &branch.events {
+                    let Some(entry) = provenance.external_events.get(&fact.draft.id.0) else {
+                        continue;
+                    };
+                    mapped_events += 1;
+                    let parsed =
+                        DateTime::<FixedOffset>::parse_from_rfc3339(&entry.occurred_at_iso8601)
+                            .map_err(|_| {
+                                TimelineError::Storage("invalid provenance time".into())
+                            })?;
+                    if parsed.timestamp_micros() != entry.occurred_at_unix_us
+                        || entry.occurred_at_unix_us < 0
+                        || (entry.occurred_at_unix_us as u64) / 1000
+                            != fact.draft.occurred_at_unix_ms
+                    {
+                        return Err(TimelineError::Storage(
+                            "provenance timestamp does not match fact".into(),
+                        ));
+                    }
+                }
+            }
+            let event_sources = provenance
+                .external_events
+                .values()
+                .map(|entry| &entry.external_event_id)
+                .collect::<HashSet<_>>();
+            if mapped_branches != provenance.external_branches.len()
+                || mapped_events != provenance.external_events.len()
+                || event_sources.len() != mapped_events
+                || provenance
+                    .observer_bindings
+                    .values()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    != provenance.observer_bindings.len()
+            {
+                return Err(TimelineError::Storage(
+                    "duplicate external provenance mapping".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn load_persisted(branches: Vec<Branch>) -> Result<Self, TimelineError> {
@@ -120,6 +235,7 @@ impl TimelineStore {
         let store = Self {
             branches: map,
             indexes: HashMap::new(),
+            provenance: HashMap::new(),
         };
         for info in store.branches.values().map(|branch| branch.info) {
             let mut visited = HashSet::new();
@@ -191,9 +307,10 @@ impl TimelineStore {
 
     /// Install a fully validated detached session without partially mutating the
     /// existing store. The caller owns archive-specific semantic validation.
-    pub(crate) fn install_archive_branches(
+    pub(crate) fn install_archive_branches_with_provenance(
         &mut self,
         incoming: Vec<Branch>,
+        provenance: Option<SessionProvenance>,
     ) -> Result<(), TimelineError> {
         if incoming.is_empty() {
             return Err(TimelineError::Invalid("archive has no branches"));
@@ -220,7 +337,17 @@ impl TimelineStore {
         }
         let mut candidate = self.persisted_branches();
         candidate.extend(incoming);
-        let validated = Self::load_persisted(candidate)?;
+        let mut validated = Self::load_persisted(candidate)?;
+        validated.provenance = self.provenance.clone();
+        if let Some(provenance) = provenance
+            && validated
+                .provenance
+                .insert(imported_session, provenance)
+                .is_some()
+        {
+            return Err(TimelineError::Conflict);
+        }
+        validated.validate_provenance()?;
         *self = validated;
         Ok(())
     }
