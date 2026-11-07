@@ -1,0 +1,39 @@
+name: Agent C Windows fail-closed safety bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-windows-fail-closed-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-windows-fail-closed-20261107
+          fetch-depth: 0
+      - name: Verify and publish exact safety candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e2e6f9147d25ffab9891fe8d238b416576262b8a
+          HEAD=7528cf77e16af1f84567f834b41b5857f008bbf4
+          SOURCE=codex/ai-platform-hub-c3-windows-fail-closed-20261107
+          TARGET=codex/ai-platform-hub-c3-windows-fail-closed-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-windows-fail-closed.bundle.b64 > /tmp/agent-c-windows.bundle
+          echo '6d0d1f3e2d9960f735e43f81514ed68fe8c5cc9729b30bae9b487d4fb3c5f00b  /tmp/agent-c-windows.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-windows.bundle
+          git fetch --no-tags /tmp/agent-c-windows.bundle "refs/heads/$SOURCE:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected target: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
