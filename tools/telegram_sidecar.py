@@ -125,10 +125,16 @@ async def main():
         line = await asyncio.to_thread(sys.stdin.buffer.readline)
         if not line:
             break
+        request_id = None
         try:
             req = json.loads(line)
+            # Correlation is transport metadata; every normal response echoes it,
+            # including invalid auth, network and Telegram errors.
+            request_id = req.get("request_id") if isinstance(req, dict) else None
+            if not isinstance(request_id, int) or isinstance(request_id, bool) or request_id < 1:
+                raise ValueError("invalid_request_id")
             result = await handle(req)
-            output = {"ok": True, "result": result}
+            output = {"ok": True, "request_id": request_id, "result": result}
         except Exception as exc:
             # Never echo credentials, code, password, phone or session paths.
             known = {
@@ -138,7 +144,10 @@ async def main():
                 "unknown_operation",
             }
             label = str(exc)
-            output = {"ok": False, "error": label if label in known else "telegram_failure"}
+            output = {
+                "ok": False, "request_id": request_id,
+                "error": label if label in known else "telegram_failure",
+            }
         print(json.dumps(output, ensure_ascii=False), flush=True)
     if client is not None:
         await client.disconnect()
