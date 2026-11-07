@@ -22,6 +22,7 @@ pub mod activation;
 pub mod handoff;
 pub mod install_policy;
 pub mod package;
+pub mod python_core_activation;
 
 use crate::portable::PortableDataRoot;
 

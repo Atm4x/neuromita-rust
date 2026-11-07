@@ -56,3 +56,42 @@ a naive overlay extract would risk overwriting user content. The real Python ZIP
 is not an eligible Rust binary; conversion to a safe multi-file transaction
 requires explicit content ownership, ZIP parser/extractor review, and validated
 rollback. These obligations remain open for #44.
+
+## D26: crash-recoverable Python entry-file transaction (not ZIP installation)
+
+`updater::python_core_activation::PythonCoreActivator` is a separate, narrowly
+scoped transaction for **both existing** `Launcher.exe` and `NeuroMita.pyz`.
+It does not update any `Settings`, `Prompts`, `UserData`, secondary library,
+asset, or Unity file. The trusted caller must first enumerate and validate the
+publisher-verified ZIP through `preflight_python_archive`, extract the two
+regular files with a separately reviewed decoder, and supply independently
+verified exact SHA-256 digests for the extracted bytes. This is an explicit
+*future input contract*: the repository still has **no approved ZIP extraction
+implementation**. Hashes handed in by an untrusted caller do not establish
+publisher authenticity. **Neither the GUI nor `neuromita-updater` currently
+calls this API**, so this work does not make Python ZIPs installable.
+
+`prepare` validates both files and existing installation bytes, copies both
+candidates into a dedicated workspace, preserves the old target permissions,
+and durably writes a bounded `pending.json` journal. The shared install-wide
+`.neuromita-update.lock` serializes operations with the raw Rust-executable
+updater. `apply` is intended for a separate process after the old launcher has
+stopped; it renames both old files to workspace backups before installing the
+new bytes, verifies the resulting pair, then atomically promotes the journal
+to `committed.json`. No switch to the new pair is considered committed before
+both new file hashes match. `recover` on a fresh activator instance handles
+crashes between *either* rename: an uncommitted transaction reverts **both**
+files or refuses on conflicting unknown bytes; a committed transaction keeps
+the verified new pair and finishes deleting backups. Unjournaled backups are
+never automatically deleted. The currently installed file and its backup must
+be regular files, and unexpected workspace entries abort before mutation.
+
+This is **crash-recovery behavior under cooperative, idle filesystem access**,
+not a global atomic filesystem transaction observable by concurrent readers.
+The caller must guarantee no concurrent Python launcher is running; Windows
+locked-file behavior and directory durability during power loss have not been
+verified. Existing targets are required; creating/removing new installation
+files and directories remains out of scope. Full 2,442-entry Python ZIP update,
+protected user overrides, actual launch-helper handoff for Python, trusted ZIP
+extraction, Windows installation E2E and any Unity installer require further
+separately tested work. Issue #44 remains OPEN.

@@ -397,7 +397,7 @@ impl SingleFileActivator {
     }
 }
 
-fn lock_installation(root: &Path) -> Result<File, ActivationError> {
+pub(super) fn lock_installation(root: &Path) -> Result<File, ActivationError> {
     let path = root.join(LOCK);
     let file = match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
@@ -460,7 +460,7 @@ fn regular_file(path: &Path) -> Result<(), ActivationError> {
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<(u64, String), ActivationError> {
+pub(super) fn hash_file(path: &Path) -> Result<(u64, String), ActivationError> {
     regular_file(path)?;
     let mut file = File::open(path)?;
     let mut context = Context::new(&SHA256);
@@ -488,12 +488,12 @@ fn verify(path: &Path, size: u64, digest: &str, role: &'static str) -> Result<()
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
