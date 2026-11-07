@@ -5,7 +5,7 @@ on:
       - codex/telegram-voice-47
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -32,20 +32,6 @@ jobs:
       - name: Telegram focused tests
         run: cargo test --locked --offline telegram_
       - name: Clippy
-        run: |
-          set +e
-          cargo clippy --locked --offline --all-targets -- -D warnings > /tmp/telegram-clippy.log 2>&1
-          result=$?
-          set -e
-          cat /tmp/telegram-clippy.log
-          if [ "$result" -ne 0 ]; then
-            cp /tmp/telegram-clippy.log docs/03-runtime/telegram-ci-clippy.log
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add docs/03-runtime/telegram-ci-clippy.log
-            git commit -m "ci(telegram): capture clippy diagnostic for review"
-            git push origin HEAD:codex/telegram-voice-47
-          fi
-          exit "$result"
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
       - name: Full unit and integration suite
         run: cargo test --locked --offline
