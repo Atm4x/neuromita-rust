@@ -1,0 +1,55 @@
+name: Agent B49 verified admin fence and headless Slint
+on:
+  push:
+    branches: [bridge/agent-b49-admin-fence-20261107]
+    paths: [bridge/agent-b49.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify B49 patch and publish exact source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=267804a1cfa72eeacf9caa864f197543f79ac43f
+          tree=88697d520734346fe0af5b3a1c42128e68fd366d
+          branch=codex/timeline-b49-conversation-owner-fence-20261107
+          base64 -d bridge/agent-b49.patch.gz.b64 > /tmp/agent-b49.patch.gz
+          echo "d4b836b6ec19d4ed610ca902fdbc04388d8d8cff64ba2a14cf4c5b484e2a36a5  /tmp/agent-b49.patch.gz" | sha256sum -c -
+          gzip -t /tmp/agent-b49.patch.gz
+          gzip -dc /tmp/agent-b49.patch.gz > /tmp/agent-b49.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/agent-b49.patch
+          git apply --index /tmp/agent-b49.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(chat): fence destructive confirmation and diagnostics by selection origin"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "existing B49 branch; abort"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "REMOTE_HEAD=$remote"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install system libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute isolated headless Slint conversation ownership regression
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^{tree})" = 88697d520734346fe0af5b3a1c42128e68fd366d
+          cargo test --locked --offline --features gui --bin neuromita-gui conversation_admin_callbacks_reject_late_a_b_a_results -- --test-threads=1
