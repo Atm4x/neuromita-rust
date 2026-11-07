@@ -1843,3 +1843,233 @@ async fn timeline_change_during_joint_semantic_react_rerank_cancels_before_llm()
     );
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn keyword_generation_admits_active_fact_and_rag_only_but_not_hidden_or_foreign_sources() {
+    use neuromita::{
+        api::CharacterApi,
+        memory::{MemoryCommand, MemoryId, MemoryKind, MemoryPriority, MemoryRecord},
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let fact = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Normal,
+        "Saffron garden fact",
+    );
+    let mut rag_only = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::High,
+        "Saffron garden retrieved only",
+    );
+    rag_only.kind = MemoryKind::RagOnly;
+    let forgotten = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Saffron hidden garden",
+    );
+    let (fact_id, rag_only_id, forgotten_id) = (fact.id, rag_only.id, forgotten.id);
+    let saved = owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![
+                MemoryCommand::ImportRecord { record: fact },
+                MemoryCommand::ImportRecord { record: rag_only },
+                MemoryCommand::ImportRecord { record: forgotten },
+            ],
+        )
+        .await
+        .unwrap();
+    owner
+        .edit_memories(
+            saved.snapshot,
+            vec![MemoryCommand::Forget { id: forgotten_id }],
+        )
+        .await
+        .unwrap();
+    let other = CharacterApi::get(CharacterId::Kind).unwrap();
+    let foreign = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Saffron foreign garden",
+    );
+    let foreign_id = foreign.id;
+    other
+        .edit_memories(
+            other.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: foreign }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Saffron garden was planted last year".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Current unrelated topic".into()).unwrap(),
+    )
+    .unwrap();
+
+    let off = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Saffron",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&fact_id.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&rag_only_id.0.to_string()), "{evidence}");
+    assert!(
+        !evidence.contains(&forgotten_id.0.to_string()),
+        "{evidence}"
+    );
+    assert!(!evidence.contains(&foreign_id.0.to_string()), "{evidence}");
+    assert!(!evidence.contains("[RETRIEVED TIMELINE EVIDENCE]"));
+    call.reply.send("Off response".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), off.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Keyword,
+            max_results: 3,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let keyword = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Saffron",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    for id in [fact_id.0, rag_only_id.0, archived.0] {
+        assert!(
+            evidence.contains(&id.to_string()),
+            "missing {id}: {evidence}"
+        );
+    }
+    for id in [forgotten_id.0, foreign_id.0] {
+        assert!(
+            !evidence.contains(&id.to_string()),
+            "leaked {id}: {evidence}"
+        );
+    }
+    call.reply.send("Keyword response".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), keyword.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn semantic_intersect_admits_rag_only_keyword_match_without_admitting_unmatched_fact() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{retrieval_fusion::FusionMode, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryKind, MemoryPriority, MemoryRecord},
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic_fusion(
+        Arc::new(SemanticMemoryRetriever::new(Arc::new(JointEmbedding::new()), 32).unwrap()),
+        FusionMode::Intersect {
+            min_methods: 2,
+            require_vector: true,
+        },
+    )
+    .unwrap();
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let mut rag_only = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Normal,
+        "Copper orchid is in the RagOnly record",
+    );
+    rag_only.kind = MemoryKind::RagOnly;
+    let unmatched = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Zebra amethyst waterfall",
+    );
+    let (rag_only_id, unmatched_id) = (rag_only.id, unmatched.id);
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![
+                MemoryCommand::ImportRecord { record: rag_only },
+                MemoryCommand::ImportRecord { record: unmatched },
+            ],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("The copper orchid appeared in older history".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Current topic is elsewhere".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Copper orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&rag_only_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(
+        !evidence.contains(&unmatched_id.0.to_string()),
+        "{evidence}"
+    );
+    call.reply.send("Found authorized sources".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}

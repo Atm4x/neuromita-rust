@@ -19,8 +19,8 @@ use super::{
     },
     history_window::HistoryWindow,
     memory_context::{
-        lexical_ranked_scoped, priority_rank, render_memory_islands,
-        render_ranked_memory_context_scoped, render_relation_context, tokens,
+        priority_rank, render_memory_islands, render_ranked_memory_context_scoped,
+        render_relation_context, tokens,
     },
     retrieval_fusion::{
         FusedHit, FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit,
@@ -55,6 +55,28 @@ fn active_retrieval_facts(memories: &[MemoryRecord]) -> impl Iterator<Item = &Me
     })
 }
 
+/// Query-matched, source-owned fact admission for generation-only Keyword buckets.
+/// Ordinary Off-mode lexical memory selection keeps its separate Fact-only contract.
+fn keyword_generation_facts<'a>(
+    memories: &'a [MemoryRecord],
+    query: &str,
+) -> Vec<&'a MemoryRecord> {
+    let terms = tokens(query);
+    let mut ranked = active_retrieval_facts(memories)
+        .filter_map(|record| {
+            let overlap = tokens(&record.content).intersection(&terms).count();
+            (overlap > 0).then_some((record, overlap))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(a, a_overlap), (b, b_overlap)| {
+        b_overlap
+            .cmp(a_overlap)
+            .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ranked.into_iter().map(|(record, _)| record).collect()
+}
+
 /// Choose one bounded set of source-qualified candidates *before* rendering
 /// Memory and archived History. This operation is used only for lexical
 /// Keyword/FTS generation; semantic modes have a separate candidate pipeline.
@@ -87,24 +109,19 @@ pub(crate) fn select_lexical_generation(
     }
 
     let memory_hits = match history_method {
-        RetrievalMethod::Keyword => {
-            let searchable = tokens(query);
-            lexical_ranked_scoped(memories, query, false)
-                .into_iter()
-                .filter(|record| record.state == MemoryState::Active)
-                .filter(|record| !tokens(&record.content).is_disjoint(&searchable))
-                .map(|record| RetrievalHit {
-                    key: RetrievalKey {
-                        character,
-                        source: RetrievalSource::Memory,
-                        id: record.id.0.to_string(),
-                    },
-                    content: record.content.clone(),
-                    raw_score: None,
-                    metadata: BTreeMap::new(),
-                })
-                .collect::<Vec<_>>()
-        }
+        RetrievalMethod::Keyword => keyword_generation_facts(memories, query)
+            .into_iter()
+            .map(|record| RetrievalHit {
+                key: RetrievalKey {
+                    character,
+                    source: RetrievalSource::Memory,
+                    id: record.id.0.to_string(),
+                },
+                content: record.content.clone(),
+                raw_score: None,
+                metadata: BTreeMap::new(),
+            })
+            .collect::<Vec<_>>(),
         RetrievalMethod::Fts => {
             let scoped = active_retrieval_facts(memories).collect::<Vec<_>>();
             let content = scoped
@@ -225,10 +242,8 @@ pub(crate) async fn select_semantic_generation(
             .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
             .then_with(|| a.id.cmp(&b.id))
     });
-    let searchable = tokens(query);
-    let lexical = lexical_ranked_scoped(&admitted, query, false)
+    let lexical = keyword_generation_facts(&admitted, query)
         .into_iter()
-        .filter(|record| !tokens(&record.content).is_disjoint(&searchable))
         .map(|record| RetrievalHit {
             key: RetrievalKey {
                 character,
