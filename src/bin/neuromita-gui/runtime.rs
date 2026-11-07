@@ -26,7 +26,9 @@ use neuromita::{
     request::{CancelResult, RequestId},
     settings::{AsrPreferences, PresetId, PresetSelection, TtsBackend, TtsPreferences, Volume},
     telegram_sidecar::TelethonSession,
-    telegram_voice::{DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramVoiceService},
+    telegram_voice::{
+        DynamicTelegramVoice, FfmpegTelegramDecoder, TelegramConfig, TelegramVoiceService,
+    },
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -56,7 +58,11 @@ pub enum Command {
     VoiceInGame(bool),
     VoiceName(String),
     SaveTts(TtsPreferences),
-    TelegramConnect { api_id: String, api_hash: String, phone: String },
+    TelegramConnect {
+        api_id: String,
+        api_hash: String,
+        phone: String,
+    },
     TelegramCode(String),
     TelegramPassword(String),
     TelegramDisconnect,
@@ -101,7 +107,10 @@ pub enum Update {
     Administration(Box<super::settings::AdministrationSnapshot>),
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
-    TelegramAuth { phase: i32, status: String },
+    TelegramAuth {
+        phase: i32,
+        status: String,
+    },
     PresetSaved(PresetId),
     AdminError(String),
     Stopped,
@@ -306,14 +315,21 @@ async fn activate_telegram_voice(
     router: &Arc<DynamicTelegramVoice>,
     session: Arc<TelethonSession>,
 ) -> Result<(), String> {
-    let snapshot = administration.settings.snapshot().map_err(|e| e.to_string())?;
+    let snapshot = administration
+        .settings
+        .snapshot()
+        .map_err(|e| e.to_string())?;
     let prefs = &snapshot.values.speech.tts;
     if !prefs.enabled || prefs.backend != TtsBackend::Telegram {
         router.clear().await;
         return Ok(());
     }
     let ffmpeg = std::env::var("NEUROMITA_FFMPEG").unwrap_or_else(|_| {
-        if cfg!(windows) { "ffmpeg.exe".into() } else { "ffmpeg".into() }
+        if cfg!(windows) {
+            "ffmpeg.exe".into()
+        } else {
+            "ffmpeg".into()
+        }
     });
     let service = TelegramVoiceService::new(
         session,
@@ -325,7 +341,8 @@ async fn activate_telegram_voice(
             poll: Duration::from_millis(330),
             max_media_bytes: 32 * 1024 * 1024,
         },
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     router.install(Arc::new(service)).await;
     Ok(())
 }
@@ -363,7 +380,17 @@ async fn run(
     publish(Update::CharacterCatalog(
         app.presenter().characters.catalog(),
     ));
-    if let Err(error) = observe(&app, &directory, &catalog, &mut receive, &stop, &publish, &telegram_voice).await {
+    if let Err(error) = observe(
+        &app,
+        &directory,
+        &catalog,
+        &mut receive,
+        &stop,
+        &publish,
+        &telegram_voice,
+    )
+    .await
+    {
         publish(Update::Error(error));
     }
     if let Err(error) = app.shutdown().await {
