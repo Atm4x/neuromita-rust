@@ -279,16 +279,16 @@ fn convert_message_content(
         .as_array()
         .filter(|list| !list.is_empty() && list.len() <= 31)
         .ok_or(PythonArchiveError::Invalid("Python attachment count"))?;
-    let text =
-        payload
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or(PythonArchiveError::Invalid(
-                "Python attachment text missing",
-            ))?;
-    let mut parts = vec![TimelineMessagePart::Text {
-        text: text.to_owned(),
-    }];
+    let mut parts = Vec::with_capacity(list.len() + 1);
+    match payload.get("content") {
+        Some(Value::String(text)) => parts.push(TimelineMessagePart::Text { text: text.clone() }),
+        None => {}
+        Some(_) => {
+            return Err(PythonArchiveError::Invalid(
+                "Python attachment text is not a string",
+            ));
+        }
+    }
     for entry in list {
         let object = entry
             .as_object()

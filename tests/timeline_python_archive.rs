@@ -1747,3 +1747,90 @@ fn python_contentless_messages_survive_sqlite_reopen_without_synthesized_text() 
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn python_image_only_message_preserves_media_without_synthesizing_text() {
+    use neuromita::timeline::domain::{TimelineMessagePart, TimelineStore, parse_message_content};
+    use neuromita::timeline::storage::archive::{export_memory, import_memory};
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let mut document: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    document["events"][1]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("content");
+    document["operations"][1]["intent"]["events"][0]["payload"] =
+        document["events"][1]["payload"].clone();
+    let source = inspect_python_archive(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = source
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let event_id = neuromita::timeline::EventId(
+        source
+            .identities
+            .events
+            .iter()
+            .find(|item| item.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+            .unwrap()
+            .candidate_uuid,
+    );
+    let fact = prepared.fact(event_id).unwrap();
+    let parts = parse_message_content(&fact.draft.payload["content"]).unwrap();
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(&parts[0], TimelineMessagePart::Image { .. }));
+    let root = std::env::temp_dir().join(format!("nm-python-image-only-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let archive = export_memory(&timeline, session, &assets).unwrap();
+    let mut reopened = TimelineStore::new();
+    import_memory(&mut reopened, &archive, &assets).unwrap();
+    assert_eq!(export_memory(&reopened, session, &assets).unwrap(), archive);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_image_only_message_survives_sqlite_reopen() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let mut document: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    document["events"][1]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("content");
+    document["operations"][1]["intent"]["events"][0]["payload"] =
+        document["events"][1]["payload"].clone();
+    let source = inspect_python_archive(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "nm-python-image-only-sqlite-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let database = root.join("timeline.sqlite");
+    let (session, expected) = {
+        let mut timeline = SqliteTimelineRepository::open(&database).unwrap();
+        let bound = source
+            .bind_sqlite(&timeline, &explicit_observers())
+            .unwrap();
+        let session = bound.import_sqlite(&mut timeline, &assets).unwrap();
+        (session, export_sqlite(&timeline, session, &assets).unwrap())
+    };
+    let reopened = SqliteTimelineRepository::open(&database).unwrap();
+    assert_eq!(
+        export_sqlite(&reopened, session, &assets).unwrap(),
+        expected
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(root).unwrap();
+}
