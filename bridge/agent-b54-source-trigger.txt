@@ -1,0 +1,1 @@
+Generate a verified source-only B42-to-B53 diff for local work, not a Git bundle.
