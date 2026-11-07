@@ -107,6 +107,15 @@ export component AiHubShell inherits Rectangle {
                 }
             }
             ActionSurface {
+                width: 112px; height: 36px;
+                label: root.localized("ai-hub.shell.refresh", "Обновить", "Refresh");
+                enabled: root.catalog.available && root.catalog.phase != AiHubLoadPhase.loading;
+                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                activated => {
+                    root.refresh-requested(root.catalog.revision, root.catalog.token);
+                }
+            }
+            ActionSurface {
                 width: 86px; height: 36px;
                 label: root.localized("common.close", "Закрыть", "Close");
                 background: SettingsTheme.button;

@@ -53,3 +53,11 @@ Core-owned dynamic metadata/status in #59, installation/preflight in #42 and #61
 ## Modal scope refinement
 
 The integration mounts the correlated operation confirmation at the full AI Hub overlay level. The operations panel retains its embedded dialog for standalone fixtures, but the production shell disables that embedded instance to avoid duplicate or clipped confirmations. No operation is enabled without an authoritative connected adapter.
+
+## Agent 5 follow-up: real Core speech inventory projection
+
+`SpeechModelCatalog::snapshot()` was already Core-owned and published through `Update::SpeechInventory` for TTS/ASR. AI Hub now consumes that same snapshot, preserving its discovered IDs and verified asset revisions. `Refresh` goes through the existing `Command::RefreshSpeechInventory`. Microphone enumeration failure no longer prevents the independent inventory refresh; its error is still published to Settings. Runtime stop clears the hub catalog.
+
+The projection explicitly distinguishes discovered, package+asset installed evidence, and unavailable worker/inference readiness. A partial package/asset state remains `unknown`, not `installed`; readiness remains `unknown` even when both exist. Runtime/package receipts are **not** proof of load/inference readiness. GUI action gates remain disabled. The read-only status label avoids showing a false "unsupported" verdict for models whose compatibility is not known.
+
+Added pure projection regression tests (`hub_inventory_tests`) for partially installed models, readiness not inferred from receipts, no write actions, and empty inventories. **Tests authored, not run:** Rust toolchain unavailable in this execution environment. This is material progress on metadata discovery, not proof of full #37 acceptance.

@@ -39,6 +39,7 @@ export component AppWindow inherits Window {
     in property <PageId> page: home;
     in-out property <bool> ai-hub-open: false;
     in-out property <int> ai-hub-session-epoch: 0;
+    callback ai-hub-refresh-requested(int, string);
     in property <bool> ai-hub-settings-connected: false;
     in property <bool> ai-hub-operations-connected: false;
     in property <[AiHubOperationSnapshot]> ai-hub-operation-snapshots;
@@ -296,6 +297,7 @@ export component AppWindow inherits Window {
             operation-snapshots: root.ai-hub-operation-snapshots;
             operation-capabilities: root.ai-hub-operation-capabilities;
             operation-decision: root.ai-hub-decision;
+            refresh-requested(rev, token) => { root.ai-hub-refresh-requested(rev, token); }
             close-requested => {
                 if !root.ai-hub-settings.dirty && root.ai-hub-settings.save-phase != AiHubSavePhase.saving {
                     root.ai-hub-open = false;

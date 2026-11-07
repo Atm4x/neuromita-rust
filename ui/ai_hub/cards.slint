@@ -111,10 +111,13 @@ export component AiHubCard inherits Rectangle {
                 overflow: elide;
             }
             SettingsLabel {
-                text: root.component.supported
-                    ? root.localized("ai-hub.card.supported", "Поддерживается", "Supported")
-                    : root.localized("ai-hub.card.unsupported", "Не поддерживается", "Unsupported");
-                color: root.component.supported ? SettingsTheme.status-success : SettingsTheme.error-text;
+                text: !root.action-adapter-connected
+                    ? root.localized("ai-hub.card.readonly", "Только чтение", "Read only")
+                    : root.component.supported
+                        ? root.localized("ai-hub.card.supported", "Поддерживается", "Supported")
+                        : root.localized("ai-hub.card.unsupported", "Не поддерживается", "Unsupported");
+                color: !root.action-adapter-connected ? SettingsTheme.muted
+                    : root.component.supported ? SettingsTheme.status-success : SettingsTheme.error-text;
                 font-size: 11px; font-weight: 700;
             }
         }
