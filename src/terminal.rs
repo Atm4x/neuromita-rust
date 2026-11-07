@@ -12,7 +12,7 @@ use neuromita::{
         GameApi, GameReceipt,
         seabattle::{Coordinate, Orientation, Side},
     },
-    knowledge::forgotten_recall::RecallSelector,
+    knowledge::{forgotten_recall::RecallSelector, retrieval_fusion::FusionMode},
     memory::MemoryId,
     presentation::ChatPresenter,
     request::{
@@ -42,7 +42,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -429,7 +429,13 @@ pub async fn run(
                             }
                         } else if slash_command(&line, "/rag") {
                             match parse_history_search(&line) {
-                                Ok(query) => match HistorySearchApi::inspect(character, query).await {
+                                Ok(selection) => {
+                                    let result = match selection {
+                                        HistoryCommand::Keyword(query) => HistorySearchApi::inspect(character, query).await,
+                                        HistoryCommand::Vector(query) => HistorySearchApi::inspect_semantic(character, query, FusionMode::VectorOnly, None).await,
+                                        HistoryCommand::Fusion(query) => HistorySearchApi::inspect_semantic(character, query, FusionMode::Union, None).await,
+                                    };
+                                    match result {
                                     Ok(result) => {
                                         if result.hits.is_empty() {
                                             println!("История: {:?}.", result.status);
@@ -439,6 +445,7 @@ pub async fn run(
                                         }
                                     }
                                     Err(error) => eprintln!("History: {error}"),
+                                    }
                                 },
                                 Err(error) => eprintln!("{error}"),
                             }
@@ -478,15 +485,34 @@ fn slash_command(line: &str, command: &str) -> bool {
         .is_some_and(|tail| tail.is_empty() || tail.chars().next().is_some_and(char::is_whitespace))
 }
 
-fn parse_history_search(line: &str) -> Result<&str, &'static str> {
-    let query = line
-        .strip_prefix("/rag history ")
-        .ok_or("Используй /rag history QUERY")?
-        .trim();
+#[derive(Debug, PartialEq, Eq)]
+enum HistoryCommand<'a> {
+    Keyword(&'a str),
+    Vector(&'a str),
+    Fusion(&'a str),
+}
+
+fn parse_history_search(line: &str) -> Result<HistoryCommand<'_>, &'static str> {
+    const USAGE: &str =
+        "Используй /rag history QUERY, /rag history-vector QUERY или /rag history-fusion QUERY";
+    let (selection, query) = if let Some(query) = line.strip_prefix("/rag history ") {
+        (0, query)
+    } else if let Some(query) = line.strip_prefix("/rag history-vector ") {
+        (1, query)
+    } else if let Some(query) = line.strip_prefix("/rag history-fusion ") {
+        (2, query)
+    } else {
+        return Err(USAGE);
+    };
+    let query = query.trim();
     if query.is_empty() || query.chars().count() > 2048 {
-        return Err("Используй /rag history QUERY");
+        return Err(USAGE);
     }
-    Ok(query)
+    Ok(match selection {
+        0 => HistoryCommand::Keyword(query),
+        1 => HistoryCommand::Vector(query),
+        _ => HistoryCommand::Fusion(query),
+    })
 }
 
 fn parse_forgotten_recall(line: &str) -> Result<(RecallSelector, String), &'static str> {
@@ -552,8 +578,17 @@ mod forgotten_recall_command_tests {
         assert!(parse_history_search("/rag\thistory tea").is_err());
         assert_eq!(
             parse_history_search("/rag history green tea"),
-            Ok("green tea")
+            Ok(HistoryCommand::Keyword("green tea"))
         );
+        assert_eq!(
+            parse_history_search("/rag history-vector green tea"),
+            Ok(HistoryCommand::Vector("green tea"))
+        );
+        assert_eq!(
+            parse_history_search("/rag history-fusion green tea"),
+            Ok(HistoryCommand::Fusion("green tea"))
+        );
+        assert!(parse_history_search("/rag history-vector").is_err());
     }
 
     #[test]

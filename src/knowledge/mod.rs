@@ -129,6 +129,32 @@ impl KnowledgeRetrieval {
         })
     }
 
+    /// Explicit History vector/fusion read. Lexical configuration is not a
+    /// substitute for an unavailable embedding backend.
+    pub async fn search_history_semantic(
+        &self,
+        character: CharacterId,
+        view: &crate::timeline::view::MitaView,
+        query: &str,
+        config: history_retrieval::HistorySearchConfig,
+        mode: FusionMode,
+        minimum_cosine: Option<f64>,
+    ) -> Result<history_retrieval::HistorySearchResult, history_retrieval::HistorySearchError> {
+        let KnowledgeMode::Semantic { retriever, .. } = &self.mode else {
+            return Err(history_retrieval::HistorySearchError::BackendUnavailable);
+        };
+        history_retrieval::search_history_semantic(
+            retriever,
+            character,
+            view,
+            query,
+            config,
+            mode,
+            minimum_cosine,
+        )
+        .await
+    }
+
     pub fn lexical() -> Self {
         Self {
             mode: KnowledgeMode::Lexical,

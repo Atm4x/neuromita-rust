@@ -61,3 +61,27 @@ Failures from semantic retrieval are explicit errors; the selected mode cannot s
 - Under Settings → Characters → Character history and memory, the Slint editor exposes **Inspect forgotten** only for a selected `Forgotten` `Fact` and a nonempty query. The action is separate from Add/Update/Forget/Restore and never submits a chat message. It dispatches `MemoryRecall` with a unique request identity to the existing running `HistoricalRecallApi::inspect` and returns only display text.
 - The desktop runtime executes each request asynchronously with shutdown cancellation. The UI discards a delayed answer after changing the selected record/character or when its original request identity no longer matches, and clears displayed historical text after a changed Timeline memory snapshot. Backend selection and post-embedding freshness checks remain authoritative; UI filtering is additional isolation, not a replacement.
 - The action is local desktop user input, not authenticated remote access. It does not prove permission to insert forgotten information into a later model prompt; automatic Reply/React/Initiate remains active-only.
+
+## Explicit semantic History inspection (partial #22; Agent A cycle 17)
+
+- `HistorySearchApi::inspect_semantic` is a local, explicit read-only operation
+  using the **same** running `KnowledgeRetrieval::Semantic` provider and bounded
+  derived cache as character memory. Its mode is explicit (`VectorOnly` or
+  lexical/vector `Union`); `Lexical` configuration returns typed
+  `BackendUnavailable`, **not** fallback keyword candidates. Normal generation
+  remains unchanged and cannot see this inspection result.
+- Every History cache record is keyed by character, `History(EventId)` vs
+  `Memory(MemoryId)`, excerpt content and full embedding space. Projection
+  membership is always recomputed from the caller's `MitaView`; reset, hide,
+  revision, branch/fork and per-character privacy are enforced at read time.
+  Embeddings from a different model/protocol/backend, even with equal dimensions,
+  are rejected as `ModelSpaceMismatch` before entering the cache.
+- `HistorySearchApi` captures a live CharacterHandle Timeline anchor before
+  awaits and re-reads the owner after retrieval. Stale results are never
+  returned to a local caller. There is no HTTP/plugin exposure or permission
+  grant to include this history in model prompts; a future remote/accepted-turn
+  path needs authenticated, scoped permissions and acceptance-time validation.
+- History vector scans a bounded current corpus (1024 visible messages,
+  first 4000 searchable characters per message). Over-capacity is an explicit
+  error, not a hidden source fallback. An absent derived cache row is a cache
+  miss and is recomputed, **not** a missing persistent index failure.
