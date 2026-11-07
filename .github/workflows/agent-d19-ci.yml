@@ -1,0 +1,43 @@
+name: Agent D19 complete Guide verification
+on:
+  push:
+    branches:
+      - bridge/agent-d19-ci-20261107
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-richtext-zoom-20261107
+          persist-credentials: false
+      - name: Verify exact D19 SHA
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "3af9cdbb532ce9c8c6fe638b1da0f91a6c88e58f"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Install Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check formatting
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Check GUI compilation
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --features gui --bin neuromita-gui
+      - name: Run full library regression
+        shell: bash
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
