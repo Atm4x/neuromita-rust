@@ -1,0 +1,30 @@
+name: agent-a-cycle37-pr280-delta
+on:
+  push:
+    branches: [bridge/agent-a-cycle36-bundle-export]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact incremental PR280 commit
+        run: |
+          git fetch origin f55e96cea5db2976308612e598b0841b2622e9f8
+          git fetch origin 9fecf0c310cfe5d2722ffdfc1ad7140ebd088103:refs/heads/agent-a-pr280
+          test "$(git rev-parse refs/heads/agent-a-pr280)" = "9fecf0c310cfe5d2722ffdfc1ad7140ebd088103"
+          git merge-base --is-ancestor f55e96cea5db2976308612e598b0841b2622e9f8 refs/heads/agent-a-pr280
+          git bundle create pr280-delta.bundle refs/heads/agent-a-pr280 '^f55e96cea5db2976308612e598b0841b2622e9f8'
+          git bundle verify pr280-delta.bundle
+          sha256sum pr280-delta.bundle > pr280-delta.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle37-pr280-delta
+          path: |
+            pr280-delta.bundle
+            pr280-delta.bundle.sha256
+          retention-days: 2
