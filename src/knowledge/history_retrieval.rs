@@ -62,6 +62,10 @@ pub enum HistorySearchError {
     Configuration(&'static str),
     #[error("semantic history retrieval is not configured")]
     BackendUnavailable,
+    #[error("SQLite FTS5 backend is not available")]
+    FtsUnavailable,
+    #[error("SQLite FTS5 derived retrieval failed: {0}")]
+    FtsFailure(&'static str),
     #[error("history corpus contains {found} candidates; maximum is {maximum}")]
     CorpusLimit { found: usize, maximum: usize },
     #[error("history retrieval evidence rejected: {0}")]
@@ -210,6 +214,119 @@ pub fn search_history(
         },
     )?;
     Ok(finish(view, messages.is_empty(), hits, None, None))
+}
+
+/// Ephemeral FTS5 source over one already-authorized MitaView. This index is
+/// populated from the canonical Timeline projection for this read, and is
+/// never persisted. SQLite FTS5 is required: there is no keyword fallback.
+pub fn search_history_fts(
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+) -> Result<HistorySearchResult, HistorySearchError> {
+    validate(character, view, query, config)?;
+    let messages = candidates(view, config.max_content_chars);
+    if messages.len() > 1024 {
+        return Err(HistorySearchError::CorpusLimit {
+            found: messages.len(),
+            maximum: 1024,
+        });
+    }
+    #[cfg(not(feature = "sqlite-system"))]
+    {
+        let _ = messages;
+        Err(HistorySearchError::FtsUnavailable)
+    }
+    #[cfg(feature = "sqlite-system")]
+    {
+        search_history_fts_sqlite(character, view, query, config, &messages)
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+fn search_history_fts_sqlite(
+    character: CharacterId,
+    view: &MitaView,
+    query: &str,
+    config: HistorySearchConfig,
+    messages: &[ProjectedMessage],
+) -> Result<HistorySearchResult, HistorySearchError> {
+    use rusqlite::{Connection, params};
+
+    let mut connection = Connection::open_in_memory()
+        .map_err(|_| HistorySearchError::FtsFailure("cannot open derived index"))?;
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE scoped_history_fts USING fts5(content, tokenize='unicode61');",
+        )
+        .map_err(|_| HistorySearchError::FtsUnavailable)?;
+    {
+        let transaction = connection
+            .transaction()
+            .map_err(|_| HistorySearchError::FtsFailure("cannot start derived indexing"))?;
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO scoped_history_fts(rowid, content) VALUES (?1, ?2)")
+                .map_err(|_| HistorySearchError::FtsFailure("cannot prepare derived indexing"))?;
+            for (index, message) in messages.iter().enumerate() {
+                insert
+                    .execute(params![index as i64 + 1, &message.content])
+                    .map_err(|_| HistorySearchError::FtsFailure("cannot build derived index"))?;
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|_| HistorySearchError::FtsFailure("cannot finalize derived index"))?;
+    }
+    let match_query = tokens(query)
+        .into_iter()
+        .map(|term| format!("\"{term}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut statement = connection
+        .prepare("SELECT rowid, bm25(scoped_history_fts) AS rank FROM scoped_history_fts WHERE scoped_history_fts MATCH ?1 ORDER BY rank, rowid LIMIT 1024")
+        .map_err(|_| HistorySearchError::FtsFailure("cannot prepare FTS query"))?;
+    let rows = statement
+        .query_map([match_query], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
+        })
+        .map_err(|_| HistorySearchError::FtsFailure("FTS query failed"))?;
+    let mut hits = Vec::new();
+    for result in rows {
+        let (row_id, bm25) =
+            result.map_err(|_| HistorySearchError::FtsFailure("invalid FTS row"))?;
+        let Some(index) = row_id
+            .checked_sub(1)
+            .and_then(|id| usize::try_from(id).ok())
+        else {
+            return Err(HistorySearchError::FtsFailure(
+                "invalid derived source identity",
+            ));
+        };
+        let Some(message) = messages.get(index) else {
+            return Err(HistorySearchError::FtsFailure(
+                "out-of-range derived source identity",
+            ));
+        };
+        if !bm25.is_finite() {
+            return Err(HistorySearchError::FtsFailure("invalid FTS rank"));
+        }
+        hits.push(hit(character, view, message, bm25));
+    }
+    let ranked = fuse(
+        character,
+        &[RetrievalBucket {
+            method: RetrievalMethod::Fts,
+            hits,
+        }],
+        FusionConfig {
+            mode: FusionMode::Union,
+            limit: config.limit,
+            minimum_graph: 0,
+        },
+    )?;
+    Ok(finish(view, messages.is_empty(), ranked, None, None))
 }
 
 /// Opt-in semantic and lexical/vector-fusion selection over the very same visible

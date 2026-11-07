@@ -100,3 +100,27 @@ authentication is implied by the local inspection API. See
 `tests/rag_history_vector.rs`, `tests/rag_history_api.rs` and
 `tests/semantic_retrieval.rs` for deterministic provider, cache, visibility and
 asynchronous-stale evidence.
+
+## FTS5 History source delta (2026-11-07, Agent A cycle 18)
+
+The active Python `RAGManager` code at SHA
+`5f3d061f523d9abefa6a264bb2953048a935fa65` wires
+`HistoryRepository.fts_rows` to an existing `history_fts` SQLite FTS5
+virtual table, filtering `history.is_active=0`, `character_id=?`, and
+not-deleted rows, ordered by `bm25(history_fts)`; absence of the table or
+SQL exceptions currently yield an empty list. The user-facing RAG mode can
+include History/FTS when configured; `RAG_USE_FTS` is enabled by default
+in the captured defaults. A literal match query is assembled by the
+upstream Python RAG pipeline.
+
+Rust now has opt-in read-only `/rag history-fts QUERY` and
+`HistorySearchApi::inspect_fts`, using **real FTS5** with `bm25` and
+source-qualified Timeline provenance. The FTS table is created in an
+in-memory SQLite connection from a single authoritative `MitaView` and
+is discarded immediately after selection. Invalid queries and backend
+errors cannot be confused with no matches or silently replaced by the
+keyword path. Unlike Python's old-history table, Rust searches the currently
+known character-visible Timeline messages, capped at 1024, and does not
+persist FTS state. This path is not wired into default generation/settings,
+does not implement Russian stemming, query-tail expansion, documents or
+cross-source reranking, and does not itself satisfy complete #22 parity.
