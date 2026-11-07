@@ -18,6 +18,9 @@ export component AiHubPage inherits Rectangle {
     private property <string> field-two: "";
     private property <HubModel> selected-model;
     in property <[HubModel]> entries;
+    in property <[int]> category-counts;
+    in property <bool> can-refresh: false;
+    callback refresh-requested();
     pure function matches(item: HubModel) -> bool {
         return (item.category == root.category
                 || (root.category == "core" && item.category == "backend")
@@ -73,34 +76,64 @@ export component AiHubPage inherits Rectangle {
         }
         Rectangle { height: 1px; background: Theme.divider; }
         Rectangle {
-            height: 58px;
+            height: 60px;
             background: Theme.sidebar;
             border-width: 1px; border-color: Theme.border; border-radius: 13px;
-            HorizontalLayout { padding-left: 8px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 6px;
+            HorizontalLayout {
+                padding-left: 7px; padding-right: 7px;
+                padding-top: 6px; padding-bottom: 6px;
+                spacing: 5px;
                 for cat in [
-                    { id: "tts", title: "TTS", subtitle: "Синтез", icon: Icons.ai-tts },
-                    { id: "asr", title: "ASR", subtitle: "Речь", icon: Icons.ai-asr },
-                    { id: "core", title: "Core", subtitle: "Ядро", icon: Icons.ai-core },
-                    { id: "rag", title: "RAG", subtitle: "Память", icon: Icons.ai-rag },
-                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else }
+                    { id: "tts", title: "TTS", subtitle: "Синтез", icon: Icons.ai-tts, order: 0 },
+                    { id: "asr", title: "ASR", subtitle: "Речь", icon: Icons.ai-asr, order: 1 },
+                    { id: "core", title: "Core", subtitle: "Ядро", icon: Icons.ai-core, order: 2 },
+                    { id: "rag", title: "RAG", subtitle: "Память", icon: Icons.ai-rag, order: 3 },
+                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else, order: 4 }
                 ]: ActionSurface {
-                    height: 44px; horizontal-stretch: 1; min-width: 120px; max-width: 10000px;
-                    label: cat.title; selected: root.category == cat.id;
-                    border-radius: 9px;
-                    background: root.category == cat.id ? Theme.accent.with-alpha(0.14) : self.hovered ? Theme.text.with-alpha(0.055) : transparent;
+                    height: 46px;
+                    horizontal-stretch: 1;
+                    min-width: 126px;
+                    max-width: 10000px;
+                    label: cat.title + ", моделей: " + (root.category-counts.length > cat.order ? root.category-counts[cat.order] : 0);
+                    selected: root.category == cat.id;
+                    border-radius: 10px;
                     border-width: root.category == cat.id ? 1px : 0px;
                     border-color: Theme.accent-border;
-                    VerticalLayout { padding: 3px; spacing: 0px; alignment: center;
-                        HorizontalLayout { alignment: center; spacing: 10px;
-                            Icon { source: cat.icon; width: 19px; height: 19px; colorize: root.category == cat.id ? Theme.accent-hover : Theme.muted; }
-                            VerticalLayout { spacing: 0px; alignment: center;
-                                Label { text: cat.title; font-size: 13px; font-weight: root.category == cat.id ? 750 : 650;
-                                    color: root.category == cat.id ? Theme.text : Theme.muted; }
-                                Label { text: cat.subtitle; font-size: 10px; color: Theme.muted.with-alpha(0.85); }
+                    background: root.category == cat.id ? Theme.accent.with-alpha(0.15)
+                        : self.hovered ? Theme.text.with-alpha(0.055) : transparent;
+                    HorizontalLayout {
+                        padding-left: 10px; padding-right: 10px;
+                        padding-top: 5px; padding-bottom: 5px;
+                        spacing: 8px;
+                        alignment: center;
+                        VerticalLayout {
+                            width: 21px; alignment: center;
+                            Icon {
+                                source: cat.icon; width: 20px; height: 20px;
+                                colorize: root.category == cat.id ? Theme.accent-hover : Theme.muted;
                             }
                         }
-                        Rectangle { height: 2px; width: 70px; border-radius: 1px;
-                            background: root.category == cat.id ? Theme.accent : transparent;
+                        VerticalLayout {
+                            spacing: 1px; alignment: center;
+                            Label {
+                                text: cat.title; height: 18px; font-size: 13px;
+                                font-weight: root.category == cat.id ? 750 : 650;
+                                color: root.category == cat.id ? Theme.text : Theme.muted;
+                            }
+                            Label { text: cat.subtitle; height: 14px; font-size: 10px; color: Theme.muted; }
+                        }
+                        Rectangle {
+                            width: max(25px, count-label.preferred-width + 12px);
+                            height: 23px;
+                            border-radius: 7px;
+                            background: root.category == cat.id ? Theme.accent.with-alpha(0.21) : Theme.text.with-alpha(0.045);
+                            border-width: 1px;
+                            border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
+                            count-label := Label {
+                                text: root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
+                                horizontal-alignment: center; font-size: 10px; font-weight: 650;
+                                color: root.category == cat.id ? Theme.text : Theme.muted;
+                            }
                         }
                     }
                     activated => {
@@ -122,47 +155,149 @@ export component AiHubPage inherits Rectangle {
         }
         if !root.settings-open: VerticalLayout {
             spacing: 11px;
-            HorizontalLayout { height: 38px; spacing: 12px;
-                Label { text: root.category == "tts" ? "Синтез речи" : root.category == "asr" ? "Распознавание речи" : root.category == "core" ? "Системное ядро" : root.category == "rag" ? "Поиск и память" : "Дополнительные компоненты"; font-size: 19px; font-weight: 700; horizontal-stretch: 1; }
-                Rectangle { width: 260px; height: 36px; border-radius: 9px; border-width: 1px; border-color: Theme.border; background: Theme.panel;
-                    HorizontalLayout { padding-left: 11px; padding-right: 9px; padding-top: 0px; padding-bottom: 0px; spacing: 9px;
-                        VerticalLayout { width: 16px; padding: 0px; alignment: center;
+            HorizontalLayout {
+                height: 40px; spacing: 10px;
+                Label {
+                    text: root.category == "tts" ? "Синтез речи" : root.category == "asr" ? "Распознавание речи"
+                        : root.category == "core" ? "Системное ядро" : root.category == "rag" ? "Поиск и память"
+                        : "Дополнительные компоненты";
+                    font-size: 19px; font-weight: 700;
+                    horizontal-stretch: 1; min-width: 185px;
+                }
+                Rectangle {
+                    width: 187px; height: 36px;
+                    background: Theme.panel; border-radius: 9px;
+                    border-width: 1px; border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 11px; padding-right: 10px; spacing: 7px;
+                        VerticalLayout {
+                            width: 17px; alignment: center;
+                            Icon {
+                                source: root.runtime-filter == "all" ? Icons.ai-hub
+                                    : root.runtime-filter == "nvidia" ? Icons.ai-core
+                                    : root.runtime-filter == "onnx" ? Icons.ai-rag : Icons.settings;
+                                colorize: Theme.accent-hover;
+                                width: 16px; height: 16px;
+                            }
+                        }
+                        Label {
+                            text: root.runtime-filter == "all" ? "Все реализации"
+                                : root.runtime-filter == "nvidia" ? "NVIDIA / CUDA"
+                                : root.runtime-filter == "onnx" ? "ONNX" : "CPU";
+                            font-size: 12px; font-weight: 600;
+                            horizontal-stretch: 1; min-width: 0px;
+                        }
+                        VerticalLayout {
+                            width: 12px; alignment: center;
+                            Icon { source: Icons.chevron-down; width: 12px; height: 12px; colorize: Theme.muted; }
+                        }
+                    }
+                    TouchArea { mouse-cursor: pointer; clicked => { filter-menu.show(); } }
+                    filter-menu := PopupWindow {
+                        y: parent.height + 5px; width: parent.width; height: 160px;
+                        close-policy: close-on-click-outside;
+                        Rectangle {
+                            background: Theme.sidebar; border-radius: 10px;
+                            border-width: 1px; border-color: Theme.border;
+                            VerticalLayout {
+                                padding: 4px; spacing: 2px;
+                                for filter in [
+                                    { id: "all", label: "Все реализации", icon: Icons.ai-hub },
+                                    { id: "nvidia", label: "NVIDIA / CUDA", icon: Icons.ai-core },
+                                    { id: "onnx", label: "ONNX", icon: Icons.ai-rag },
+                                    { id: "cpu", label: "CPU", icon: Icons.settings }
+                                ]: ActionSurface {
+                                    label: filter.label;
+                                    height: 36px; border-radius: 7px;
+                                    selected: root.runtime-filter == filter.id;
+                                    background: root.runtime-filter == filter.id ? Theme.accent.with-alpha(0.15)
+                                        : self.hovered ? Theme.hover : transparent;
+                                    HorizontalLayout {
+                                        padding-left: 10px; padding-right: 8px; spacing: 10px;
+                                        VerticalLayout { width: 16px; alignment: center;
+                                            Icon { source: filter.icon; width: 16px; height: 16px; colorize: Theme.accent-hover; }
+                                        }
+                                        Label { text: filter.label; font-size: 12px; horizontal-stretch: 1; }
+                                        if root.runtime-filter == filter.id: Icon {
+                                            source: Icons.check; width: 13px; height: 13px; colorize: Theme.accent-hover;
+                                        }
+                                    }
+                                    activated => { root.runtime-filter = filter.id; filter-menu.close(); }
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 245px; height: 36px;
+                    border-radius: 9px; border-width: 1px;
+                    border-color: Theme.border; background: Theme.panel;
+                    HorizontalLayout {
+                        padding-left: 11px; padding-right: 10px; spacing: 9px;
+                        VerticalLayout { width: 16px; alignment: center;
                             Icon { source: Icons.ai-search; colorize: Theme.muted; width: 15px; height: 15px; }
                         }
-                        Rectangle { horizontal-stretch: 1; max-width: 10000px; height: 22px; background: transparent;
+                        Rectangle {
+                            horizontal-stretch: 1; min-width: 0px;
+                            height: 34px; background: transparent;
                             if root.search-text == "": Label {
-                                text: "Поиск в категории…"; color: Theme.muted; font-size: 11px;
-                                width: parent.width; height: parent.height; horizontal-alignment: left;
+                                text: "Поиск в категории…";
+                                color: Theme.muted; font-size: 12px;
+                                width: parent.width; height: parent.height;
+                                vertical-alignment: center;
+                                horizontal-alignment: left;
                             }
-                            search := TextInput {
+                            TextInput {
                                 text <=> root.search-text; single-line: true;
+                                width: parent.width; height: parent.height;
                                 color: Theme.text; font-size: 12px;
                                 vertical-alignment: center;
                                 horizontal-alignment: left;
-                                width: parent.width; height: parent.height;
                             }
                         }
                     }
                 }
-            }
-            HorizontalLayout { height: 32px; spacing: 8px;
-                Label { text: "Реализация"; color: Theme.muted; font-size: 11px; width: 72px; }
-                for filter in [
-                    { id: "all", label: "Все" }, { id: "nvidia", label: "NVIDIA / CUDA" },
-                    { id: "onnx", label: "ONNX" }, { id: "cpu", label: "CPU" }
-                ]: ActionSurface {
-                    height: 30px; width: filter.id == "nvidia" ? 130px : 75px;
-                    label: filter.label; selected: root.runtime-filter == filter.id;
-                    border-radius: 12px; border-width: 1px;
-                    border-color: root.runtime-filter == filter.id ? Theme.accent : Theme.border;
-                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? Theme.accent.with-alpha(0.13) : Theme.panel;
-                    HorizontalLayout { padding: 4px; alignment: center;
-                        Label { text: filter.label; font-size: 11px; color: root.runtime-filter == filter.id ? Theme.text : Theme.muted; }
+                Rectangle {
+                    width: 36px; height: 36px;
+                    refresh-icon := ActionSurface {
+                        width: 100%; height: 100%;
+                        label: root.can-refresh ? "Обновить список моделей" : "Обновление станет доступно после подключения каталога";
+                        enabled: root.can-refresh;
+                        border-radius: 9px; border-width: 1px;
+                        border-color: Theme.border;
+                        background: self.hovered ? Theme.accent.with-alpha(0.14) : Theme.panel;
+                        VerticalLayout { alignment: center;
+                            HorizontalLayout { alignment: center;
+                                Icon { source: Icons.refresh; width: 16px; height: 16px;
+                                    colorize: root.can-refresh ? Theme.accent-hover : Theme.muted; }
+                            }
+                        }
+                        activated => { root.refresh-requested(); }
                     }
-                    activated => { root.runtime-filter = filter.id; }
+                    hover-target := TouchArea {
+                        mouse-cursor: root.can-refresh ? pointer : default;
+                        clicked => { if root.can-refresh { root.refresh-requested(); } }
+                        changed has-hover => {
+                            if self.has-hover { refresh-tooltip.show(); }
+                            else { refresh-tooltip.close(); }
+                        }
+                    }
+                    refresh-tooltip := PopupWindow {
+                        x: -205px; y: parent.height + 5px;
+                        width: 241px; height: 29px;
+                        close-policy: close-on-click-outside;
+                        Rectangle {
+                            background: Theme.sidebar;
+                            border-radius: 7px; border-width: 1px; border-color: Theme.border;
+                            Label {
+                                width: 100%; height: 100%;
+                                text: root.can-refresh ? "Обновить список моделей" : "Обновление доступно после подключения";
+                                font-size: 11px; color: Theme.muted;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                    }
                 }
-                Rectangle { horizontal-stretch: 1; }
-                HubAction { caption: "Обновить список"; compact: true; enabled: false; }
             }
             if root.entries.length == 0: Rectangle {
                 vertical-stretch: 1; background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 14px;
