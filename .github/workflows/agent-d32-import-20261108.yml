@@ -1,0 +1,38 @@
+name: Agent D32 exact-commit history import
+on:
+  push:
+    branches: [codex/bridge-agent-d32-import-20261108]
+permissions:
+  contents: write
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check payload, reconstruct exact commit, push candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7b166a718eebfb03ec099a83112a673c6a9b46c0
+          HEAD=04c48ae3cacd9c68be166d83ee3857cf7cbf77e1
+          TREE=c1f3944449dff5fde1b70ce794ee4537a5f6b03e
+          BRANCH=codex/python-preset-historical-layouts-20261108
+          base64 --decode .git-bridge/d32-original.patch.xz.b64 > /tmp/d32.patch.xz
+          echo 'f7b54d4c975c0d3ddd9ff7cf5dd9b6b96e6e6c934a6dc65f31bb2e3119f55331  /tmp/d32.patch.xz' | sha256sum --check
+          xz --decompress --stdout /tmp/d32.patch.xz > /tmp/d32.patch
+          git fetch --no-tags origin refs/heads/codex/python-settings-standalone-review-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d32.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git fsck --full
+          git diff --check "$BASE" "$HEAD"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
