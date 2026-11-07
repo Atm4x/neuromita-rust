@@ -20,6 +20,7 @@ use super::{
     install::PluginInstallPlan,
     layer::valid_segment,
     overlay::{LockedOverlay, OverlayInstaller, load_installed_overlay},
+    sdk::SdkPublisher,
     speech_catalog::{
         SpeechInventory, SpeechModelCatalog, executable_plugin_root, verify_executable_plugin,
     },
@@ -58,13 +59,10 @@ pub struct InstalledSpeechEnvironment {
 
 impl InstalledSpeechEnvironment {
     pub fn for_desktop(data_directory: PathBuf) -> Self {
-        let installed_sdk = data_directory.join("AIData/sdk");
-        let source_sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
-        let sdk_root = if installed_sdk.join("neuromita_ai_sdk/host.py").is_file() {
-            installed_sdk
-        } else {
-            source_sdk.clone()
-        };
+        let publisher = SdkPublisher::new(data_directory.join("AIData"));
+        let sdk_root = publisher
+            .resolve_active()
+            .unwrap_or_else(|_| publisher.sdk_directory().join(".unavailable"));
         let plugins_directory = executable_plugin_root(&data_directory);
         Self {
             data_directory,
@@ -141,6 +139,16 @@ impl InstalledSpeechEnvironment {
             return Err(InstalledSpeechError::Environment(
                 "absolute data, SDK, installed plugin directory and timeout required".into(),
             ));
+        }
+        if self.sdk_root.starts_with(self.ai_data().join("sdk")) {
+            let active = SdkPublisher::new(self.ai_data())
+                .resolve_active()
+                .map_err(|error| InstalledSpeechError::Environment(error.to_string()))?;
+            if self.sdk_root != active {
+                return Err(InstalledSpeechError::Environment(
+                    "SDK selection changed".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -548,6 +556,26 @@ mod tests {
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn desktop_environment_requires_attested_installed_sdk_without_source_fallback() {
+        let root = std::env::temp_dir().join(format!("nm-sdk-desktop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let before = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert!(!before.sdk_root.join("neuromita_ai_sdk/host.py").exists());
+        let publisher = SdkPublisher::new(root.join("AIData"));
+        let release = publisher.publish_embedded().unwrap();
+        let after = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert_eq!(after.sdk_root, release);
+        std::fs::write(release.join("neuromita_ai_sdk/host.py"), b"corrupted").unwrap();
+        let invalid = InstalledSpeechEnvironment::for_desktop(root.clone());
+        assert_ne!(invalid.sdk_root, release);
+        assert!(matches!(
+            publisher.resolve_active(),
+            Err(crate::ai_runtime::sdk::SdkError::Corrupt)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

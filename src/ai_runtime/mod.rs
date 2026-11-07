@@ -24,6 +24,7 @@ pub mod removal;
 pub mod resolver;
 mod revision_lease;
 pub mod runtime_status;
+pub mod sdk;
 pub mod speech;
 pub mod speech_catalog;
 pub mod speech_inspection;

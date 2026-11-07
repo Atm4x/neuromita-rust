@@ -7,6 +7,7 @@ use neuromita::ai_runtime::{
     AiService, AiSupervisor, ProcessTopology, PythonHostConfig, fetch_install_plan,
     fetch_speech_plugin_inspection,
     managed::ManagedRuntimeBootstrap,
+    sdk::SdkPublisher,
     uv::{UvArchiveKind, UvDistribution, UvInstaller},
 };
 use ring::digest::{SHA256, digest};
@@ -174,9 +175,12 @@ async fn actual_managed_cpython_runs_community_tts_and_builtin_asr_through_typed
         "raise RuntimeError('unapproved plugin must not be imported')",
     ).await;
 
+    let publisher = SdkPublisher::new(root.join("AIData"));
+    let installed_sdk = publisher.publish_embedded().unwrap();
+    assert_eq!(installed_sdk, publisher.resolve_active().unwrap());
     let config = PythonHostConfig {
         python_executable: runtime.python_executable.clone(),
-        sdk_root: Path::new(env!("CARGO_MANIFEST_DIR")).join("python"),
+        sdk_root: installed_sdk,
         plugins_directory: plugins.clone(),
         models_directory: None,
         request_timeout: Duration::from_secs(20),

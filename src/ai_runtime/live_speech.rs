@@ -1065,6 +1065,9 @@ mod tests {
         .await
         .unwrap();
         let owner = lifecycle.owner();
+        crate::ai_runtime::sdk::SdkPublisher::new(root.join("AIData"))
+            .publish_embedded()
+            .unwrap();
         let installed = InstalledSpeechEnvironment::for_desktop(root.clone());
         let plan = installed
             .prepare_from_saved(&saved.speech)

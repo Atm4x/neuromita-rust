@@ -110,7 +110,7 @@ exit 5
                 python_version: "3.12.10".into(),
                 python_timeout: Duration::from_secs(8),
             },
-            sdk_root: python_root.clone(),
+            sdk_root: root.join("AIData/sdk"),
             plugins_directory: python_root.join("plugins/builtin"),
             topology,
             timeout: Duration::from_secs(12),

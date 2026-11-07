@@ -25,6 +25,7 @@ use super::{
     managed::{ManagedRuntimeBootstrap, ManagedRuntimeError},
     overlay::OverlayInstaller,
     resolver::DependencyResolver,
+    sdk::SdkPublisher,
     voice_profile::VoiceProfileStore,
 };
 
@@ -239,7 +240,6 @@ impl AiProductionInstaller {
         if selections.is_empty()
             || selections.len() > 5
             || !self.sdk_root.is_absolute()
-            || !self.sdk_root.join("neuromita_ai_sdk/host.py").is_file()
             || !self.plugins_directory.is_absolute()
             || !self.plugins_directory.is_dir()
             || self.timeout.is_zero()
@@ -297,6 +297,15 @@ impl AiProductionInstaller {
         let _abort_on_drop = AbortOnDrop(cancel);
         let managed = task.await??;
         let data = &self.bootstrap.uv.data_directory;
+        let publisher = SdkPublisher::new(data.clone());
+        let verified_sdk = publisher.resolve_active().map_err(|error| {
+            AiProductionError::Invalid(format!("verified SDK is not ready: {error}"))
+        })?;
+        if self.sdk_root != publisher.sdk_directory() && self.sdk_root != verified_sdk {
+            return Err(AiProductionError::Invalid(
+                "configured SDK bypasses verified installation".into(),
+            ));
+        }
         let cache = data.join("cache/uv");
         let backends = BackendInstaller {
             uv_executable: managed.uv_executable.clone(),
@@ -329,7 +338,7 @@ impl AiProductionInstaller {
         };
         let host = PythonHostConfig {
             python_executable: managed.python_executable,
-            sdk_root: self.sdk_root.clone(),
+            sdk_root: verified_sdk,
             plugins_directory: self.plugins_directory.clone(),
             models_directory: Some(store.root.clone()),
             request_timeout: self.timeout,
