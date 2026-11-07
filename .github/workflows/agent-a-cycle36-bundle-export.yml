@@ -1,0 +1,29 @@
+name: agent-a-cycle36-bundle-export
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle36-bundle-export
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned PR #276
+        run: |
+          git fetch origin f55e96cea5db2976308612e598b0841b2622e9f8:refs/heads/agent-a-pr276
+          git bundle create pr276-source.bundle refs/heads/agent-a-pr276
+          git bundle verify pr276-source.bundle
+          sha256sum pr276-source.bundle > pr276-source.bundle.sha256
+          git rev-parse refs/heads/agent-a-pr276
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle36-pr276-source
+          path: |
+            pr276-source.bundle
+            pr276-source.bundle.sha256
+          retention-days: 2
