@@ -1,0 +1,42 @@
+name: Publish Agent B24 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b24-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 34c7502f45989f9a7f59a6d8ebcee6ce4c0c3f1d
+          fetch-depth: 0
+      - name: Verify and publish B24 objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=34c7502f45989f9a7f59a6d8ebcee6ce4c0c3f1d
+          EXPECTED=b8552a85665440bbf3ee97399870381079f0d994
+          SHA256=850469fb84d4d1b6ee5956c6e2b774481d3782cba46c243b54181a9844afadb2
+          TARGET=refs/heads/codex/timeline-python-import-observer-binding-20261107
+          git fetch origin refs/heads/bridge/agent-b24-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b24-20261107.bundle.b64 | base64 --decode > /tmp/agent-b24.bundle
+          echo "$SHA256  /tmp/agent-b24.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b24.bundle
+          git fetch /tmp/agent-b24.bundle "$TARGET"
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination at unrelated SHA $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
