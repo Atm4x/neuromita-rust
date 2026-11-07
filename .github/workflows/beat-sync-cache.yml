@@ -31,10 +31,10 @@ jobs:
       - name: Format Rust files and publish formatting if needed
         run: |
           cargo fmt --all
-          if ! git diff --quiet -- src/music.rs src/music/ tests/beat_sync_runtime.rs tests/beat_sync_cache.rs; then
+          if ! git diff --quiet -- src/music.rs src/music/ src/game_link.rs src/app.rs src/bin/beat_sync.rs tests/beat_sync_runtime.rs tests/beat_sync_cache.rs tests/game_beat_sync.rs; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add src/music.rs src/music/ tests/beat_sync_runtime.rs tests/beat_sync_cache.rs
+            git add src/music.rs src/music/ src/game_link.rs src/app.rs src/bin/beat_sync.rs tests/beat_sync_runtime.rs tests/beat_sync_cache.rs tests/game_beat_sync.rs
             git commit -m 'style(music): rustfmt on native Beat Sync runtime'
             git fetch origin codex/beat-sync-cache-29
             git rebase FETCH_HEAD
@@ -46,5 +46,9 @@ jobs:
         run: cargo test --locked --offline --test beat_sync_cache
       - name: Run real WAV and runtime delivery fixtures
         run: cargo test --locked --offline --test beat_sync_runtime
+      - name: Run GameLink TCP Beat Sync fixture
+        run: cargo test --locked --offline --test game_beat_sync
+      - name: Full offline Rust suite
+        run: cargo test --locked --offline
       - name: Strict Clippy
         run: cargo clippy --locked --offline --all-targets -- -D warnings
