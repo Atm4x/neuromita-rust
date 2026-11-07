@@ -5,6 +5,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 
+[workspace]
+members = ["."]
+exclude = ["third_party/cozy-chess/cozy-chess", "third_party/cozy-chess/types"]
+resolver = "2"
+
 [[bin]]
 name = "neuromita-gui"
 path = "src/bin/neuromita-gui/main.rs"
