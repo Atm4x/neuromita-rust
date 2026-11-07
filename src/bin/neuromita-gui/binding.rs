@@ -350,8 +350,19 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     });
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
-    let update_checker = super::update_check::UpdateChecker::default();
+    let update_checker = Rc::new(super::update_check::UpdateChecker::new(
+        options.data_directory.clone(),
+    ));
     let update_window = window.as_weak();
+    let update_stage_checker = update_checker.clone();
+    let update_stage_window = window.as_weak();
+    window.on_update_stage(move |component| {
+        if let Some(window) = update_stage_window.upgrade() {
+            update_stage_checker.stage(&window, &component);
+        }
+    });
+    let update_cancel_checker = update_checker.clone();
+    window.on_update_cancel(move || update_cancel_checker.cancel_stage());
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {

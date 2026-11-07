@@ -137,7 +137,12 @@ export component HomePage inherits Rectangle {
     in property <bool> client-selected;
     in property <bool> game-running;
     in property <bool> update-check-loading;
+    in property <bool> update-stage-loading;
+    in property <bool> update-can-stage-python;
+    in property <bool> update-can-stage-unity;
     in property <string> update-check-status;
+    callback stage-update(string);
+    callback cancel-update();
     callback toggle-backend();
     callback toggle-client();
     callback play();
@@ -168,18 +173,43 @@ export component HomePage inherits Rectangle {
             }
             PlayButton { game-running: root.game-running; play => { root.play(); } menu-action(action) => { root.menu-action(action); } }
             if root.update-check-status != "": Rectangle {
-                height: 57px;
+                height: root.update-can-stage-python || root.update-can-stage-unity ? 112px : 65px;
                 min-width: 0px;
                 background: Theme.panel;
                 border-width: 1px;
                 border-color: Theme.border;
                 border-radius: 10px;
-                Label {
-                    x: 12px; y: 5px; width: parent.width - 24px; height: parent.height - 10px;
-                    text: root.update-check-status;
-                    color: root.update-check-loading ? Theme.accent-hover : Theme.muted;
-                    font-size: 11px;
-                    wrap: word-wrap;
+                VerticalLayout {
+                    padding: 8px; spacing: 4px;
+                    Label {
+                        height: 44px; min-width: 0px;
+                        text: root.update-check-status;
+                        color: root.update-check-loading || root.update-stage-loading ? Theme.accent-hover : Theme.muted;
+                        font-size: 11px; wrap: word-wrap;
+                    }
+                    if root.update-can-stage-python || root.update-can-stage-unity: HorizontalLayout {
+                        height: 32px; spacing: 6px;
+                        if root.update-can-stage-python: ActionSurface {
+                            width: 107px; label: "Download verified Python ZIP";
+                            enabled: !root.update-check-loading && !root.update-stage-loading;
+                            background: Theme.hover;
+                            Label { text: "Python ZIP"; horizontal-alignment: center; font-size: 11px; }
+                            activated => { root.stage-update("python"); }
+                        }
+                        if root.update-can-stage-unity: ActionSurface {
+                            width: 107px; label: "Download verified Unity ZIP";
+                            enabled: !root.update-check-loading && !root.update-stage-loading;
+                            background: Theme.hover;
+                            Label { text: "Unity ZIP"; horizontal-alignment: center; font-size: 11px; }
+                            activated => { root.stage-update("unity"); }
+                        }
+                        if root.update-stage-loading: ActionSurface {
+                            width: 75px; label: "Cancel download"; background: Theme.hover;
+                            Label { text: I18n.locale == "ru" ? "Отмена" : "Cancel"; horizontal-alignment: center; font-size: 11px; }
+                            activated => { root.cancel-update(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
                 }
             }
         }

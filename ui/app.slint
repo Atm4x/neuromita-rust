@@ -92,7 +92,12 @@ export component AppWindow inherits Window {
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
     in property <bool> update-check-loading: false;
+    in property <bool> update-stage-loading: false;
+    in property <bool> update-can-stage-python: false;
+    in property <bool> update-can-stage-unity: false;
     in property <string> update-check-status;
+    callback update-stage(string);
+    callback update-cancel();
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
     in property <int> chat-clients;
@@ -156,6 +161,11 @@ export component AppWindow inherits Window {
                 releases: root.releases;
                 update-check-status: root.update-check-status;
                 update-check-loading: root.update-check-loading;
+                update-stage-loading: root.update-stage-loading;
+                update-can-stage-python: root.update-can-stage-python;
+                update-can-stage-unity: root.update-can-stage-unity;
+                stage-update(component) => { root.update-stage(component); }
+                cancel-update => { root.update-cancel(); }
                 backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }

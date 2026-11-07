@@ -38,3 +38,21 @@ relabels a ZIP as an executable or launches the helper for these archives.
 The core/Unity installed-version comparison, publisher trust and full ZIP
 installer/rollback are still required for user-visible update eligibility.
 Until those exist, the action is a release inspection, not an install button.
+
+## D24: verified archive download (no automatic install)
+
+The Home release inspector now exposes explicit Python/Unity ZIP download actions
+only for archive names matching the verified published release tag exactly.
+Each request is scoped to the current published release metadata and is handled
+by `UpdateStager` with its existing size and SHA-256 checks, content-addressed
+storage, cancellation and no-overwrite publication. The GUI displays staging
+progress and result without blocking the Slint event thread. Download does
+not unpack, install, restart the app, or invoke the single-file helper.
+
+A pinned D24 archive-layout investigation of PythonBuild-v2026.11.01.zip
+verified the publisher SHA-256 and found 2,442 Deflate entries (75,870,045
+uncompressed bytes). It contains top-level `Settings` and `Prompts` directories:
+a naive overlay extract would risk overwriting user content. The real Python ZIP
+is not an eligible Rust binary; conversion to a safe multi-file transaction
+requires explicit content ownership, ZIP parser/extractor review, and validated
+rollback. These obligations remain open for #44.
