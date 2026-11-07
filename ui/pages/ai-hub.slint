@@ -1,0 +1,251 @@
+import { Theme, Icons } from "../theme.slint";
+import { Label, Icon, ActionSurface } from "../components/controls.slint";
+import { HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export component AiHubPage inherits Rectangle {
+    background: Theme.background;
+    clip: true;
+    private property <string> category: "tts";
+    private property <string> runtime-filter: "all";
+    private property <string> search-text: "";
+    private property <string> selected-id: "";
+    private property <bool> settings-open: false;
+    private property <bool> confirm-discard: false;
+    private property <bool> dirty: false;
+    private property <string> field-one: "";
+    private property <string> field-two: "";
+    private property <HubModel> selected-model;
+    private property <[HubModel]> entries: [
+        { id: "edge-rvc", category: "tts", title: "Edge TTS + RVC", description: "Синтез речи Edge TTS и преобразование голоса с помощью RVC.", backend: "CPU", language: "RU / EN", size: "RVC assets", state: "unknown", location: "AIData/Models", setting-one: "Голос TTS", setting-one-value: "Выбирается плагином", setting-two: "Смещение тона RVC", setting-two-value: "2" },
+        { id: "fish-speech", category: "tts", title: "Fish Speech+", description: "Нейросетевой синтез речи; параметры компиляции зависят от установленной модели.", backend: "NVIDIA", language: "Multi", size: "VRAM", state: "unknown", location: "AIData/Models", setting-one: "Вычислительное устройство", setting-one-value: "CUDA", setting-two: "Компиляция", setting-two-value: "Проверить после установки" },
+        { id: "silero", category: "tts", title: "Silero TTS", description: "Локальный движок синтеза с выбором языка и диктора.", backend: "CPU", language: "RU", size: "ONNX", state: "unknown", location: "AIData/Models", setting-one: "Диктор", setting-one-value: "Из схемы плагина", setting-two: "Язык", setting-two-value: "ru" },
+        { id: "whisper", category: "asr", title: "Whisper", description: "Распознавание речи с локальной моделью и настройкой вычислительного устройства.", backend: "NVIDIA", language: "Multi", size: "Model", state: "unknown", location: "AIData/Models", setting-one: "Устройство", setting-one-value: "Определяется системой", setting-two: "Язык", setting-two-value: "auto" },
+        { id: "whisper-onnx", category: "asr", title: "Whisper ONNX", description: "Вариант распознавания речи на ONNX Runtime.", backend: "ONNX", language: "Multi", size: "ONNX", state: "unknown", location: "AIData/Models", setting-one: "Устройство", setting-one-value: "CPU", setting-two: "Язык", setting-two-value: "auto" },
+        { id: "backend", category: "core", title: "Python AI Runtime", description: "Управляемый интерпретатор Python, SDK и окружения для AI-плагинов.", backend: "CPU", language: "", size: "SDK", state: "unknown", location: "AIData/sdk", setting-one: "Версия SDK", setting-one-value: "API v1", setting-two: "Интерпретатор", setting-two-value: "CPython 3.12" },
+        { id: "rag-emb", category: "rag", title: "Embeddings", description: "Векторные представления для поиска и долговременной памяти.", backend: "ONNX", language: "Multi", size: "RAG", state: "unknown", location: "AIData/Models", setting-one: "Модель эмбеддингов", setting-one-value: "Не выбрана", setting-two: "Устройство", setting-two-value: "CPU" },
+        { id: "rag-rerank", category: "rag", title: "Reranker", description: "Повторная сортировка результатов семантического поиска.", backend: "CPU", language: "Multi", size: "RAG", state: "unknown", location: "AIData/Models", setting-one: "Модель ранжирования", setting-one-value: "Не выбрана", setting-two: "Лимит результатов", setting-two-value: "10" },
+        { id: "beats", category: "else", title: "Beat synchronization", description: "Дополнительный компонент синхронизации движений и аудио.", backend: "CPU", language: "", size: "Extras", state: "unknown", location: "AIData/Models", setting-one: "Режим", setting-one-value: "Автоматический", setting-two: "Чувствительность", setting-two-value: "По умолчанию" },
+        { id: "voices", category: "else", title: "Голоса персонажей", description: "Независимые от TTS движков профили и голосовые ресурсы персонажей.", backend: "CPU", language: "", size: "Voices", state: "unknown", location: "AIData/Models", setting-one: "Профиль", setting-one-value: "Выберите голос", setting-two: "Вариант", setting-two-value: "Из каталога" },
+        { id: "dependencies", category: "else", title: "Зависимости", description: "Системные библиотеки и окружения для устанавливаемых AI-компонентов.", backend: "CPU", language: "", size: "Deps", state: "unknown", location: "AIData", setting-one: "Окружение", setting-one-value: "Системное", setting-two: "Версия", setting-two-value: "Определяется при проверке" }
+    ];
+    pure function matches(item: HubModel) -> bool {
+        return item.category == root.category
+            && (root.runtime-filter == "all" || item.backend.to-lowercase() == root.runtime-filter || item.backend == "CPU")
+            && (root.search-text == "" || item.title.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.title.to-lowercase()
+                || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
+                || item.backend.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.backend.to-lowercase());
+    }
+    function open-details(index: int) {
+        if index >= 0 && index < root.entries.length {
+            root.selected-model = root.entries[index];
+            root.selected-id = root.selected-model.id;
+            root.field-one = root.selected-model.setting-one-value;
+            root.field-two = root.selected-model.setting-two-value;
+            root.dirty = false;
+            root.confirm-discard = false;
+            root.settings-open = true;
+        }
+    }
+    function close-details() {
+        if root.dirty { root.confirm-discard = true; }
+        else { root.settings-open = false; }
+    }
+    VerticalLayout {
+        padding-left: 28px; padding-right: 28px; padding-top: 24px; padding-bottom: 20px;
+        spacing: 16px;
+        HorizontalLayout { height: 56px; spacing: 14px;
+            Rectangle { width: 48px; height: 48px; border-radius: 12px; border-width: 1px; border-color: Theme.accent-border;
+                background: #b74b7d25;
+                HorizontalLayout { alignment: center;
+                    Text { text: "✦"; color: Theme.accent-hover; font-size: 29px; }
+                }
+            }
+            VerticalLayout { spacing: 3px; horizontal-stretch: 1; alignment: center;
+                Label { text: "AI Hub"; font-size: 24px; font-weight: 800; }
+                Label { text: "Установка, обслуживание и управление локальными AI-компонентами"; color: Theme.muted; font-size: 12px; }
+            }
+            HubPill { caption: "GUI preview · без runtime"; warning: true; }
+        }
+        Rectangle { height: 1px; background: Theme.divider; }
+        ScrollView {
+            height: 47px;
+            horizontal-stretch: 1;
+            vertical-scrollbar-policy: always-off;
+            horizontal-scrollbar-policy: as-needed;
+            content-width: 748px;
+            content-height: 45px;
+            HorizontalLayout {
+                padding: 0px; spacing: 8px; height: 43px;
+                for cat in [
+                    { id: "tts", title: "TTS", wide: 125px },
+                    { id: "asr", title: "ASR", wide: 125px },
+                    { id: "core", title: "Core", wide: 125px },
+                    { id: "rag", title: "RAG", wide: 125px },
+                    { id: "else", title: "Else", wide: 168px }
+                ]: ActionSurface {
+                    width: cat.wide; height: 38px;
+                    label: cat.title;
+                    selected: root.category == cat.id;
+                    border-radius: 10px;
+                    background: root.category == cat.id ? #b74b7d30 : self.hovered ? #ffffff0e : Theme.panel;
+                    border-width: 1px;
+                    border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
+                    HorizontalLayout { padding: 6px; alignment: center;
+                        Label { text: cat.title; font-size: 13px; font-weight: root.category == cat.id ? 700 : 600; color: root.category == cat.id ? Theme.text : Theme.muted; }
+                    }
+                    activated => {
+                        if !root.settings-open || !root.dirty {
+                            root.category = cat.id;
+                            root.settings-open = false;
+                        } else { root.confirm-discard = true; }
+                    }
+                }
+            }
+        }
+        if !root.settings-open: VerticalLayout {
+            spacing: 13px;
+            HorizontalLayout { height: 40px; spacing: 12px;
+                Label { text: root.category == "tts" ? "Синтез речи" : root.category == "asr" ? "Распознавание речи" : root.category == "core" ? "Системное ядро" : root.category == "rag" ? "Поиск и память" : "Дополнительные компоненты"; font-size: 19px; font-weight: 700; horizontal-stretch: 1; }
+                Rectangle { width: 260px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: Theme.panel;
+                    HorizontalLayout { padding-left: 12px; padding-right: 10px; spacing: 8px;
+                        Text { text: "⌕"; color: Theme.muted; font-size: 20px; }
+                        search := TextInput {
+                            text <=> root.search-text;
+                            single-line: true;
+                            color: Theme.text; font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout { height: 32px; spacing: 8px;
+                Label { text: "Реализация"; color: Theme.muted; font-size: 11px; }
+                for filter in [
+                    { id: "all", label: "Все" }, { id: "nvidia", label: "NVIDIA / CUDA" },
+                    { id: "onnx", label: "ONNX" }, { id: "cpu", label: "CPU" }
+                ]: ActionSurface {
+                    height: 30px; width: filter.id == "nvidia" ? 130px : 75px;
+                    label: filter.label; selected: root.runtime-filter == filter.id;
+                    border-radius: 12px; border-width: 1px;
+                    border-color: root.runtime-filter == filter.id ? Theme.accent : Theme.border;
+                    background: root.runtime-filter == filter.id ? Theme.accent : self.hovered ? #b74b7d24 : Theme.panel;
+                    HorizontalLayout { padding: 4px; alignment: center;
+                        Label { text: filter.label; font-size: 11px; color: root.runtime-filter == filter.id ? Theme.text : Theme.muted; }
+                    }
+                    activated => { root.runtime-filter = filter.id; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                HubAction { caption: "Обновить список"; compact: true; enabled: false; }
+            }
+            Rectangle { horizontal-stretch: 1; vertical-stretch: 1; clip: true;
+                ScrollView { width: 100%; height: 100%; content-width: self.visible-width;
+                    VerticalLayout {
+                        padding-right: 9px; padding-top: 2px; padding-bottom: 4px;
+                        spacing: 10px; alignment: start;
+                        for model[index] in root.entries: HubModelCard {
+                            visible: root.matches(model);
+                            horizontal-stretch: 1;
+                            entry: model;
+                            open-settings(index) => { root.open-details(index); }
+                        }
+                    }
+                }
+            }
+        }
+        if root.settings-open: Rectangle {
+            vertical-stretch: 1; horizontal-stretch: 1;
+            clip: true; background: Theme.panel;
+            border-radius: 14px; border-width: 1px; border-color: Theme.accent-border;
+            VerticalLayout {
+                padding: 22px; spacing: 15px;
+                HorizontalLayout { height: 38px; spacing: 10px;
+                    HubAction { caption: "← К моделям"; compact: true; activated => { root.close-details(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    HubPill { caption: "Параметры модели"; accent: true; }
+                    if root.dirty: HubPill { caption: "Есть изменения"; warning: true; }
+                }
+                Rectangle { height: 1px; background: Theme.divider; }
+                ScrollView { horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
+                    VerticalLayout { padding-right: 8px; spacing: 16px; alignment: start;
+                        HorizontalLayout { height: 66px; spacing: 14px;
+                            Rectangle { width: 54px; height: 54px; border-radius: 13px; background: #b74b7d24;
+                                border-width: 1px; border-color: Theme.accent-border;
+                                HorizontalLayout { alignment: center;
+                                    Icon { source: Icons.settings; width: 25px; height: 25px; colorize: Theme.accent-hover; }
+                                }
+                            }
+                            VerticalLayout { spacing: 4px; alignment: center; horizontal-stretch: 1;
+                                Label { text: root.selected-model.title; font-size: 22px; font-weight: 700; }
+                                Label { text: "Компонент · " + root.selected-model.backend + " · " + root.selected-model.id; color: Theme.muted; font-size: 11px; }
+                            }
+                        }
+                        Text { text: root.selected-model.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        HorizontalLayout { spacing: 8px; height: 28px;
+                            HubPill { caption: root.selected-model.backend; accent: true; }
+                            if root.selected-model.language != "": HubPill { caption: root.selected-model.language; }
+                            HubPill { caption: root.selected-model.state == "ready" ? "Установлено" : "Статус не проверен"; }
+                        }
+                        Rectangle { border-radius: 10px; border-width: 1px; border-color: Theme.border; background: #ffffff08; height: 66px;
+                            VerticalLayout { padding: 12px; spacing: 6px;
+                                Label { text: "Расположение на диске (типовой каталог)"; color: Theme.muted; font-size: 10px; }
+                                Label { text: root.selected-model.location; font-size: 12px; font-weight: 600; }
+                            }
+                        }
+                        Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }
+                        Rectangle { min-height: 152px; border-radius: 10px; border-width: 1px; border-color: Theme.border; background: #ffffff05;
+                            VerticalLayout { padding: 15px; spacing: 12px;
+                                VerticalLayout { spacing: 5px;
+                                    Label { text: root.selected-model.setting-one; font-size: 12px; font-weight: 600; }
+                                    Rectangle { height: 36px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                                        HorizontalLayout { padding-left: 12px; padding-right: 12px;
+                                            TextInput { text <=> root.field-one; single-line: true; color: Theme.text; font-size: 12px; vertical-alignment: center;
+                                                edited => { root.dirty = true; }
+                                            }
+                                        }
+                                    }
+                                }
+                                VerticalLayout { spacing: 5px;
+                                    Label { text: root.selected-model.setting-two; font-size: 12px; font-weight: 600; }
+                                    Rectangle { height: 36px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                                        HorizontalLayout { padding-left: 12px; padding-right: 12px;
+                                            TextInput { text <=> root.field-two; single-line: true; color: Theme.text; font-size: 12px; vertical-alignment: center;
+                                                edited => { root.dirty = true; }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Text { text: "Демонстрационная форма. Поля и валидаторы будут построены из settings_schema установленного плагина; сейчас значения не сохраняются.";
+                            color: Theme.muted; font-size: 11px; wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout { height: 42px; spacing: 10px;
+                    Label { text: root.dirty ? "Черновик изменён · не сохранён" : "Демо без подключения к каталогу"; color: Theme.muted; font-size: 11px; horizontal-stretch: 1; }
+                    HubAction { caption: "Сбросить"; activated => { root.field-one = root.selected-model.setting-one-value; root.field-two = root.selected-model.setting-two-value; root.dirty = false; } }
+                    HubAction { caption: "Сохранить"; primary: true; enabled: false; }
+                }
+                if root.confirm-discard: Rectangle {
+                    height: 98px; border-radius: 10px; border-width: 1px; border-color: Theme.accent-border; background: #301728;
+                    HorizontalLayout { padding: 14px; spacing: 16px;
+                        VerticalLayout { spacing: 4px; horizontal-stretch: 1; alignment: center;
+                            Label { text: "Отменить несохранённые изменения?"; font-size: 13px; font-weight: 700; }
+                            Label { text: "Черновик текущей модели будет сброшен."; font-size: 11px; color: Theme.muted; }
+                        }
+                        HubAction { caption: "Остаться"; activated => { root.confirm-discard = false; } }
+                        HubAction { caption: "Сбросить и выйти"; primary: true; activated => { root.confirm-discard = false; root.dirty = false; root.settings-open = false; } }
+                    }
+                }
+            }
+        }
+        HorizontalLayout { height: 76px; spacing: 10px;
+            HubStat { caption: "Установлено"; value: "—"; hint: "Не подключено"; }
+            HubStat { caption: "GPU"; value: "—"; hint: "Проверка не запускалась"; }
+            HubStat { caption: "Свободно на диске"; value: "—"; hint: "Нет данных"; }
+            HubStat { caption: "Последняя проверка"; value: "—"; hint: "Статусы не получены"; }
+        }
+    }
+}

@@ -8,6 +8,8 @@ export enum PageId { home, settings, sandbox, releases, gallery, wiki, logs, abo
 export component Sidebar inherits Rectangle {
     in property <PageId> current-page: home;
     in property <string> version;
+    in property <bool> ai-hub-open: false;
+    callback open-ai-hub();
     callback navigate(PageId);
     callback language-selected(string);
     callback reload-translations();
@@ -44,7 +46,7 @@ export component Sidebar inherits Rectangle {
                 { page: PageId.about, label: I18n.i18n("navigation.about", "О приложении"), icon: Icons.about }
             ]: ActionSurface {
                 height: Theme.navigation-height; label: item.label;
-                selected: root.current-page == item.page;
+                selected: !root.ai-hub-open && root.current-page == item.page;
                 border-radius: 16px;
                 activated => { root.navigate(item.page); }
                 HorizontalLayout {
@@ -52,6 +54,17 @@ export component Sidebar inherits Rectangle {
                     VerticalLayout { width: 16px; padding: 0px; alignment: center; Icon { source: item.icon; } }
                     Label { text: item.label; color: root.current-page == item.page ? Theme.text : Theme.muted; font-size: Theme.navigation-size; font-weight: 600; min-width: 0px; }
                 }
+            }
+        }
+        ActionSurface {
+            height: Theme.navigation-height;
+            label: "AI Hub"; selected: root.ai-hub-open; border-radius: 16px;
+            activated => { root.open-ai-hub(); }
+            HorizontalLayout { padding-left: 15px; padding-right: 12px; spacing: 10px;
+                VerticalLayout { width: 16px; padding: 0px; alignment: center;
+                    Icon { source: Icons.python; colorize: Theme.accent-hover; }
+                }
+                Label { text: "AI Hub"; font-size: Theme.navigation-size; font-weight: 650; color: root.ai-hub-open ? Theme.text : Theme.muted; }
             }
         }
         Rectangle { vertical-stretch: 1; }
