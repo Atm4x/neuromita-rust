@@ -8,7 +8,9 @@ use std::{
 use thiserror::Error;
 
 use super::python_presets::{parse_credentials, parse_unique_json};
-use super::{PresetId, PythonPresetStage, SettingsTransfer};
+use super::{
+    PresetId, PythonPresetStage, PythonSettingsMigration, PythonUnmappedPolicy, SettingsTransfer,
+};
 use crate::generation::StoredPresets;
 
 const JOURNAL: &str = ".preset-activation-journal";
@@ -70,6 +72,13 @@ pub struct PresetStorageLease {
 
 pub struct PresetActivation;
 
+#[derive(Clone, Copy)]
+enum SettingsActivationMode {
+    PresetsOnly,
+    WithSelection,
+    ImportSupported(PythonUnmappedPolicy),
+}
+
 impl PresetActivation {
     /// Acquire an exclusive lease for the full lifetime of a persistent catalog.
     /// Holding the lease over catalog.open() and its subsequent writes ensures
@@ -93,7 +102,7 @@ impl PresetActivation {
     /// Must only be called by an operator with both applications stopped.
     /// Never modifies the source review package, and never runs during startup.
     pub fn apply(review: &Path, active: &Path) -> Result<(), PresetActivationError> {
-        Self::apply_inner(review, active, None, false)
+        Self::apply_inner(review, active, None, SettingsActivationMode::PresetsOnly)
     }
 
     /// Activate the reviewed Python user selection in the same recoverable
@@ -104,15 +113,33 @@ impl PresetActivation {
         review: &Path,
         active: &Path,
     ) -> Result<(), PresetActivationError> {
-        Self::apply_inner(review, active, None, true)
+        Self::apply_inner(review, active, None, SettingsActivationMode::WithSelection)
+    }
+
+    /// Import supported Python settings alongside presets, credentials and the
+    /// explicitly reviewed Python user-preset selection. Unknown keys (other
+    /// than the separately reviewed LAST_API_PRESET_ID) require opt-in.
+    /// Only valid for an explicitly stopped Rust and Python application.
+    pub fn apply_with_imported_settings(
+        review: &Path,
+        active: &Path,
+        unmapped: PythonUnmappedPolicy,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner(
+            review,
+            active,
+            None,
+            SettingsActivationMode::ImportSupported(unmapped),
+        )
     }
 
     fn apply_inner(
         review: &Path,
         active: &Path,
         fail_after_install: Option<usize>,
-        with_settings: bool,
+        mode: SettingsActivationMode,
     ) -> Result<(), PresetActivationError> {
+        let with_settings = !matches!(mode, SettingsActivationMode::PresetsOnly);
         check_dir(review)?;
         check_dir(active)?;
         let _lock = lock_storage(active)?;
@@ -193,9 +220,25 @@ impl PresetActivation {
                 .ok_or(PresetActivationError::SnapshotConflict)?;
             let settings_original = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
                 .ok_or(PresetActivationError::SnapshotConflict)?;
-            let mut stored = SettingsTransfer::decode(&settings_original)
+            let baseline = SettingsTransfer::decode(&settings_original)
                 .map_err(|_| PresetActivationError::SnapshotConflict)?
                 .into_stored();
+            let mut stored = if let SettingsActivationMode::ImportSupported(unmapped) = mode {
+                let mut preview = PythonSettingsMigration
+                    .preview(&python_settings, &baseline)
+                    .map_err(|_| PresetActivationError::SnapshotConflict)?;
+                // The staged preset-preferences review already validated this
+                // key against the imported catalog. It is not an unmapped field.
+                preview
+                    .skipped_keys
+                    .retain(|name| name != "LAST_API_PRESET_ID");
+                if unmapped == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+                    return Err(PresetActivationError::SnapshotConflict);
+                }
+                preview.transfer.into_stored()
+            } else {
+                baseline
+            };
             stored.revision = stored
                 .revision
                 .checked_add(1)
@@ -777,7 +820,12 @@ mod tests {
         .unwrap();
         prepared.stage_new_directory(&review).unwrap();
         assert!(matches!(
-            PresetActivation::apply_inner(&review, &active, Some(0), false),
+            PresetActivation::apply_inner(
+                &review,
+                &active,
+                Some(0),
+                SettingsActivationMode::PresetsOnly
+            ),
             Err(PresetActivationError::SnapshotConflict)
         ));
         assert!(!active.join(NAMES[0]).exists());

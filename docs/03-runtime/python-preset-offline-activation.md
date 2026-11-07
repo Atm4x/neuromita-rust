@@ -92,3 +92,31 @@ Never manually remove or modify a pending activation journal. Linux process
 abort tests cover `prepared`, after each of three installs, and `committed`;
 Windows file-lock/ACL behavior and physical power-failure durability remain
 unverified. This is not a three-file filesystem-level atomic rename.
+
+## D28 — one-transaction import of supported Python settings and preset selection
+
+The existing stopped-app, three-document journal now offers an **explicit** alternative to
+selection-only activation. It combines the reviewed Python selected user preset with the
+supported fields of the same byte-exact `python-source-settings.json` source:
+
+```text
+cargo run --locked --offline --example activate_python_presets -- \
+  --apply-with-imported-settings /absolute/review /absolute/UserData --confirm-stopped
+```
+
+Run `neuromita settings import --format python --source /absolute/review/python-source-settings.json
+--destination /absolute/UserData/settings.json --preview` first to inspect all supported and
+unmapped key names. The selected `LAST_API_PRESET_ID` is reviewed by the preset staging flow,
+not treated as an unmapped setting during combined activation. If any *other* keys are unmapped,
+the combined operation fails before creating the journal or changing an active file. Only after
+review may an operator append `--allow-unmapped` to skip those keys. Invalid supported keys
+continue to fail even with this opt-in. No skipped values or credentials are logged.
+
+Supported settings are merged onto the existing, validated Rust `settings.json` (never generic
+Python defaults), with the selected preset ID resolved against the staged preset catalog.
+`presets.json`, `preset-credentials.json`, and `settings.json` are installed within the same
+journal and same stopped-app lock lifetime. Existing `--apply`, `--apply-with-preferences`, and
+`--recover` behavior is unchanged. Source files are read-only. The same journal supports
+rollback before commit and verified cleanup after commit. This is still an offline workflow,
+not live hot reload or a Windows power-loss certification. Full Python format coverage and
+production GUI migration remain open in #45.

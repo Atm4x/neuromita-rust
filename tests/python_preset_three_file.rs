@@ -1,7 +1,7 @@
 use neuromita::generation::PresetId;
 use neuromita::settings::{
     AppSettings, PresetActivation, PresetActivationError, PresetRecovery, PythonPresetStage,
-    SettingsTransfer, StoredSettings,
+    PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
 };
 use serde_json::json;
 use std::{
@@ -146,4 +146,115 @@ fn legacy_two_file_apply_does_not_mutate_settings_even_with_preference_review() 
     let (review, active, old) = fixture(&root, br#"{"LAST_API_PRESET_ID":18}"#);
     PresetActivation::apply(&review, &active).unwrap();
     assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+}
+
+#[test]
+fn composite_python_import_merges_supported_fields_and_selected_preset_atomically() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","CHAT_FONT_SIZE":18,"REMINDERS_ENABLED":true}"#,
+    );
+    PresetActivation::apply_with_imported_settings(&review, &active, PythonUnmappedPolicy::Reject)
+        .unwrap();
+    let before = SettingsTransfer::decode(&old).unwrap().into_stored();
+    let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(after.revision, before.revision + 1);
+    assert_eq!(after.settings.presets.active, PresetId(18));
+    assert_eq!(
+        after.settings.interface.language,
+        neuromita::settings::Language::English
+    );
+    assert_eq!(after.settings.interface.font_size, 18);
+    assert!(after.settings.reminders.enabled);
+    assert_eq!(
+        after.settings.interface.hide_private,
+        before.settings.interface.hide_private
+    );
+    assert_eq!(
+        fs::read(review.join("python-source-settings.json")).unwrap(),
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","CHAT_FONT_SIZE":18,"REMINDERS_ENABLED":true}"#,
+    );
+    assert_eq!(
+        PresetActivation::recover(&active).unwrap(),
+        PresetRecovery::NoJournal
+    );
+}
+
+#[test]
+fn composite_import_unknown_fields_require_explicit_approval_before_any_write() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":"18","LANGUAGE":"EN","UNSUPPORTED_SECRET":"never-print"}"#,
+    );
+    assert!(matches!(
+        PresetActivation::apply_with_imported_settings(
+            &review,
+            &active,
+            PythonUnmappedPolicy::Reject
+        ),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+    assert!(!active.join("presets.json").exists());
+    assert!(!active.join(".preset-activation-journal").exists());
+    PresetActivation::apply_with_imported_settings(
+        &review,
+        &active,
+        PythonUnmappedPolicy::SkipAfterReview,
+    )
+    .unwrap();
+    let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(after.settings.presets.active, PresetId(18));
+    assert_eq!(
+        after.settings.interface.language,
+        neuromita::settings::Language::English
+    );
+}
+
+#[test]
+fn composite_import_rejects_invalid_known_fields_even_if_unmapped_are_approved() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"unknown","UNKNOWN_KEY":true}"#,
+    );
+    assert!(matches!(
+        PresetActivation::apply_with_imported_settings(
+            &review,
+            &active,
+            PythonUnmappedPolicy::SkipAfterReview,
+        ),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), old);
+    assert!(!active.join("presets.json").exists());
+}
+
+#[test]
+fn legacy_preference_only_activation_does_not_import_other_python_keys() {
+    let root = Temp::new();
+    let (review, active, old) = fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"CHAT_FONT_SIZE":18,"REMINDERS_ENABLED":true}"#,
+    );
+    PresetActivation::apply_with_preferences(&review, &active).unwrap();
+    let before = SettingsTransfer::decode(&old).unwrap().into_stored();
+    let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(
+        after.settings.interface.font_size,
+        before.settings.interface.font_size
+    );
+    assert_eq!(
+        after.settings.reminders.enabled,
+        before.settings.reminders.enabled
+    );
+    assert_eq!(after.settings.presets.active, PresetId(18));
 }
