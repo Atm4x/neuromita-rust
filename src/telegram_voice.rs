@@ -216,10 +216,10 @@ impl Conversation {
         if let Some(last) = self.last_send {
             due = due.max(last + interval);
         }
-        if self.send_times.len() >= 20 {
-            if let Some(first) = self.send_times.front() {
-                due = due.max(*first + Duration::from_secs(60));
-            }
+        if self.send_times.len() >= 20
+            && let Some(first) = self.send_times.front()
+        {
+            due = due.max(*first + Duration::from_secs(60));
         }
         due
     }
@@ -288,11 +288,11 @@ impl TelegramVoiceService {
             }
             state.bot_initialized = true;
         }
-        if let Some(command) = normalize_speaker_command(speaker)? {
-            if state.speaker.as_deref() != Some(command.as_str()) {
-                watermark = watermark.max(self.send(&mut state, &command).await?);
-                state.speaker = Some(command);
-            }
+        if let Some(command) = normalize_speaker_command(speaker)?
+            && state.speaker.as_deref() != Some(command.as_str())
+        {
+            watermark = watermark.max(self.send(&mut state, &command).await?);
+            state.speaker = Some(command);
         }
         // CrazyMita expects one *prefixed message*, not two separate sends.
         let text = if self.config.peer.eq_ignore_ascii_case("@CrazyMitaAIbot") {
