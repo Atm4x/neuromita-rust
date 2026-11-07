@@ -19,7 +19,7 @@ use crate::timeline::domain::{
 
 #[cfg(feature = "sqlite-system")]
 use super::SqliteTimelineRepository;
-use super::assets::{TimelineAssetError, TimelineAssetStore};
+use super::assets::{TimelineAssetError, TimelineAssetInventory, TimelineAssetStore};
 
 const FORMAT: &str = "neuromita.timeline.session";
 const VERSION: u32 = 1;
@@ -469,6 +469,29 @@ pub fn retention_manifest_sqlite(
     retained_archives: &[&[u8]],
 ) -> Result<Vec<TimelineAssetRef>, SessionArchiveError> {
     retention_manifest_memory(&store.archive_snapshot()?, retained_archives)
+}
+
+/// Observe filesystem candidates after collecting every canonical branch and
+/// the supplied, verified external archives. It is deliberately read-only:
+/// neither this function nor its result proves that the list of external
+/// archives is exhaustive or that no concurrent append/import is occurring.
+pub fn inventory_memory(
+    store: &TimelineStore,
+    assets: &TimelineAssetStore,
+    retained_archives: &[&[u8]],
+) -> Result<TimelineAssetInventory, SessionArchiveError> {
+    let roots = retention_manifest_memory(store, retained_archives)?;
+    Ok(assets.inventory(&roots)?)
+}
+
+#[cfg(feature = "sqlite-system")]
+pub fn inventory_sqlite(
+    store: &SqliteTimelineRepository,
+    assets: &TimelineAssetStore,
+    retained_archives: &[&[u8]],
+) -> Result<TimelineAssetInventory, SessionArchiveError> {
+    let roots = retention_manifest_sqlite(store, retained_archives)?;
+    Ok(assets.inventory(&roots)?)
 }
 
 /// Export a selected session, including its own branch facts and receipts (not
