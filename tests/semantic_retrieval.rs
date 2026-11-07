@@ -794,3 +794,147 @@ async fn clearing_embedding_cache_during_inflight_batch_prevents_late_repopulati
     assert_eq!(retrieval.preview_cache_clear().total_entries, 1);
     assert_eq!(provider.inner.document_batches.load(Ordering::Relaxed), 2);
 }
+
+#[tokio::test]
+async fn scoped_retrieval_requires_explicit_forgotten_visibility_and_preserves_timeline() {
+    use neuromita::{
+        knowledge::{
+            retrieval_fusion::FusionMode,
+            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+        },
+        memory::{CharacterMemories, MemoryChange, MemoryKind, MemoryState},
+    };
+
+    let mut snapshot = CharacterMemories::default();
+    for (id, state, kind, expiry) in [
+        (1, MemoryState::Active, MemoryKind::Fact, None),
+        (2, MemoryState::Forgotten, MemoryKind::Fact, None),
+        (3, MemoryState::Deleted, MemoryKind::Fact, None),
+        (4, MemoryState::Active, MemoryKind::Fact, Some(100)),
+        (5, MemoryState::Forgotten, MemoryKind::RagOnly, None),
+        (
+            6,
+            MemoryState::Forgotten,
+            MemoryKind::Island(neuromita::memory::MemoryIsland::Preferences),
+            None,
+        ),
+    ] {
+        let mut record = memory(id, MemoryPriority::Normal, &format!("distinct fact {id}"));
+        record.state = state;
+        record.kind = kind;
+        record.expires_at_unix_ms = expiry;
+        snapshot
+            .apply_committed(&MemoryChange::Upsert(record))
+            .unwrap();
+    }
+    let retained = snapshot.clone();
+    let fixture = Arc::new(SemanticFixture::new("scoped-memory"));
+    let retrieval = SemanticMemoryRetriever::new(fixture.clone(), 16).unwrap();
+
+    let default = retrieval
+        .retrieve(CharacterId::Crazy, &snapshot.all(), "fact")
+        .await
+        .unwrap();
+    assert_eq!(default.selected_ids.len(), 2);
+    assert!(default.selected_ids.contains(&MemoryId(Uuid::from_u128(4))));
+    assert!(!default.selected_ids.contains(&MemoryId(Uuid::from_u128(2))));
+
+    let scoped = |scope| {
+        retrieval.retrieve_scoped(
+            CharacterId::Crazy,
+            &snapshot,
+            "fact",
+            100,
+            scope,
+            SemanticRetrievalFilter::all(),
+            FusionMode::Union,
+        )
+    };
+    let active = scoped(MemoryRetrievalScope::ActiveOnly).await.unwrap();
+    assert_eq!(active.selected_ids, vec![MemoryId(Uuid::from_u128(1))]);
+
+    let all = scoped(MemoryRetrievalScope::ActiveAndForgotten)
+        .await
+        .unwrap();
+    assert_eq!(all.status, RetrievalStatus::Selected);
+    assert_eq!(all.selected_ids.len(), 3);
+    for id in [1, 2, 5] {
+        assert!(all.selected_ids.contains(&MemoryId(Uuid::from_u128(id))));
+    }
+    for id in [3, 4, 6] {
+        assert!(!all.selected_ids.contains(&MemoryId(Uuid::from_u128(id))));
+    }
+    assert_eq!(all.matches.len(), 3);
+
+    let forgotten = scoped(MemoryRetrievalScope::ForgottenOnly).await.unwrap();
+    assert_eq!(forgotten.selected_ids.len(), 2);
+    for id in [2, 5] {
+        assert!(
+            forgotten
+                .selected_ids
+                .contains(&MemoryId(Uuid::from_u128(id)))
+        );
+    }
+    assert_eq!(snapshot, retained);
+}
+
+#[tokio::test]
+async fn forgotten_only_mode_is_empty_without_forgotten_and_never_falls_back_on_provider_failure() {
+    use neuromita::{
+        knowledge::{
+            retrieval_fusion::FusionMode,
+            semantic_memory::{MemoryRetrievalScope, RetrievalStatus, SemanticRetrievalFilter},
+        },
+        memory::{CharacterMemories, MemoryChange, MemoryState},
+    };
+    let mut snapshot = CharacterMemories::default();
+    snapshot
+        .apply_committed(&MemoryChange::Upsert(memory(
+            1,
+            MemoryPriority::Normal,
+            "tea",
+        )))
+        .unwrap();
+    let provider = Arc::new(SemanticFixture {
+        fail: true,
+        ..SemanticFixture::new("scoped-down")
+    });
+    let retrieval = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+    let retrieve = |scope| {
+        retrieval.retrieve_scoped(
+            CharacterId::Crazy,
+            &snapshot,
+            "tea",
+            0,
+            scope,
+            SemanticRetrievalFilter::all(),
+            FusionMode::VectorOnly,
+        )
+    };
+    let empty = retrieve(MemoryRetrievalScope::ForgottenOnly).await.unwrap();
+    assert_eq!(empty.status, RetrievalStatus::EmptyCorpus);
+    assert_eq!(provider.query_count.load(Ordering::Relaxed), 0);
+    assert!(matches!(
+        retrieve(MemoryRetrievalScope::ActiveAndForgotten).await,
+        Err(EmbeddingError::Transport(_))
+    ));
+    let mut updated = snapshot.get(MemoryId(Uuid::from_u128(1))).unwrap().clone();
+    updated.state = MemoryState::Forgotten;
+    snapshot
+        .apply_committed(&MemoryChange::Upsert(updated))
+        .unwrap();
+    assert!(matches!(
+        retrieval
+            .retrieve_scoped(
+                CharacterId::Crazy,
+                &snapshot,
+                "tea",
+                0,
+                MemoryRetrievalScope::ForgottenOnly,
+                SemanticRetrievalFilter::all(),
+                FusionMode::VectorOnly,
+            )
+            .await,
+        Err(EmbeddingError::Transport(_))
+    ));
+}

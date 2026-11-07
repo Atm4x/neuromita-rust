@@ -5,7 +5,9 @@ use std::{
 
 use super::{
     embedding::{Embedding, EmbeddingError, EmbeddingProvider, EmbeddingPurpose, EmbeddingSpace},
-    memory_context::{lexical_ranked, priority_rank, render_ranked_memory_context, tokens},
+    memory_context::{
+        lexical_ranked_scoped, priority_rank, render_ranked_memory_context_scoped, tokens,
+    },
     reranking::{RerankPolicy, RerankProvider, rerank_prefix},
     retrieval_fusion::{
         FusionConfig, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey, RetrievalMethod,
@@ -14,7 +16,7 @@ use super::{
 };
 use crate::{
     identity::CharacterId,
-    memory::{MemoryKind, MemoryState},
+    memory::{CharacterMemories, MemoryKind, MemoryState},
     timeline::domain::{MemoryId, MemoryRecord},
 };
 
@@ -104,6 +106,27 @@ impl SemanticRetrievalFilter {
             ));
         }
         Ok(self)
+    }
+}
+
+/// Explicit visibility policy for a read from one captured Timeline memory projection.
+/// Default retrieval remains active-only; forgotten facts are never admitted implicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRetrievalScope {
+    ActiveOnly,
+    ActiveAndForgotten,
+    ForgottenOnly,
+}
+
+impl MemoryRetrievalScope {
+    fn admits(self, record: &MemoryRecord, as_of_unix_ms: u64) -> bool {
+        match (self, record.state) {
+            (Self::ActiveOnly | Self::ActiveAndForgotten, MemoryState::Active) => {
+                record.available_at(as_of_unix_ms)
+            }
+            (Self::ActiveAndForgotten | Self::ForgottenOnly, MemoryState::Forgotten) => true,
+            _ => false,
+        }
     }
 }
 
@@ -264,6 +287,62 @@ impl SemanticMemoryRetriever {
         filter: SemanticRetrievalFilter,
         mode: FusionMode,
     ) -> Result<RetrievedMemory, EmbeddingError> {
+        let admitted = memories
+            .iter()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && record.state == MemoryState::Active
+            })
+            .cloned()
+            .collect();
+        self.retrieve_admitted_with_fusion(character, admitted, query, filter, mode, false)
+            .await
+    }
+
+    /// Opt-in read of a single character's captured authoritative memory projection.
+    /// Active memories must be available at `as_of_unix_ms`; forgotten entries are
+    /// retained historical facts and require an explicitly selected scope. Deleted
+    /// entries are never searchable, and this method never restores any memory.
+    /// Callers are responsible for authorizing historical recall before rendering
+    /// its returned context into a model prompt.
+    pub async fn retrieve_scoped(
+        &self,
+        character: CharacterId,
+        snapshot: &CharacterMemories,
+        query: &str,
+        as_of_unix_ms: u64,
+        scope: MemoryRetrievalScope,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        let admitted = snapshot
+            .all()
+            .into_iter()
+            .filter(|record| {
+                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                    && scope.admits(record, as_of_unix_ms)
+            })
+            .collect();
+        self.retrieve_admitted_with_fusion(
+            character,
+            admitted,
+            query,
+            filter,
+            mode,
+            scope != MemoryRetrievalScope::ActiveOnly,
+        )
+        .await
+    }
+
+    async fn retrieve_admitted_with_fusion(
+        &self,
+        character: CharacterId,
+        memories: Vec<MemoryRecord>,
+        query: &str,
+        filter: SemanticRetrievalFilter,
+        mode: FusionMode,
+        include_forgotten: bool,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
         let filter = filter.validate()?;
         let config = FusionConfig {
             mode,
@@ -271,14 +350,6 @@ impl SemanticMemoryRetriever {
             minimum_graph: 0,
         };
         fuse(character, &[], config).map_err(|e| EmbeddingError::Configuration(e.to_string()))?;
-        let memories = memories
-            .iter()
-            .filter(|record| {
-                matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
-                    && record.state == MemoryState::Active
-            })
-            .cloned()
-            .collect::<Vec<_>>();
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -417,7 +488,7 @@ impl SemanticMemoryRetriever {
         }];
         if !matches!(mode, FusionMode::VectorOnly) {
             let query_tokens = tokens(&query);
-            let lexical_hits = lexical_ranked(&memories, &query)
+            let lexical_hits = lexical_ranked_scoped(&memories, &query, include_forgotten)
                 .into_iter()
                 .filter(|memory| {
                     tokens(&memory.content)
@@ -450,10 +521,11 @@ impl SemanticMemoryRetriever {
             .iter()
             .map(|memory| (memory.id.0.to_string(), memory))
             .collect::<HashMap<_, _>>();
-        let (rendered, selected_ids) = render_ranked_memory_context(
+        let (rendered, selected_ids) = render_ranked_memory_context_scoped(
             fused
                 .iter()
                 .filter_map(|hit| by_id.get(&hit.key.id).copied()),
+            include_forgotten,
         );
         let selected_set = selected_ids
             .iter()
