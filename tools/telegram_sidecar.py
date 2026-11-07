@@ -121,34 +121,46 @@ async def handle(req):
     raise ValueError("unknown_operation")
 
 
+async def respond(line):
+    """Handle one framed RPC; testable with a fake Telethon client."""
+    request_id = None
+    try:
+        req = json.loads(line)
+        request_id = req.get("request_id") if isinstance(req, dict) else None
+        if not isinstance(request_id, int) or isinstance(request_id, bool) or request_id < 1:
+            raise ValueError("invalid_request_id")
+        result = await handle(req)
+        return {"ok": True, "request_id": request_id, "result": result}
+    except Exception as exc:
+        # Never echo credentials, code, password, phone or session paths.
+        known = {
+            "invalid_credentials", "not_connected", "code_not_requested",
+            "invalid_code", "expired_code", "invalid_password",
+            "unauthorized", "missing_media", "media_too_large",
+            "unknown_operation",
+        }
+        label = str(exc)
+        return {
+            "ok": False, "request_id": request_id,
+            "error": label if label in known else "telegram_failure",
+        }
+
+
 async def main():
     while True:
-        line = await asyncio.to_thread(sys.stdin.buffer.readline)
+        line = await asyncio.to_thread(sys.stdin.buffer.readline, 16 * 1024 + 1)
         if not line:
             break
-        request_id = None
-        try:
-            req = json.loads(line)
-            # Correlation is transport metadata; every normal response echoes it,
-            # including invalid auth, network and Telegram errors.
-            request_id = req.get("request_id") if isinstance(req, dict) else None
-            if not isinstance(request_id, int) or isinstance(request_id, bool) or request_id < 1:
-                raise ValueError("invalid_request_id")
-            result = await handle(req)
-            output = {"ok": True, "request_id": request_id, "result": result}
-        except Exception as exc:
-            # Never echo credentials, code, password, phone or session paths.
-            known = {
-                "invalid_credentials", "not_connected", "code_not_requested",
-                "invalid_code", "expired_code", "invalid_password",
-                "unauthorized", "missing_media", "media_too_large",
-                "unknown_operation",
-            }
-            label = str(exc)
-            output = {
-                "ok": False, "request_id": request_id,
-                "error": label if label in known else "telegram_failure",
-            }
+        if len(line) > 16 * 1024:
+            # Discard the entire invalid frame so the following request is not
+            # interpreted as the continuation of its credential payload.
+            while not line.endswith(b"\\n"):
+                line = await asyncio.to_thread(sys.stdin.buffer.readline, 16 * 1024 + 1)
+                if not line:
+                    break
+            output = {"ok": False, "request_id": None, "error": "frame_too_large"}
+        else:
+            output = await respond(line)
         print(json.dumps(output, ensure_ascii=False), flush=True)
     if client is not None:
         await client.disconnect()
