@@ -48,8 +48,15 @@ six). Each section tab jumps to its first page and indicates the current group.
 The ordered group ranges and RU/EN labels are computed in the same Rust page
 catalog, not duplicated in the UI.
 
-**Not implemented:** rich-text inline step links/hover, PyQt page-by-page
-progress segments and contents popup, full PyQt image toolbar parity (fit-width/actual-pixel-size,
+**D17 page navigation:** The `GuideNavigator` component renders one clickable
+progress segment for every currently visible page, with done/current/upcoming
+states and an accessible page label. A localized Contents popup lists page
+titles, section names and numbers; selecting a page navigates through the
+existing Guide callback. Both models are derived by the GUI presenter from the
+same Rust catalog and reflect guide level and RU/EN language changes. There is
+no extra page list or persisted progress state in Slint.
+
+**Not implemented:** rich-text inline step links/hover, full PyQt image toolbar parity (fit-width/actual-pixel-size,
 scrollbars and free panning), direct page-specific *local* Wiki navigation,
 advanced keyboard/accessibility E2E and Windows GUI behavioral E2E. The Help button now links to the exact historical
 RU/EN Wiki article for the current page using the pinned read-only Python
@@ -59,9 +66,11 @@ equivalent to the PyQt per-hotspot focus walkthrough. Historical screenshots
 might depict Python UI rather than the current Slint layout. These limitations
 remain visible until explicit parity acceptance.
 
-Verification: `cargo test --locked --offline --lib onboarding::guide::tests`,
-`cargo check --locked --offline --features gui --bin neuromita-gui`, and
-format/diff checks. Library unit tests check level membership, unique IDs,
+**Required, not yet executed on D15–D17 patches:** `cargo fmt --all -- --check`,
+`cargo test --locked --offline --lib onboarding::guide::tests`, `cargo check --locked --offline --features gui --bin neuromita-gui`,
+scoped Clippy, and interactive/Windows acceptance. GitHub has no CI status
+checks or workflow runs for D16 HEAD. Previous D14 test evidence does not
+certify subsequent patches. Library unit tests check level membership, unique IDs,
 nonempty bilingual content, screenshot assets, fallback locale, and retaining a
 visible page across level changes. A successful Linux GUI *compile* does not
 certify mouse-driven Slint or Windows behavior.
@@ -75,3 +84,8 @@ D16 source reference: `Atm4x/NeuroMita@5f3d061f523d9abefa6a264bb2953048a935fa65`
 `GuideWidget._STEP_TARGETS`, `IGuidePage.get_image_crop`.
 Do not treat these original Python screenshot hotspots as current Rust controls
 until interactive GUI acceptance confirms their usefulness.
+
+D17 source reference: `GuideWidget._rebuild_progress_steps` and
+`GuideWidget._show_contents_menu` from the pinned Python Guide source.
+The Slint popup is scoped to the active Guide screen rather than a
+new application-global route or a second settings store.

@@ -1,0 +1,125 @@
+import { Theme } from "../theme.slint";
+import { Label, ActionSurface } from "controls.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct GuideContentsEntry {
+    index: int,
+    title: string,
+    section: string,
+}
+
+export component GuideNavigator inherits Rectangle {
+    in property <[GuideContentsEntry]> entries;
+    in property <int> current-index;
+    in property <string> language: "ru";
+    callback navigate(int);
+
+    height: 30px;
+    background: transparent;
+
+    HorizontalLayout {
+        padding: 0px;
+        spacing: 8px;
+        ActionSurface {
+            width: 125px;
+            height: 30px;
+            label: root.language == "ru" ? "Содержание руководства" : "Guide contents";
+            background: contents.is-open ? Theme.selected : Theme.hover;
+            Label {
+                text: root.language == "ru" ? "Содержание" : "Contents";
+                horizontal-alignment: center;
+                font-size: 12px;
+            }
+            activated => { contents.show(); }
+        }
+        HorizontalLayout {
+            padding: 0px;
+            spacing: 3px;
+            for item in root.entries: ActionSurface {
+                height: 30px;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                label: item.section + " · " + item.title;
+                background: transparent;
+                Rectangle {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    height: item.index == root.current-index ? 10px : 7px;
+                    border-radius: 4px;
+                    background: item.index < root.current-index ? Theme.accent-pressed :
+                                item.index == root.current-index ? Theme.accent : Theme.border;
+                }
+                activated => { root.navigate(item.index); }
+            }
+        }
+    }
+
+    contents := PopupWindow {
+        x: 0px;
+        y: 34px;
+        width: min(410px, root.width);
+        height: min(450px, 54px + root.entries.length * 38px);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.accent-border;
+            border-radius: 12px;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 7px;
+                Label {
+                    text: root.language == "ru" ? "Быстрый переход" : "Jump to a page";
+                    font-size: 14px;
+                    font-weight: 700;
+                    height: 25px;
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    VerticalLayout {
+                        padding: 0px;
+                        spacing: 2px;
+                        for item in root.entries: ActionSurface {
+                            height: 36px;
+                            label: item.section + " · " + item.title;
+                            selected: root.current-index == item.index;
+                            background: self.selected ? Theme.selected : Theme.hover;
+                            border-radius: 7px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 9px;
+                                Label {
+                                    text: "" + (item.index + 1);
+                                    color: Theme.accent-hover;
+                                    width: 25px;
+                                    font-size: 12px;
+                                }
+                                Label {
+                                    text: item.title;
+                                    font-size: 12px;
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    overflow: elide;
+                                }
+                                Label {
+                                    text: item.section;
+                                    color: Theme.muted;
+                                    font-size: 10px;
+                                    horizontal-stretch: 0;
+                                }
+                            }
+                            activated => {
+                                contents.close();
+                                root.navigate(item.index);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

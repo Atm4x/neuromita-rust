@@ -5,6 +5,7 @@ import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
+import { GuideNavigator, GuideContentsEntry } from "components/guide-navigator.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
@@ -17,7 +18,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget }
+export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 
@@ -53,6 +54,7 @@ export component AppWindow inherits Window {
     in property <float> onboarding-guide-crop-bottom: 1.0;
     in property <[GuideFocusTarget]> onboarding-guide-targets;
     in property <[GuideSectionEntry]> onboarding-guide-sections;
+    in property <[GuideContentsEntry]> onboarding-guide-contents;
     callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-select-level(int);
@@ -253,6 +255,12 @@ export component AppWindow inherits Window {
                         }
                         activated => { root.onboarding-guide-navigate(section.first); }
                     }
+                }
+                GuideNavigator {
+                    entries: root.onboarding-guide-contents;
+                    current-index: root.onboarding-guide-page;
+                    language: root.onboarding-language;
+                    navigate(index) => { root.onboarding-guide-navigate(index); }
                 }
                 GuideMedia {
                     vertical-stretch: 1;
