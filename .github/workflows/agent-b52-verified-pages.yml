@@ -1,0 +1,58 @@
+name: Agent B52 verified canonical older-page UI
+on:
+  push:
+    branches: [bridge/agent-b52-history-pages-20261108]
+    paths: [bridge/agent-b52.patch.xz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact B52 source tree and publish linear branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=0913e658133e47246d9a4fa27de75a1c9eee3188
+          tree=6c5f7fcebe64a6d0d592f022ae62d3fe539d4228
+          branch=codex/timeline-b52-canonical-history-pages-20261108
+          base64 -d bridge/agent-b52.patch.xz.b64 > /tmp/b52.patch.xz
+          echo "78cf69ad5d6cb4fef1c9fed7dc31c8d22dc03ca9b3b9e05612751efe37f1201e  /tmp/b52.patch.xz" | sha256sum -c -
+          xz -t /tmp/b52.patch.xz
+          xz -dc /tmp/b52.patch.xz > /tmp/b52.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b52.patch
+          git apply --index /tmp/b52.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "feat(chat): bounded Timeline history pages with generation-fenced UI tickets"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B52 target exists; refuse overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_HEAD=$(git rev-parse HEAD)"
+          echo "EXACT_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute observer-scoped canonical page integration
+        run: cargo test --locked --offline --test vertical_slice conversation_history_page_is_bounded_observer_scoped_and_rejects_stale_prefix -- --test-threads=1
+      - name: Execute Slint page ticket and A-B-A race regression
+        run: cargo test --locked --offline --features gui --bin neuromita-gui chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows -- --test-threads=1
+      - name: Validate Rust formatting and patch
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
