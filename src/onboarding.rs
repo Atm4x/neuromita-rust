@@ -1,3 +1,5 @@
+pub mod guide;
+
 use std::{io, path::Path};
 
 use crate::settings::{AppSettings, JsonSettingsRepository, SettingsRepository, StoredSettings};

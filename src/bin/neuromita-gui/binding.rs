@@ -53,6 +53,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let initial_code = options.locale.as_str();
     window.set_onboarding_language(initial_code.into());
     window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
+    update_guide(&window, 0);
     let desktop = Rc::new(RefCell::new(None));
     if !requires_consent {
         *desktop.borrow_mut() = Some(super::sandbox::attach(
@@ -136,11 +137,30 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
     });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_navigate(move |index| {
+        if let Some(window) = guide_window.upgrade() {
+            update_guide(&window, index);
+        }
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_select_level(move |index| {
+        if let Some(window) = guide_window.upgrade() {
+            use neuromita::onboarding::guide::{self, GuideLevel};
+            let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
+            let level = GuideLevel::from_index(index);
+            let destination =
+                guide::remap_index(previous, window.get_onboarding_guide_page() as usize, level);
+            window.set_onboarding_guide_level(level.index());
+            update_guide(&window, destination as i32);
+        }
+    });
     let language_window = window.as_weak();
     window.on_onboarding_language_selected(move |code| {
         if let Some(window) = language_window.upgrade() {
             window.set_onboarding_language(code.clone());
             window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
+            update_guide(&window, window.get_onboarding_guide_page());
         }
     });
     let accept_window = window.as_weak();
@@ -158,7 +178,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             return;
         }
         window.set_onboarding_required(false);
-        window.set_onboarding_guide_page(0);
+        update_guide(&window, 0);
         window.set_onboarding_guide_visible(true);
         match super::sandbox::attach(&window, accept_directory.clone(), accept_model.clone()) {
             Ok(runtime) => {
@@ -239,11 +259,30 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn update_guide(window: &AppWindow, requested_index: i32) {
+    use neuromita::onboarding::guide::{self, GuideLevel};
+
+    let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+    let count = guide::count(level);
+    let index = requested_index.clamp(0, (count - 1) as i32);
+    let page = guide::page(level, index as usize).expect("guide has a visible page");
+    let language = window.get_onboarding_language();
+    window.set_onboarding_guide_count(count as i32);
+    window.set_onboarding_guide_page(index);
+    window.set_onboarding_guide_title(page.title(&language).into());
+    window.set_onboarding_guide_description(page.description(&language).into());
+    window.set_onboarding_guide_image(page.image_key.into());
+}
+
 fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
     let localize =
         |text: &LocalizedText| display_translation(catalog.resolve(presenter.locale(), text));
     let translations = window.global::<I18n>();
     translations.set_locale(presenter.locale().as_str().into());
+    if !window.get_onboarding_required() {
+        window.set_onboarding_language(presenter.locale().as_str().into());
+        update_guide(window, window.get_onboarding_guide_page());
+    }
     translations.set_revision((catalog.revision() % i32::MAX as u64) as i32);
     let languages = catalog
         .languages()
