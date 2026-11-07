@@ -1,0 +1,40 @@
+name: Telegram Voice branch validation
+on:
+  push:
+    branches:
+      - codex/telegram-voice-47
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libfontconfig1-dev libssl-dev
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.89.0
+      - name: Format Rust source and publish a non-force formatting commit
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -- '*.rs'
+            git commit -m "style(telegram): apply cargo fmt"
+            git push origin HEAD:codex/telegram-voice-47
+          fi
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Unit and integration tests
+        run: cargo test --locked --offline
+      - name: Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
