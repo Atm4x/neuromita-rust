@@ -13,6 +13,9 @@ export component GuideMedia inherits Rectangle {
     in property <string> language;
     in property <string> description;
     in property <float> zoom: 1.0;
+    in property <int> sizing-mode: 0;
+    in-out property <length> pan-x: 0px;
+    in-out property <length> pan-y: 0px;
     in property <float> crop-left: 0.0;
     in property <float> crop-top: 0.0;
     in property <float> crop-right: 1.0;
@@ -39,6 +42,9 @@ export component GuideMedia inherits Rectangle {
     private property <float> crop-ratio: root.cropped-width / root.cropped-height;
     private property <length> fitted-width: min(root.width, root.height * root.crop-ratio);
     private property <length> fitted-height: min(root.height, root.width / root.crop-ratio);
+    private property <length> base-width: root.sizing-mode == 1 ? root.width :
+        root.sizing-mode == 2 ? 1px * root.cropped-width : root.fitted-width;
+    private property <length> base-height: root.base-width / root.crop-ratio;
 
     background: #090c16;
     clip: true;
@@ -51,12 +57,28 @@ export component GuideMedia inherits Rectangle {
         source-clip-height: max(1, ((root.picture.height) * (root.crop-bottom - root.crop-top)));
         image-fit: fill;
         accessible-label: root.description;
-        width: root.fitted-width * root.zoom;
-        height: root.fitted-height * root.zoom;
+        width: root.base-width * root.zoom;
+        height: root.base-height * root.zoom;
         x: self.width <= root.width ? (root.width - self.width) / 2
-           : max(root.width - self.width, min(0px, root.width / 2 - self.width * root.focus-center-x));
+           : max(root.width - self.width, min(0px, root.width / 2 - self.width * root.focus-center-x + root.pan-x));
         y: self.height <= root.height ? (root.height - self.height) / 2
-           : max(root.height - self.height, min(0px, root.height / 2 - self.height * root.focus-center-y));
+           : max(root.height - self.height, min(0px, root.height / 2 - self.height * root.focus-center-y + root.pan-y));
+    }
+
+    TouchArea {
+        enabled: snapshot.width > root.width || snapshot.height > root.height;
+        private property <length> drag-start-pan-x;
+        private property <length> drag-start-pan-y;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                self.drag-start-pan-x = root.pan-x;
+                self.drag-start-pan-y = root.pan-y;
+            }
+        }
+        moved => {
+            root.pan-x = self.drag-start-pan-x + self.mouse-x - self.pressed-x;
+            root.pan-y = self.drag-start-pan-y + self.mouse-y - self.pressed-y;
+        }
     }
 
     for step in root.steps: Rectangle {

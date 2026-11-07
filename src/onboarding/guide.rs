@@ -4,6 +4,48 @@
 pub use crate::settings::GuideLevel;
 pub mod focus;
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
+static GUIDE_STEP_MARKER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([0-9]{1,3})[ \t]*[-–—]").expect("Guide marker pattern is valid")
+});
+
+fn append_markdown_literal(output: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '\n' => output.push_str("  \n"),
+            '\\' | '*' | '_' | '[' | ']' | '(' | ')' | '`' | '<' | '>' | '!' | '#' | '|' => {
+                output.push('\\');
+                output.push(character);
+            }
+            _ => output.push(character),
+        }
+    }
+}
+
+fn link_step_markers(text: &str, steps: &[focus::FocusStep]) -> String {
+    let mut result = String::with_capacity(text.len() + 96);
+    let mut cursor = 0;
+    for capture in GUIDE_STEP_MARKER.captures_iter(text) {
+        let entire = capture.get(0).expect("regex capture zero");
+        let number = capture.get(1).expect("regex capture number");
+        let Ok(step) = number.as_str().parse::<u8>() else {
+            continue;
+        };
+        if !steps.iter().any(|target| target.number == step) {
+            continue;
+        }
+        append_markdown_literal(&mut result, &text[cursor..entire.start()]);
+        result.push_str(&format!("[{step}](guide-step:{step})"));
+        append_markdown_literal(&mut result, &text[number.end()..entire.end()]);
+        cursor = entire.end();
+    }
+    append_markdown_literal(&mut result, &text[cursor..]);
+    result
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuideSection {
     Start,
@@ -96,6 +138,22 @@ impl GuidePage {
         } else {
             self.description_en
         }
+    }
+
+    pub fn description_markdown(self, language: &str) -> String {
+        link_step_markers(self.description(language), self.focus_steps())
+    }
+
+    pub fn step_from_link(self, link: &str) -> Option<u8> {
+        let decimal = link.strip_prefix("guide-step:")?;
+        let number = decimal.parse::<u8>().ok()?;
+        if number == 0 || decimal != number.to_string() {
+            return None;
+        }
+        self.focus_steps()
+            .iter()
+            .any(|step| step.number == number)
+            .then_some(number)
     }
 
     pub fn image_crop(self) -> focus::ImageCrop {
@@ -563,6 +621,64 @@ mod tests {
                 .ends_with("/en/getting-started.md")
         );
         assert_eq!(page(GuideLevel::Full, 10).unwrap().wiki_url("ru"), None);
+    }
+
+    #[test]
+    fn description_links_only_existing_numbered_hotspots() {
+        let preset = page(GuideLevel::Basic, 1).unwrap();
+        let markup = preset.description_markdown("ru");
+        assert!(markup.contains("[1](guide-step:1) -"));
+        assert!(markup.contains("[6](guide-step:6) -"));
+        assert!(!markup.contains("guide-step:7"));
+        assert_eq!(preset.step_from_link("guide-step:1"), Some(1));
+        assert_eq!(preset.step_from_link("guide-step:7"), None);
+        assert_eq!(preset.step_from_link("guide-step:01"), None);
+        assert_eq!(preset.step_from_link("guide-step:0"), None);
+        assert_eq!(
+            preset.step_from_link("https://example.org/guide-step:1"),
+            None
+        );
+        assert_eq!(preset.step_from_link("guide-step:1?malformed"), None);
+        assert!(
+            !page(GuideLevel::Basic, 0)
+                .unwrap()
+                .description_markdown("ru")
+                .contains("guide-step:")
+        );
+    }
+
+    #[test]
+    fn unrelated_numbers_and_markdown_syntax_remain_unlinked() {
+        let examples =
+            "Version 2026 - stable; 99 - missing; <b>1 - hello</b>\n2 - second. [unsafe]";
+        let steps = page(GuideLevel::Basic, 1).unwrap().focus_steps();
+        let rendered = link_step_markers(examples, steps);
+        assert!(rendered.contains("2026 - stable"));
+        assert!(rendered.contains("99 - missing"));
+        assert!(rendered.contains("\\<b\\>"));
+        assert!(rendered.contains("[1](guide-step:1) - hello"));
+        assert!(rendered.contains("[2](guide-step:2) - second"));
+        assert!(rendered.contains("\\[unsafe\\]"));
+    }
+
+    #[test]
+    fn every_guide_link_resolves_only_within_its_page() {
+        for page in PAGES {
+            for locale in ["ru", "en"] {
+                let markdown = page.description_markdown(locale);
+                assert!(!markdown.is_empty());
+                for capture in GUIDE_STEP_MARKER.captures_iter(page.description(locale)) {
+                    let number = capture[1].parse::<u8>().unwrap_or(0);
+                    let expected = page.focus_steps().iter().any(|step| step.number == number);
+                    assert_eq!(
+                        markdown.contains(&format!("[{number}](guide-step:{number})")),
+                        expected,
+                        "page {} locale {locale} step {number}",
+                        page.id
+                    );
+                }
+            }
+        }
     }
 
     #[test]

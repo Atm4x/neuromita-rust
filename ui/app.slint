@@ -42,9 +42,15 @@ export component AppWindow inherits Window {
     in property <int> onboarding-guide-count: 3;
     in property <string> onboarding-guide-title;
     in property <string> onboarding-guide-description;
+    in property <styled-text> onboarding-guide-description-rich;
+    callback onboarding-guide-link-activated(string);
     in property <string> onboarding-guide-image;
     in property <string> onboarding-guide-wiki-url;
     in-out property <float> onboarding-guide-zoom: 1.0;
+    in-out property <int> onboarding-guide-sizing-mode: 0;
+    in-out property <length> onboarding-guide-pan-x: 0px;
+    in-out property <length> onboarding-guide-pan-y: 0px;
+    callback onboarding-guide-select-image-mode(int);
     in-out property <int> onboarding-guide-focus-step: 0;
     in property <float> onboarding-guide-focus-x: 0.5;
     in property <float> onboarding-guide-focus-y: 0.5;
@@ -166,7 +172,7 @@ export component AppWindow inherits Window {
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
                 guide => {
-                    root.onboarding-guide-zoom = 1.0;
+                    root.onboarding-guide-select-image-mode(0);
                     root.onboarding-guide-select-step(0);
                     root.onboarding-guide-visible = true;
                     root.onboarding-guide-navigate(0);
@@ -288,6 +294,9 @@ export component AppWindow inherits Window {
                     language: root.onboarding-language;
                     description: root.onboarding-guide-title;
                     zoom: root.onboarding-guide-zoom;
+                    sizing-mode: root.onboarding-guide-sizing-mode;
+                    pan-x <=> root.onboarding-guide-pan-x;
+                    pan-y <=> root.onboarding-guide-pan-y;
                     crop-left: root.onboarding-guide-crop-left;
                     crop-top: root.onboarding-guide-crop-top;
                     crop-right: root.onboarding-guide-crop-right;
@@ -329,11 +338,13 @@ export component AppWindow inherits Window {
                     height: 165px; background: transparent;
                     ScrollView {
                         width: parent.width; height: parent.height; content-width: self.visible-width;
-                        Text {
+                        StyledText {
                             x: 10px; y: 8px; width: parent.width - 20px;
                             height: self.preferred-height;
-                            text: root.onboarding-guide-description;
-                            color: Theme.muted; font-size: 13px; wrap: word-wrap;
+                            text: root.onboarding-guide-description-rich;
+                            color: Theme.muted; link-color: Theme.accent-hover;
+                            font-size: 13px; wrap: word-wrap;
+                            link-clicked(url) => { root.onboarding-guide-link-activated(url); }
                         }
                     }
                 }
@@ -352,15 +363,31 @@ export component AppWindow inherits Window {
                         activated => { root.onboarding-guide-zoom = max(1.0, root.onboarding-guide-zoom - 0.25); }
                     }
                     ActionSurface {
-                        width: 62px; height: 38px; label: "Fit image"; background: Theme.hover;
+                        width: 62px; height: 38px; label: "Fit image";
+                        selected: root.onboarding-guide-sizing-mode == 0;
+                        background: self.selected ? Theme.selected : Theme.hover;
                         Label { text: root.onboarding-language == "ru" ? "Вписать" : "Fit"; horizontal-alignment: center; }
-                        activated => { root.onboarding-guide-zoom = 1.0; }
+                        activated => { root.onboarding-guide-select-image-mode(0); }
+                    }
+                    ActionSurface {
+                        width: 53px; height: 38px; label: "Fit image width";
+                        selected: root.onboarding-guide-sizing-mode == 1;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Шир." : "Width"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-image-mode(1); }
+                    }
+                    ActionSurface {
+                        width: 40px; height: 38px; label: "Actual image pixels";
+                        selected: root.onboarding-guide-sizing-mode == 2;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "1:1"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-image-mode(2); }
                     }
                     ActionSurface {
                         width: 38px; height: 38px; label: "Zoom in";
-                        enabled: root.onboarding-guide-zoom < 2.5; background: Theme.hover;
+                        enabled: root.onboarding-guide-zoom < 6.0; background: Theme.hover;
                         Label { text: "+"; horizontal-alignment: center; }
-                        activated => { root.onboarding-guide-zoom = min(2.5, root.onboarding-guide-zoom + 0.25); }
+                        activated => { root.onboarding-guide-zoom = min(6.0, root.onboarding-guide-zoom + 0.25); }
                     }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Text { text: (root.onboarding-guide-page + 1) + " / " + root.onboarding-guide-count; color: Theme.muted; vertical-alignment: center; }
