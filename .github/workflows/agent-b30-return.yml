@@ -1,0 +1,42 @@
+name: Publish Agent B30 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b30-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 758afc8c0d4300574da1023e46c0b36ab7f4bc8f
+          fetch-depth: 0
+      - name: Verify and import B30 Git objects with preserved commit ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=758afc8c0d4300574da1023e46c0b36ab7f4bc8f
+          EXPECTED=a559cd85c7cccba14206aeac7f7fe5e8d3333668
+          SHA256=d3c15148f7e4db2ea0f10eeeaa1911a220c4c064a69da6e4097a6ffaf5e3df52
+          TARGET=refs/heads/codex/timeline-python-presentation-actions-20261107
+          git fetch origin refs/heads/bridge/agent-b30-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b30-20261107.bundle.b64 | base64 --decode > /tmp/agent-b30.bundle
+          echo "$SHA256  /tmp/agent-b30.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b30.bundle
+          git fetch /tmp/agent-b30.bundle refs/heads/codex/timeline-python-presentation-actions-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Destination already exists at unexpected SHA: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET at $IMPORTED"
