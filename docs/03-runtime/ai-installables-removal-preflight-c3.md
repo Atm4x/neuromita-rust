@@ -16,3 +16,7 @@ A point-in-time snapshot cannot prove there is no concurrent worker activation *
 A safe destructive operation requires a single application-owned operation holding lifecycle exclusion for the entire delete, a consistent inventory of saved selections/active workers, and cross-process publication/worker acquisition coordination. The backend shared-dependency contract must explicitly refuse deleting a still-referenced backend. Failure of any proof retains the immutable installed revision.
 
 The existing installer and worker APIs remain unchanged. This module is read-only and adds no persisted schema, PID lease, fallback, dependency, or root selection. It never edits Legacy code or imports settings ownership into the Python SDK.
+
+## Canonical path identity
+
+`RuntimeComposition` canonicalizes each installed layer before passing it to a Python worker. A raw install path may refer to the same directory through an alias in an injected ancestor. Preflight therefore compares the filesystem identity of existing paths using `canonicalize` for both saved selections and active worker imports. A UNIX regression covers an alias at the configured backend root with a worker holding the canonical path. Missing paths are left lexical for read-only reporting, **never promoted to deletion authorization**; future destructive removal must require a present, revalidated immutable receipt and exclusive lease.

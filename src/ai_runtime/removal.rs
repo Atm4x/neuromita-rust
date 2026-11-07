@@ -4,7 +4,10 @@
 //! another process or a subsequent worker activation will not acquire it.
 //! Physical removal requires an exclusive application-owned lifecycle boundary.
 
-use std::path::PathBuf;
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 use uuid::Uuid;
@@ -56,8 +59,9 @@ pub fn assess_backend(
 ) -> Result<RemovalAssessment, LayerError> {
     let path = installer.installed_path(backend)?;
     assess(&path, configured, running, |selection| {
+        let target = existing_identity(&path)?;
         for other in &selection.backends {
-            if installer.installed_path(other)? == path {
+            if existing_identity(&installer.installed_path(other)?)? == target {
                 return Ok(true);
             }
         }
@@ -73,8 +77,9 @@ pub fn assess_overlay(
 ) -> Result<RemovalAssessment, LayerError> {
     let path = installer.installed_path(overlay)?;
     assess(&path, configured, running, |selection| {
+        let target = existing_identity(&path)?;
         for other in &selection.overlays {
-            if installer.installed_path(other)? == path {
+            if existing_identity(&installer.installed_path(other)?)? == target {
                 return Ok(true);
             }
         }
@@ -83,7 +88,7 @@ pub fn assess_overlay(
 }
 
 fn assess(
-    path: &std::path::Path,
+    path: &Path,
     configured: &[ServiceSelection],
     running: &[ActiveWorkerLayers],
     selected: impl Fn(&ServiceSelection) -> Result<bool, LayerError>,
@@ -91,6 +96,7 @@ fn assess(
     if !path.is_absolute() {
         return Err(LayerError::Invalid("layer path must be absolute".into()));
     }
+    let resolved_path = existing_identity(path)?;
     let mut blockers = Vec::new();
     for selection in configured {
         if selected(selection)? {
@@ -101,7 +107,13 @@ fn assess(
         }
     }
     for worker in running {
-        if worker.paths.iter().any(|candidate| candidate == path) {
+        if worker
+            .paths
+            .iter()
+            .map(|candidate| existing_identity(candidate))
+            .collect::<Result<Vec<_>, _>>()?
+            .contains(&resolved_path)
+        {
             let blocker = RemovalBlocker::ActiveGeneration(worker.generation);
             if !blockers.contains(&blocker) {
                 blockers.push(blocker);
@@ -112,6 +124,14 @@ fn assess(
         path: path.to_owned(),
         blockers,
     })
+}
+
+fn existing_identity(path: &Path) -> Result<PathBuf, LayerError> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(path.to_owned()),
+        Err(error) => Err(LayerError::Io(error)),
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +268,51 @@ mod tests {
                 .blockers,
             vec![RemovalBlocker::SelectedBy(AiService::Tts)]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_import_paths_cannot_bypass_selected_layer_assessment() {
+        use std::os::unix::fs::symlink;
+
+        let (mut backend_installer, _) = installers();
+        let root = backend_installer
+            .backends_directory
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let actual = root.join("actual/backends");
+        std::fs::create_dir_all(actual.join("remote-api/shared1")).unwrap();
+        symlink(&actual, &backend_installer.backends_directory).unwrap();
+        let shared = backend();
+        let path = backend_installer.installed_path(&shared).unwrap();
+        let canonical = path.canonicalize().unwrap();
+        let generation = Uuid::new_v4();
+        let running = [ActiveWorkerLayers {
+            generation,
+            paths: vec![canonical],
+        }];
+        let assessment = assess_backend(&backend_installer, &shared, &[], &running).unwrap();
+        assert_eq!(
+            assessment.blockers,
+            vec![RemovalBlocker::ActiveGeneration(generation)]
+        );
+        backend_installer.backends_directory = actual;
+        let configured = [ServiceSelection {
+            service: AiService::Tts,
+            backends: vec![shared.clone()],
+            overlays: vec![],
+        }];
+        let assessment =
+            assess_backend(&backend_installer, &shared, &configured, &running).unwrap();
+        assert_eq!(
+            assessment.blockers,
+            vec![
+                RemovalBlocker::SelectedBy(AiService::Tts),
+                RemovalBlocker::ActiveGeneration(generation)
+            ]
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
