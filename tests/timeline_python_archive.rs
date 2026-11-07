@@ -660,3 +660,175 @@ fn python_detached_conversion_preserves_attachment_order_and_rejects_unknown_pla
         ))
     ));
 }
+
+fn python_presentation_fixture(source: &[u8]) -> Vec<u8> {
+    let mut doc: Value = serde_json::from_slice(source).unwrap();
+    let original = "59bcbaeb163b57fb939cc4589b16d8c4";
+    let existing_message = doc["events"][1]["payload"]["message_id"].clone();
+    let mutations = [
+        (
+            "revision:1",
+            "MessageRevised",
+            json!({
+                "event_id": original,
+                "message": {"content":"Исправлено", "message_id":existing_message}
+            }),
+        ),
+        ("hidden:1", "MessageHidden", json!({"event_ids":[original]})),
+        (
+            "restored:1",
+            "MessageRestored",
+            json!({"event_id":original}),
+        ),
+    ];
+    for (index, (id, kind, payload)) in mutations.into_iter().enumerate() {
+        let event = json!({
+            "event_id":id, "session_id":"session:русский", "branch_id":"main",
+            "sequence": 3 + index, "kind":kind, "payload":payload,
+            "actor_id":null, "observers":["A"], "links":[],
+            "occurred_at": format!("2026-11-07T06:28:44.74{}917+00:00", index),
+            "schema_version":1
+        });
+        doc["operations"].as_array_mut().unwrap().push(json!({
+            "branch_id":"main", "key":format!("present:{id}"),
+            "event_ids":[id], "intent":{"command":{},"events":[{
+                "event_id":id, "kind":kind, "payload":event["payload"].clone(),
+                "actor_id":null,"observers":["A"], "links":[], "schema_version":1
+            }]}
+        }));
+        doc["events"].as_array_mut().unwrap().push(event);
+    }
+    doc["branches"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|branch| branch["branch_id"] == "main")
+        .unwrap()["head_sequence"] = json!(5);
+    serde_json::to_vec(&doc).unwrap()
+}
+
+#[test]
+fn python_presentation_actions_preserve_canonical_targets_receipts_and_identity() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{EventKind, TimelineStore};
+    let source = inspect_python_archive(&python_presentation_fixture(PYTHON_ARCHIVE)).unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    assert_eq!(prepared.receipt_count(), 5);
+    let native = |key: &str| {
+        EventId(
+            source
+                .identities
+                .events
+                .iter()
+                .find(|event| event.source == key)
+                .unwrap()
+                .candidate_uuid,
+        )
+    };
+    let original = native("59bcbaeb163b57fb939cc4589b16d8c4");
+    let revision = &prepared.fact(native("revision:1")).unwrap().draft;
+    assert_eq!(revision.kind, EventKind::MessageRevised);
+    assert_eq!(revision.payload["event_id"], json!(original.0.to_string()));
+    assert_eq!(revision.payload["message"]["content"], "Исправлено");
+    assert!(revision.payload["message"].get("message_id").is_none());
+    let hidden = &prepared.fact(native("hidden:1")).unwrap().draft;
+    assert_eq!(hidden.kind, EventKind::MessageHidden);
+    assert_eq!(hidden.payload["event_ids"], json!([original.0.to_string()]));
+    let restored = &prepared.fact(native("restored:1")).unwrap().draft;
+    assert_eq!(restored.kind, EventKind::MessageRestored);
+    assert_eq!(restored.payload["event_id"], json!(original.0.to_string()));
+    assert_eq!(prepared.provenance(), &bound.provenance());
+}
+
+#[test]
+fn python_revision_rejects_ambiguous_layout_without_publishing_native_facts() {
+    use neuromita::timeline::domain::TimelineStore;
+    let mut doc: Value =
+        serde_json::from_slice(&python_presentation_fixture(PYTHON_ARCHIVE)).unwrap();
+    for event in doc["events"].as_array_mut().unwrap() {
+        if event["kind"] == "MessageRevised" {
+            event["payload"]["content"] = json!("contradictory");
+        }
+    }
+    for operation in doc["operations"].as_array_mut().unwrap() {
+        if operation["key"] == "present:revision:1" {
+            operation["intent"]["events"][0]["payload"]["content"] = json!("contradictory");
+        }
+    }
+    let source = inspect_python_archive(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let destination = TimelineStore::new();
+    let bound = source
+        .bind_memory(&destination, &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "unsupported Python presentation payload"
+        ))
+    ));
+    assert!(
+        destination
+            .session_provenance(bound.native_session())
+            .is_none()
+    );
+}
+
+#[test]
+fn python_revision_converts_verified_binary_attachments_without_cross_character_disclosure() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{TimelineMessagePart, TimelineStore, parse_message_content};
+    let mut doc: Value = serde_json::from_slice(&python_presentation_fixture(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    )))
+    .unwrap();
+    let image = doc["events"][1]["payload"]["attachments"][0].clone();
+    for event in doc["events"].as_array_mut().unwrap() {
+        if event["kind"] == "MessageRevised" {
+            event["payload"]["message"]["attachments"] = json!([image]);
+        }
+    }
+    let revision_payload = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "MessageRevised")
+        .unwrap()["payload"]
+        .clone();
+    for operation in doc["operations"].as_array_mut().unwrap() {
+        if operation["key"] == "present:revision:1" {
+            operation["intent"]["events"][0]["payload"] = revision_payload.clone();
+        }
+    }
+    let source = inspect_python_archive(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let revision = prepared
+        .fact(EventId(
+            source
+                .identities
+                .events
+                .iter()
+                .find(|event| event.source == "revision:1")
+                .unwrap()
+                .candidate_uuid,
+        ))
+        .unwrap();
+    let parts = parse_message_content(&revision.draft.payload["message"]["content"]).unwrap();
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(&parts[0], TimelineMessagePart::Text { text } if text == "Исправлено"));
+    assert!(
+        matches!(&parts[1], TimelineMessagePart::Image { asset } if asset.media_type == "image/png" && asset.size == 34)
+    );
+    assert_eq!(revision.draft.observers.len(), 1);
+    assert!(
+        revision
+            .draft
+            .observers
+            .contains(&neuromita::character::CharacterId::Crazy)
+    );
+}
