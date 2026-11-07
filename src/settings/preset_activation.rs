@@ -144,6 +144,7 @@ impl PresetActivation {
                 Err(_) => PresetActivationError::RecoveryRequired,
             });
         }
+        crash_test_checkpoint("prepared");
         let result = (|| -> Result<(), PresetActivationError> {
             // Refuse stale snapshots before the first mutation. This is not a
             // replacement for ensuring the application has been shut down.
@@ -154,6 +155,7 @@ impl PresetActivation {
             }
             for i in 0..2 {
                 install_bytes(&journal, active, NAMES[i], &new[i])?;
+                crash_test_checkpoint(if i == 0 { "installed-0" } else { "installed-1" });
                 if fail_after_install == Some(i) {
                     return Err(PresetActivationError::SnapshotConflict);
                 }
@@ -161,6 +163,7 @@ impl PresetActivation {
             sync_dir(active)?;
             write_private(&journal.join("committed"), b"")?;
             sync_dir(&journal)?;
+            crash_test_checkpoint("committed");
             Ok(())
         })();
         if let Err(error) = result {
@@ -202,22 +205,31 @@ impl PresetActivation {
         } else if prepared {
             let mut old = Vec::with_capacity(2);
             for (i, limit) in MAX_BYTES.iter().enumerate() {
-                let old_path = journal.join(format!("old-{i}"));
-                let snapshot = read_file(&old_path, *limit)?;
+                let snapshot = read_file(&journal.join(format!("old-{i}")), *limit)?;
                 let present = read_file(&journal.join(format!("present-{i}")), 0)?.is_some();
                 if snapshot.is_some() != present {
                     return Err(PresetActivationError::RecoveryRequired);
                 }
-                old.push(snapshot);
-                // Staged new snapshot must exist before any recovery rewrite.
-                if read_file(&journal.join(format!("new-{i}")), *limit)?.is_none() {
-                    return Err(PresetActivationError::RecoveryRequired);
+                let next = read_file(&journal.join(format!("new-{i}")), *limit)?
+                    .ok_or(PresetActivationError::RecoveryRequired)?;
+                let current = read_file(&active.join(NAMES[i]), *limit)?;
+                if let Some(current) = current.as_deref()
+                    && Some(current) != snapshot.as_deref()
+                    && current != next
+                {
+                    // An external writer changed the file after the crash.
+                    // Refuse recovery rather than overwriting unrelated data.
+                    return Err(PresetActivationError::SnapshotConflict);
                 }
+                old.push(snapshot);
             }
             for i in 0..2 {
                 match &old[i] {
                     Some(bytes) => install_bytes(&journal, active, NAMES[i], bytes)?,
                     None => remove_target(&journal, active, NAMES[i])?,
+                }
+                if i == 0 {
+                    crash_test_checkpoint("recovered-0");
                 }
             }
             sync_dir(active)?;
@@ -354,6 +366,19 @@ fn finish_journal(active: &Path, journal: &Path) -> Result<(), PresetActivationE
     sync_dir(active)?;
     Ok(())
 }
+
+// Crash points are compiled into unit tests only. Production builds have no
+// environment-controlled termination path.
+#[cfg(test)]
+fn crash_test_checkpoint(point: &str) {
+    if std::env::var("NEUROMITA_PRESET_TEST_ABORT_AT").as_deref() == Ok(point) {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn crash_test_checkpoint(_: &str) {}
 
 #[cfg(test)]
 mod tests {
@@ -513,6 +538,188 @@ mod tests {
             PresetActivation::recover(root.path()),
             Err(PresetActivationError::RecoveryRequired)
         ));
+        assert!(journal.exists());
+    }
+
+    fn fixture_input(id: u32) -> (Vec<u8>, Vec<u8>) {
+        let templates = serde_json::json!({"templates":{"3":{
+            "name":"Google", "protocol_id":"google_gemini_default",
+            "url":"", "default_model":"gemini-2.5-flash"
+        }}});
+        let presets = serde_json::json!({"presets":{id.to_string():{
+            "id":id, "name":format!("Preset {id}"), "base":3,
+            "protocol_id":"", "protocol_overrides":{}, "url":"",
+            "default_model":"gemini-2.5-flash", "key":format!("private-{id}"),
+            "model_settings":{"values":{
+                "temperature":1.0,"max_tokens":3000,"thinking_level":"minimal"
+            },"enabled":["max_tokens","thinking_level"]}
+        }}});
+        (
+            serde_json::to_vec(&presets).unwrap(),
+            serde_json::to_vec(&templates).unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    fn crash_fixture(
+        root: &Root,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        [Vec<u8>; 2],
+        [Vec<u8>; 2],
+    ) {
+        let active = root.path().join("UserData");
+        fs::create_dir(&active).unwrap();
+        let (old_presets, old_templates) = fixture_input(7);
+        let old_stage = PythonPresetStage::prepare(&old_presets, &old_templates).unwrap();
+        let old = [
+            old_stage.file(NAMES[0]).unwrap().to_vec(),
+            old_stage.file(NAMES[1]).unwrap().to_vec(),
+        ];
+        for (name, bytes) in NAMES.iter().zip(old.iter()) {
+            write_private(&active.join(name), bytes).unwrap();
+        }
+        let (incoming, templates) = fixture_input(18);
+        let next_stage = PythonPresetStage::prepare(&incoming, &templates)
+            .unwrap()
+            .merge_with_existing(Some(&old[0]), Some(&old[1]))
+            .unwrap();
+        let next = [
+            next_stage.file(NAMES[0]).unwrap().to_vec(),
+            next_stage.file(NAMES[1]).unwrap().to_vec(),
+        ];
+        let review = root.path().join("review с пробелами");
+        next_stage.stage_new_directory(&review).unwrap();
+        (review, active, old, next)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_child_runner() {
+        let Ok(marker) = std::env::var("NEUROMITA_PRESET_TEST_ABORT_AT") else {
+            return;
+        };
+        let active = std::path::PathBuf::from(std::env::var_os("NEUROMITA_TEST_ACTIVE").unwrap());
+        if marker == "recovered-0" {
+            PresetActivation::recover(&active).unwrap();
+        } else {
+            let review =
+                std::path::PathBuf::from(std::env::var_os("NEUROMITA_TEST_REVIEW").unwrap());
+            PresetActivation::apply(&review, &active).unwrap();
+        }
+        panic!("crash injection point {marker} was not reached");
+    }
+
+    #[cfg(unix)]
+    fn abort_process_at(marker: &str, review: &Path, active: &Path) {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("settings::preset_activation::tests::abort_child_runner")
+            .arg("--nocapture")
+            .env("NEUROMITA_PRESET_TEST_ABORT_AT", marker)
+            .env("NEUROMITA_TEST_REVIEW", review)
+            .env("NEUROMITA_TEST_ACTIVE", active)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(6),
+            "{marker}: child did not abort at checkpoint: {status}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actual_subprocess_crashes_recover_both_files_at_every_commit_boundary() {
+        for marker in ["prepared", "installed-0", "installed-1", "committed"] {
+            let root = Root::new();
+            let (review, active, old, next) = crash_fixture(&root);
+            abort_process_at(marker, &review, &active);
+            assert!(matches!(
+                PresetActivation::ensure_ready(&active),
+                Err(PresetActivationError::RecoveryRequired)
+            ));
+            let result = PresetActivation::recover(&active).unwrap();
+            let expected = if marker == "committed" {
+                assert_eq!(result, PresetRecovery::Committed);
+                &next
+            } else {
+                assert_eq!(result, PresetRecovery::RolledBack);
+                &old
+            };
+            for (name, bytes) in NAMES.iter().zip(expected.iter()) {
+                assert_eq!(
+                    fs::read(active.join(name)).unwrap(),
+                    *bytes,
+                    "{marker} {name}"
+                );
+            }
+            assert_eq!(
+                PresetActivation::recover(&active).unwrap(),
+                PresetRecovery::NoJournal
+            );
+            PresetActivation::ensure_ready(&active).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_is_idempotent_after_a_second_real_process_crash() {
+        let root = Root::new();
+        let (review, active, old, _) = crash_fixture(&root);
+        abort_process_at("installed-0", &review, &active);
+        abort_process_at("recovered-0", &review, &active);
+        assert!(matches!(
+            PresetActivation::ensure_ready(&active),
+            Err(PresetActivationError::RecoveryRequired)
+        ));
+        assert_eq!(
+            PresetActivation::recover(&active).unwrap(),
+            PresetRecovery::RolledBack
+        );
+        for (name, bytes) in NAMES.iter().zip(old.iter()) {
+            assert_eq!(fs::read(active.join(name)).unwrap(), *bytes);
+        }
+        assert_eq!(
+            PresetActivation::recover(&active).unwrap(),
+            PresetRecovery::NoJournal
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_external_mutation_before_replacing_either_file() {
+        let root = Root::new();
+        let journal = root.path().join(JOURNAL);
+        create_private_dir(&journal).unwrap();
+        for (i, name) in NAMES.iter().enumerate() {
+            write_private(
+                &journal.join(format!("old-{i}")),
+                format!("old-{i}").as_bytes(),
+            )
+            .unwrap();
+            write_private(
+                &journal.join(format!("new-{i}")),
+                format!("new-{i}").as_bytes(),
+            )
+            .unwrap();
+            write_private(&journal.join(format!("present-{i}")), b"").unwrap();
+            write_private(&root.path().join(name), format!("new-{i}").as_bytes()).unwrap();
+        }
+        write_private(&journal.join("prepared"), b"").unwrap();
+        fs::write(root.path().join(NAMES[1]), b"outside writer data").unwrap();
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(fs::read(root.path().join(NAMES[0])).unwrap(), b"new-0");
+        assert_eq!(
+            fs::read(root.path().join(NAMES[1])).unwrap(),
+            b"outside writer data"
+        );
         assert!(journal.exists());
     }
 }
