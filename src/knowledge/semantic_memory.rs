@@ -334,6 +334,26 @@ impl SemanticMemoryRetriever {
         .await
     }
 
+    /// Rank only facts that were already admitted by an explicit, validated
+    /// forgotten-memory recall. Never broaden the selected IDs to the corpus.
+    pub(crate) async fn retrieve_recalled_forgotten(
+        &self,
+        character: CharacterId,
+        records: Vec<MemoryRecord>,
+        query: &str,
+        mode: FusionMode,
+    ) -> Result<RetrievedMemory, EmbeddingError> {
+        self.retrieve_admitted_with_fusion(
+            character,
+            records,
+            query,
+            SemanticRetrievalFilter::all(),
+            mode,
+            true,
+        )
+        .await
+    }
+
     async fn retrieve_admitted_with_fusion(
         &self,
         character: CharacterId,

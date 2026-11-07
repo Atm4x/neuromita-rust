@@ -1,4 +1,4 @@
-//! Explicit, snapshot-bound inspection of forgotten facts. Never a prompt input.
+//! Explicit, snapshot-bound inspection of forgotten facts. Never an implicit prompt input.
 
 use std::collections::BTreeSet;
 
