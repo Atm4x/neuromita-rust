@@ -8,6 +8,7 @@ The host owns starting/stopping this process and must protect its session file.
 import asyncio
 import base64
 import json
+import os
 import sys
 
 try:
@@ -38,6 +39,8 @@ async def handle(req):
         session = str(req["session"])
         if not (api_id > 0 and api_hash and phone and session):
             raise ValueError("invalid_credentials")
+        if os.name == "posix":
+            os.umask(0o077)
         client = TelegramClient(session, api_id, api_hash)
         await asyncio.wait_for(client.connect(), 30)
         authorized = await client.is_user_authorized()
