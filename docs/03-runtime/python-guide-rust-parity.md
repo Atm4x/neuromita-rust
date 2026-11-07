@@ -139,3 +139,33 @@ packages and isolated Linux linker/pkg-config shims (outside the repository):
 These are compilation and source-level proofs, **not** Windows/desktop E2E or
 pixel-accurate image focus acceptance. GUI interaction tests, local Wiki
 routing and inline rich-text step hotspots remain open. Issue #41 must stay open until those are validated.
+
+## D19 — inline step links and image inspection
+
+The Guide text is now rendered by Slint 1.18.1 `StyledText` with styled markup
+prepared from the canonical `GuidePage` descriptions, not from a second list of
+instructions. The formatter recognizes the source's numbered `N -` control
+markers only when `N` exists in the current page's typed `focus_steps` catalog;
+unrelated numbers, non-existent targets and Markdown punctuation are preserved
+as regular escaped text. Links have the local `guide-step:N` scheme. The GUI
+callback validates that the full scheme and canonical number match a target on
+the *currently visible page* before calling the pre-existing focus handler.
+Unknown links cannot open external URLs or move the screenshot. The accessible
+numbered step chips remain available as an alternative navigation path.
+
+`GuideMedia` supports Fit (contain), Width (fit cropped image width), and 1:1
+(original cropped image pixel dimensions at Slint logical-pixel scale) sizing.
+The zoom controls run from 1x to 6x relative to the current sizing mode.
+When an image is larger than the viewport, pointer dragging pans it with
+clamping; selecting a numbered step resets manual pan and centers the selected
+focus rectangle. Resizing the window recalculates width/fit sizing. New page,
+Guide level, and Guide language changes reset zoom, mode, focus and pan.
+Image crop coordinates and all 64 focus rectangles remain in the same Rust
+catalog introduced in D16.
+
+The following still require work: transient link-hover focus (Slint `StyledText`
+exposes `link-clicked` but no per-link hover callback), actual-size/high-DPI
+visual acceptance, pixel-accurate image behavior, local/offline Wiki article
+routing (the current `PageId::Wiki` is a placeholder), and Windows GUI E2E.
+The existing external historical Wiki URL is not an offline navigation route.
+Onboarding consent and the canonical SettingsOwner remain unchanged.
