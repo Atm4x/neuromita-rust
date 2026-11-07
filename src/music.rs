@@ -265,7 +265,91 @@ impl BeatCache {
         result.map_err(BeatCacheError::Io)
     }
 
+    /// Run a producer against exactly the bytes used to form the cache key.
+    /// The producer MUST return unfiltered confidence values; in particular a
+    /// legacy Python beats worker must be called with min_confidence = 0.0.
+    /// Cache I/O is best effort and never hides a successful analysis.
+    pub fn analyze_or_reuse<F, E>(
+        &self,
+        audio: &[u8],
+        backend: BeatBackend,
+        backend_revision: &str,
+        decoder_revision: &str,
+        analysis_settings_revision: &str,
+        min_confidence: f32,
+        producer: F,
+    ) -> Result<BeatAnalysisOutcome, BeatPipelineError<E>>
+    where
+        F: FnOnce(&[u8]) -> Result<BeatTimeline, E>,
+    {
+        if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+            return Err(BeatPipelineError::Cache(BeatCacheError::InvalidThreshold));
+        }
+        let key = BeatCacheKey::for_audio_bytes(
+            audio,
+            backend,
+            backend_revision,
+            decoder_revision,
+            analysis_settings_revision,
+        );
+        key.validate().map_err(BeatPipelineError::Cache)?;
+        let mut cache_warning = None;
+        let mut corrupt_cache = false;
+        match self.lookup(&key) {
+            Ok(CacheLookup::Hit(timeline)) => {
+                return Ok(BeatAnalysisOutcome {
+                    timeline: timeline
+                        .with_min_confidence(min_confidence)
+                        .map_err(BeatPipelineError::Cache)?,
+                    origin: BeatResultOrigin::Cache,
+                    corrupt_cache: false,
+                    cache_warning: None,
+                });
+            }
+            Ok(CacheLookup::Corrupt) => corrupt_cache = true,
+            Ok(CacheLookup::Miss) => {}
+            Err(BeatCacheError::Io(error)) => {
+                cache_warning = Some(BeatCacheError::Io(error));
+            }
+            Err(error) => return Err(BeatPipelineError::Cache(error)),
+        }
+        let raw = producer(audio).map_err(BeatPipelineError::Analyzer)?;
+        let filtered = raw
+            .with_min_confidence(min_confidence)
+            .map_err(BeatPipelineError::Cache)?;
+        if let Err(error) = self.store(&key, &raw) {
+            cache_warning = Some(error);
+        }
+        Ok(BeatAnalysisOutcome {
+            timeline: filtered,
+            origin: BeatResultOrigin::Analysis,
+            corrupt_cache,
+            cache_warning,
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeatResultOrigin {
+    Cache,
+    Analysis,
+}
+
+/// A cache error is reported as a warning when fresh analysis succeeded.
+#[derive(Debug)]
+pub struct BeatAnalysisOutcome {
+    pub timeline: BeatTimeline,
+    pub origin: BeatResultOrigin,
+    pub corrupt_cache: bool,
+    pub cache_warning: Option<BeatCacheError>,
+}
+
+#[derive(Debug)]
+pub enum BeatPipelineError<E> {
+    Cache(BeatCacheError),
+    Analyzer(E),
 }
