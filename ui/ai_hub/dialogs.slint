@@ -74,7 +74,7 @@ export component AiHubOperationDialog inherits Rectangle {
     visible: root.open;
     background: #070612ce;
     clip: true;
-    accessible-role: dialog;
+    accessible-role: region;
     changed open => {
         if root.open { modal-focus.focus(); }
     }
