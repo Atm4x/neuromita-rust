@@ -1,0 +1,56 @@
+name: Agent B54 verified live pagination and selection copy
+on:
+  push:
+    branches: [bridge/agent-b54-chat-copy-pages-20261108]
+    paths: [bridge/agent-b54.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify pinned source and publish linear B54 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=f31fbb7eab78a42dd7704fcb51193fefb0597a99
+          tree=ab35c4adc23f682ad481bf3c9a3c2fbddc95e255
+          branch=codex/timeline-b54-live-page-retention-copy-20261108
+          base64 -d bridge/agent-b54.patch.gz.b64 >/tmp/b54.patch.gz
+          echo "cbd939f3d51333c7884e5dcf561ac55faad014ab0e3f3deec5ad8bc9ed03c1be  /tmp/b54.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b54.patch.gz
+          gzip -dc /tmp/b54.patch.gz >/tmp/b54.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b54.patch
+          git apply --index /tmp/b54.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(chat): retain loaded older pages on live replies and offer selectable message text"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B54 branch exists"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$(git rev-parse HEAD)"
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Install GUI Linux build packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Executable Slint history-pager regression
+        run: cargo test --locked --offline --features gui --bin neuromita-gui chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows -- --test-threads=1
+      - name: Executable Slint selection-copy dialog regression
+        run: cargo test --locked --offline --features gui --bin neuromita-gui chat_copy_selection_dialog_scopes_text_to_active_character -- --test-threads=1
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
