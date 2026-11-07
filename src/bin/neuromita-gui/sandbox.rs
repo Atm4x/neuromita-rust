@@ -487,9 +487,55 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
             .filter(|r| !r.snapshot.state.is_terminal())
             .count() as i32,
     );
-    window.set_chat_messages(ModelRc::new(VecModel::from(rows(snapshot))));
+    reconcile_rows(window, rows(snapshot));
     if let Some(error) = &snapshot.requests.discovery_error {
         window.set_chat_error(error.to_string().into());
+    }
+}
+
+fn same_row_identity(current: &ChatRow, next: &ChatRow) -> bool {
+    if !current.request_id.is_empty() || !next.request_id.is_empty() {
+        return !current.request_id.is_empty() && current.request_id == next.request_id;
+    }
+    !current.sequence.is_empty()
+        && current.sequence == next.sequence
+        && current.user == next.user
+        && current.speaker == next.speaker
+}
+
+pub(super) fn reconcile_rows(window: &AppWindow, next: Vec<ChatRow>) {
+    let model = window.get_chat_messages();
+    let Some(rows) = model.as_any().downcast_ref::<VecModel<ChatRow>>() else {
+        window.set_chat_messages(ModelRc::new(VecModel::from(next)));
+        return;
+    };
+    for (index, desired) in next.iter().enumerate() {
+        match rows.row_data(index) {
+            Some(current) if same_row_identity(&current, desired) => {
+                if current != *desired {
+                    rows.set_row_data(index, desired.clone());
+                }
+            }
+            Some(_) => {
+                if let Some(later) = ((index + 1)..rows.row_count()).find(|&position| {
+                    rows.row_data(position)
+                        .is_some_and(|row| same_row_identity(&row, desired))
+                }) {
+                    for _ in index..later {
+                        rows.remove(index);
+                    }
+                    if rows.row_data(index).is_some_and(|row| row != *desired) {
+                        rows.set_row_data(index, desired.clone());
+                    }
+                } else {
+                    rows.insert(index, desired.clone());
+                }
+            }
+            None => rows.push(desired.clone()),
+        }
+    }
+    while rows.row_count() > next.len() {
+        rows.remove(next.len());
     }
 }
 

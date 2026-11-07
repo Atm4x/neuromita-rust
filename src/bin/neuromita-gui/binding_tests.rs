@@ -427,6 +427,82 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 }
 
 #[test]
+fn chat_refresh_and_live_reconcile_preserves_model_and_deduplicates_rows() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    use super::super::sandbox::reconcile_rows;
+    use super::super::view::{ChatRow, ChatStatus};
+
+    let user = ChatRow {
+        sequence: "#1".into(),
+        text: "player".into(),
+        user: true,
+        ..Default::default()
+    };
+    let pending = ChatRow {
+        request_id: "1234".into(),
+        text: "draft".into(),
+        status: ChatStatus::Text,
+        ..Default::default()
+    };
+    let accepted = ChatRow {
+        sequence: "#2".into(),
+        text: "final".into(),
+        status: ChatStatus::Success,
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![user.clone(), pending.clone()]);
+    let model = window.get_chat_messages();
+    assert_eq!(model.row_count(), 2);
+    reconcile_rows(&window, vec![user.clone(), pending.clone()]);
+    assert_eq!(
+        model,
+        window.get_chat_messages(),
+        "refresh must retain the model"
+    );
+    assert_eq!(model.row_count(), 2);
+
+    let streaming = ChatRow {
+        text: "draft updated".into(),
+        ..pending.clone()
+    };
+    reconcile_rows(&window, vec![user.clone(), streaming.clone()]);
+    assert_eq!(model, window.get_chat_messages());
+    assert_eq!(model.row_data(1), Some(streaming));
+    reconcile_rows(&window, vec![user.clone(), accepted.clone()]);
+    reconcile_rows(&window, vec![user.clone(), accepted.clone()]);
+    assert_eq!(
+        model.row_count(),
+        2,
+        "accepted message replaces the request row"
+    );
+    assert_eq!(model.row_data(1), Some(accepted.clone()));
+
+    let newest = ChatRow {
+        sequence: "#3".into(),
+        text: "newer".into(),
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![accepted.clone(), newest.clone()]);
+    assert_eq!(model, window.get_chat_messages());
+    assert_eq!(model.row_count(), 2);
+    assert_eq!(model.row_data(0), Some(accepted));
+    assert_eq!(model.row_data(1), Some(newest));
+
+    let other_branch = ChatRow {
+        sequence: "#1".into(),
+        text: "other branch".into(),
+        user: true,
+        ..Default::default()
+    };
+    reconcile_rows(&window, vec![other_branch.clone()]);
+    assert_eq!(model.row_count(), 1);
+    assert_eq!(model.row_data(0), Some(other_branch));
+    window.hide().unwrap();
+}
+
+#[test]
 fn chat_feedback_and_asr_callbacks_are_scoped_to_selection_revision() {
     slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
     let window = AppWindow::new().unwrap();
