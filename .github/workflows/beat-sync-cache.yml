@@ -36,6 +36,8 @@ jobs:
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add src/music.rs src/music/ tests/beat_sync_runtime.rs tests/beat_sync_cache.rs
             git commit -m 'style(music): rustfmt on native Beat Sync runtime'
+            git fetch origin codex/beat-sync-cache-29
+            git rebase FETCH_HEAD
             git push origin HEAD:codex/beat-sync-cache-29
           fi
       - name: Check formatting
