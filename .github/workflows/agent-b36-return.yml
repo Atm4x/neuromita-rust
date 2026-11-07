@@ -1,0 +1,42 @@
+name: Publish Agent B36 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b36-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0bb287a4d64c9e8d10b53d61e1a517d6aea525f3
+          fetch-depth: 0
+      - name: Verify and publish B36 commit without rewriting history
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=0bb287a4d64c9e8d10b53d61e1a517d6aea525f3
+          EXPECTED=f10461c4c8f7a80cee2748bfcd1e718426992da2
+          SHA256=c37d70226f969f6d1d798f53b9c8e13562322938d67914a434aa2d831cb6fc89
+          TARGET=refs/heads/codex/timeline-python-receipt-parity-20261107
+          git fetch origin refs/heads/bridge/agent-b36-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b36-20261107.bundle.b64 | base64 --decode > /tmp/agent-b36.bundle
+          echo "$SHA256  /tmp/agent-b36.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify /tmp/agent-b36.bundle
+          git fetch /tmp/agent-b36.bundle HEAD
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Conflicting destination: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
+          echo "Published $TARGET @ $IMPORTED"
