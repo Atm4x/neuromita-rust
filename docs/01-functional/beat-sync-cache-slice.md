@@ -30,10 +30,9 @@ results. Writes use unique staged files with file sync and rename. This slice
 has neither a cross-process writer lease nor directory-fsync durability, so
 those aspects require separate review before concurrent production activation.
 
-Not implemented: reading local audio files, performing beats inference, Python
-worker lifecycle/cancellation, progressive computation, Unity status events,
-GUI cache management, and batch reindex. Tests cover repeated lookup, identity
-invalidation, threshold reuse, corruption recovery, and invalid fixture data.
+The initial cache-only paragraph is superseded by the native DSP runtime
+implementation and integration status below. The optional Python model workers
+and end-user GUI remain distinct future integration work.
 
 ## Review update — 2026-11-07
 
@@ -112,3 +111,75 @@ raw-confidence contract, nor can it guarantee worker cancellation.
 End-to-end parity requires a worker with a verifiable raw-output
 contract and real fixture coverage. Source file path → immutable byte
 snapshot → actual decoder/worker still needs a dedicated implementation.
+
+## Native DSP runtime and GameLink integration (2026-11-07)
+
+The new `music::wav` parser accepts bounded RIFF/WAVE files with PCM16,
+PCM24, PCM32 or IEEE float32 (mono/stereo/multichannel downmix, 1–8 channels,
+8–192 kHz). Inputs are capped at 64 MiB and 15 minutes; truncated, unsupported,
+invalid samples, oversized audio and cancellation are explicit errors.
+The native `dsp_energy_onset_v1` algorithm detects energy transients with
+10-ms windows and a minimum beat separation, then estimates BPM from the
+median interval. It is a **new deliberately named fallback**, not a
+numerically equivalent port of Python spectral-flux DSP or Beat This.
+
+`BeatRuntime` now provides one immutable-source read, cache-first analysis,
+post-analysis confidence filtering, optional game event emission, and bounded
+recursive WAV-only build-missing indexing (10,000 files, 16 levels).
+File hashes, decoder and analyzer revision form the content-addressed cache
+identity. The `beat_sync` binary provides a direct reproducible smoke route:
+
+```text
+cargo run --locked --offline --bin beat_sync -- /absolute/path/track.wav /absolute/path/cache
+```
+
+GameLink is opt-in via `ApplicationConfig::game_beats` with a
+`GameBeatConfig { media_root, cache_root, enabled }`. Without an explicit
+config it is **disabled**. The root is canonicalized at binding; the GameLink
+command accepts only WAV files whose canonical resolved path is inside this
+root. At most two parallel jobs are admitted; each carries a cancellation
+token and an owned game-session request ID. The job runs off the async
+transport executor. A session can ask for:
+
+```json
+{"command_id":"<uuid>","command":"get_music_beat_status"}
+{"command_id":"<uuid>","command":"get_music_beats","request_id":"<uuid>","audio_path":"track.wav","track_name":"track","stream":true,"min_confidence":0.2,"backend":"dsp"}
+{"command_id":"<uuid>","command":"cancel_music_beats","request_id":"<uuid>"}
+```
+
+The accepted request emits `music_beats_accepted` (command receipt),
+then `music_beats_job_started` and either a `music_beats_ready`
+with beats when `stream=false`, or one `music_beats_chunk`
+and summary-only `music_beats_ready` when `stream=true`.
+Failures emit `music_beats_error`; malformed/rejected requests use the
+existing GameLink `error` response. The transport does not pretend that
+the single completed chunk represents progressive decoding or inference.
+
+Readiness reports only DSP as available. `BeatThis` and `Librosa`
+preferences are explicitly rejected rather than silently pretending a
+model was initialized. `Auto` uses the native DSP implementation as
+the only available fallback. Model installation, GPU readiness, external
+Python worker activation, non-WAV codec support, interactive GUI cache
+management, and verified live Unity animations are NOT included in this
+native fallback scope.
+
+### Validation and residual risks
+
+`tests/beat_sync_runtime.rs` generates actual WAV fixtures and checks
+tempo/onsets, cache reuse, error/cancel, source snapshot behavior, streaming
+event payloads and batch indexing. `tests/game_beat_sync.rs` exercises
+a real GameLink TCP socket (hello, status, request, ready), and rejects a
+path traversal attempt. The CI workflow runs these plus the existing
+cache tests, all-target strict Clippy, rustfmt and the full offline
+Rust suite with Python 3.12 available.
+
+This still does **not** establish parity with Python's BeatThis/Librosa
+models, musical quality on real-world tracks, or Unity visual behavior.
+Long audio and hostile concurrent file replacement require dedicated
+integration tests. The GameLink adapter validates path scope but does not
+provide a sandbox against a malicious *local process* racing file changes;
+the local game transport is restricted to loopback. Source snapshots and
+worker cancellation are bounded, but an external model worker is not yet
+connected.
+
+Do not close #29 as fully completed based on this native DSP milestone alone.
