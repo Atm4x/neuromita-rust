@@ -180,6 +180,10 @@ impl CharacterMessageProjection {
         messages
     }
 
+    pub fn observer(&self) -> CharacterId {
+        self.character
+    }
+
     pub fn count(&self) -> usize {
         self.visible.len()
     }
