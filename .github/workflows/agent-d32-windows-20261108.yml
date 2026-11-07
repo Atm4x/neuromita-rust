@@ -1,0 +1,36 @@
+name: Agent D32 pinned Windows historical Python presets
+on:
+  push:
+    branches: [codex/bridge-agent-d32-windows-20261108]
+permissions:
+  contents: read
+jobs:
+  native-windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Pin exact product commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e 04c48ae3cacd9c68be166d83ee3857cf7cbf77e1^{commit}
+          test "$(git rev-parse 04c48ae3cacd9c68be166d83ee3857cf7cbf77e1^{tree})" = c1f3944449dff5fde1b70ce794ee4537a5f6b03e
+          git checkout --detach 04c48ae3cacd9c68be166d83ee3857cf7cbf77e1
+          test "$(git rev-parse HEAD)" = 04c48ae3cacd9c68be166d83ee3857cf7cbf77e1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native historical staging and recovery
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_preset_staging -- --test-threads=8
+          cargo test --locked --offline --test python_preset_preferences -- --test-threads=8
+          cargo test --locked --offline --test python_preset_activation -- --test-threads=8
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo check --locked --offline --all-targets
