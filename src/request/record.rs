@@ -470,6 +470,13 @@ impl RequestRecord {
         combined.push_str(delta);
         let mut snapshot = (*inner.snapshot).clone();
         snapshot.revision += 1;
+        if snapshot
+            .tool_activity
+            .as_ref()
+            .is_some_and(|activity| !activity.executing)
+        {
+            snapshot.tool_activity = None;
+        }
         snapshot.streamed_text = super::stream_preview::spoken_prefix(&combined).map(Arc::from);
         snapshot.streamed_json = Some(Arc::from(combined));
         inner.snapshot = Arc::new(snapshot);
@@ -776,6 +783,50 @@ mod tests {
         let terminal = handle.snapshot();
         assert!(matches!(terminal.state, RequestState::Cancelled));
         assert!(terminal.tool_activity.is_none());
+    }
+
+    #[test]
+    fn completed_tool_activity_does_not_shadow_follow_up_stream_preview() {
+        let registry = RequestRegistry::new(4);
+        let handle = registry.register(
+            Box::new(request()),
+            RequestId::new(),
+            TimelineAdmission {
+                selection: selection(),
+                context_epoch: 0,
+            },
+        );
+        let record = Arc::clone(&handle.record);
+        assert!(record.try_start().is_some());
+        let args = serde_json::json!({"expression": "2+3"});
+        record.tool_started("calculator", args.as_object().unwrap(), "Проверяю");
+        record.tool_finished();
+        record.stream_reset();
+        let waiting = handle.snapshot();
+        assert_eq!(
+            waiting.tool_activity.as_ref().unwrap().name.as_ref(),
+            "calculator"
+        );
+        assert!(!waiting.tool_activity.as_ref().unwrap().executing);
+        assert_eq!(waiting.streamed_text.as_deref(), Some("Проверяю"));
+
+        record.stream_delta("{\"segments\":[{\"text\":\"Новый ответ\"}]}");
+        let resumed = handle.snapshot();
+        assert_eq!(resumed.streamed_text.as_deref(), Some("Новый ответ"));
+        assert!(
+            resumed.tool_activity.is_none(),
+            "finished tool must not shadow a new answer"
+        );
+        assert!(matches!(
+            resumed.state,
+            RequestState::Processing(ProcessingStage::GeneratingText)
+        ));
+        assert_eq!(handle.cancel(), CancelResult::Requested);
+        record.finish_cancelled();
+        let cancelled = handle.snapshot();
+        assert!(cancelled.tool_activity.is_none());
+        assert!(cancelled.streamed_json.is_none());
+        assert!(cancelled.streamed_text.is_none());
     }
 
     #[test]

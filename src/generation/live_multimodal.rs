@@ -1411,6 +1411,10 @@ mod live_http_tests {
         deltas: Vec<String>,
         replies: Vec<super::super::ProviderReply>,
         failures: Vec<String>,
+        stream_resets: usize,
+        started_tools: Vec<String>,
+        finished_tools: usize,
+        first_delta: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
     impl GenerationObserver for StreamObserve {
@@ -1420,6 +1424,9 @@ mod live_http_tests {
 
         fn stream_delta(&mut self, delta: &str) {
             self.deltas.push(delta.to_owned());
+            if let Some(signal) = self.first_delta.take() {
+                let _ = signal.send(());
+            }
         }
 
         fn response_received(&mut self, reply: super::super::ProviderReply) {
@@ -1428,6 +1435,23 @@ mod live_http_tests {
 
         fn failed(&mut self, error: &GenerationError) {
             self.failures.push(error.to_string());
+        }
+
+        fn stream_reset(&mut self) {
+            self.stream_resets += 1;
+        }
+
+        fn tool_started(
+            &mut self,
+            name: &str,
+            _args: &serde_json::Map<String, Value>,
+            _spoken: &str,
+        ) {
+            self.started_tools.push(name.to_owned());
+        }
+
+        fn tool_finished(&mut self) {
+            self.finished_tools += 1;
         }
     }
 
@@ -1697,6 +1721,332 @@ mod live_http_tests {
                 );
                 assert!(!visible.contains("private-sse-pixels"));
             }
+            std::fs::remove_dir_all(directory).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_native_tool_follow_up_preserves_one_media_event_per_turn() {
+        use tokio::time::timeout;
+
+        for provider_name in ["gemini", "chat", "responses"] {
+            let directory = std::env::temp_dir().join(format!("nm-sse-tools-{}", Uuid::new_v4()));
+            let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+            let image = assets
+                .import("image/png", Cursor::new(b"original-only-media"))
+                .unwrap();
+            let private = assets
+                .import("image/png", Cursor::new(b"outsider-media"))
+                .unwrap();
+            let mut timeline = TimelineStore::new();
+            let branch = BranchId::new();
+            timeline.create_session(SessionId::new(), branch).unwrap();
+            let mut outside = EventDraft::new(EventKind::PlayerMessage);
+            outside.actor = Some("player".into());
+            outside.observers.insert(CharacterId::Kind);
+            outside.payload.insert(
+                "content".into(),
+                json!([
+                    {"type":"text","text":"secret-for-kind"}, {"type":"image","asset":private}
+                ]),
+            );
+            timeline
+                .append(branch, 0, "private", json!({}), vec![outside])
+                .unwrap();
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft.payload.insert(
+                "content".into(),
+                json!([
+                    {"type":"text","text":"compute"},
+                    {"type":"image","asset":image},
+                    {"type":"text","text":"then reply"}
+                ]),
+            );
+            let target = draft.id;
+            timeline
+                .append(branch, 1, "visible", json!({}), vec![draft])
+                .unwrap();
+            let stable_head = timeline.branch(branch).unwrap().head_sequence;
+            let view = TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None)
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let name = provider_name.to_owned();
+            let server = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for round in 0..2 {
+                    let (socket, _) = timeout(Duration::from_secs(3), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let mut reader = BufReader::new(socket);
+                    let mut length = 0;
+                    let mut first_line = String::new();
+                    reader.read_line(&mut first_line).await.unwrap();
+                    for _ in 0..64 {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                    assert!(length > 0);
+                    let mut bytes = vec![0; length];
+                    reader.read_exact(&mut bytes).await.unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    requests.push(body);
+                    let events: Vec<Value> = match (name.as_str(), round) {
+                        ("gemini", 0) => vec![
+                            json!({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"calculator","args":{"expression":"2+3"}}}]},"finishReason":"STOP"}]}),
+                        ],
+                        ("gemini", _) => vec![
+                            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"{\"segments\":[{\"text\":\"final\"}]}"}]},"finishReason":"STOP"}]}),
+                        ],
+                        ("responses", 0) => vec![
+                            json!({"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"calculator","arguments":"{\"expression\":\"2+3\"}"}}),
+                            json!({"type":"response.completed","response":{"status":"completed"}}),
+                        ],
+                        ("responses", _) => vec![
+                            json!({"type":"response.output_text.delta","delta":"{\"segments\":[{\"text\":\"final\"}]}"}),
+                            json!({"type":"response.completed","response":{"status":"completed"}}),
+                        ],
+                        ("chat", 0) => vec![
+                            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"calculator","arguments":"{\"expression\":\"2+3\"}"}}]},"finish_reason":"tool_calls"}]}),
+                        ],
+                        ("chat", _) => vec![
+                            json!({"choices":[{"index":0,"delta":{"content":"{\"segments\":[{\"text\":\"final\"}]}"},"finish_reason":"stop"}]}),
+                        ],
+                        _ => unreachable!(),
+                    };
+                    let mut response = events
+                        .iter()
+                        .map(|e| format!("data: {e}\r\n\r\n"))
+                        .collect::<String>();
+                    if name == "chat" {
+                        response.push_str("data: [DONE]\r\n\r\n");
+                    }
+                    reader.get_mut().write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()
+                    ).as_bytes()).await.unwrap();
+                    for chunk in response.as_bytes().chunks(13) {
+                        reader.get_mut().write_all(chunk).await.unwrap();
+                    }
+                }
+                requests
+            });
+            let (provider, preset) = provider_with_stream(provider_name, &endpoint, true);
+            let generator = ResponseGenerator::new([provider]).unwrap();
+            let tools = super::super::ToolSettings {
+                enabled: true,
+                calculator: true,
+                max_depth: 1,
+                ..Default::default()
+            };
+            let mut observation = StreamObserve::default();
+            let result = timeout(
+                Duration::from_secs(5),
+                generator.generate_observed(
+                    GenerationRequest::new(context(view, branch, target), preset, None)
+                        .with_tools(tools)
+                        .with_assets(Some(Arc::clone(&assets))),
+                    &mut observation,
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(result.is_ok(), "{provider_name}: {result:?}");
+            assert_eq!(result.unwrap().text().as_ref(), "final", "{provider_name}");
+            assert_eq!(timeline.branch(branch).unwrap().head_sequence, stable_head);
+            let bodies = server.await.unwrap();
+            assert_eq!(bodies.len(), 2);
+            for body in &bodies {
+                let serialized = body.to_string();
+                assert_eq!(
+                    serialized.matches("b3JpZ2luYWwtb25seS1tZWRpYQ==").count(),
+                    1,
+                    "{provider_name}"
+                );
+                assert!(
+                    !serialized.contains("b3V0c2lkZXItbWVkaWE="),
+                    "{provider_name}"
+                );
+                assert!(!serialized.contains("secret-for-kind"), "{provider_name}");
+                assert_eq!(serialized.matches("compute").count(), 1, "{provider_name}");
+                assert_eq!(
+                    serialized.matches("then reply").count(),
+                    1,
+                    "{provider_name}"
+                );
+            }
+            let second = &bodies[1];
+            let item =
+                match provider_name {
+                    "gemini" => second["contents"].as_array().unwrap().last().unwrap()["parts"][0]
+                        ["functionResponse"]["response"]["result"]
+                        .as_str(),
+                    "responses" => {
+                        second["input"].as_array().unwrap().last().unwrap()["output"].as_str()
+                    }
+                    _ => second["messages"].as_array().unwrap().last().unwrap()["content"].as_str(),
+                }
+                .expect("native result must be serialized on next provider turn");
+            assert!(item.contains("\n5\n"), "{provider_name}: {item}");
+            assert_eq!(observation.requests.len(), 2, "{provider_name}");
+            assert!(
+                observation
+                    .requests
+                    .iter()
+                    .all(|r| r.payload_json.as_ref() == "[REDACTED MULTIMODAL ATTACHMENTS]")
+            );
+            assert_eq!(observation.replies.len(), 2, "{provider_name}");
+            assert_eq!(observation.stream_resets, 1, "{provider_name}");
+            assert_eq!(observation.started_tools, ["calculator"], "{provider_name}");
+            assert_eq!(observation.finished_tools, 1, "{provider_name}");
+            assert!(
+                observation.failures.is_empty(),
+                "{provider_name}: {:?}",
+                observation.failures
+            );
+            assert_eq!(
+                observation.deltas.concat(),
+                "{\"segments\":[{\"text\":\"final\"}]}"
+            );
+            std::fs::remove_dir_all(directory).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_partial_sse_with_media_drops_provider_future_and_socket() {
+        use tokio::time::timeout;
+        use tokio_util::sync::CancellationToken;
+
+        for name in ["gemini", "chat", "responses"] {
+            let directory = std::env::temp_dir().join(format!("nm-sse-abort-{}", Uuid::new_v4()));
+            let assets = Arc::new(TimelineAssetStore::new(directory.join("assets"), 1024).unwrap());
+            let image = assets
+                .import("image/png", Cursor::new(b"cancelled-pixels"))
+                .unwrap();
+            let mut timeline = TimelineStore::new();
+            let branch = BranchId::new();
+            timeline.create_session(SessionId::new(), branch).unwrap();
+            let mut draft = EventDraft::new(EventKind::PlayerMessage);
+            draft.actor = Some("player".into());
+            draft.observers.insert(CharacterId::Crazy);
+            draft.payload.insert(
+                "content".into(),
+                json!([
+                    {"type":"text","text":"abort after first partial answer"},
+                    {"type":"image","asset":image}
+                ]),
+            );
+            let target = draft.id;
+            timeline
+                .append(branch, 0, "abort-input", json!({}), vec![draft])
+                .unwrap();
+            let stable_head = timeline.branch(branch).unwrap().head_sequence;
+            let view = TimelineMessageQueries::capture(&timeline, branch, CharacterId::Crazy, None)
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            let dialect = name.to_owned();
+            let server = tokio::spawn(async move {
+                let (socket, _) = timeout(Duration::from_secs(3), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes).await.unwrap();
+                let json: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    json.to_string().matches("Y2FuY2VsbGVkLXBpeGVscw==").count(),
+                    1
+                );
+                let event = match dialect.as_str() {
+                    "gemini" => {
+                        json!({"candidates":[{"content":{"role":"model","parts":[{"text":"{\"segments\":["}]}}]})
+                    }
+                    "responses" => {
+                        json!({"type":"response.output_text.delta","delta":"{\"segments\":["})
+                    }
+                    _ => {
+                        json!({"choices":[{"index":0,"delta":{"content":"{\"segments\":["},"finish_reason":null}]})
+                    }
+                };
+                let response = format!("data: {event}\r\n\r\n");
+                reader.get_mut().write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n"
+                ).await.unwrap();
+                reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .await
+                    .unwrap();
+                let mut rest = [0u8; 1];
+                let closed = timeout(Duration::from_secs(3), reader.read(&mut rest)).await;
+                assert!(
+                    matches!(closed, Ok(Ok(0))),
+                    "cancelled transport must close the socket: {closed:?}"
+                );
+            });
+            let (provider, preset) = provider_with_stream(name, &endpoint, true);
+            let generator = ResponseGenerator::new([provider]).unwrap();
+            let cancellation = CancellationToken::new();
+            let cancellation_task = cancellation.clone();
+            let (signal, heard) = tokio::sync::oneshot::channel();
+            let generation = tokio::spawn(async move {
+                let mut observation = StreamObserve {
+                    first_delta: Some(signal),
+                    ..Default::default()
+                };
+                let was_cancelled = tokio::select! {
+                    biased;
+                    _ = cancellation_task.cancelled() => true,
+                    response = generator.generate_observed(
+                        GenerationRequest::new(context(view, branch, target), preset, None)
+                            .with_assets(Some(assets)),
+                        &mut observation,
+                    ) => panic!("unexpected pre-cancel completion: {response:?}"),
+                };
+                (was_cancelled, observation)
+            });
+            timeout(Duration::from_secs(3), heard)
+                .await
+                .unwrap()
+                .unwrap();
+            cancellation.cancel();
+            let (cancelled, observed) = timeout(Duration::from_secs(3), generation)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(cancelled);
+            assert_eq!(observed.requests.len(), 1, "{name}");
+            assert_eq!(observed.deltas, ["{\"segments\":["], "{name}");
+            assert!(observed.replies.is_empty(), "{name}");
+            assert!(observed.failures.is_empty(), "{name}");
+            assert_eq!(timeline.branch(branch).unwrap().head_sequence, stable_head);
+            timeout(Duration::from_secs(4), server)
+                .await
+                .unwrap()
+                .unwrap();
             std::fs::remove_dir_all(directory).ok();
         }
     }
