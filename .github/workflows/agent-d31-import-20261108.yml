@@ -1,0 +1,45 @@
+name: Agent D31 verified exact-commit import
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d31-import-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact source commit and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e456a207111de30ed4aa64101b128134a4738b55
+          HEAD=7b166a718eebfb03ec099a83112a673c6a9b46c0
+          TREE=9120a8ce266ffadc42839af05ea6edae9e56b58c
+          BRANCH=codex/python-settings-standalone-review-20261108
+          git fetch --no-tags origin refs/heads/codex/python-settings-exact-review-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          base64 --decode .git-bridge/agent-d31.patch.brotli.b64 > /tmp/d31.patch.br
+          echo "58f844ba8ca3d872acca42214c587254a23e9271917feb541acf60aebbbe3792  /tmp/d31.patch.br" | sha256sum --check
+          if ! command -v brotli >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq brotli
+          fi
+          brotli -d /tmp/d31.patch.br -o /tmp/d31.patch
+          git checkout --detach "$BASE"
+          export GIT_COMMITTER_NAME='Agent D'
+          export GIT_COMMITTER_EMAIL='agent-d@local.invalid'
+          git am --committer-date-is-author-date /tmp/d31.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
