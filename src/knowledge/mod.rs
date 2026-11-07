@@ -52,17 +52,42 @@ pub enum HistoricalMemorySelectionError {
     Embedding(#[from] EmbeddingError),
 }
 
+/// Asynchronous historical retrieval cannot expose prompt text until the owner
+/// re-reads its current authoritative Timeline projection and verifies that the
+/// original read is still valid. Constructed only by KnowledgeRetrieval.
+#[must_use = "historical recall must be finalized against a fresh Timeline snapshot"]
+pub struct PendingHistoricalRecall {
+    captured: CharacterMemorySnapshot,
+    rendered: Option<String>,
+}
+
+impl PendingHistoricalRecall {
+    /// The caller must obtain `current` again from its live CharacterHandle after
+    /// retrieval, immediately before using the text. A stale branch, Timeline
+    /// position, context reset or memory mutation rejects the whole result.
+    pub fn finalize(
+        self,
+        current: &CharacterMemorySnapshot,
+    ) -> Result<Option<String>, HistoricalMemorySelectionError> {
+        if self.captured.anchor != current.anchor || !self.captured.matches_version(current) {
+            return Err(HistoricalMemorySelectionError::StaleRecall);
+        }
+        Ok(self.rendered)
+    }
+}
+
 impl KnowledgeRetrieval {
     /// Explicitly rank *only* the forgotten facts selected by a prior recall
     /// action, tied to one character and one immutable Timeline prefix.
     /// The regular generation selection never calls this method. A request
-    /// owner must separately authorize using its returned text in a prompt.
+    /// owner must separately authorize the original historical recall, then
+    /// finalize the opaque result against a freshly read Timeline snapshot.
     pub async fn select_recalled_forgotten(
         &self,
         snapshot: &CharacterMemorySnapshot,
         recalled: &ForgottenRecall,
         query: &str,
-    ) -> Result<Option<String>, HistoricalMemorySelectionError> {
+    ) -> Result<PendingHistoricalRecall, HistoricalMemorySelectionError> {
         if recalled.character != snapshot.character() || recalled.anchor != snapshot.anchor() {
             return Err(HistoricalMemorySelectionError::StaleRecall);
         }
@@ -82,7 +107,7 @@ impl KnowledgeRetrieval {
             }
             selected.push(record.clone());
         }
-        Ok(match &self.mode {
+        let rendered = match &self.mode {
             KnowledgeMode::Lexical => {
                 render_ranked_memory_context_scoped(
                     lexical_ranked_scoped(&selected, query, true).into_iter(),
@@ -96,6 +121,10 @@ impl KnowledgeRetrieval {
                     .await?
                     .rendered
             }
+        };
+        Ok(PendingHistoricalRecall {
+            captured: snapshot.clone(),
+            rendered,
         })
     }
 
@@ -317,6 +346,8 @@ mod tests {
             .select_recalled_forgotten(&snapshot, &recall, "ромашковый чай")
             .await
             .unwrap()
+            .finalize(&snapshot)
+            .unwrap()
             .unwrap();
         assert!(historical.contains("forgotten ромашковый чай"));
         assert!(historical.contains("[FORGOTTEN]"));
@@ -418,6 +449,8 @@ mod tests {
             .select_recalled_forgotten(&snapshot, &recall, "ромашковый чай")
             .await
             .unwrap()
+            .finalize(&snapshot)
+            .unwrap()
             .unwrap();
         assert!(selected.contains("forgotten ромашковый чай"));
         assert!(!selected.contains("unselected ромашковый чай"));
@@ -443,6 +476,119 @@ mod tests {
             Err(HistoricalMemorySelectionError::InvalidRecall)
         ));
         assert_eq!(fixture.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_recall_rejects_changed_timeline_or_character_before_prompt_use() {
+        let (snapshot, recall) = recall_fixture();
+        let retrieval = KnowledgeRetrieval::lexical();
+        let pending = retrieval
+            .select_recalled_forgotten(&snapshot, &recall, "чай")
+            .await
+            .unwrap();
+        let mut advanced = snapshot.clone();
+        advanced.anchor.through += 1;
+        assert!(matches!(
+            pending.finalize(&advanced),
+            Err(HistoricalMemorySelectionError::StaleRecall)
+        ));
+
+        let mut changed = snapshot.clone();
+        changed.context_epoch += 1;
+        let pending = retrieval
+            .select_recalled_forgotten(&snapshot, &recall, "чай")
+            .await
+            .unwrap();
+        assert!(matches!(
+            pending.finalize(&changed),
+            Err(HistoricalMemorySelectionError::StaleRecall)
+        ));
+
+        let mut other = snapshot.clone();
+        other.character = CharacterId::Kind;
+        let pending = retrieval
+            .select_recalled_forgotten(&snapshot, &recall, "чай")
+            .await
+            .unwrap();
+        assert!(matches!(
+            pending.finalize(&other),
+            Err(HistoricalMemorySelectionError::StaleRecall)
+        ));
+
+        let mut edited = snapshot.clone();
+        edited.records[0].content = "changed after retrieval".into();
+        let pending = retrieval
+            .select_recalled_forgotten(&snapshot, &recall, "чай")
+            .await
+            .unwrap();
+        assert!(matches!(
+            pending.finalize(&edited),
+            Err(HistoricalMemorySelectionError::StaleRecall)
+        ));
+
+        let pending = retrieval
+            .select_recalled_forgotten(&snapshot, &recall, "чай")
+            .await
+            .unwrap();
+        assert!(
+            pending
+                .finalize(&snapshot)
+                .unwrap()
+                .unwrap()
+                .contains("[FORGOTTEN]")
+        );
+    }
+
+    struct PausedQueryFixture {
+        space: EmbeddingSpace,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    impl EmbeddingProvider for PausedQueryFixture {
+        fn space(&self) -> &EmbeddingSpace {
+            &self.space
+        }
+
+        fn embed(&self, purpose: EmbeddingPurpose, _: String) -> EmbeddingFuture<'_, Embedding> {
+            Box::pin(async move {
+                if purpose == EmbeddingPurpose::Query {
+                    self.started.notify_one();
+                    self.resume.notified().await;
+                }
+                Embedding::new(vec![1.0, 0.0], &self.space)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_semantic_recall_cannot_reveal_text_after_timeline_advances() {
+        let (snapshot, recall) = recall_fixture();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let provider = Arc::new(PausedQueryFixture {
+            space: EmbeddingSpace::new("fixture", "delayed-recall", "v1", 2).unwrap(),
+            started: started.clone(),
+            resume: resume.clone(),
+        });
+        let retriever = Arc::new(SemanticMemoryRetriever::new(provider, 10).unwrap());
+        let original = snapshot.clone();
+        let task = tokio::spawn(async move {
+            KnowledgeRetrieval::semantic(retriever)
+                .select_recalled_forgotten(&original, &recall, "чай")
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+            .await
+            .unwrap();
+        let mut advanced = snapshot.clone();
+        advanced.anchor.through += 1;
+        resume.notify_one();
+        let pending = task.await.unwrap().unwrap();
+        assert!(matches!(
+            pending.finalize(&advanced),
+            Err(HistoricalMemorySelectionError::StaleRecall)
+        ));
     }
 
     #[tokio::test]
