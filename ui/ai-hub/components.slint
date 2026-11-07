@@ -53,7 +53,7 @@ export component HubAction inherits ActionSurface {
 
 export component HubModelCard inherits Rectangle {
     in property <HubModel> entry;
-    callback open-settings(int);
+    callback open-settings();
     preferred-height: 84px;
     min-height: 84px;
     max-height: 84px;
@@ -76,7 +76,7 @@ export component HubModelCard inherits Rectangle {
             Label {
                 text: root.entry.title;
                 font-size: 14px; font-weight: 700;
-                wrap: word-wrap;
+                overflow: elide;
                 min-width: 0px;
             }
             Text {
@@ -84,8 +84,9 @@ export component HubModelCard inherits Rectangle {
                 color: Theme.muted;
                 font-size: 11px;
                 wrap: word-wrap;
+                overflow: elide;
                 min-width: 0px;
-                max-height: 32px;
+                height: 30px;
             }
         }
 
@@ -151,7 +152,7 @@ export component HubModelCard inherits Rectangle {
                         Icon { source: Icons.settings; width: 16px; height: 16px; colorize: Theme.accent-hover; }
                     }
                 }
-                activated => { root.open-settings(0); }
+                activated => { root.open-settings(); }
             }
         }
     }

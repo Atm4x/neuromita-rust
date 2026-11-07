@@ -12,6 +12,7 @@ export component AiHubPage inherits Rectangle {
     private property <string> selected-id: "";
     private property <bool> settings-open: false;
     private property <bool> confirm-discard: false;
+    private property <string> pending-category: "";
     private property <bool> dirty: false;
     private property <string> field-one: "";
     private property <string> field-two: "";
@@ -35,12 +36,21 @@ export component AiHubPage inherits Rectangle {
             root.field-two = root.selected-model.setting-two-value;
             root.dirty = false;
             root.confirm-discard = false;
+            root.pending-category = "";
             root.settings-open = true;
         }
     }
     function close-details() {
+        root.pending-category = "";
         if root.dirty { root.confirm-discard = true; }
         else { root.settings-open = false; }
+    }
+    function discard-and-leave() {
+        root.confirm-discard = false;
+        root.dirty = false;
+        root.settings-open = false;
+        if root.pending-category != "" { root.category = root.pending-category; }
+        root.pending-category = "";
     }
     VerticalLayout {
         width: 100%; height: 100%;
@@ -94,10 +104,18 @@ export component AiHubPage inherits Rectangle {
                         }
                     }
                     activated => {
-                        if !root.settings-open || !root.dirty {
+                        if root.category == cat.id {
+                            root.pending-category = "";
+                            root.confirm-discard = false;
+                        } else if !root.settings-open || !root.dirty {
                             root.category = cat.id;
                             root.settings-open = false;
-                        } else { root.confirm-discard = true; }
+                            root.confirm-discard = false;
+                            root.pending-category = "";
+                        } else {
+                            root.pending-category = cat.id;
+                            root.confirm-discard = true;
+                        }
                     }
                 }
             }
@@ -167,7 +185,7 @@ export component AiHubPage inherits Rectangle {
                             if root.matches(model): HubModelCard {
                                 horizontal-stretch: 1;
                                 entry: model;
-                                open-settings(index) => { root.open-details(index); }
+                                open-settings => { root.open-details(index); }
                             }
                         }
                     }
@@ -257,8 +275,8 @@ export component AiHubPage inherits Rectangle {
                             Label { text: "Отменить несохранённые изменения?"; font-size: 13px; font-weight: 700; }
                             Label { text: "Черновик текущей модели будет сброшен."; font-size: 11px; color: Theme.muted; }
                         }
-                        HubAction { caption: "Остаться"; activated => { root.confirm-discard = false; } }
-                        HubAction { caption: "Сбросить и выйти"; primary: true; activated => { root.confirm-discard = false; root.dirty = false; root.settings-open = false; } }
+                        HubAction { caption: "Остаться"; activated => { root.confirm-discard = false; root.pending-category = ""; } }
+                        HubAction { caption: "Сбросить и выйти"; primary: true; activated => { root.discard-and-leave(); } }
                     }
                 }
             }
