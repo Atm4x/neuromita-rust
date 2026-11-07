@@ -7,8 +7,8 @@ use std::{
 
 use thiserror::Error;
 
-use super::PythonPresetStage;
 use super::python_presets::{parse_credentials, parse_unique_json};
+use super::{PresetId, PythonPresetStage, SettingsTransfer};
 use crate::generation::StoredPresets;
 
 const JOURNAL: &str = ".preset-activation-journal";
@@ -19,6 +19,21 @@ const SOURCES: [&str; 2] = [
     "existing-source-preset-credentials.json",
 ];
 const MAX_BYTES: [usize; 2] = [8 * 1024 * 1024, 1_048_576];
+const FULL_NAMES: [&str; 3] = ["presets.json", "preset-credentials.json", "settings.json"];
+const SETTINGS_LIMIT: usize = 8 * 1024 * 1024;
+const SETTINGS_MARKER: &str = "includes-settings";
+
+fn target_names(with_settings: bool) -> &'static [&'static str] {
+    if with_settings { &FULL_NAMES } else { &NAMES }
+}
+
+fn target_limit(index: usize) -> usize {
+    if index < MAX_BYTES.len() {
+        MAX_BYTES[index]
+    } else {
+        SETTINGS_LIMIT
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PresetActivationError {
@@ -78,17 +93,39 @@ impl PresetActivation {
     /// Must only be called by an operator with both applications stopped.
     /// Never modifies the source review package, and never runs during startup.
     pub fn apply(review: &Path, active: &Path) -> Result<(), PresetActivationError> {
-        Self::apply_inner(review, active, None)
+        Self::apply_inner(review, active, None, false)
+    }
+
+    /// Activate the reviewed Python user selection in the same recoverable
+    /// transaction as presets and credentials. A valid existing settings.json
+    /// is required; no default profile is synthesized.
+    /// This operation is only for an explicitly stopped app.
+    pub fn apply_with_preferences(
+        review: &Path,
+        active: &Path,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner(review, active, None, true)
     }
 
     fn apply_inner(
         review: &Path,
         active: &Path,
         fail_after_install: Option<usize>,
+        with_settings: bool,
     ) -> Result<(), PresetActivationError> {
         check_dir(review)?;
         check_dir(active)?;
         let _lock = lock_storage(active)?;
+        // Prevent cooperating settings CLI writers from racing the third
+        // document while the preset lease protects the catalog pair.
+        let _settings_lock = if with_settings {
+            Some(
+                super::storage::writer_lock(&active.join("settings.json"))
+                    .map_err(|_| PresetActivationError::StorageBusy)?,
+            )
+        } else {
+            None
+        };
         Self::ensure_ready(active)?;
         if fs::canonicalize(review)? == fs::canonicalize(active)? {
             return Err(PresetActivationError::UnsafePath);
@@ -134,6 +171,45 @@ impl PresetActivation {
                 return Err(PresetActivationError::SnapshotConflict);
             }
         }
+        if with_settings {
+            let python_settings =
+                read_file(&review.join("python-source-settings.json"), SETTINGS_LIMIT)?
+                    .ok_or(PresetActivationError::SnapshotConflict)?;
+            let reviewed = read_file(
+                &review.join("python-preset-preferences-review.json"),
+                SETTINGS_LIMIT,
+            )?
+            .ok_or(PresetActivationError::SnapshotConflict)?;
+            let expected_review = expected_plan
+                .preview_preferences(&python_settings)
+                .map_err(|_| PresetActivationError::SnapshotConflict)?;
+            let expected_bytes = serde_json::to_vec_pretty(&expected_review)
+                .map_err(|_| PresetActivationError::SnapshotConflict)?;
+            if reviewed != expected_bytes || !expected_review.selection_explicit {
+                return Err(PresetActivationError::SnapshotConflict);
+            }
+            let selected = expected_review
+                .selected_user_id
+                .ok_or(PresetActivationError::SnapshotConflict)?;
+            let settings_original = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
+                .ok_or(PresetActivationError::SnapshotConflict)?;
+            let mut stored = SettingsTransfer::decode(&settings_original)
+                .map_err(|_| PresetActivationError::SnapshotConflict)?
+                .into_stored();
+            stored.revision = stored
+                .revision
+                .checked_add(1)
+                .ok_or(PresetActivationError::SnapshotConflict)?;
+            stored.settings.presets.active = PresetId(selected);
+            let encoded = SettingsTransfer::new(stored)
+                .and_then(|value| value.encode())
+                .map_err(|_| PresetActivationError::SnapshotConflict)?;
+            if encoded.len() > SETTINGS_LIMIT {
+                return Err(PresetActivationError::SnapshotConflict);
+            }
+            old.push(Some(settings_original));
+            new.push(encoded);
+        }
         validate_pair(&new[0], &new[1])?;
         if let Some(previous) = &old[0] {
             let credentials = old[1].as_deref().unwrap_or(b"{}");
@@ -153,6 +229,10 @@ impl PresetActivation {
                 }
             }
             sync_dir(&journal)?;
+            if with_settings {
+                write_private(&journal.join(SETTINGS_MARKER), b"")?;
+                sync_dir(&journal)?;
+            }
             write_private(&journal.join("prepared"), b"")?;
             sync_dir(&journal)?;
             sync_dir(active)?;
@@ -169,14 +249,22 @@ impl PresetActivation {
         let result = (|| -> Result<(), PresetActivationError> {
             // Refuse stale snapshots before the first mutation. This is not a
             // replacement for ensuring the application has been shut down.
-            for i in 0..2 {
-                if read_file(&active.join(NAMES[i]), MAX_BYTES[i])? != old[i] {
+            for i in 0..old.len() {
+                if read_file(
+                    &active.join(target_names(with_settings)[i]),
+                    target_limit(i),
+                )? != old[i]
+                {
                     return Err(PresetActivationError::SnapshotConflict);
                 }
             }
-            for i in 0..2 {
-                install_bytes(&journal, active, NAMES[i], &new[i])?;
-                crash_test_checkpoint(if i == 0 { "installed-0" } else { "installed-1" });
+            for i in 0..new.len() {
+                install_bytes(&journal, active, target_names(with_settings)[i], &new[i])?;
+                crash_test_checkpoint(match i {
+                    0 => "installed-0",
+                    1 => "installed-1",
+                    _ => "installed-2",
+                });
                 if fail_after_install == Some(i) {
                     return Err(PresetActivationError::SnapshotConflict);
                 }
@@ -203,6 +291,17 @@ impl PresetActivation {
     pub fn recover(active: &Path) -> Result<PresetRecovery, PresetActivationError> {
         check_dir(active)?;
         let _lock = lock_storage(active)?;
+        // Obtain the settings-writer lock whenever recovery could touch the
+        // third document. Read is guarded by the already-held preset lease.
+        let is_full = read_file(&active.join(JOURNAL).join(SETTINGS_MARKER), 0)?.is_some();
+        let _settings_lock = if is_full {
+            Some(
+                super::storage::writer_lock(&active.join("settings.json"))
+                    .map_err(|_| PresetActivationError::StorageBusy)?,
+            )
+        } else {
+            None
+        };
         Self::recover_locked(active)
     }
 
@@ -215,30 +314,35 @@ impl PresetActivation {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             _ => return Err(PresetActivationError::UnsafePath),
         }
+        let with_settings = read_file(&journal.join(SETTINGS_MARKER), 0)?.is_some();
+        let names = target_names(with_settings);
         let committed = read_file(&journal.join("committed"), 0)?.is_some();
         let prepared = read_file(&journal.join("prepared"), 0)?.is_some();
         if committed {
             if !prepared {
                 return Err(PresetActivationError::RecoveryRequired);
             }
-            for (i, name) in NAMES.iter().enumerate() {
-                let new = read_file(&journal.join(format!("new-{i}")), MAX_BYTES[i])?
+            for (i, name) in names.iter().enumerate() {
+                let new = read_file(&journal.join(format!("new-{i}")), target_limit(i))?
                     .ok_or(PresetActivationError::RecoveryRequired)?;
-                if read_file(&active.join(name), MAX_BYTES[i])?.as_deref() != Some(new.as_slice()) {
+                if read_file(&active.join(name), target_limit(i))?.as_deref()
+                    != Some(new.as_slice())
+                {
                     return Err(PresetActivationError::RecoveryRequired);
                 }
             }
         } else if prepared {
-            let mut old = Vec::with_capacity(2);
-            for (i, limit) in MAX_BYTES.iter().enumerate() {
-                let snapshot = read_file(&journal.join(format!("old-{i}")), *limit)?;
+            let mut old = Vec::with_capacity(names.len());
+            for i in 0..names.len() {
+                let limit = target_limit(i);
+                let snapshot = read_file(&journal.join(format!("old-{i}")), limit)?;
                 let present = read_file(&journal.join(format!("present-{i}")), 0)?.is_some();
                 if snapshot.is_some() != present {
                     return Err(PresetActivationError::RecoveryRequired);
                 }
-                let next = read_file(&journal.join(format!("new-{i}")), *limit)?
+                let next = read_file(&journal.join(format!("new-{i}")), limit)?
                     .ok_or(PresetActivationError::RecoveryRequired)?;
-                let current = read_file(&active.join(NAMES[i]), *limit)?;
+                let current = read_file(&active.join(names[i]), limit)?;
                 if let Some(current) = current.as_deref()
                     && Some(current) != snapshot.as_deref()
                     && current != next
@@ -249,10 +353,10 @@ impl PresetActivation {
                 }
                 old.push(snapshot);
             }
-            for i in 0..2 {
+            for i in 0..names.len() {
                 match &old[i] {
-                    Some(bytes) => install_bytes(&journal, active, NAMES[i], bytes)?,
-                    None => remove_target(&journal, active, NAMES[i])?,
+                    Some(bytes) => install_bytes(&journal, active, names[i], bytes)?,
+                    None => remove_target(&journal, active, names[i])?,
                 }
                 if i == 0 {
                     crash_test_checkpoint("recovered-0");
@@ -407,7 +511,13 @@ fn install_bytes(
 
 fn remove_target(journal: &Path, active: &Path, name: &str) -> Result<(), PresetActivationError> {
     let target = active.join(name);
-    if read_file(&target, MAX_BYTES[if name == NAMES[0] { 0 } else { 1 }])?.is_some() {
+    let limit = match name {
+        "presets.json" => MAX_BYTES[0],
+        "preset-credentials.json" => MAX_BYTES[1],
+        "settings.json" => SETTINGS_LIMIT,
+        _ => return Err(PresetActivationError::UnsafePath),
+    };
+    if read_file(&target, limit)?.is_some() {
         fs::rename(
             target,
             journal.join(format!("discard-{}", uuid::Uuid::new_v4().simple())),
@@ -667,7 +777,7 @@ mod tests {
         .unwrap();
         prepared.stage_new_directory(&review).unwrap();
         assert!(matches!(
-            PresetActivation::apply_inner(&review, &active, Some(0)),
+            PresetActivation::apply_inner(&review, &active, Some(0), false),
             Err(PresetActivationError::SnapshotConflict)
         ));
         assert!(!active.join(NAMES[0]).exists());
@@ -771,6 +881,155 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn three_file_crash_fixture(
+        root: &Root,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        [Vec<u8>; 3],
+        [Vec<u8>; 3],
+    ) {
+        let (old_review, active, old_pair, _) = crash_fixture(root);
+        let old_settings = SettingsTransfer::new(crate::settings::StoredSettings {
+            revision: 6,
+            settings: crate::settings::AppSettings::initial_profile(),
+        })
+        .unwrap()
+        .encode()
+        .unwrap();
+        write_private(&active.join("settings.json"), &old_settings).unwrap();
+        fs::remove_dir_all(old_review).unwrap();
+        let (incoming, templates) = fixture_input(18);
+        let plan = PythonPresetStage::prepare(&incoming, &templates)
+            .unwrap()
+            .merge_with_existing(Some(&old_pair[0]), Some(&old_pair[1]))
+            .unwrap();
+        let (plan, _) = plan
+            .with_preferences(br#"{"LAST_API_PRESET_ID":18}"#)
+            .unwrap();
+        let review = root.path().join("three-files");
+        plan.stage_new_directory(&review).unwrap();
+        let mut updated = SettingsTransfer::decode(&old_settings)
+            .unwrap()
+            .into_stored();
+        updated.revision += 1;
+        updated.settings.presets.active = PresetId(18);
+        let new_settings = SettingsTransfer::new(updated).unwrap().encode().unwrap();
+        let old = [old_pair[0].clone(), old_pair[1].clone(), old_settings];
+        let next = [
+            plan.file(NAMES[0]).unwrap().to_vec(),
+            plan.file(NAMES[1]).unwrap().to_vec(),
+            new_settings,
+        ];
+        (review, active, old, next)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_three_file_crashes_recover_every_boundary() {
+        for marker in [
+            "prepared",
+            "installed-0",
+            "installed-1",
+            "installed-2",
+            "committed",
+        ] {
+            let root = Root::new();
+            let (review, active, old, next) = three_file_crash_fixture(&root);
+            use std::os::unix::process::ExitStatusExt;
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("settings::preset_activation::tests::abort_child_runner")
+                .env("NEUROMITA_PRESET_TEST_ABORT_AT", marker)
+                .env("NEUROMITA_TEST_THREE_FILES", "1")
+                .env("NEUROMITA_TEST_REVIEW", &review)
+                .env("NEUROMITA_TEST_ACTIVE", &active)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert_eq!(status.signal(), Some(6), "{marker}: {status}");
+            assert!(matches!(
+                PresetActivation::ensure_ready(&active),
+                Err(PresetActivationError::RecoveryRequired)
+            ));
+            let recovered = PresetActivation::recover(&active).unwrap();
+            let expected = if marker == "committed" {
+                assert_eq!(recovered, PresetRecovery::Committed);
+                &next
+            } else {
+                assert_eq!(recovered, PresetRecovery::RolledBack);
+                &old
+            };
+            for (name, bytes) in FULL_NAMES.iter().zip(expected.iter()) {
+                assert_eq!(
+                    fs::read(active.join(name)).unwrap(),
+                    *bytes,
+                    "{marker} {name}"
+                );
+            }
+            assert_eq!(
+                PresetActivation::recover(&active).unwrap(),
+                PresetRecovery::NoJournal
+            );
+        }
+    }
+
+    #[test]
+    fn three_file_recovery_refuses_foreign_settings_edit_without_touching_presets() {
+        let root = Root::new();
+        let journal = root.path().join(JOURNAL);
+        create_private_dir(&journal).unwrap();
+        for (i, name) in FULL_NAMES.iter().enumerate() {
+            let old = format!("old-{i}");
+            let new = format!("new-{i}");
+            write_private(&root.path().join(name), new.as_bytes()).unwrap();
+            write_private(&journal.join(format!("old-{i}")), old.as_bytes()).unwrap();
+            write_private(&journal.join(format!("new-{i}")), new.as_bytes()).unwrap();
+            write_private(&journal.join(format!("present-{i}")), b"").unwrap();
+        }
+        write_private(&journal.join(SETTINGS_MARKER), b"").unwrap();
+        write_private(&journal.join("prepared"), b"").unwrap();
+        fs::write(root.path().join("settings.json"), b"foreign settings write").unwrap();
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_eq!(
+            fs::read(root.path().join("presets.json")).unwrap(),
+            b"new-0"
+        );
+        assert_eq!(
+            fs::read(root.path().join("preset-credentials.json")).unwrap(),
+            b"new-1"
+        );
+        assert_eq!(
+            fs::read(root.path().join("settings.json")).unwrap(),
+            b"foreign settings write"
+        );
+        assert!(journal.is_dir());
+    }
+
+    #[test]
+    fn incomplete_three_file_journal_requires_manual_inspection() {
+        let root = Root::new();
+        let journal = root.path().join(JOURNAL);
+        create_private_dir(&journal).unwrap();
+        for i in 0..2 {
+            write_private(&journal.join(format!("old-{i}")), b"old").unwrap();
+            write_private(&journal.join(format!("present-{i}")), b"").unwrap();
+            write_private(&journal.join(format!("new-{i}")), b"new").unwrap();
+        }
+        write_private(&journal.join(SETTINGS_MARKER), b"").unwrap();
+        write_private(&journal.join("prepared"), b"").unwrap();
+        assert!(matches!(
+            PresetActivation::recover(root.path()),
+            Err(PresetActivationError::RecoveryRequired)
+        ));
+        assert!(journal.is_dir());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn abort_child_runner() {
         let Ok(marker) = std::env::var("NEUROMITA_PRESET_TEST_ABORT_AT") else {
@@ -782,7 +1041,11 @@ mod tests {
         } else {
             let review =
                 std::path::PathBuf::from(std::env::var_os("NEUROMITA_TEST_REVIEW").unwrap());
-            PresetActivation::apply(&review, &active).unwrap();
+            if std::env::var_os("NEUROMITA_TEST_THREE_FILES").is_some() {
+                PresetActivation::apply_with_preferences(&review, &active).unwrap();
+            } else {
+                PresetActivation::apply(&review, &active).unwrap();
+            }
         }
         panic!("crash injection point {marker} was not reached");
     }

@@ -48,3 +48,47 @@ its journal when it detects foreign content. Kernel lock lifetime is scoped to
 the acquired file descriptor (released by Drop/process death), rather than a
 persistent PID file or stale timestamp. Existing unrelated file writers must
 opt into this contract before they can be considered protected.
+
+## D11 — optional three-document offline preference activation
+
+A reviewed Python user selection can now be installed together with the preset
+catalog and separate credentials **only** with an explicit operator action:
+
+```text
+cargo run --locked --offline --example activate_python_presets -- \
+  --apply-with-preferences /absolute/review /absolute/UserData --confirm-stopped
+```
+
+This requires a valid, **existing** Rust `settings.json`. It neither creates a
+new default settings profile nor imports unrelated Python settings. The reviewed
+Python `LAST_API_PRESET_ID` must explicitly resolve to a converted user preset;
+null, absent, template or unknown selections are refused. The review payload
+is rederived from the byte-exact Python sources before any active write. Only
+`AppSettings.presets.active` and the monotonically increasing `revision` change;
+per-character assignments, speech, AI, locale and all other settings remain
+unchanged. Custom Python display order is **not installed**, because Rust does
+not yet have an owned display-order model.
+
+The existing D7 journal remains the sole transaction owner. A private
+`includes-settings` marker identifies D11 journals, which include old/new
+snapshots and presence markers for all three files. D7 two-file journals remain
+recoverable as-is. The `prepared` and `committed` boundaries apply to all three
+files; recovery performs a full three-file foreign-write preflight *before*
+changing any file and restores the exact old snapshots on an interrupted
+uncommitted activation. Once committed, all three installed byte snapshots must
+match before journal cleanup. Startup refuses a pending transaction.
+
+D11 takes the existing `.preset-storage.lock` (to exclude cooperating Core
+owners) and the settings repository's own `settings.json.lock` (to exclude
+cooperating CLI settings writers) for the complete three-document apply or
+recovery. Lock acquisition follows the preset-then-settings order. Neither
+lock replaces the requirement that **both applications be stopped**. An
+external Python app or editor which ignores these locks is not excluded, and
+an all-or-nothing view for *live* external readers is not provided.
+
+The original `--apply` action still installs **only two** files and leaves
+`settings.json` unchanged, even for a review containing Python preferences.
+Never manually remove or modify a pending activation journal. Linux process
+abort tests cover `prepared`, after each of three installs, and `committed`;
+Windows file-lock/ACL behavior and physical power-failure durability remain
+unverified. This is not a three-file filesystem-level atomic rename.

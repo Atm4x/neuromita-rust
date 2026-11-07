@@ -219,7 +219,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SettingsError> {
     atomic_replace(path, bytes)
 }
 
-fn writer_lock(path: &Path) -> Result<std::fs::File, SettingsError> {
+pub(super) fn writer_lock(path: &Path) -> Result<std::fs::File, SettingsError> {
     let name = path
         .file_name()
         .ok_or_else(|| SettingsError::Storage("settings path has no file name".into()))?;
