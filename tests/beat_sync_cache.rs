@@ -165,3 +165,41 @@ fn invalid_identity_and_threshold_are_rejected() {
         Err(BeatCacheError::InvalidThreshold)
     ));
 }
+
+#[test]
+fn syntactically_valid_but_modified_timeline_is_corrupt() {
+    let tmp = TempDirectory::new();
+    let cache = BeatCache::new(&tmp.0);
+    let request = key(b"fixture", "v1");
+    cache.store(&request, &fixture()).unwrap();
+    let path = fs::read_dir(cache.root())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    envelope["timeline"]["beats"][1]["confidence"] = serde_json::json!(0.5);
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    assert_eq!(cache.lookup(&request).unwrap(), CacheLookup::Corrupt);
+}
+
+#[test]
+fn old_cache_format_is_rejected_instead_of_reused() {
+    let tmp = TempDirectory::new();
+    let cache = BeatCache::new(&tmp.0);
+    let request = key(b"fixture", "v1");
+    cache.store(&request, &fixture()).unwrap();
+    let path = fs::read_dir(cache.root())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    envelope["version"] = serde_json::json!(1);
+    fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    assert_eq!(cache.lookup(&request).unwrap(), CacheLookup::Corrupt);
+}
