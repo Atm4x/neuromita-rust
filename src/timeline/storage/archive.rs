@@ -2,7 +2,9 @@
 //! No migration chain, alternate history, compression codec or process-wide path.
 
 use std::collections::{BTreeMap, HashSet};
-use std::io::Cursor;
+use std::fs::{self, File};
+use std::io::{Cursor, Read};
+use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -44,6 +46,12 @@ pub enum SessionArchiveError {
     Invalid(&'static str),
     #[error("session archive identity already exists in destination")]
     Conflict,
+    #[error("pinned external archive is missing")]
+    MissingPinnedArchive,
+    #[error("pinned external archive bytes differ from their registered digest")]
+    PinnedArchiveChanged,
+    #[error("pinned external archive I/O failed: {0}")]
+    ArchiveIo(#[from] std::io::Error),
     #[error("session archive serialization failed: {0}")]
     Encoding(String),
     #[error(transparent)]
@@ -480,6 +488,141 @@ pub fn retention_manifest_sqlite(
     retained_archives: &[&[u8]],
 ) -> Result<Vec<TimelineAssetRef>, SessionArchiveError> {
     retention_manifest_memory(&store.archive_snapshot()?, retained_archives)
+}
+
+/// A caller-owned external archive location, pinned to its exact serialized bytes.
+/// This is a *retention input*, not proof that every external archive was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedExternalArchive {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl PinnedExternalArchive {
+    pub fn new(
+        path: impl AsRef<Path>,
+        sha256: impl Into<String>,
+    ) -> Result<Self, SessionArchiveError> {
+        let path = path.as_ref();
+        let sha256 = sha256.into();
+        if !path.is_absolute()
+            || sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(SessionArchiveError::Invalid("invalid external archive pin"));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            sha256,
+        })
+    }
+
+    /// Pin the original archive bytes at an explicitly supplied absolute path.
+    /// The bytes are independently verified against the path at every inventory.
+    pub fn for_export(path: impl AsRef<Path>, bytes: &[u8]) -> Result<Self, SessionArchiveError> {
+        if bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(SessionArchiveError::Invalid("external archive too large"));
+        }
+        let sha256 = archive_sha256(bytes);
+        Self::new(path, sha256)
+    }
+
+    fn read_checked(&self) -> Result<Vec<u8>, SessionArchiveError> {
+        let metadata = fs::symlink_metadata(&self.path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => SessionArchiveError::MissingPinnedArchive,
+            _ => SessionArchiveError::ArchiveIo(error),
+        })?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_ARCHIVE_BYTES as u64 {
+            return Err(SessionArchiveError::Invalid("unsafe external archive file"));
+        }
+        let file = File::open(&self.path)?;
+        let opened = file.metadata()?;
+        if !opened.is_file() || opened.len() > MAX_ARCHIVE_BYTES as u64 {
+            return Err(SessionArchiveError::Invalid("unsafe external archive file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_ARCHIVE_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(SessionArchiveError::Invalid("external archive too large"));
+        }
+        let after = fs::symlink_metadata(&self.path)
+            .map_err(|_| SessionArchiveError::MissingPinnedArchive)?;
+        if !after.file_type().is_file() || after.len() != bytes.len() as u64 {
+            return Err(SessionArchiveError::Invalid(
+                "external archive changed during scan",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (metadata.dev(), metadata.ino()) != (opened.dev(), opened.ino())
+                || (opened.dev(), opened.ino()) != (after.dev(), after.ino())
+            {
+                return Err(SessionArchiveError::Invalid(
+                    "external archive changed during scan",
+                ));
+            }
+        }
+        if archive_sha256(&bytes) != self.sha256 {
+            return Err(SessionArchiveError::PinnedArchiveChanged);
+        }
+        Ok(bytes)
+    }
+}
+
+fn archive_sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn read_pinned_archives(
+    pins: &[PinnedExternalArchive],
+) -> Result<Vec<Vec<u8>>, SessionArchiveError> {
+    let mut known = BTreeMap::new();
+    let mut documents = Vec::with_capacity(pins.len());
+    for pin in pins {
+        if known
+            .insert(pin.path.clone(), pin.sha256.as_str())
+            .is_some_and(|previous| previous != pin.sha256)
+        {
+            return Err(SessionArchiveError::Invalid(
+                "conflicting external archive pins",
+            ));
+        }
+        documents.push(pin.read_checked()?);
+    }
+    Ok(documents)
+}
+
+/// Reverify every pinned on-disk archive, then inventory all local branches and
+/// those external archive roots. A missing, replaced or corrupt pin fails closed.
+/// Unknown external archives, pending imports and concurrent writers still make
+/// the result unsuitable for *any* physical GC, even if no candidates are seen.
+pub fn inventory_pinned_memory(
+    store: &TimelineStore,
+    assets: &TimelineAssetStore,
+    pins: &[PinnedExternalArchive],
+) -> Result<TimelineAssetInventory, SessionArchiveError> {
+    let documents = read_pinned_archives(pins)?;
+    let borrowed = documents.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    inventory_memory(store, assets, &borrowed)
+}
+
+#[cfg(feature = "sqlite-system")]
+pub fn inventory_pinned_sqlite(
+    store: &SqliteTimelineRepository,
+    assets: &TimelineAssetStore,
+    pins: &[PinnedExternalArchive],
+) -> Result<TimelineAssetInventory, SessionArchiveError> {
+    let documents = read_pinned_archives(pins)?;
+    let borrowed = documents.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    inventory_sqlite(store, assets, &borrowed)
 }
 
 /// Observe filesystem candidates after collecting every canonical branch and

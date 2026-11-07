@@ -22,3 +22,24 @@ is rejected by domain validation, even if its bytes are identical. Asset
 verification (`append_checked`) and SessionArchive reference collection use
 the same canonical resolver, so a shadow field cannot mask an unavailable
 replacement or cause the archive to omit the replacement's binary.
+
+### Pinned on-disk archives (B42 read-only retention boundary)
+
+`archive::PinnedExternalArchive` binds an explicit absolute archive path to the
+SHA-256 of its **serialized archive bytes**. `inventory_pinned_memory` and
+`inventory_pinned_sqlite` re-open every pin, reject symlinks and non-regular
+files, bound the read to the existing native archive limit, recheck the byte
+fingerprint, then validate its full `SessionArchive` structure and binary
+closure before inventorying all canonical local branches and the pinned roots.
+A missing or replaced pin fails the entire inventory; an archive that existed
+when a prior inventory ran is **never** trusted from that prior result. These
+APIs never load private assets into the user's MitaView, and never delete
+anything. Pin paths are caller-owned; there is no implicit `cwd` lookup.
+
+**GC remains blocked:** these checked pins do *not* certify that the caller
+knows all external archives, that in-progress imports are settled, or that
+other processes cannot append an asset after the read. A persistent
+owner-controlled pin registry, complete external roots, a coordinated
+revision/lease revalidation boundary and crash recovery are still needed
+before any physical deletion can safely be enabled. The returned
+`orphan_candidates` are inspection diagnostics, not a deletion plan.

@@ -9,7 +9,10 @@ use neuromita::{
     timeline::{
         domain::{BranchId, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore},
         storage::{
-            archive::{SessionArchiveError, export_memory, inventory_memory},
+            archive::{
+                PinnedExternalArchive, SessionArchiveError, export_memory, inventory_memory,
+                inventory_pinned_memory,
+            },
             assets::{TimelineAssetError, TimelineAssetRef, TimelineAssetStore},
         },
     },
@@ -258,4 +261,134 @@ fn sqlite_inventory_includes_reopened_canonical_roots() {
     assert_eq!(inventory.retained, vec![retained]);
     assert_eq!(inventory.orphan_candidates.len(), 1);
     assert_eq!(inventory.orphan_candidates[0].digest, orphan.digest);
+}
+
+#[test]
+fn pinned_archive_on_disk_retains_branch_binary_and_rechecks_every_inventory() {
+    let temp = TestDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut original = TimelineStore::new();
+    let (session, reference) = attach(&store, &mut original);
+    let archive = export_memory(&original, session, &store).unwrap();
+    let saved = temp.path().join("pinned-session.json");
+    fs::write(&saved, &archive).unwrap();
+    let pin = PinnedExternalArchive::for_export(&saved, &archive).unwrap();
+    let empty = TimelineStore::new();
+
+    assert_eq!(
+        inventory_memory(&empty, &store, &[])
+            .unwrap()
+            .orphan_candidates
+            .len(),
+        1
+    );
+    let inventory = inventory_pinned_memory(&empty, &store, &[pin.clone()]).unwrap();
+    assert_eq!(inventory.retained, vec![reference.clone()]);
+    assert!(inventory.orphan_candidates.is_empty());
+
+    fs::write(&saved, b"valid path, replaced bytes").unwrap();
+    assert!(matches!(
+        inventory_pinned_memory(&empty, &store, &[pin.clone()]),
+        Err(SessionArchiveError::PinnedArchiveChanged)
+    ));
+    store.verify(&reference).unwrap();
+    fs::remove_file(&saved).unwrap();
+    assert!(matches!(
+        inventory_pinned_memory(&empty, &store, &[pin]),
+        Err(SessionArchiveError::MissingPinnedArchive)
+    ));
+    store.verify(&reference).unwrap();
+}
+
+#[test]
+fn pinned_archive_rejects_relative_paths_and_conflicting_pins() {
+    let temp = TestDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    assert!(PinnedExternalArchive::new("relative.json", "0".repeat(64)).is_err());
+    assert!(PinnedExternalArchive::new(temp.path().join("archive"), "ABC").is_err());
+    let mut original = TimelineStore::new();
+    let (session, reference) = attach(&store, &mut original);
+    let archive = export_memory(&original, session, &store).unwrap();
+    let saved = temp.path().join("archive.json");
+    fs::write(&saved, &archive).unwrap();
+    let valid = PinnedExternalArchive::for_export(&saved, &archive).unwrap();
+    let other = PinnedExternalArchive::new(&saved, "0".repeat(64)).unwrap();
+    assert!(matches!(
+        inventory_pinned_memory(&TimelineStore::new(), &store, &[valid, other]),
+        Err(SessionArchiveError::Invalid(
+            "conflicting external archive pins"
+        ))
+    ));
+    store.verify(&reference).unwrap();
+}
+
+#[test]
+fn pinned_archive_valid_digest_still_requires_valid_session_document() {
+    let temp = TestDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let saved = temp.path().join("invalid.json");
+    fs::write(&saved, b"not a session archive").unwrap();
+    let pin = PinnedExternalArchive::for_export(&saved, b"not a session archive").unwrap();
+    assert!(inventory_pinned_memory(&TimelineStore::new(), &store, &[pin]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_archive_symlink_never_bypasses_disk_archive_verification() {
+    use std::os::unix::fs::symlink;
+    let temp = TestDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut original = TimelineStore::new();
+    let (session, _) = attach(&store, &mut original);
+    let archive = export_memory(&original, session, &store).unwrap();
+    let actual = temp.path().join("actual.json");
+    let link = temp.path().join("linked.json");
+    fs::write(&actual, &archive).unwrap();
+    symlink(&actual, &link).unwrap();
+    let pin = PinnedExternalArchive::for_export(&link, &archive).unwrap();
+    assert!(matches!(
+        inventory_pinned_memory(&TimelineStore::new(), &store, &[pin]),
+        Err(SessionArchiveError::Invalid("unsafe external archive file"))
+    ));
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn reopened_sqlite_with_pinned_archive_preserves_all_roots() {
+    use neuromita::timeline::storage::{
+        SqliteTimelineRepository, archive::inventory_pinned_sqlite,
+    };
+    let temp = TestDir::new();
+    let store = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut origin = TimelineStore::new();
+    let (session, pinned_reference) = attach(&store, &mut origin);
+    let archive = export_memory(&origin, session, &store).unwrap();
+    let saved = temp.path().join("saved-session.json");
+    fs::write(&saved, &archive).unwrap();
+    let pin = PinnedExternalArchive::for_export(&saved, &archive).unwrap();
+    let local_reference = store
+        .import("image/png", Cursor::new(b"local branch asset"))
+        .unwrap();
+    let path = temp.path().join("timeline.db");
+    let branch = BranchId::new();
+    {
+        let mut sqlite = SqliteTimelineRepository::open(&path).unwrap();
+        sqlite.create_session(SessionId::new(), branch).unwrap();
+        let mut draft = EventDraft::new(EventKind::PlayerMessage);
+        draft.actor = Some("player".into());
+        draft.observers.insert(CharacterId::Crazy);
+        draft.payload.insert(
+            "content".into(),
+            json!([{"type":"image","asset":local_reference}]),
+        );
+        sqlite
+            .append(branch, 0, "local", json!({}), vec![draft])
+            .unwrap();
+    }
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    let inventory = inventory_pinned_sqlite(&reopened, &store, &[pin]).unwrap();
+    assert_eq!(inventory.retained.len(), 2);
+    assert!(inventory.retained.contains(&pinned_reference));
+    assert!(inventory.retained.contains(&local_reference));
+    assert!(inventory.orphan_candidates.is_empty());
 }
