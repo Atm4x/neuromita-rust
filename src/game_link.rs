@@ -438,10 +438,11 @@ enum GameCommand {
         audio_path: String,
         #[serde(default)]
         track_name: String,
-        #[serde(default)]
+        #[serde(default = "default_beat_stream")]
         stream: bool,
         #[serde(default = "default_beat_confidence")]
         min_confidence: f32,
+        #[serde(default = "default_beat_backend")]
         backend: BeatBackend,
     },
     CancelMusicBeats {
@@ -502,6 +503,8 @@ enum GameCommand {
         error: Option<String>,
     },
 }
+fn default_beat_stream() -> bool { true }
+fn default_beat_backend() -> BeatBackend { BeatBackend::Auto }
 fn default_beat_confidence() -> f32 {
     0.2
 }
