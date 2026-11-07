@@ -1,0 +1,33 @@
+name: Agent D PR265 source export
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d-pr265-export-20261107
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and bundle pinned D28
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=860284de8b65c35cb84fb70cd58e35a1246a00ed
+          BRANCH=codex/python-settings-atomic-composite-import-20261107
+          git fetch --no-tags origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+          test "$(git rev-parse "refs/remotes/origin/$BRANCH^{commit}")" = "$EXPECTED"
+          mkdir -p transfer
+          git bundle create transfer/agent-d-pr265.bundle "refs/remotes/origin/$BRANCH"
+          git bundle verify transfer/agent-d-pr265.bundle
+          sha256sum transfer/agent-d-pr265.bundle > transfer/agent-d-pr265.bundle.sha256
+          git bundle list-heads transfer/agent-d-pr265.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d-pr265-source
+          path: transfer/
+          retention-days: 1
