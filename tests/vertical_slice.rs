@@ -3229,3 +3229,86 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
     api.conversation.apply_change(reset).unwrap();
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_single_message_hide_checks_event_identity_observer_and_timeline_anchor() {
+    use neuromita::{
+        presentation::{ConversationChange, ConversationError},
+        request::UserInput,
+    };
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("first".into()).unwrap())
+        .await
+        .unwrap();
+    api.characters
+        .observe(CharacterId::Kind, UserInput::new("private".into()).unwrap())
+        .await
+        .unwrap();
+    let first = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let target = first.messages[0].event_id;
+    let private = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    let foreign = private.messages[0].event_id;
+    assert!(matches!(
+        api.conversation
+            .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(foreign))
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    assert_eq!(
+        api.conversation
+            .snapshot(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .at,
+        first.at,
+        "unauthorized preview must not write a Timeline fact"
+    );
+    let stale = api
+        .conversation
+        .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+        .await
+        .unwrap();
+    assert_eq!(stale.message_count(), 1);
+    api.characters
+        .observe(CharacterId::Crazy, UserInput::new("second".into()).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        api.conversation.apply_change(stale),
+        Err(ConversationError::StalePreview)
+    ));
+    let fresh = api
+        .conversation
+        .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+        .await
+        .unwrap();
+    assert_eq!(fresh.message_count(), 1);
+    api.conversation.apply_change(fresh).unwrap();
+    let visible = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(visible.messages.len(), 1);
+    assert_ne!(visible.messages[0].event_id, target);
+    assert_eq!(visible.messages[0].content, "second");
+    let after_other = api.conversation.snapshot(CharacterId::Kind).await.unwrap();
+    assert_eq!(after_other.messages.len(), private.messages.len());
+    assert_eq!(after_other.messages[0].event_id, foreign);
+    assert!(matches!(
+        api.conversation
+            .preview_change(CharacterId::Crazy, ConversationChange::HideMessage(target))
+            .await,
+        Err(ConversationError::MessageNotVisible)
+    ));
+    app.shutdown().await.unwrap();
+}

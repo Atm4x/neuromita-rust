@@ -603,6 +603,18 @@
     "source": "Озвучивать в игре",
     "translation": "Speak in game"
   },
+  "sandbox.message.hide": {
+    "source": "Скрыть сообщение",
+    "translation": "Hide message"
+  },
+  "conversation.hide.title": {
+    "source": "Скрыть выбранное сообщение?",
+    "translation": "Hide selected message?"
+  },
+  "conversation.hide.body": {
+    "source": "Сообщение исчезнет из истории этого персонажа. Исходное событие сохранится.",
+    "translation": "The message will disappear from this character's history. The original event remains intact."
+  },
   "conversation.clear.title": {
     "source": "Очистить видимую историю?",
     "translation": "Clear visible history?"

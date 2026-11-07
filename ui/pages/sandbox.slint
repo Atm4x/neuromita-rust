@@ -38,6 +38,7 @@ export component SandboxPage inherits Rectangle {
     callback send(string);
     callback attach(string, string);
     callback cancel(string);
+    callback hide-message(string);
     callback select-character(int);
     callback refresh();
     callback set-volume(int);
@@ -82,6 +83,7 @@ export component SandboxPage inherits Rectangle {
                     send(text) => { root.send(text); }
                     attach(text, path) => { root.attach(text, path); }
                     cancel(id) => { root.cancel(id); }
+                    hide-message(id) => { root.hide-message(id); }
                     refresh => { root.refresh(); }
                 }
             }

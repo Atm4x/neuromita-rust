@@ -1148,3 +1148,70 @@ fn conversation_admin_callbacks_reject_late_a_b_a_results() {
     assert!(matches!(&recorded[6], Command::Diagnostics(origin) if *origin == selected));
     assert!(matches!(&recorded[7], Command::Abort(origin) if *origin == selected));
 }
+
+#[test]
+fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let collected = received.clone();
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    super::super::sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        view::ConversationUi,
+    };
+    use neuromita::{character::CharacterId, presentation::ConversationChange};
+    let target = neuromita::timeline::EventId::new();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_hide_message(target.0.to_string().into());
+    assert!(
+        matches!(&received.borrow()[0], Command::Preview(origin, ConversationChange::HideMessage(id))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 0 && *id == target)
+    );
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 0,
+            },
+            Some((ConversationChange::HideMessage(target), 1)),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 0);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    window.invoke_chat_hide_message(target.0.to_string().into());
+    assert!(
+        matches!(&received.borrow()[3], Command::Preview(origin, ConversationChange::HideMessage(id))
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2 && *id == target)
+    );
+    super::super::sandbox::apply(
+        &window,
+        Update::Confirmation(
+            ChatOrigin {
+                character: CharacterId::Crazy,
+                selection_revision: 2,
+            },
+            Some((ConversationChange::HideMessage(target), 1)),
+        ),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.global::<ConversationUi>().get_confirmation(), 3);
+    window.global::<ConversationUi>().invoke_confirm();
+    assert!(matches!(&received.borrow()[4], Command::Confirm(origin)
+        if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
+    window.hide().unwrap();
+}

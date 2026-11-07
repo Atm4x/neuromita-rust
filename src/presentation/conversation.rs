@@ -28,12 +28,15 @@ pub enum ConversationError {
     Timeline(#[from] crate::timeline::domain::TimelineError),
     #[error("conversation changed after confirmation was prepared; review the action again")]
     StalePreview,
+    #[error("message is not visible to the selected character at this timeline position")]
+    MessageNotVisible,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum ConversationChange {
     ClearMessages,
     ResetContext,
+    HideMessage(crate::identity::EventId),
 }
 
 pub struct ConversationChangePreview {
@@ -89,17 +92,25 @@ impl ConversationPresenter {
             (timeline.anchor(), timeline.selection())
         };
         let view = self.characters.context(character, at).await?;
+        let visible = view.view.messages();
+        let targets = match operation {
+            ConversationChange::HideMessage(id) => {
+                if !visible.iter().any(|message| message.event_id == id) {
+                    return Err(ConversationError::MessageNotVisible);
+                }
+                vec![id]
+            }
+            _ => visible
+                .into_iter()
+                .map(|message| message.event_id)
+                .collect(),
+        };
         Ok(ConversationChangePreview {
             character,
             at,
             selection,
             operation,
-            targets: view
-                .view
-                .messages()
-                .into_iter()
-                .map(|message| message.event_id)
-                .collect(),
+            targets,
         })
     }
 
@@ -127,6 +138,16 @@ impl ConversationPresenter {
                 )?;
             }
             ConversationChange::ClearMessages => {}
+            ConversationChange::HideMessage(_) => {
+                timeline.change_message(
+                    preview.selection,
+                    preview.character,
+                    id,
+                    crate::timeline::message_actions::MessageAction::Hide {
+                        targets: preview.targets,
+                    },
+                )?;
+            }
             ConversationChange::ResetContext => {
                 timeline.reset_character_context(preview.selection, preview.character, id)?;
             }

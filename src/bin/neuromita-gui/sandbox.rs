@@ -196,6 +196,27 @@ pub(super) fn bind_chat_actions(
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
+    window.on_chat_hide_message(move |id| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        match (
+            current_origin(&window, &revision),
+            uuid::Uuid::parse_str(&id),
+        ) {
+            (Some(origin), Ok(id)) => send(Command::Preview(
+                origin,
+                neuromita::presentation::ConversationChange::HideMessage(
+                    neuromita::timeline::EventId(id),
+                ),
+            )),
+            (None, _) => window.set_chat_error("Unknown chat character selection".into()),
+            (_, Err(error)) => window.set_chat_error(error.to_string().into()),
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
     window.on_chat_cancel(move |id| {
         let Some(window) = weak.upgrade() else {
             return;
@@ -341,6 +362,7 @@ pub(super) fn apply(
                     ui.set_confirmation(match operation {
                         neuromita::presentation::ConversationChange::ClearMessages => 1,
                         neuromita::presentation::ConversationChange::ResetContext => 2,
+                        neuromita::presentation::ConversationChange::HideMessage(_) => 3,
                     });
                 }
                 None => ui.set_confirmation(0),
@@ -600,6 +622,8 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
                     .map(|id| id.index() as i32)
                     .unwrap_or(-1),
                 sequence: format!("#{}", message.sequence).into(),
+                event_id: message.event_id.0.to_string().into(),
+                can_hide: message.role != MessageRole::System,
                 status: ChatStatus::History,
                 ..Default::default()
             };

@@ -138,6 +138,7 @@ export component SandboxChat inherits Rectangle {
     callback send(string);
     callback attach(string, string);
     callback cancel(string);
+    callback hide-message(string);
     callback refresh();
     background: #0e101ff7; border-color: SandboxTheme.border; border-width: 1px; border-radius: 20px;
     VerticalLayout {
@@ -156,6 +157,7 @@ export component SandboxChat inherits Rectangle {
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
                         character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
+                        hide-message(id) => { root.hide-message(id); }
                     }
                 }
             }

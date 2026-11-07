@@ -49,6 +49,7 @@ export component MessageRow inherits VerticalLayout {
     in property <string> character-name;
     in property <length> bubble-width;
     callback cancel(string);
+    callback hide-message(string);
     padding: 0px; padding-top: 4px; padding-bottom: 4px; spacing: 4px;
     vertical-stretch: 0;
     HorizontalLayout {
@@ -130,6 +131,11 @@ export component MessageRow inherits VerticalLayout {
                 }
             }
         }
+    }
+    if root.item.can-hide: HorizontalLayout {
+        padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
+        Rectangle { horizontal-stretch: 1; }
+        GhostButton { text: I18n.i18n("sandbox.message.hide", "Скрыть сообщение"); height: 25px; activated => { root.hide-message(root.item.event-id); } }
     }
     if root.item.status != ChatStatus.history && root.item.status != ChatStatus.success: HorizontalLayout {
         padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;

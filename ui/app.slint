@@ -71,6 +71,7 @@ export component AppWindow inherits Window {
     callback chat-send(string);
     callback chat-attach(string, string);
     callback chat-cancel(string);
+    callback chat-hide-message(string);
     callback chat-select-character(int);
     callback chat-refresh();
     callback chat-set-volume(int);
@@ -124,6 +125,7 @@ export component AppWindow inherits Window {
                 send(text) => { root.chat-send(text); }
                 attach(text, path) => { root.chat-attach(text, path); }
                 cancel(id) => { root.chat-cancel(id); }
+                hide-message(id) => { root.chat-hide-message(id); }
                 select-character(id) => { root.chat-select-character(id); }
                 refresh => { root.chat-refresh(); }
                 set-volume(value) => { root.chat-set-volume(value); }
