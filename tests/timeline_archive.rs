@@ -14,7 +14,9 @@ use neuromita::{
     timeline::{
         domain::{BranchId, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore},
         storage::{
-            archive::{SessionArchiveError, export_memory, import_memory},
+            archive::{
+                SessionArchiveError, export_memory, import_memory, retention_manifest_memory,
+            },
             assets::{TimelineAssetRef, TimelineAssetStore},
         },
         view::TimelineMessageQueries,
@@ -157,6 +159,72 @@ fn memory_roundtrip_retains_branch_graph_receipt_external_id_and_assets() {
         import_memory(&mut target, &archive, &target_assets),
         Err(SessionArchiveError::Conflict)
     ));
+}
+
+#[test]
+fn retention_manifest_preserves_hidden_and_revised_facts_and_pinned_archives() {
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut timeline = TimelineStore::new();
+    let (session, root, fork, original, first, _) = build_session(&mut timeline, &assets);
+    let revised = assets
+        .import("image/png", Cursor::new(b"revised image"))
+        .unwrap();
+    let unreferenced = assets
+        .import("image/png", Cursor::new(b"orphaned"))
+        .unwrap();
+
+    let mut edit = EventDraft::new(EventKind::MessageRevised);
+    edit.observers.insert(CharacterId::Crazy);
+    edit.payload
+        .insert("event_id".into(), json!(first.id.0.to_string()));
+    edit.payload.insert(
+        "message".into(),
+        json!({"content": [
+            {"type":"image", "asset":revised}
+        ]}),
+    );
+    timeline
+        .append(root, 2, "revision", json!({}), vec![edit])
+        .unwrap();
+    let mut hidden = EventDraft::new(EventKind::MessageHidden);
+    hidden.observers.insert(CharacterId::Crazy);
+    hidden
+        .payload
+        .insert("event_ids".into(), json!([first.id.0.to_string()]));
+    timeline
+        .append(root, 3, "hide", json!({}), vec![hidden])
+        .unwrap();
+
+    let live = retention_manifest_memory(&timeline, &[]).unwrap();
+    assert_eq!(live.len(), 2);
+    assert!(live.contains(&original));
+    assert!(live.contains(&revised));
+    assert!(!live.contains(&unreferenced));
+    assert_eq!(timeline.branch(fork).unwrap().parent, Some(root));
+
+    let exported = export_memory(&timeline, session, &assets).unwrap();
+    let empty = TimelineStore::new();
+    let pinned = retention_manifest_memory(&empty, &[&exported]).unwrap();
+    assert_eq!(pinned, live);
+    let corrupted = bytes_with_change(&exported, |value| {
+        value["assets"][0]["data_base64"] = json!("YmFk");
+    });
+    assert!(retention_manifest_memory(&empty, &[&corrupted]).is_err());
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_retention_manifest_enumerates_all_canonical_branches() {
+    use neuromita::timeline::storage::archive::retention_manifest_sqlite;
+    let temp = TestDir::new();
+    let assets = TimelineAssetStore::new(temp.path().join("assets"), 1024).unwrap();
+    let mut repository = SqliteTimelineRepository::open(&temp.path().join("timeline.db")).unwrap();
+    let (_, _, _, reference, _, _) = build_session(&mut repository, &assets);
+    assert_eq!(
+        retention_manifest_sqlite(&repository, &[]).unwrap(),
+        vec![reference]
+    );
 }
 
 #[test]
