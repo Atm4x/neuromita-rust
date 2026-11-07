@@ -26,7 +26,7 @@ Required environment variables: `NEUROMITA_TG_API_ID`, `NEUROMITA_TG_API_HASH`, 
 ## Remaining critical review blockers
 
 - No live Telegram auth, bot setup or media decoding test with real credentials. Bot commands and response formats may change.
-- No complete multi-character/speaker protocol adaptation for each supported bot, and no proof of `/start`, `/mp3`, `/hd`, `/videonotes` setup compatibility. Only `/speaker` is implemented in the coordinator.
+- No complete multi-character/speaker protocol adaptation for each supported bot, and no proof of `/start`, `/mp3`, `/voice`, `/hd`, `/videonotes` compatibility. The coordinator now sends `/start` and `/mp3` for Silero and `/voice` before CrazyMita requests; HD/video-note options and external protocol compatibility are unverified.
 - Telegram incoming voice is received and exposed at transport level but is **not** routed into Core ASR/chat. Issue #47 is not complete until this is wired.
 - No durable deduplication checkpoint for incoming messages or backend-owned session rehydration/autoconnect from saved application settings. GUI credentials are currently transient; stored Telethon sessions are persisted separately.
 - No secure user-credentials settings store, installer provision of the Telethon sidecar, 2FA modal/prompt-id queue, or clean recovery when the Telegram session expires during generation.
