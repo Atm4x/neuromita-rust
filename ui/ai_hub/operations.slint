@@ -43,7 +43,7 @@ export struct AiHubOperationCapabilities {
 
 // A single task row is a projection of ONE owner-issued operation ID.
 // No local completion, queue admission or model-ready status is synthesized.
-component AiHubOperationRow inherits Rectangle {
+export component AiHubOperationRow inherits Rectangle {
     in property <AiHubOperationSnapshot> task;
     in property <bool> showing: true;
     in property <bool> connected: false;
