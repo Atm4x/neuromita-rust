@@ -1,0 +1,55 @@
+name: Agent B50 verified refresh-live projection and Slint test
+on:
+  push:
+    branches: [bridge/agent-b50-chat-rows-20261107]
+    paths: [bridge/agent-b50.patch.gz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify SHA and reproduce exact B50 source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=5a6cca378308d66ad6c31741262bd5e4a4cd6bec
+          tree=1ce447422fedfaf3d084a549076e30ac87b6cecb
+          branch=codex/timeline-b50-chat-refresh-live-reconcile-20261107
+          base64 -d bridge/agent-b50.patch.gz.b64 > /tmp/b50.patch.gz
+          echo "e64d210a6a16e9c08216b07741bd555dca18aa4321ae34abd5fc04caf2fef4bc  /tmp/b50.patch.gz" | sha256sum -c -
+          gzip -t /tmp/b50.patch.gz
+          gzip -dc /tmp/b50.patch.gz > /tmp/b50.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b50.patch
+          git apply --index /tmp/b50.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "fix(chat): incrementally reconcile refresh and live rows without duplication"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B50 ref exists: refuse overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          remote="$(git ls-remote origin "refs/heads/$branch" | cut -f1)"
+          test "$remote" = "$(git rev-parse HEAD)"
+          echo "B50_REMOTE=$remote"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute refresh/live Slint regression
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^{tree})" = 1ce447422fedfaf3d084a549076e30ac87b6cecb
+          cargo test --locked --offline --features gui --bin neuromita-gui chat_refresh_and_live_reconcile_preserves_model_and_deduplicates_rows -- --test-threads=1
