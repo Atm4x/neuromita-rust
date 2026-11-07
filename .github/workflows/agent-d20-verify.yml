@@ -1,0 +1,40 @@
+name: Verify Agent D20 Wiki
+on:
+  push:
+    branches:
+      - bridge/agent-d20-verification-20261107
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-offline-wiki-20261107
+          persist-credentials: false
+      - name: Assert exact SHA
+        run: test "$(git rev-parse HEAD)" = "3cb037b0d7ac4c2220f9d8350a5c9e16d8825564"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native build requirements
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check rustfmt
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Check GUI Slint
+        run: cargo +1.98.1 check --locked --offline --features gui --bin neuromita-gui
+      - name: Check all targets
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: Test library in full
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
