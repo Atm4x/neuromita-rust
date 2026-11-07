@@ -1,0 +1,277 @@
+import { Theme } from "../theme.slint";
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel, SettingsField } from "../settings/form-controls.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
+import { AiHubCard } from "cards.slint";
+import { AiHubCatalogState, AiHubComponent, AiHubSettingsState, AiHubOperation, AiHubLoadPhase, AiHubSavePhase, AiHubTruth } from "contract.slint";
+
+// GUI-only workspace. Agent 2 owns cards, agent 3 owns the schema editor,
+// agent 4 owns operation/queue widgets. No backend intents are emitted here.
+export component AiHubShell inherits Rectangle {
+    in property <AiHubCatalogState> catalog;
+    in property <[AiHubComponent]> components;
+    in property <AiHubSettingsState> settings;
+    in property <[AiHubOperation]> operations;
+    in-out property <string> selected-category: "tts";
+    in-out property <int> active-tab: 0; // 0 = Install, 1 = Settings
+    in-out property <string> search-text;
+    in-out property <string> backend-filter: "all";
+    callback close-requested();
+    // Reserved typed UI intents: not wired until corresponding adapters exist.
+    callback refresh-requested(int, string);
+    callback component-action-requested(string, string, int, string);
+    callback settings-save-requested(string, int, string);
+    callback operation-cancel-requested(string, string, int, string);
+
+    // The source translation catalog can lag a new UI key. Provide exact EN
+    // fallbacks while retaining the existing runtime I18n path for RU/overrides.
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+    }
+
+    // Category keys from Python constants.py, not a model/component catalog.
+    // Unknown categories remain visible in "Other"; never discard registry data.
+    pure function in-category(key: string, selected: string) -> bool {
+        if selected == "all" { return true; }
+        if selected == "extras" { return key == "extras" || key == "beats"; }
+        if selected == "deps" { return key == "deps" || key == "dependency"; }
+        if selected == "other" {
+            return key != "tts" && key != "voices" && key != "asr" && key != "rag"
+                && key != "extras" && key != "beats" && key != "backend"
+                && key != "deps" && key != "dependency";
+        }
+        return key == selected;
+    }
+    // substring search via supported Slint string.replace-all; empty needle is handled.
+    pure function search-match(value: string, query: string) -> bool {
+        if query == "" { return true; }
+        let lowered = value.to-lowercase();
+        return lowered.replace-all(query.to-lowercase(), "") != lowered;
+    }
+    pure function show-component(component: AiHubComponent) -> bool {
+        return root.in-category(component.category, root.selected-category)
+            && (root.backend-filter == "all" || component.backend == root.backend-filter
+                || component.backend == "CPU" || component.backend == "none" || component.backend == "")
+            && (root.search-text == ""
+                || root.search-match(component.component-id, root.search-text)
+                || root.search-match(component.title, root.search-text)
+                || root.search-match(component.description, root.search-text)
+                || root.search-match(component.backend, root.search-text)
+                || root.search-match(component.compatibility, root.search-text)
+                || root.search-match(component.error, root.search-text));
+    }
+    // Sort supported + inference-ready first without changing the source model.
+    pure function card-rank(component: AiHubComponent) -> int {
+        return !component.supported ? 2 : component.model-ready == AiHubTruth.yes ? 0 : 1;
+    }
+    background: SettingsTheme.workspace;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: SettingsTheme.border;
+    clip: true;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        HorizontalLayout {
+            height: 56px;
+            spacing: 12px;
+            VerticalLayout {
+                padding: 0px; spacing: 5px; horizontal-stretch: 1;
+                SettingsLabel { text: "AI Hub"; font-size: 23px; font-weight: 800; }
+                SettingsLabel {
+                    text: root.localized("ai-hub.shell.subtitle", "Каталог компонентов ИИ и управление настройками", "AI component catalog and settings");
+                    font-size: 12px; color: SettingsTheme.muted;
+                }
+            }
+            ActionSurface {
+                width: 86px; height: 36px;
+                label: root.localized("common.close", "Закрыть", "Close");
+                background: SettingsTheme.button;
+                enabled: !root.settings.dirty && root.settings.save-phase != AiHubSavePhase.saving;
+                SettingsLabel { text: root.localized("common.close", "Закрыть", "Close"); horizontal-alignment: center; }
+                activated => { root.close-requested(); }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.divider; }
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 202px;
+                min-width: 202px;
+                background: SettingsTheme.panel;
+                border-radius: 12px;
+                border-color: SettingsTheme.border;
+                border-width: 1px;
+                VerticalLayout {
+                    padding: 9px; spacing: 7px;
+                    SettingsLabel {
+                        text: root.localized("ai-hub.shell.categories", "КАТЕГОРИИ", "CATEGORIES");
+                        font-size: 10px; font-weight: 800; color: SettingsTheme.muted;
+                        height: 26px;
+                    }
+                    category-scroll := SettingsScrollView {
+                        content-height: category-list.preferred-height;
+                        category-list := VerticalLayout {
+                            width: category-scroll.visible-width;
+                            padding: 0px; spacing: 4px; alignment: start;
+                            for category in [
+                                {key: "tts", name: root.localized("ai-hub.category.tts", "Синтез речи (TTS)", "Text to speech (TTS)")},
+                                {key: "voices", name: root.localized("ai-hub.category.voices", "Голоса Мит", "Mita Voices")},
+                                {key: "asr", name: root.localized("ai-hub.category.asr", "Распознавание (ASR)", "Speech recognition (ASR)")},
+                                {key: "rag", name: root.localized("ai-hub.category.rag", "Поиск и память (RAG)", "Search and memory (RAG)")},
+                                {key: "extras", name: root.localized("ai-hub.category.extras", "Дополнительно / Beat", "Extras / Beat")},
+                                {key: "backend", name: root.localized("ai-hub.category.backend", "Системное ядро", "System core")},
+                                {key: "deps", name: root.localized("ai-hub.category.deps", "Зависимости", "Dependencies")},
+                                {key: "other", name: root.localized("ai-hub.category.other", "Прочие", "Other")},
+                                {key: "all", name: root.localized("ai-hub.category.all", "Все категории", "All categories")},
+                            ]: ActionSurface {
+                                height: 39px;
+                                label: category.name;
+                                selected: root.selected-category == category.key;
+                                SettingsLabel {
+                                    text: category.name;
+                                    color: parent.selected ? SettingsTheme.text : SettingsTheme.muted;
+                                    font-weight: parent.selected ? 700 : 500;
+                                    horizontal-alignment: left;
+                                    x: 10px; width: parent.width - 20px;
+                                }
+                                activated => { root.selected-category = category.key; }
+                            }
+                        }
+                    }
+                    Rectangle { height: 1px; background: Theme.divider; }
+                    SettingsLabel {
+                        height: 40px; color: SettingsTheme.muted;
+                        text: !root.catalog.available
+                            ? root.localized("ai-hub.shell.offline", "Нет подключения к каталогу", "Catalog not connected")
+                            : root.catalog.phase == AiHubLoadPhase.checking
+                                ? root.localized("ai-hub.shell.checking", "Проверка состояния…", "Checking status…")
+                                : root.localized("ai-hub.shell.catalog", "Каталог подключён", "Catalog connected");
+                        wrap: word-wrap;
+                        overflow: clip;
+                    }
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1; min-width: 0px;
+                background: transparent;
+                VerticalLayout {
+                    spacing: 11px;
+                    HorizontalLayout {
+                        height: 40px; spacing: 8px;
+                        for tab in [
+                            {id: 0, label: root.localized("ai-hub.tab.install", "Установка", "Install")},
+                            {id: 1, label: root.localized("ai-hub.tab.settings", "Настройки", "Settings")},
+                        ]: ActionSurface {
+                            width: 132px; height: 36px; label: tab.label;
+                            selected: root.active-tab == tab.id;
+                            SettingsLabel { text: tab.label; horizontal-alignment: center; font-weight: 700; }
+                            activated => { root.active-tab = tab.id; }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                    }
+                    HorizontalLayout {
+                        height: 40px; spacing: 8px;
+                        SettingsField {
+                            text <=> root.search-text;
+                            placeholder: root.localized("ai-hub.shell.search", "Поиск по компонентам…", "Search components…");
+                            horizontal-stretch: 1; height: 38px;
+                        }
+                        for backend in ["all", "CUDA", "ONNX", "CPU"]: ActionSurface {
+                            width: backend == "all" ? 55px : 62px; height: 36px;
+                            label: backend;
+                            selected: root.backend-filter == backend;
+                            SettingsLabel {
+                                text: backend == "all" ? root.localized("ai-hub.filter.all", "Все", "All") : backend;
+                                horizontal-alignment: center; font-size: 11px;
+                            }
+                            activated => { root.backend-filter = backend; }
+                        }
+                    }
+                    Rectangle {
+                        background: SettingsTheme.panel; border-radius: 12px;
+                        border-width: 1px; border-color: SettingsTheme.border;
+                        vertical-stretch: 1; min-height: 0px; clip: true;
+                        body-scroll := SettingsScrollView {
+                            width: parent.width; height: parent.height;
+                            content-height: body-content.preferred-height;
+                            body-content := VerticalLayout {
+                                width: body-scroll.visible-width;
+                                padding: 18px; spacing: 12px; alignment: start;
+                                if !root.catalog.available: VerticalLayout {
+                                    padding: 0px; spacing: 8px;
+                                    SettingsLabel {
+                                        text: root.localized("ai-hub.shell.no-data", "Данные и управление AI Hub пока недоступны.", "AI Hub data and controls are unavailable.");
+                                        font-size: 17px; font-weight: 700; wrap: word-wrap; overflow: clip;
+                                    }
+                                    SettingsLabel {
+                                        text: root.localized("ai-hub.shell.no-adapter", "Адаптер каталога не подключён. Установленные или готовые модели не предполагаются.", "No catalog adapter is connected. No model is assumed installed or ready.");
+                                        color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
+                                    }
+                                }
+                                if root.catalog.available && root.catalog.error != "": SettingsLabel {
+                                    text: root.catalog.error; color: SettingsTheme.error-text;
+                                    wrap: word-wrap; overflow: clip;
+                                }
+                                if root.catalog.available && root.components.length == 0: SettingsLabel {
+                                    text: root.catalog.phase == AiHubLoadPhase.loading || root.catalog.phase == AiHubLoadPhase.checking
+                                        ? root.localized("ai-hub.shell.loading", "Загрузка метаданных…", "Loading metadata…")
+                                        : root.localized("ai-hub.shell.empty", "Компоненты не обнаружены.", "No components discovered.");
+                                    color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
+                                }
+                                if root.catalog.available && root.components.length > 0 && root.active-tab == 0: VerticalLayout {
+                                    padding: 0px; spacing: 0px; alignment: start;
+                                    for rank in [0, 1, 2]: VerticalLayout {
+                                        padding: 0px; spacing: 8px; alignment: start;
+                                        for component in root.components: AiHubCard {
+                                            component: component;
+                                            operations: root.operations;
+                                            card-visible: root.show-component(component) && root.card-rank(component) == rank;
+                                            action-requested(id, verb, revision, token) => {
+                                                root.component-action-requested(id, verb, revision, token);
+                                            }
+                                        }
+                                    }
+                                }
+                                if root.catalog.available && root.components.length > 0 && root.active-tab == 1: SettingsLabel {
+                                    text: root.localized("ai-hub.shell.settings-placeholder", "Параметры компонентов (редактор подключит следующий агент)", "Component settings (editor will be added by the next agent)");
+                                    color: SettingsTheme.muted; wrap: word-wrap; overflow: clip;
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 47px; background: SettingsTheme.section;
+                        border-radius: 10px; border-width: 1px; border-color: SettingsTheme.border;
+                        HorizontalLayout {
+                            padding-left: 14px; padding-right: 14px; spacing: 10px;
+                            SettingsLabel {
+                                horizontal-stretch: 1;
+                                text: !root.catalog.available ? root.localized("ai-hub.shell.unavailable", "Статус: недоступно", "Status: unavailable")
+                                    : root.catalog.phase == AiHubLoadPhase.failed
+                                        ? root.localized("ai-hub.shell.error", "Статус: ошибка", "Status: error")
+                                        : root.catalog.phase == AiHubLoadPhase.checking
+                                            ? root.localized("ai-hub.shell.checking", "Проверка состояния…", "Checking status…")
+                                            : root.localized("ai-hub.shell.available", "Статус: каталог получен", "Status: catalog received");
+                                color: SettingsTheme.muted;
+                            }
+                            SettingsLabel {
+                                text: root.operations.length > 0
+                                    ? root.localized("ai-hub.shell.operations", "Операции: ", "Operations: ") + root.operations.length
+                                    : root.localized("ai-hub.shell.no-operations", "Нет операций", "No operations");
+                                color: SettingsTheme.muted;
+                            }
+                        }
+                    }
+                    if root.settings.dirty: SettingsLabel {
+                        text: root.localized("ai-hub.shell.unsaved", "Есть несохранённые изменения. Сохраните или отмените их перед закрытием.", "Unsaved changes. Save or discard before closing.");
+                        color: Theme.warning; wrap: word-wrap; overflow: clip;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -7,6 +7,14 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 use std::rc::Rc;
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
+    // Only the shell is available; catalog actions and model readiness stay unavailable.
+    window.global::<AiEngineUi>().set_hub_available(true);
+    let hub_window = window.as_weak();
+    window.global::<AiEngineUi>().on_open_hub(move || {
+        if let Some(window) = hub_window.upgrade() {
+            window.set_ai_hub_open(true);
+        }
+    });
     let weak = window.as_weak();
     window.global::<AiEngineUi>().on_refresh_hardware(move || {
         if let Some(window) = weak.upgrade() {

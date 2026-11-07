@@ -1,0 +1,209 @@
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { AiHubComponent, AiHubTruth, AiHubLoadPhase, AiHubOperation, AiHubOperationPhase } from "contract.slint";
+
+// A truth gate is intentionally NOT a single green "Installed" badge. A model can
+// be on disk without its environment, worker, or inference model being ready.
+component AiHubGate inherits Rectangle {
+    in property <string> caption;
+    in property <AiHubTruth> truth;
+    height: 27px;
+    min-width: 96px;
+    horizontal-stretch: 0;
+    border-radius: 7px;
+    background: root.truth == AiHubTruth.yes ? #173624 : root.truth == AiHubTruth.no ? #3a222d : SettingsTheme.field;
+    border-width: 1px;
+    border-color: root.truth == AiHubTruth.yes ? #448d60 : root.truth == AiHubTruth.no ? #86465a : SettingsTheme.border;
+    HorizontalLayout {
+        padding-left: 7px; padding-right: 7px; spacing: 4px;
+        SettingsLabel { text: root.caption; font-size: 10px; font-weight: 600; }
+        SettingsLabel {
+            text: root.truth == AiHubTruth.yes ? (I18n.locale == "en" ? "Yes" : "Да")
+                : root.truth == AiHubTruth.no ? (I18n.locale == "en" ? "No" : "Нет")
+                : "?";
+            color: root.truth == AiHubTruth.yes ? SettingsTheme.status-success : SettingsTheme.muted;
+            font-size: 10px; font-weight: 700;
+        }
+    }
+}
+
+component AiHubTag inherits Rectangle {
+    in property <string> value;
+    height: 23px;
+    horizontal-stretch: 0;
+    min-width: 35px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: SettingsTheme.field-border;
+    background: SettingsTheme.field;
+    tag-label := SettingsLabel {
+        text: root.value;
+        font-size: 11px;
+        color: SettingsTheme.muted;
+        horizontal-alignment: center;
+        x: 6px; width: parent.width - 12px;
+    }
+    width: max(35px, tag-label.preferred-width + 14px);
+}
+
+// The presenter supplies the original AiHubComponent and operations. No catalog
+// data, readiness, successful operation, or install permission is synthesized.
+export component AiHubCard inherits Rectangle {
+    in property <AiHubComponent> component;
+    in property <[AiHubOperation]> operations;
+    in property <bool> card-visible: true;
+    // V1 has no can-update/can-reinstall. The eventual presenter must explicitly
+    // authorize these verbs before they become active; can-install is NOT enough.
+    in property <bool> can-update: false;
+    in property <bool> can-reinstall: false;
+    // The operations presenter can additionally assert busy before its queue rows
+    // reach the UI. This flag does not block an unrelated component's actions.
+    in property <bool> operation-busy: false;
+    callback action-requested(string, string, int, string);
+
+    property <bool> request-pending: false;
+    property <int> pending-revision: -1;
+    property <string> pending-component-id;
+    property <string> pending-token;
+    property <bool> blocked: root.operation-busy || root.request-pending
+        || root.component.phase == AiHubLoadPhase.checking
+        || root.component.phase == AiHubLoadPhase.loading;
+
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+    }
+    // The UI never declares success. A newer owner-issued component snapshot can
+    // release only its local click latch; Core must still decide admission.
+    changed component => {
+        if root.request-pending && root.component.component-id == root.pending-component-id
+            && root.component.revision > root.pending-revision
+            && root.component.token == root.pending-token {
+            root.request-pending = false;
+        }
+    }
+    function dispatch-action(action: string) {
+        if !root.blocked && root.component.component-id != "" {
+            root.request-pending = true;
+            root.pending-revision = root.component.revision;
+            root.pending-component-id = root.component.component-id;
+            root.pending-token = root.component.token;
+            root.action-requested(root.component.component-id, action, root.component.revision, root.component.token);
+        }
+    }
+
+    visible: root.card-visible;
+    height: root.card-visible ? max(222px, details.preferred-height + 24px) : 0px;
+    background: SettingsTheme.field;
+    border-width: 1px;
+    border-color: SettingsTheme.field-border;
+    border-radius: 10px;
+
+    details := VerticalLayout {
+        padding: 12px; spacing: 8px; alignment: start;
+        HorizontalLayout {
+            spacing: 10px; height: 25px;
+            SettingsLabel {
+                text: root.component.title != "" ? root.component.title : root.component.component-id;
+                font-size: 15px; font-weight: 750; horizontal-stretch: 1;
+                overflow: elide;
+            }
+            SettingsLabel {
+                text: root.component.supported
+                    ? root.localized("ai-hub.card.supported", "Поддерживается", "Supported")
+                    : root.localized("ai-hub.card.unsupported", "Не поддерживается", "Unsupported");
+                color: root.component.supported ? SettingsTheme.status-success : SettingsTheme.error-text;
+                font-size: 11px; font-weight: 700;
+            }
+        }
+        SettingsLabel {
+            text: root.component.description;
+            color: SettingsTheme.muted; font-size: 12px;
+            wrap: word-wrap; overflow: clip;
+            height: max(22px, self.preferred-height);
+        }
+        HorizontalLayout {
+            spacing: 7px; height: 24px;
+            if root.component.backend != "": AiHubTag { value: root.component.backend; }
+            if root.component.compatibility != "": AiHubTag { value: root.component.compatibility; }
+            for tag in root.component.tags: AiHubTag { value: tag; }
+        }
+        HorizontalLayout {
+            spacing: 5px; height: 28px;
+            AiHubGate { caption: root.localized("ai-hub.card.discovered", "Найден", "Discovered"); truth: root.component.discovered; }
+            AiHubGate { caption: root.localized("ai-hub.card.installed", "Установлен", "Installed"); truth: root.component.installed; }
+            AiHubGate { caption: root.localized("ai-hub.card.environment", "Среда", "Environment"); truth: root.component.environment-ready; }
+            AiHubGate { caption: root.localized("ai-hub.card.worker", "Worker", "Worker"); truth: root.component.worker-ready; }
+            AiHubGate { caption: root.localized("ai-hub.card.model", "Модель", "Model"); truth: root.component.model-ready; }
+        }
+        SettingsLabel {
+            text: root.component.phase == AiHubLoadPhase.checking
+                ? root.localized("ai-hub.card.checking", "Проверка состояния…", "Checking status…")
+                : root.component.phase == AiHubLoadPhase.loading
+                    ? root.localized("ai-hub.card.loading", "Загрузка…", "Loading…")
+                    : root.component.phase == AiHubLoadPhase.failed
+                        ? root.localized("ai-hub.card.failed", "Ошибка проверки", "Status check failed")
+                        : root.component.phase == AiHubLoadPhase.loaded
+                            ? root.localized("ai-hub.card.status-received", "Статус получен", "Status received")
+                            : root.localized("ai-hub.card.status-unknown", "Статус неизвестен", "Status unknown");
+            font-size: 11px;
+            color: root.component.phase == AiHubLoadPhase.failed ? SettingsTheme.error-text : SettingsTheme.muted;
+            height: 19px;
+        }
+        if root.component.unsupported-reason != "" && !root.component.supported: SettingsLabel {
+            text: root.component.unsupported-reason;
+            font-size: 11px; color: SettingsTheme.error-text;
+            wrap: word-wrap; overflow: clip; height: max(20px, self.preferred-height);
+        }
+        if root.component.error != "": SettingsLabel {
+            text: root.component.error;
+            font-size: 11px; color: SettingsTheme.error-text;
+            wrap: word-wrap; overflow: clip; height: max(20px, self.preferred-height);
+        }
+        for op in root.operations: SettingsLabel {
+            visible: op.component-id == root.component.component-id
+                && (op.phase == AiHubOperationPhase.queued
+                    || op.phase == AiHubOperationPhase.running
+                    || op.phase == AiHubOperationPhase.cancelling
+                    || op.phase == AiHubOperationPhase.failed);
+            height: visible ? max(20px, self.preferred-height) : 0px;
+            text: (op.phase == AiHubOperationPhase.queued ? root.localized("ai-hub.card.queued", "В очереди", "Queued")
+                : op.phase == AiHubOperationPhase.running ? root.localized("ai-hub.card.running", "Выполняется", "Running")
+                : op.phase == AiHubOperationPhase.cancelling ? root.localized("ai-hub.card.cancelling", "Отмена…", "Cancelling…")
+                : root.localized("ai-hub.card.operation-error", "Ошибка операции", "Operation failed"))
+                + (op.progress-known ? " · " + op.progress + "%" : "")
+                + (op.detail != "" ? ": " + op.detail : "")
+                + (op.error != "" ? " — " + op.error : "");
+            font-size: 11px; color: op.phase == AiHubOperationPhase.failed ? SettingsTheme.error-text : SettingsTheme.muted;
+            wrap: word-wrap; overflow: clip;
+        }
+        HorizontalLayout {
+            spacing: 7px; height: 32px;
+            for action in [
+                { id: "install", ru: "Установить", en: "Install" },
+                { id: "update", ru: "Обновить", en: "Update" },
+                { id: "reinstall", ru: "Переустановить", en: "Reinstall" },
+                { id: "uninstall", ru: "Удалить", en: "Uninstall" },
+                { id: "settings", ru: "Настройки", en: "Settings" },
+            ]: ActionSurface {
+                width: action.id == "reinstall" ? 124px : 103px;
+                height: 31px;
+                label: root.localized("ai-hub.action." + action.id, action.ru, action.en);
+                enabled: !root.blocked && root.component.component-id != ""
+                    && (action.id == "settings" ? root.component.can-open-settings
+                        : root.component.supported
+                            && (action.id == "install" ? root.component.can-install
+                                : action.id == "uninstall" ? root.component.can-uninstall
+                                : action.id == "update" ? root.can-update : root.can-reinstall));
+                background: !self.enabled ? SettingsTheme.input : self.hovered ? SettingsTheme.button-hover : SettingsTheme.button;
+                border-radius: 7px; border-width: 1px; border-color: SettingsTheme.button-border;
+                SettingsLabel {
+                    text: parent.label; horizontal-alignment: center;
+                    font-size: 11px; color: parent.enabled ? SettingsTheme.text : SettingsTheme.muted;
+                }
+                activated => { root.dispatch-action(action.id); }
+            }
+        }
+    }
+}
