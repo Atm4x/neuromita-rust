@@ -154,7 +154,7 @@ async def main():
         if len(line) > 16 * 1024:
             # Discard the entire invalid frame so the following request is not
             # interpreted as the continuation of its credential payload.
-            while not line.endswith(b"\\n"):
+            while not line.endswith(b"\n"):
                 line = await asyncio.to_thread(sys.stdin.buffer.readline, 16 * 1024 + 1)
                 if not line:
                     break
