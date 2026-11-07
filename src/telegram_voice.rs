@@ -49,6 +49,8 @@ pub struct Incoming {
     pub peer: String,
     pub outgoing: bool,
     pub kind: Option<MediaKind>,
+    /// Bot replies may carry the original outgoing Telegram message ID.
+    pub reply_to_id: Option<i64>,
 }
 
 /// Must be implemented by an authorized *user* MTProto session; a Bot API
@@ -173,6 +175,23 @@ impl TelegramConfig {
     }
 }
 
+/// Voice settings may contain a bare voice ID or a complete legacy
+/// `/speaker voice` command. Never concatenate another slash-command to it.
+fn normalize_speaker_command(value: &str) -> Result<Option<String>, TelegramError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let voice = value.strip_prefix("/speaker ").unwrap_or(value).trim();
+    if voice.is_empty()
+        || voice.len() > 100
+        || voice.chars().any(|ch| ch.is_control() || ch.is_whitespace() || ch == '/')
+    {
+        return Err(TelegramError::Unavailable);
+    }
+    Ok(Some(format!("/speaker {voice}")))
+}
+
 struct Conversation {
     last_send: Option<Instant>,
     send_times: VecDeque<Instant>,
@@ -259,25 +278,26 @@ impl TelegramVoiceService {
         self.transport.ready().await?;
         let mut watermark = self.transport.latest(&self.config.peer).await?;
         if !state.bot_initialized {
-            // These commands are specific to the audited Silero bot protocol.
+            // All audited bots receive /start; the Silero format is MP3.
+            watermark = watermark.max(self.send(&mut state, "/start").await?);
             if self.config.peer.eq_ignore_ascii_case("@silero_voice_bot") {
-                watermark = watermark.max(self.send(&mut state, "/start").await?);
                 watermark = watermark.max(self.send(&mut state, "/mp3").await?);
             }
             state.bot_initialized = true;
         }
-        if self.config.peer.eq_ignore_ascii_case("@CrazyMitaAIbot") {
-            watermark = watermark.max(self.send(&mut state, "/voice").await?);
-        }
-        let speaker = speaker.trim();
-        if !speaker.is_empty() {
-            let command = format!("/speaker {speaker}");
+        if let Some(command) = normalize_speaker_command(speaker)? {
             if state.speaker.as_deref() != Some(command.as_str()) {
                 watermark = watermark.max(self.send(&mut state, &command).await?);
                 state.speaker = Some(command);
             }
         }
-        let sent = self.send(&mut state, text).await?;
+        // CrazyMita expects one *prefixed message*, not two separate sends.
+        let text = if self.config.peer.eq_ignore_ascii_case("@CrazyMitaAIbot") {
+            format!("/voice {text}")
+        } else {
+            text.to_owned()
+        };
+        let sent = self.send(&mut state, &text).await?;
         watermark = watermark.max(sent);
         let deadline = Instant::now() + self.config.wait;
         loop {
@@ -290,6 +310,11 @@ impl TelegramVoiceService {
             messages.sort_by_key(|m| m.id);
             for msg in messages {
                 if msg.id <= watermark || msg.outgoing || msg.peer != self.config.peer {
+                    continue;
+                }
+                // If Telegram exposes reply metadata, never accept audio that
+                // explicitly answers a previous request that has timed out.
+                if msg.reply_to_id.is_some_and(|id| id != sent) {
                     continue;
                 }
                 let Some(kind @ (MediaKind::Mp3 | MediaKind::VoiceOgg)) = msg.kind else {
@@ -434,6 +459,7 @@ mod tests {
             peer: peer.into(),
             outgoing: false,
             kind: Some(MediaKind::Mp3),
+            reply_to_id: None,
         }
     }
     #[test]
@@ -500,4 +526,51 @@ mod tests {
             vec!["/start", "/mp3", "/speaker mita", "first", "second"]
         );
     }
+    #[test]
+    fn legacy_speaker_command_is_not_double_prefixed() {
+        assert_eq!(
+            normalize_speaker_command("/speaker mita").unwrap(),
+            Some("/speaker mita".to_owned())
+        );
+        assert_eq!(
+            normalize_speaker_command("mita").unwrap(),
+            Some("/speaker mita".to_owned())
+        );
+        assert_eq!(normalize_speaker_command("").unwrap(), None);
+        assert!(normalize_speaker_command("/start").is_err());
+        assert!(normalize_speaker_command("mita\n/start").is_err());
+    }
+
+    #[tokio::test]
+    async fn crazy_bot_receives_voice_as_text_prefix_not_separate_command() {
+        let fake = Arc::new(Fake::default());
+        fake.replies
+            .lock()
+            .await
+            .push_back(vec![audio(12, "@CrazyMitaAIbot")]);
+        let config = TelegramConfig {
+            peer: "@CrazyMitaAIbot".into(),
+            wait: Duration::from_millis(50),
+            interval: Duration::ZERO,
+            poll: Duration::from_millis(1),
+            max_media_bytes: 1024,
+        };
+        let service =
+            TelegramVoiceService::new(fake.clone(), Arc::new(Decoder), config.clone()).unwrap();
+        service.speak("hello", "").await.unwrap();
+        assert_eq!(*fake.sent.lock().await, vec!["/start", "/voice hello"]);
+    }
+
+    #[tokio::test]
+    async fn late_audio_explicitly_replying_to_old_text_is_ignored() {
+        let fake = Arc::new(Fake::default());
+        let mut old = audio(13, "@silero_voice_bot");
+        old.reply_to_id = Some(10);
+        let mut current = audio(14, "@silero_voice_bot");
+        current.reply_to_id = Some(11);
+        fake.replies.lock().await.push_back(vec![old, current]);
+        setup(fake.clone()).speak("new", "mita").await.unwrap();
+        assert_eq!(fake.downloads.load(Ordering::SeqCst), 1);
+    }
+
 }
