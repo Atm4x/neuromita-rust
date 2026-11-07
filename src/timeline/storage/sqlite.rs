@@ -1055,6 +1055,77 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn second_sqlite_insert_failure_rolls_back_memory_and_variables_together() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Durable memory");
+        let mut variables = EventDraft::new(EventKind::CharacterVariablesChanged);
+        variables.actor = Some(CharacterId::Crazy.to_string());
+        variables.observers.insert(CharacterId::Crazy);
+        variables
+            .payload
+            .insert("variables".into(), json!({"user_locale": "ru"}));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let before_revision = revision(&conn).unwrap();
+        conn.exec(
+            "CREATE TRIGGER deny_second_portable_event \
+             BEFORE INSERT ON timeline_events \
+             WHEN NEW.sequence = 2 \
+             BEGIN SELECT RAISE(ABORT, 'injected portable second insert failure'); END",
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.append(
+                branch,
+                0,
+                "portable-atomic-retry",
+                json!({}),
+                vec![memory.clone(), variables.clone()]
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(branch).unwrap().head_sequence, 0);
+        assert!(repo.world(branch).unwrap().is_empty());
+        assert_eq!(revision(&conn).unwrap(), before_revision);
+        assert!(
+            conn.query("SELECT 1 FROM timeline_events", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            conn.query("SELECT 1 FROM timeline_receipts", &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        conn.exec("DROP TRIGGER deny_second_portable_event")
+            .unwrap();
+        let committed = repo
+            .append(
+                branch,
+                0,
+                "portable-atomic-retry",
+                json!({}),
+                vec![memory, variables],
+            )
+            .unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].draft.kind, EventKind::CharacterMemoryChanged);
+        assert_eq!(
+            committed[1].draft.kind,
+            EventKind::CharacterVariablesChanged
+        );
+        drop(repo);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.branch(branch).unwrap().head_sequence, 2);
+        assert_eq!(reopened.world(branch).unwrap().len(), 2);
+    }
+
     #[test]
     fn reopen_existing_session_does_not_change_timeline_revision() {
         let db = TestDb::new();
