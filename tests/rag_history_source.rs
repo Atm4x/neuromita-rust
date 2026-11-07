@@ -3,6 +3,7 @@ use neuromita::{
     knowledge::{
         history_retrieval::{
             HistorySearchConfig, HistorySearchError, HistorySearchStatus, search_history,
+            search_history_fts,
         },
         retrieval_fusion::{RetrievalMethod, RetrievalSource},
     },
@@ -291,4 +292,300 @@ fn history_source_reopens_with_same_provenance_and_no_derived_index() {
         assert_eq!(result.hits[0].metadata["through"], "1");
     }
     std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn fts5_source_tracks_authorized_timeline_revision_and_provenance() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let empty = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let result = search_history_fts(
+        CharacterId::Crazy,
+        &empty,
+        "jasmine",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(result.status, HistorySearchStatus::EmptyCorpus);
+    let source = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Jasmine jasmine tea in the garden"),
+    );
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Small flower studio"),
+    );
+    let crazy = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let matches = search_history_fts(
+        CharacterId::Crazy,
+        &crazy,
+        "jasmine",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(matches.status, HistorySearchStatus::Selected);
+    assert_eq!(matches.hits.len(), 1);
+    assert_eq!(matches.hits[0].key.id, source.0.to_string());
+    assert_eq!(matches.hits[0].evidence[0].method, RetrievalMethod::Fts);
+    assert_eq!(matches.hits[0].metadata["branch_id"], branch.0.to_string());
+    assert!(matches.hits[0].evidence[0].raw_score.unwrap().is_finite());
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &crazy,
+            "notfound",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .status,
+        HistorySearchStatus::NoMatches
+    );
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Kind,
+            &crazy,
+            "jasmine",
+            HistorySearchConfig::default()
+        )
+        .unwrap_err(),
+        HistorySearchError::WrongCharacter
+    );
+
+    update_message(
+        &mut repo,
+        branch,
+        CharacterId::Crazy,
+        source,
+        EventKind::MessageRevised,
+        "Garden blue iris",
+    );
+    let current = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &current,
+            "jasmine",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .status,
+        HistorySearchStatus::NoMatches
+    );
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &current,
+            "iris",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .hits[0]
+            .key
+            .id,
+        source.0.to_string()
+    );
+    update_message(
+        &mut repo,
+        branch,
+        CharacterId::Crazy,
+        source,
+        EventKind::MessageHidden,
+        "",
+    );
+    let hidden = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &hidden,
+            "iris",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .status,
+        HistorySearchStatus::NoMatches
+    );
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &crazy,
+            "jasmine",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .hits[0]
+            .key
+            .id,
+        source.0.to_string()
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn fts5_quoted_input_is_data_not_query_syntax_and_character_scopes_never_merge() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Kind],
+        json!("Privately held orange tea"),
+    );
+    let shared = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy, CharacterId::Kind],
+        json!("Зелёный чай на кухне"),
+    );
+    let crazy = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let kind = TimelineMessageQueries::capture(&repo, branch, CharacterId::Kind, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &crazy,
+            "orange",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .status,
+        HistorySearchStatus::NoMatches
+    );
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Kind,
+            &kind,
+            "orange",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .hits
+        .len(),
+        1
+    );
+    for query in [
+        "зелёный",
+        "чай",
+        "\"чай\" OR something",
+        "чай'; DROP TABLE history;--",
+    ] {
+        let selected = search_history_fts(
+            CharacterId::Crazy,
+            &crazy,
+            query,
+            HistorySearchConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(selected.status, HistorySearchStatus::Selected);
+        assert_eq!(selected.hits[0].key.id, shared.0.to_string());
+    }
+    append(
+        &mut repo,
+        branch,
+        EventKind::CharacterContextReset,
+        &[CharacterId::Crazy],
+        Value::Null,
+    );
+    let reset = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &reset,
+            "чай",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .status,
+        HistorySearchStatus::EmptyCorpus
+    );
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Kind,
+            &TimelineMessageQueries::capture(&repo, branch, CharacterId::Kind, None).unwrap(),
+            "чай",
+            HistorySearchConfig::default()
+        )
+        .unwrap()
+        .hits
+        .len(),
+        1
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn fts5_rejects_invalid_query_and_overlarge_corpus_before_building_index() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let empty = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    for query in ["", "a", " ", "?", &"z".repeat(2049)] {
+        assert!(matches!(
+            search_history_fts(
+                CharacterId::Crazy,
+                &empty,
+                query,
+                HistorySearchConfig::default()
+            ),
+            Err(HistorySearchError::Configuration(_))
+        ));
+    }
+    for number in 0..1025 {
+        append(
+            &mut repo,
+            branch,
+            EventKind::PlayerMessage,
+            &[CharacterId::Crazy],
+            json!(format!("history tea {number}")),
+        );
+    }
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &view,
+            "tea",
+            HistorySearchConfig::default()
+        )
+        .unwrap_err(),
+        HistorySearchError::CorpusLimit {
+            found: 1025,
+            maximum: 1024
+        }
+    );
+}
+
+#[cfg(not(feature = "sqlite-system"))]
+#[test]
+fn explicit_fts_mode_rejects_missing_backend_without_lexical_substitution() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("jasmine tea"),
+    );
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    assert_eq!(
+        search_history_fts(
+            CharacterId::Crazy,
+            &view,
+            "jasmine",
+            HistorySearchConfig::default(),
+        )
+        .unwrap_err(),
+        HistorySearchError::FtsUnavailable
+    );
 }

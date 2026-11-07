@@ -45,7 +45,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /knowledge cache preview|clear TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -436,6 +436,7 @@ pub async fn run(
                                 Ok(selection) => {
                                     let result = match selection {
                                         HistoryCommand::Keyword(query) => HistorySearchApi::inspect(character, query).await,
+                                        HistoryCommand::Fts(query) => HistorySearchApi::inspect_fts(character, query).await,
                                         HistoryCommand::Vector(query) => HistorySearchApi::inspect_semantic(character, query, FusionMode::VectorOnly, None).await,
                                         HistoryCommand::Fusion(query) => HistorySearchApi::inspect_semantic(character, query, FusionMode::Union, None).await,
                                     };
@@ -554,15 +555,17 @@ fn take_cache_clear_preview(
 #[derive(Debug, PartialEq, Eq)]
 enum HistoryCommand<'a> {
     Keyword(&'a str),
+    Fts(&'a str),
     Vector(&'a str),
     Fusion(&'a str),
 }
 
 fn parse_history_search(line: &str) -> Result<HistoryCommand<'_>, &'static str> {
-    const USAGE: &str =
-        "Используй /rag history QUERY, /rag history-vector QUERY или /rag history-fusion QUERY";
+    const USAGE: &str = "Используй /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY или /rag history-fusion QUERY";
     let (selection, query) = if let Some(query) = line.strip_prefix("/rag history ") {
         (0, query)
+    } else if let Some(query) = line.strip_prefix("/rag history-fts ") {
+        (3, query)
     } else if let Some(query) = line.strip_prefix("/rag history-vector ") {
         (1, query)
     } else if let Some(query) = line.strip_prefix("/rag history-fusion ") {
@@ -577,7 +580,8 @@ fn parse_history_search(line: &str) -> Result<HistoryCommand<'_>, &'static str> 
     Ok(match selection {
         0 => HistoryCommand::Keyword(query),
         1 => HistoryCommand::Vector(query),
-        _ => HistoryCommand::Fusion(query),
+        2 => HistoryCommand::Fusion(query),
+        _ => HistoryCommand::Fts(query),
     })
 }
 
@@ -645,6 +649,10 @@ mod forgotten_recall_command_tests {
         assert_eq!(
             parse_history_search("/rag history green tea"),
             Ok(HistoryCommand::Keyword("green tea"))
+        );
+        assert_eq!(
+            parse_history_search("/rag history-fts green tea"),
+            Ok(HistoryCommand::Fts("green tea"))
         );
         assert_eq!(
             parse_history_search("/rag history-vector green tea"),

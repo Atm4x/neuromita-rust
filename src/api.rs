@@ -112,6 +112,7 @@ pub enum HistorySearchApiError {
 
 enum HistorySearchSelection {
     Keyword,
+    Fts,
     Semantic {
         fusion: crate::knowledge::retrieval_fusion::FusionMode,
         minimum_cosine: Option<f64>,
@@ -126,6 +127,16 @@ impl HistorySearchApi {
     ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
     {
         Self::inspect_selected(character, query, HistorySearchSelection::Keyword).await
+    }
+
+    /// Explicit SQLite FTS5 history inspection over a single live Timeline
+    /// projection. Missing FTS5 is an error, never a keyword fallback.
+    pub async fn inspect_fts(
+        character: CharacterId,
+        query: &str,
+    ) -> Result<crate::knowledge::history_retrieval::HistorySearchResult, HistorySearchApiError>
+    {
+        Self::inspect_selected(character, query, HistorySearchSelection::Fts).await
     }
 
     /// Explicit semantic History mode; requires the application's configured
@@ -170,6 +181,12 @@ impl HistorySearchApi {
         }
         let selected = match selection {
             HistorySearchSelection::Keyword => crate::knowledge::history_retrieval::search_history(
+                character,
+                &context.view,
+                query,
+                Default::default(),
+            )?,
+            HistorySearchSelection::Fts => crate::knowledge::history_retrieval::search_history_fts(
                 character,
                 &context.view,
                 query,

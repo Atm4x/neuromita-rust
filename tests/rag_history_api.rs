@@ -301,3 +301,38 @@ async fn lexical_mode_refuses_cache_preview_and_clear_without_silent_upgrade() {
     ));
     app.shutdown().await.unwrap();
 }
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn live_history_fts_is_a_separate_user_visible_read_only_selection() {
+    let _single_application = API_RUNTIME_TEST.lock().await;
+    let app = ApplicationLifecycle::start(application_config(KnowledgeRetrieval::lexical()))
+        .await
+        .unwrap();
+    let id = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Кухня и чай".into()).unwrap(),
+    )
+    .unwrap();
+    let selected = HistorySearchApi::inspect_fts(CharacterId::Crazy, "кухня")
+        .await
+        .unwrap();
+    assert_eq!(selected.status, HistorySearchStatus::Selected);
+    assert_eq!(selected.hits[0].key.id, id.0.to_string());
+    assert_eq!(
+        selected.hits[0].evidence[0].method,
+        neuromita::knowledge::retrieval_fusion::RetrievalMethod::Fts
+    );
+    assert_eq!(
+        HistorySearchApi::inspect_fts(CharacterId::Kind, "кухня")
+            .await
+            .unwrap()
+            .status,
+        HistorySearchStatus::EmptyCorpus
+    );
+    app.shutdown().await.unwrap();
+    assert!(matches!(
+        HistorySearchApi::inspect_fts(CharacterId::Crazy, "кухня").await,
+        Err(HistorySearchApiError::Unavailable)
+    ));
+}
