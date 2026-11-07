@@ -205,7 +205,8 @@ impl ChessGame {
         }
         let mut board: Board = self.root_fen.parse().map_err(|_| ChessError::InvalidFen)?;
         let mut positions = vec![board.clone()];
-        let mut halfmoves = self.root_fen
+        let mut halfmoves = self
+            .root_fen
             .split_ascii_whitespace()
             .nth(4)
             .ok_or(ChessError::InvalidFen)?
@@ -222,8 +223,8 @@ impl ChessGame {
                 return Err(ChessError::CorruptHistory);
             }
             let pawn = board.piece_on(mv.from) == Some(Piece::Pawn);
-            let capture = board.piece_on(mv.to).is_some()
-                || (pawn && mv.from.file() != mv.to.file());
+            let capture =
+                board.piece_on(mv.to).is_some() || (pawn && mv.from.file() != mv.to.file());
             let san = display_san_move(&board, mv).to_string();
             board.try_play(mv).map_err(|_| ChessError::CorruptHistory)?;
             halfmoves = if pawn || capture {
@@ -232,9 +233,17 @@ impl ChessGame {
                 halfmoves.checked_add(1).ok_or(ChessError::CorruptHistory)?
             };
             positions.push(board.clone());
-            history.push(MoveRecord { uci: canonical, san });
+            history.push(MoveRecord {
+                uci: canonical,
+                san,
+            });
         }
-        Ok(Replayed { board, positions, history, halfmoves })
+        Ok(Replayed {
+            board,
+            positions,
+            history,
+            halfmoves,
+        })
     }
 }
 
@@ -255,7 +264,10 @@ fn adjudicate_partial(board: &Board, positions: &[Board], halfmoves: u32) -> Che
     if insufficient_material(board) {
         return ChessResult::Draw(DrawReason::InsufficientMaterial);
     }
-    let repeats = positions.iter().filter(|past| past.same_position(board)).count();
+    let repeats = positions
+        .iter()
+        .filter(|past| past.same_position(board))
+        .count();
     if repeats >= 5 {
         return ChessResult::Draw(DrawReason::FivefoldRepetition);
     }
@@ -286,9 +298,9 @@ fn insufficient_material(board: &Board) -> bool {
     }
     // All bishops on one square color cannot produce checkmate.
     if knights.is_empty() {
-        let mut square_colors = bishops.iter().map(|square| {
-            ((square.file() as u8) + (square.rank() as u8)) % 2
-        });
+        let mut square_colors = bishops
+            .iter()
+            .map(|square| ((square.file() as u8) + (square.rank() as u8)) % 2);
         if let Some(color) = square_colors.next() {
             return square_colors.all(|candidate| candidate == color);
         }
@@ -297,22 +309,27 @@ fn insufficient_material(board: &Board) -> bool {
 }
 
 fn board_text(board: &Board) -> Vec<String> {
-    (0..8).rev().map(|rank| {
-        (0..8).map(|file| {
-            let square = Square::ALL[rank * 8 + file];
-            match board.piece_on(square) {
-                None => '.',
-                Some(piece) => {
-                    let symbol = piece.to_string().chars().next().unwrap_or('?');
-                    if board.color_on(square) == Some(Color::White) {
-                        symbol.to_ascii_uppercase()
-                    } else {
-                        symbol.to_ascii_lowercase()
+    (0..8)
+        .rev()
+        .map(|rank| {
+            (0..8)
+                .map(|file| {
+                    let square = Square::ALL[rank * 8 + file];
+                    match board.piece_on(square) {
+                        None => '.',
+                        Some(piece) => {
+                            let symbol = piece.to_string().chars().next().unwrap_or('?');
+                            if board.color_on(square) == Some(Color::White) {
+                                symbol.to_ascii_uppercase()
+                            } else {
+                                symbol.to_ascii_lowercase()
+                            }
+                        }
                     }
-                }
-            }
-        }).collect()
-    }).collect()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -327,7 +344,9 @@ mod tests {
         }
         assert_eq!(
             game.view().unwrap().result,
-            ChessResult::Checkmate { winner: ChessSide::Black }
+            ChessResult::Checkmate {
+                winner: ChessSide::Black
+            }
         );
         assert_eq!(game.view().unwrap().history[3].san, "Qh4#");
         assert!(matches!(game.play_uci("a2a3"), Err(ChessError::Finished)));
@@ -335,9 +354,7 @@ mod tests {
 
     #[test]
     fn validates_castling_and_en_passant() {
-        let mut castle = ChessGame::from_fen(
-            "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"
-        ).unwrap();
+        let mut castle = ChessGame::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").unwrap();
         assert_eq!(castle.play_uci("e1g1").unwrap().san, "O-O");
         let mut en_passant = ChessGame::new();
         for mv in ["e2e4", "a7a6", "e4e5", "d7d5"] {
@@ -363,13 +380,14 @@ mod tests {
     fn repetition_is_restored_from_history() {
         let mut game = ChessGame::new();
         for mv in [
-            "g1f3", "g8f6", "f3g1", "f6g8",
-            "g1f3", "g8f6", "f3g1", "f6g8",
+            "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8",
         ] {
             game.play_uci(mv).unwrap();
         }
-        assert_eq!(game.view().unwrap().result,
-            ChessResult::Draw(DrawReason::ThreefoldRepetition));
+        assert_eq!(
+            game.view().unwrap().result,
+            ChessResult::Draw(DrawReason::ThreefoldRepetition)
+        );
         let stored = serde_json::to_string(&game).unwrap();
         let restored: ChessGame = serde_json::from_str(&stored).unwrap();
         restored.validate().unwrap();
@@ -378,24 +396,27 @@ mod tests {
 
     #[test]
     fn fifty_move_and_material_draws() {
-        let mut count = ChessGame::from_fen(
-            "4k3/8/8/8/8/8/4K2P/8 w - - 99 1"
-        ).unwrap();
+        let mut count = ChessGame::from_fen("4k3/8/8/8/8/8/4K2P/8 w - - 99 1").unwrap();
         count.play_uci("e2d2").unwrap();
-        assert_eq!(count.view().unwrap().result,
-            ChessResult::Draw(DrawReason::FiftyMoves));
-        let bare = ChessGame::from_fen(
-            "4k3/8/8/8/8/8/8/4K3 w - - 0 1"
-        ).unwrap();
-        assert_eq!(bare.view().unwrap().result,
-            ChessResult::Draw(DrawReason::InsufficientMaterial));
+        assert_eq!(
+            count.view().unwrap().result,
+            ChessResult::Draw(DrawReason::FiftyMoves)
+        );
+        let bare = ChessGame::from_fen("4k3/8/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(
+            bare.view().unwrap().result,
+            ChessResult::Draw(DrawReason::InsufficientMaterial)
+        );
     }
 
     #[test]
     fn illegal_move_never_mutates_game() {
         let mut game = ChessGame::new();
         let previous = game.clone();
-        assert!(matches!(game.play_uci("e2e5"), Err(ChessError::IllegalMove)));
+        assert!(matches!(
+            game.play_uci("e2e5"),
+            Err(ChessError::IllegalMove)
+        ));
         assert_eq!(game, previous);
         game.play_san("e4").unwrap();
         assert_eq!(game.uci_history(), ["e2e4"]);
