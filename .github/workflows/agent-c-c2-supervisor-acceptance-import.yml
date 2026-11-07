@@ -1,0 +1,59 @@
+name: Agent C C2 supervisor recovery patch and Windows acceptance
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c2-supervisor-closure-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c2-supervisor-closure-20261107
+          fetch-depth: 0
+      - name: Verify exact patch and publish standalone stacked C2 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=054cee83194bb7bbacd4ee0e159a62204948f355
+          TARGET=codex/ai-platform-hub-c2-supervisor-acceptance-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/bridges/agent-c-c2-supervisor-patch.gz.b64 >/tmp/c2.patch.gz
+          echo 'b7052580d7a62172b8c713354c94adf1fb6052f2212407c338d14ab63a52c447  /tmp/c2.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/c2.patch.gz >/tmp/c2.patch
+          git switch --detach "$BASE"
+          git apply --check /tmp/c2.patch
+          git apply /tmp/c2.patch
+          git diff --check
+          git add src/ai_runtime/application.rs src/ai_runtime/hardware.rs src/ai_runtime/live_speech.rs src/ai_runtime/mod.rs tests/ai_hardware_acceptance.rs tests/ai_supervisor_recovery.rs tests/fixtures/ai_hardware_fixture_host.py docs/03-runtime/ai-supervisor-acceptance-c2.md
+          git -c user.name='NeuroMita Agent C' -c user.email='agent-c@users.noreply.github.com' commit -m 'feat(ai): recover hardware-selected workers without fallback and bound speech retries'
+          git merge-base --is-ancestor "$BASE" HEAD
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "HEAD:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$(git rev-parse HEAD)"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c2-supervisor-acceptance-20261107
+      - name: Windows Rust 1.98.1 fail-fast C2 supervisor contract
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --test ai_hardware_acceptance -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --test ai_supervisor_recovery -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --test ai_runtime_cancellation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::live_speech::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
