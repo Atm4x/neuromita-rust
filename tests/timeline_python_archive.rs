@@ -206,6 +206,80 @@ fn archive_with_rehashed_media_type(media_type: &str) -> Vec<u8> {
     serde_json::to_vec(&archive).unwrap()
 }
 
+fn python_direct_image_content() -> Vec<u8> {
+    let mut doc: Value = serde_json::from_slice(&with_binary(b"inline Python image")).unwrap();
+    let image = doc["events"][1]["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("embedded_image")
+        .unwrap();
+    doc["events"][1]["payload"]["content"] = image;
+    doc["operations"][1]["intent"]["events"][0]["payload"] = doc["events"][1]["payload"].clone();
+    serde_json::to_vec(&doc).unwrap()
+}
+
+#[test]
+fn python_direct_image_content_rehydrates_as_one_native_image_part() {
+    use neuromita::timeline::{
+        EventId,
+        domain::{TimelineMessagePart, TimelineStore, parse_message_content},
+    };
+    let source = inspect_python_archive(&python_direct_image_content()).unwrap();
+    let bound = source
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    let prepared = bound.prepare_canonical().unwrap();
+    let message_id = source
+        .identities
+        .events
+        .iter()
+        .find(|id| id.source == "59bcbaeb163b57fb939cc4589b16d8c4")
+        .unwrap();
+    let fact = prepared.fact(EventId(message_id.candidate_uuid)).unwrap();
+    let content = fact.draft.payload.get("content").unwrap();
+    let parts = parse_message_content(content).unwrap();
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(&parts[0], TimelineMessagePart::Image { .. }));
+}
+
+#[test]
+fn python_direct_image_ref_import_survives_native_memory_roundtrip() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::{export_memory, import_memory};
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let source = inspect_python_archive(&python_direct_image_content()).unwrap();
+    let mut timeline = TimelineStore::new();
+    let bound = source
+        .bind_memory(&timeline, &explicit_observers())
+        .unwrap();
+    let root =
+        std::env::temp_dir().join(format!("nm-python-direct-image-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+    let session = bound.import_memory(&mut timeline, &assets).unwrap();
+    let archive = export_memory(&timeline, session, &assets).unwrap();
+    let mut restored = TimelineStore::new();
+    import_memory(&mut restored, &archive, &assets).unwrap();
+    assert_eq!(export_memory(&restored, session, &assets).unwrap(), archive);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn python_combined_direct_image_and_attachments_fails_closed() {
+    let mut doc: Value = serde_json::from_slice(&python_direct_image_content()).unwrap();
+    let reference = doc["events"][1]["payload"]["content"].clone();
+    doc["events"][1]["payload"]["attachments"] = json!([reference]);
+    doc["operations"][1]["intent"]["events"][0]["payload"] = doc["events"][1]["payload"].clone();
+    let source = inspect_python_archive(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    let bound = source
+        .bind_memory(
+            &neuromita::timeline::domain::TimelineStore::new(),
+            &explicit_observers(),
+        )
+        .unwrap();
+    assert!(bound.prepare_canonical().is_err());
+}
+
 #[test]
 fn python_archive_rejects_noncanonical_mime_with_valid_hash_and_receipt() {
     for media_type in [

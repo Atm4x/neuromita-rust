@@ -255,6 +255,16 @@ fn convert_message_content(
     payload: &mut serde_json::Map<String, Value>,
     assets: &HashMap<&str, (&str, usize)>,
 ) -> Result<(), PythonArchiveError> {
+    if !payload.contains_key("attachments")
+        && payload
+            .get("content")
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str)
+            == Some("image_ref")
+    {
+        let image = payload.remove("content").expect("checked image ref");
+        payload.insert("attachments".into(), Value::Array(vec![image]));
+    }
     let attachments = payload.remove("attachments");
     if contains_python_media(&Value::Object(payload.clone())) {
         return Err(PythonArchiveError::Invalid(
