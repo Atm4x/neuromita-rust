@@ -3,7 +3,9 @@
 //! can be added without bypassing the authoritative cache.
 use super::{
     BeatAnalysisOutcome, BeatAnalysisRequest, BeatBackend, BeatCache, BeatCacheError,
-    BeatPipelineError, dsp::detect_beats, wav::{WavError, decode_wav},
+    BeatPipelineError,
+    dsp::detect_beats,
+    wav::{WavError, decode_wav},
 };
 use serde_json::{Value, json};
 use std::{fs, io, path::Path};
@@ -66,7 +68,9 @@ impl BeatRuntime {
         let mut file = fs::File::open(path)?;
         use io::Read;
         let mut bytes = Vec::new();
-        file.by_ref().take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes)?;
+        file.by_ref()
+            .take(MAX_SOURCE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
         if bytes.is_empty() || bytes.len() as u64 > MAX_SOURCE_BYTES {
             return Err(BeatRuntimeError::SourceSize);
         }
@@ -163,9 +167,11 @@ impl BeatRuntime {
             }
         };
         let timeline = outcome.timeline;
-        let beats: Vec<Value> = timeline.beats.iter().map(|point| {
-            json!({"time":point.time_seconds,"confidence":point.confidence})
-        }).collect();
+        let beats: Vec<Value> = timeline
+            .beats
+            .iter()
+            .map(|point| json!({"time":point.time_seconds,"confidence":point.confidence}))
+            .collect();
         if job.stream {
             let mut chunk = identity.clone();
             chunk["chunk_index"] = json!(0);

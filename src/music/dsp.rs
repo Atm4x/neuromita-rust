@@ -1,10 +1,16 @@
 //! Deterministic native energy-onset fallback. This intentionally does not
 //! claim spectral-flux or Beat This/Librosa model parity.
-use super::{BeatPoint, BeatTimeline, wav::{WavAudio, WavError}};
+use super::{
+    BeatPoint, BeatTimeline,
+    wav::{WavAudio, WavError},
+};
 
 const MIN_GAP_SECONDS: f64 = 0.18;
 
-pub fn detect_beats(audio: &WavAudio, cancelled: &impl Fn() -> bool) -> Result<BeatTimeline, WavError> {
+pub fn detect_beats(
+    audio: &WavAudio,
+    cancelled: &impl Fn() -> bool,
+) -> Result<BeatTimeline, WavError> {
     let sr = audio.sample_rate_hz;
     let window = ((sr as usize) / 100).max(1); // 10 ms
     let mut energies = Vec::with_capacity(audio.samples.len().div_ceil(window));
@@ -12,8 +18,8 @@ pub fn detect_beats(audio: &WavAudio, cancelled: &impl Fn() -> bool) -> Result<B
         if i % 128 == 0 && cancelled() {
             return Err(WavError::Cancelled);
         }
-        let power = frame.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>()
-            / frame.len() as f64;
+        let power =
+            frame.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>() / frame.len() as f64;
         energies.push(power.sqrt());
     }
     let peak = energies.iter().copied().fold(0.0_f64, f64::max);
@@ -43,7 +49,8 @@ pub fn detect_beats(audio: &WavAudio, cancelled: &impl Fn() -> bool) -> Result<B
         }
     }
     let bpm = if beats.len() >= 3 {
-        let mut intervals: Vec<f64> = beats.windows(2)
+        let mut intervals: Vec<f64> = beats
+            .windows(2)
             .map(|pair| pair[1].time_seconds - pair[0].time_seconds)
             .filter(|gap| *gap > 0.001 && *gap < 2.0)
             .collect();
@@ -52,8 +59,12 @@ pub fn detect_beats(audio: &WavAudio, cancelled: &impl Fn() -> bool) -> Result<B
         } else {
             intervals.sort_by(f64::total_cmp);
             let mut tempo = 60.0 / intervals[intervals.len() / 2];
-            while tempo < 70.0 { tempo *= 2.0; }
-            while tempo > 190.0 { tempo *= 0.5; }
+            while tempo < 70.0 {
+                tempo *= 2.0;
+            }
+            while tempo > 190.0 {
+                tempo *= 0.5;
+            }
             Some(tempo)
         }
     } else {

@@ -37,14 +37,13 @@ pub fn decode_wav(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<WavAudi
     if bytes.len() < 44 || bytes.len() > MAX_WAV_BYTES {
         return Err(WavError::Size);
     }
-    if bytes.get(..4) != Some(b"RIFF")
-        || bytes.get(8..12) != Some(b"WAVE")
-    {
+    if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
         return Err(WavError::Invalid);
     }
     let riff_end = 8usize
-        .checked_add(le32(bytes.get(4..8).ok_or(WavError::Invalid)?)
-            .ok_or(WavError::Invalid)? as usize)
+        .checked_add(
+            le32(bytes.get(4..8).ok_or(WavError::Invalid)?).ok_or(WavError::Invalid)? as usize,
+        )
         .ok_or(WavError::Invalid)?;
     if riff_end > bytes.len() || riff_end < 44 {
         return Err(WavError::Invalid);
@@ -81,9 +80,11 @@ pub fn decode_wav(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<WavAudi
     let bits = le16(&fmt[14..16]).ok_or(WavError::Invalid)? as usize;
     let valid_format = matches!((encoding, bits), (1, 16 | 24 | 32) | (3, 32));
     let bytes_per_sample = bits / 8;
-    if !valid_format || !(1..=8).contains(&channels)
+    if !valid_format
+        || !(1..=8).contains(&channels)
         || !(8_000..=192_000).contains(&sample_rate_hz)
-        || block_align != channels * bytes_per_sample || block_align == 0
+        || block_align != channels * bytes_per_sample
+        || block_align == 0
     {
         return Err(WavError::Unsupported);
     }
@@ -104,12 +105,21 @@ pub fn decode_wav(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<WavAudi
             let value = match (encoding, bits) {
                 (1, 16) => i16::from_le_bytes([sample[0], sample[1]]) as f64 / 32768.0,
                 (1, 24) => {
-                    let signed = i32::from_le_bytes([sample[0], sample[1], sample[2],
-                        if sample[2] & 0x80 == 0 { 0 } else { 0xff }]);
+                    let signed = i32::from_le_bytes([
+                        sample[0],
+                        sample[1],
+                        sample[2],
+                        if sample[2] & 0x80 == 0 { 0 } else { 0xff },
+                    ]);
                     signed as f64 / 8_388_608.0
                 }
-                (1, 32) => i32::from_le_bytes(sample.try_into().map_err(|_| WavError::Invalid)?) as f64 / 2_147_483_648.0,
-                (3, 32) => f32::from_le_bytes(sample.try_into().map_err(|_| WavError::Invalid)?) as f64,
+                (1, 32) => {
+                    i32::from_le_bytes(sample.try_into().map_err(|_| WavError::Invalid)?) as f64
+                        / 2_147_483_648.0
+                }
+                (3, 32) => {
+                    f32::from_le_bytes(sample.try_into().map_err(|_| WavError::Invalid)?) as f64
+                }
                 _ => return Err(WavError::Unsupported),
             };
             if !value.is_finite() || value.abs() > 1.001 {
@@ -119,5 +129,8 @@ pub fn decode_wav(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<WavAudi
         }
         samples.push((sum / channels as f64) as f32);
     }
-    Ok(WavAudio { samples, sample_rate_hz })
+    Ok(WavAudio {
+        samples,
+        sample_rate_hz,
+    })
 }
