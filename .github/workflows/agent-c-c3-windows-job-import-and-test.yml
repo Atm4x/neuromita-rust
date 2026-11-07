@@ -1,0 +1,71 @@
+name: Agent C Windows uv job checked import and smoke
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-c3-windows-job-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-c3-windows-job-20261107
+          fetch-depth: 0
+      - name: Verify exact source and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7528cf77e16af1f84567f834b41b5857f008bbf4
+          HEAD=029aea0b82b1fda57c8ed55821c8da7304d631b6
+          SOURCE=codex/ai-platform-hub-c3-windows-fail-closed-20261107
+          TARGET=codex/ai-platform-hub-c3-windows-job-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-windows-job-20261107.bundle.b64 > /tmp/agent-c-job.bundle
+          echo 'dcf2b09c0e5641ac9d09153ee97e4c301967aa8c034b607631f80fbe9182f80c  /tmp/agent-c-job.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-job.bundle
+          git fetch --no-tags /tmp/agent-c-job.bundle "refs/heads/$SOURCE:refs/heads/agent-c-candidate"
+          test "$(git rev-parse refs/heads/agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          CURRENT="$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)"
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ]; then
+            echo "Unexpected target: $CURRENT" >&2
+            exit 1
+          fi
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-windows-job-20261107
+          fetch-depth: 1
+      - name: Compile and execute exact Windows Job Object module
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          New-Item -ItemType Directory -Force -Path win-probe/src | Out-Null
+          @'
+          [package]
+          name = "nm_c3_windows_job_probe"
+          version = "0.1.0"
+          edition = "2024"
+          [target.'cfg(windows)'.dependencies]
+          windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+          '@ | Set-Content win-probe/Cargo.toml
+          @'
+          #[path = "../../src/ai_runtime/windows_uv_job.rs"]
+          mod windows_uv_job;
+          '@ | Set-Content win-probe/src/lib.rs
+          rustup run 1.98.1 cargo test --manifest-path win-probe/Cargo.toml --offline -- --nocapture
+      - name: Test actual LayerInstaller cancelled uv lifecycle on Windows
+        shell: pwsh
+        run: |
+          rustup run 1.98.1 cargo test --locked --offline --lib windows_cancelled_uv_job_releases_staging_only_after_child_shutdown -- --nocapture
