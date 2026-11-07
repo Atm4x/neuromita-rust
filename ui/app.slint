@@ -19,6 +19,8 @@ import { AboutPage } from "pages/about.slint";
 
 export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget }
 
+export struct GuideSectionEntry { first: int, last: int, title: string }
+
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
     icon: @image-url("../assets/launcher_ui/NM_Logo.png");
@@ -50,6 +52,7 @@ export component AppWindow inherits Window {
     in property <float> onboarding-guide-crop-right: 1.0;
     in property <float> onboarding-guide-crop-bottom: 1.0;
     in property <[GuideFocusTarget]> onboarding-guide-targets;
+    in property <[GuideSectionEntry]> onboarding-guide-sections;
     callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
     callback onboarding-guide-select-level(int);
@@ -235,6 +238,20 @@ export component AppWindow inherits Window {
                         background: root.onboarding-guide-level == 2 ? Theme.selected : Theme.hover;
                         Label { text: root.onboarding-language == "ru" ? "Все возможности" : "Everything"; horizontal-alignment: center; }
                         activated => { root.onboarding-guide-select-level(2); }
+                    }
+                }
+                if root.onboarding-guide-sections.length > 0: HorizontalLayout {
+                    height: 30px; spacing: 6px;
+                    for section in root.onboarding-guide-sections: ActionSurface {
+                        horizontal-stretch: 1; min-width: 0px; height: 30px;
+                        label: section.title;
+                        selected: root.onboarding-guide-page >= section.first && root.onboarding-guide-page <= section.last;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label {
+                            text: section.title; horizontal-alignment: center;
+                            font-size: 11px; overflow: elide;
+                        }
+                        activated => { root.onboarding-guide-navigate(section.first); }
                     }
                 }
                 GuideMedia {

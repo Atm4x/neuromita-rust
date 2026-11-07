@@ -42,8 +42,14 @@ through keyboard-accessible buttons; the selected rectangle is highlighted and
 the zoomed screenshot is centered toward it. The image geometry and button list
 are not separately hardcoded in Slint.
 
-**Not implemented:** rich-text inline step links/hover, PyQt contents menu and
-section progress, full PyQt image toolbar parity (fit-width/actual-pixel-size,
+Section navigation now matches the six historical PyQt groups, with only
+groups visible for the current Guide level (Basic two, Advanced three, Full
+six). Each section tab jumps to its first page and indicates the current group.
+The ordered group ranges and RU/EN labels are computed in the same Rust page
+catalog, not duplicated in the UI.
+
+**Not implemented:** rich-text inline step links/hover, PyQt page-by-page
+progress segments and contents popup, full PyQt image toolbar parity (fit-width/actual-pixel-size,
 scrollbars and free panning), direct page-specific *local* Wiki navigation,
 advanced keyboard/accessibility E2E and Windows GUI behavioral E2E. The Help button now links to the exact historical
 RU/EN Wiki article for the current page using the pinned read-only Python

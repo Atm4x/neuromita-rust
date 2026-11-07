@@ -11,8 +11,8 @@ use super::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
     view::{
-        AppWindow, ComponentCard, GuideFocusTarget, I18n, LauncherMenuAction, LocaleOption,
-        PageId, ReleaseItem,
+        AppWindow, ComponentCard, GuideFocusTarget, GuideSectionEntry, I18n,
+        LauncherMenuAction, LocaleOption, PageId, ReleaseItem,
     },
     voice::VoicePreviewMode,
 };
@@ -363,6 +363,15 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
         })
         .collect::<Vec<_>>();
     window.set_onboarding_guide_targets(ModelRc::new(VecModel::from(targets)));
+    let sections = guide::sections(level)
+        .into_iter()
+        .map(|section| GuideSectionEntry {
+            first: section.first_index as i32,
+            last: section.last_index as i32,
+            title: section.kind.title(&language).into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_onboarding_guide_sections(ModelRc::new(VecModel::from(sections)));
 }
 
 fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
