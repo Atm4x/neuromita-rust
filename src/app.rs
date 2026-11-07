@@ -98,6 +98,7 @@ pub struct ApplicationConfig {
     pub prompts: Option<Arc<PromptCatalog>>,
     pub generator: ResponseGenerator,
     pub knowledge: KnowledgeRetrieval,
+    pub graph_extractor: Option<Arc<dyn crate::knowledge::graph::GraphExtractor>>,
     pub limits: RuntimeLimits,
     pub voice: Arc<dyn VoiceProvider>,
     pub ai_runtime: Option<AiApplicationConfig>,
@@ -142,6 +143,7 @@ impl ApplicationConfig {
             prompts: None,
             generator,
             knowledge: KnowledgeRetrieval::lexical(),
+            graph_extractor: None,
             limits,
             voice: Arc::new(UnavailableVoiceProvider),
             ai_runtime: None,
@@ -157,6 +159,16 @@ impl ApplicationConfig {
             games: GamePolicy::default(),
             reminders: ReminderConfig::system(),
         }
+    }
+
+    /// Supply an explicitly selected, typed graph extraction backend.
+    /// Without one, Graph Reindex fails closed instead of synthesizing relations.
+    pub fn with_graph_extractor(
+        mut self,
+        extractor: Arc<dyn crate::knowledge::graph::GraphExtractor>,
+    ) -> Self {
+        self.graph_extractor = Some(extractor);
+        self
     }
 
     pub fn with_prompt_catalog(mut self, catalog: PromptCatalog) -> Self {
@@ -408,6 +420,7 @@ impl ApplicationLifecycle {
             prompts,
             generator,
             knowledge,
+            graph_extractor,
             limits,
             voice,
             ai_runtime,
@@ -662,6 +675,7 @@ impl ApplicationLifecycle {
             timeline: Arc::clone(&timeline),
             characters,
             knowledge: Arc::clone(&knowledge),
+            graph_extractor,
             settings: settings_owner,
             presets: Arc::clone(&presets),
             games: Arc::clone(&games),
