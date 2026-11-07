@@ -64,3 +64,21 @@ regression input for a future explicit Python-to-Rust import boundary, not a
 claimed implementation of Python parity. Do not add a schema migration chain
 or synthesize lossy UUIDs. The existing Python app import/onboarding pipeline
 is tracked separately by agent D; the archive identity contract belongs here.
+
+## Explicit Python observer bindings (B24)
+
+`InspectedPythonArchive::bind_memory` and `bind_sqlite` form a **read-only**
+`BoundPythonArchive` against a destination snapshot. The caller must supply an
+exact one-to-one mapping of every Python observer string to an existing Rust
+`CharacterId`; no implicit names, defaults or aliases are inferred. Source
+`PlayerMessage` actors must use the recognized Python `Player` spelling, and
+character-owned events must have an explicitly bound author. Unicode external
+IDs and original ISO-8601 timestamps remain on the inspected archive. Session,
+branch and event candidate UUIDs must be unused across the destination.
+
+Binding is **not** an import, identity reservation, or database transaction.
+The destination may change after the snapshot. A future installer must
+revalidate the mappings and collision set **inside the same destination write
+transaction**, and must persist the original source identities and exact
+microsecond timestamps atomically with canonical events. Neither the current
+SQLite storage nor the in-memory store is mutated by this step.

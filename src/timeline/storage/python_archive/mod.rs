@@ -147,8 +147,10 @@ struct PythonAsset {
 }
 
 mod assets;
+mod binding;
 mod validation;
 use assets::validate_assets;
+pub use binding::BoundPythonArchive;
 use validation::*;
 
 /// Validate a Python archive into a detached transport plan. No canonical Rust

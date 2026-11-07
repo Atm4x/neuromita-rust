@@ -248,3 +248,122 @@ fn real_python_asset_archive_fixture_cross_language_roundtrip() {
     corrupted["assets"][0]["base64"] = json!("YmFk");
     assert!(inspect_python_archive(&serde_json::to_vec(&corrupted).unwrap()).is_err());
 }
+
+fn explicit_observers() -> std::collections::BTreeMap<String, neuromita::character::CharacterId> {
+    std::collections::BTreeMap::from([("A".to_owned(), neuromita::character::CharacterId::Crazy)])
+}
+
+#[test]
+fn python_import_binding_requires_explicit_observers_and_preserves_source_identity() {
+    use neuromita::timeline::domain::TimelineStore;
+    let source = inspect_python_archive(PYTHON_ARCHIVE).unwrap();
+    let target = TimelineStore::new();
+    assert!(source.bind_memory(&target, &Default::default()).is_err());
+    let mut extraneous = explicit_observers();
+    extraneous.insert("Ghost".into(), neuromita::character::CharacterId::Ghost);
+    assert!(source.bind_memory(&target, &extraneous).is_err());
+    let bound = source.bind_memory(&target, &explicit_observers()).unwrap();
+    assert_eq!(
+        bound.native_session().0,
+        source.identities.session.candidate_uuid
+    );
+    assert_eq!(bound.identities(), &source.identities);
+    assert_eq!(bound.source.event_times, source.event_times);
+    assert_eq!(bound.source.external_session_id(), "session:русский");
+}
+
+#[test]
+fn python_import_binding_rejects_native_session_and_event_collisions() {
+    use neuromita::timeline::EventId;
+    use neuromita::timeline::domain::{BranchId, EventDraft, EventKind, SessionId, TimelineStore};
+    let source = inspect_python_archive(PYTHON_ARCHIVE).unwrap();
+    let mut target = TimelineStore::new();
+    target
+        .create_session(
+            SessionId(source.identities.session.candidate_uuid),
+            BranchId::new(),
+        )
+        .unwrap();
+    assert!(source.bind_memory(&target, &explicit_observers()).is_err());
+
+    let mut target = TimelineStore::new();
+    let branch = BranchId::new();
+    target.create_session(SessionId::new(), branch).unwrap();
+    let mut draft = EventDraft::new(EventKind::PlayerMessage);
+    draft.id = EventId(source.identities.events[0].candidate_uuid);
+    draft.actor = Some("player".into());
+    draft
+        .observers
+        .insert(neuromita::character::CharacterId::Crazy);
+    draft.payload.insert("content".into(), json!("native"));
+    target
+        .append(branch, 0, "native:message", json!({}), vec![draft])
+        .unwrap();
+    assert!(source.bind_memory(&target, &explicit_observers()).is_err());
+    assert_eq!(target.branch(branch).unwrap().head_sequence, 1);
+}
+
+#[test]
+fn python_import_binding_rejects_aliasing_and_unknown_character_actors() {
+    use neuromita::timeline::domain::TimelineStore;
+    let modified = alter(|doc| {
+        doc["events"][1]["observers"] = json!(["A", "B"]);
+        doc["operations"][1]["intent"]["events"][0]["observers"] = json!(["A", "B"]);
+    });
+    let source = inspect_python_archive(&modified).unwrap();
+    let same = std::collections::BTreeMap::from([
+        ("A".into(), neuromita::character::CharacterId::Crazy),
+        ("B".into(), neuromita::character::CharacterId::Crazy),
+    ]);
+    assert!(source.bind_memory(&TimelineStore::new(), &same).is_err());
+    let different = std::collections::BTreeMap::from([
+        ("A".into(), neuromita::character::CharacterId::Crazy),
+        ("B".into(), neuromita::character::CharacterId::Kind),
+    ]);
+    assert!(
+        source
+            .bind_memory(&TimelineStore::new(), &different)
+            .is_ok()
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_import_binding_detects_sqlite_collision_after_reopen() {
+    use neuromita::timeline::domain::{BranchId, SessionId, TimelineRepository};
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    let source = inspect_python_archive(PYTHON_ARCHIVE).unwrap();
+    let path =
+        std::env::temp_dir().join(format!("nm-python-binding-{}.sqlite", uuid::Uuid::new_v4()));
+    {
+        let mut repo = SqliteTimelineRepository::open(&path).unwrap();
+        assert!(source.bind_sqlite(&repo, &explicit_observers()).is_ok());
+        repo.create_session(
+            SessionId(source.identities.session.candidate_uuid),
+            BranchId::new(),
+        )
+        .unwrap();
+    }
+    let reopened = SqliteTimelineRepository::open(&path).unwrap();
+    assert!(
+        source
+            .bind_sqlite(&reopened, &explicit_observers())
+            .is_err()
+    );
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(path.with_extension("sqlite-wal")).ok();
+    std::fs::remove_file(path.with_extension("sqlite-shm")).ok();
+}
+
+#[test]
+fn python_import_binding_rejects_unrecognized_player_author_before_mutation() {
+    use neuromita::timeline::domain::TimelineStore;
+    let modified = alter(|doc| {
+        doc["events"][1]["actor_id"] = json!("unknown-player-alias");
+        doc["operations"][1]["intent"]["events"][0]["actor_id"] = json!("unknown-player-alias");
+    });
+    let source = inspect_python_archive(&modified).unwrap();
+    let target = TimelineStore::new();
+    assert!(source.bind_memory(&target, &explicit_observers()).is_err());
+    assert!(source.bind_memory(&target, &explicit_observers()).is_err());
+}
