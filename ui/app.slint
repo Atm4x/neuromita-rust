@@ -44,6 +44,8 @@ export component AppWindow inherits Window {
     in property <bool> unity-installed;
     in property <string> notice;
     in property <[ChatRow]> chat-messages;
+    in property <bool> chat-has-older;
+    in property <bool> chat-older-loading;
     in property <int> chat-clients;
     in property <bool> chat-server-running;
     in property <bool> core-connected;
@@ -74,6 +76,7 @@ export component AppWindow inherits Window {
     callback chat-hide-message(string);
     callback chat-select-character(int);
     callback chat-refresh();
+    callback chat-load-older();
     callback chat-set-volume(int);
     callback chat-dismiss-error();
     callback navigate(PageId);
@@ -113,7 +116,7 @@ export component AppWindow inherits Window {
             if root.page == PageId.sandbox: SandboxPage {
                 width: parent.width; height: parent.height;
                 clients: root.chat-clients; server-running: root.chat-server-running;
-                messages: root.chat-messages; connected: root.core-connected; connecting: root.core-connecting;
+                messages: root.chat-messages; has-older: root.chat-has-older; older-loading: root.chat-older-loading; connected: root.core-connected; connecting: root.core-connecting;
                 sending: root.chat-sending; character: root.chat-character;
                 generation-ready: root.chat-generation-ready; generation-error: root.chat-generation-error;
                 model: root.chat-model; preset: root.chat-preset; address: root.chat-address;
@@ -128,6 +131,7 @@ export component AppWindow inherits Window {
                 hide-message(id) => { root.chat-hide-message(id); }
                 select-character(id) => { root.chat-select-character(id); }
                 refresh => { root.chat-refresh(); }
+                load-older => { root.chat-load-older(); }
                 set-volume(value) => { root.chat-set-volume(value); }
                 dismiss-error => { root.chat-dismiss-error(); }
                 home => { root.navigate(PageId.home); }

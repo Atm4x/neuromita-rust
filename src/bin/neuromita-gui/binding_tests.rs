@@ -1215,3 +1215,247 @@ fn chat_single_message_hide_callback_uses_event_id_and_origin_revision() {
         if origin.character == CharacterId::Crazy && origin.selection_revision == 2));
     window.hide().unwrap();
 }
+
+#[test]
+fn chat_real_history_pages_are_ticket_fenced_and_preserve_live_rows() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox::{HistoryPager, apply_with_pager, bind_history_actions, reconcile_rows},
+        view::{ChatRow, ChatStatus},
+    };
+    use neuromita::{
+        character::CharacterId,
+        presentation::ConversationHistoryPage,
+        timeline::{
+            ContextAnchor,
+            domain::{EventKind, MessageRole, ProjectedMessage},
+            selection::TimelineSelection,
+        },
+    };
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pager = std::sync::Arc::new(std::sync::Mutex::new(HistoryPager::default()));
+    let origin = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    let branch = uuid::Uuid::new_v4();
+    let at = ContextAnchor {
+        branch_id: branch,
+        through: 205,
+    };
+    let selected = TimelineSelection {
+        branch_id: neuromita::timeline::domain::BranchId(branch),
+        generation: 1,
+    };
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    bind_history_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+        pager.clone(),
+    );
+    pager.lock().unwrap().observe(origin, at, selected, 205);
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let existing = (6..=205)
+        .map(|i| ChatRow {
+            sequence: format!("#{i}").into(),
+            event_id: uuid::Uuid::from_u128(i).to_string().into(),
+            text: format!("history-{i}").into(),
+            user: true,
+            ..Default::default()
+        })
+        .chain(std::iter::once(ChatRow {
+            request_id: "pending-live".into(),
+            text: "streaming".into(),
+            status: ChatStatus::Text,
+            can_cancel: true,
+            ..Default::default()
+        }))
+        .collect();
+    reconcile_rows(&window, existing);
+    let model = window.get_chat_messages();
+    window.invoke_chat_load_older();
+    window.invoke_chat_load_older();
+    assert_eq!(
+        commands.borrow().len(),
+        1,
+        "one bounded read must be in flight"
+    );
+    let (ticket, offset) = match &commands.borrow()[0] {
+        Command::LoadOlder(request_origin, id, request_at, request_selection, offset) => {
+            assert_eq!(*request_origin, origin);
+            assert_eq!(*request_at, at);
+            assert_eq!(*request_selection, selected);
+            (*id, *offset)
+        }
+        _ => panic!("expected typed Timeline history page"),
+    };
+    assert_eq!(offset, 200);
+    let older = (1..=5)
+        .map(|i| ProjectedMessage {
+            event_id: neuromita::timeline::EventId(uuid::Uuid::from_u128(i)),
+            request_id: None,
+            kind: EventKind::PlayerMessage,
+            message_id: format!("message-{i}"),
+            external_message_id: None,
+            sequence: i as u64,
+            learned_at: i as u64,
+            role: MessageRole::User,
+            speaker: Some("player".into()),
+            content: format!("history-{i}"),
+            fields: Default::default(),
+        })
+        .collect::<Vec<_>>();
+    let page = ConversationHistoryPage {
+        character: CharacterId::Crazy,
+        at,
+        selection: selected,
+        offset: 200,
+        total: 205,
+        messages: older.clone(),
+    };
+    apply_with_pager(
+        &window,
+        Update::OlderPage(origin, ticket, Ok(page)),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        window.get_chat_messages(),
+        model,
+        "pages retain mounted Slint model"
+    );
+    assert_eq!(model.row_count(), 206, "older messages plus live pending");
+    assert_eq!(model.row_data(0).unwrap().text, "history-1");
+    assert_eq!(model.row_data(204).unwrap().text, "history-205");
+    assert_eq!(model.row_data(205).unwrap().request_id, "pending-live");
+    assert!(!window.get_chat_has_older());
+    window.invoke_chat_load_older();
+    assert_eq!(commands.borrow().len(), 1);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "duplicate page cannot append duplicate events"
+    );
+
+    let loading_at = ContextAnchor { through: 206, ..at };
+    let changed_at = ContextAnchor { through: 207, ..at };
+    pager
+        .lock()
+        .unwrap()
+        .observe(origin, loading_at, selected, 205);
+    let (late_ticket, _, _, _) = pager.lock().unwrap().request(origin).unwrap();
+    pager
+        .lock()
+        .unwrap()
+        .observe(origin, changed_at, selected, 204);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            late_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "edit/hide during read cannot resurrect old rows"
+    );
+
+    pager.lock().unwrap().observe(
+        origin,
+        at,
+        TimelineSelection {
+            generation: 2,
+            ..selected
+        },
+        205,
+    );
+    let (new_ticket, _, _, _) = pager.lock().unwrap().request(origin).unwrap();
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            new_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older.clone(),
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "same branch/head but different generation must be fenced"
+    );
+
+    revision.store(2, std::sync::atomic::Ordering::Release);
+    apply_with_pager(
+        &window,
+        Update::OlderPage(
+            origin,
+            new_ticket,
+            Ok(ConversationHistoryPage {
+                character: CharacterId::Crazy,
+                at,
+                selection: selected,
+                offset: 200,
+                total: 205,
+                messages: older,
+            }),
+        ),
+        &editor,
+        &revision,
+        Some(&pager),
+    );
+    assert_eq!(
+        model.row_count(),
+        206,
+        "A→B→A old result cannot mutate current selection"
+    );
+    window.hide().unwrap();
+}

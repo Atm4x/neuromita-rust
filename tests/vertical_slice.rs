@@ -3312,3 +3312,93 @@ async fn conversation_single_message_hide_checks_event_identity_observer_and_tim
     ));
     app.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conversation_history_page_is_bounded_observer_scoped_and_rejects_stale_prefix() {
+    use neuromita::{presentation::ConversationError, request::UserInput};
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset("http://127.0.0.1:1/v1beta/"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let api = app.presenter();
+    for i in 0..205 {
+        api.characters
+            .observe(
+                CharacterId::Crazy,
+                UserInput::new(format!("history-{i}")).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    api.characters
+        .observe(
+            CharacterId::Kind,
+            UserInput::new("private-not-for-crazy".into()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let snapshot = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert_eq!(snapshot.messages.len(), 205);
+    let older = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(older.total, 205);
+    assert_eq!(older.messages.len(), 5);
+    assert_eq!(older.messages[0].content, "history-0");
+    assert_eq!(older.messages[4].content, "history-4");
+    assert!(
+        older
+            .messages
+            .iter()
+            .all(|message| message.content != "private-not-for-crazy")
+    );
+    let repeated = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(older.messages, repeated.messages);
+    let tail = api
+        .conversation
+        .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 0)
+        .await
+        .unwrap();
+    assert_eq!(tail.messages.len(), 200);
+    assert_eq!(tail.messages[0].content, "history-5");
+    let target = older.messages[0].event_id;
+    let preview = api
+        .conversation
+        .preview_change(
+            CharacterId::Crazy,
+            neuromita::presentation::ConversationChange::HideMessage(target),
+        )
+        .await
+        .unwrap();
+    api.conversation.apply_change(preview).unwrap();
+    assert!(matches!(
+        api.conversation
+            .history_page(CharacterId::Crazy, snapshot.at, snapshot.selection, 200)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let current = api.conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let after_hide = api
+        .conversation
+        .history_page(CharacterId::Crazy, current.at, current.selection, 200)
+        .await
+        .unwrap();
+    assert_eq!(after_hide.total, 204);
+    assert_eq!(after_hide.messages.len(), 4);
+    assert!(!after_hide.messages.iter().any(|m| m.event_id == target));
+    app.shutdown().await.unwrap();
+}

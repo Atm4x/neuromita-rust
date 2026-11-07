@@ -1,17 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    rc::Rc,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 use neuromita::{
     character::CharacterId,
-    presentation::ConversationSnapshot,
+    presentation::{ConversationHistoryPage, ConversationSnapshot},
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
     timeline::domain::MessageRole,
+    timeline::{ContextAnchor, domain::ProjectedMessage, selection::TimelineSelection},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
@@ -22,6 +24,119 @@ use super::{
         MemoryUi, SettingsUi,
     },
 };
+
+const HISTORY_PAGE_SIZE: usize = 200;
+
+#[derive(Default)]
+pub(super) struct HistoryPager {
+    owner: Option<ChatOrigin>,
+    at: Option<ContextAnchor>,
+    selection: Option<TimelineSelection>,
+    total: usize,
+    visible: usize,
+    next_ticket: u64,
+    pending: Option<(u64, usize)>,
+}
+
+impl HistoryPager {
+    fn reset(&mut self) {
+        self.owner = None;
+        self.at = None;
+        self.selection = None;
+        self.total = 0;
+        self.visible = 0;
+        self.pending = None;
+    }
+
+    pub(super) fn observe(
+        &mut self,
+        owner: ChatOrigin,
+        at: ContextAnchor,
+        selection: TimelineSelection,
+        total: usize,
+    ) {
+        if self.owner != Some(owner) || self.at != Some(at) || self.selection != Some(selection) {
+            self.reset();
+            self.owner = Some(owner);
+            self.at = Some(at);
+            self.selection = Some(selection);
+            self.visible = total.min(HISTORY_PAGE_SIZE);
+        }
+        self.total = total;
+        self.visible = self.visible.min(self.total);
+    }
+
+    pub(super) fn request(
+        &mut self,
+        origin: ChatOrigin,
+    ) -> Option<(u64, ContextAnchor, TimelineSelection, usize)> {
+        if self.owner != Some(origin) || self.pending.is_some() || self.visible >= self.total {
+            return None;
+        }
+        self.next_ticket = self.next_ticket.checked_add(1)?;
+        self.pending = Some((self.next_ticket, self.visible));
+        Some((self.next_ticket, self.at?, self.selection?, self.visible))
+    }
+
+    fn accept(&mut self, origin: ChatOrigin, ticket: u64, page: &ConversationHistoryPage) -> bool {
+        if self.owner != Some(origin)
+            || self.at != Some(page.at)
+            || self.selection != Some(page.selection)
+            || page.character != origin.character
+            || self.pending != Some((ticket, page.offset))
+            || self.total != page.total
+            || page.messages.len() > HISTORY_PAGE_SIZE
+            || page.messages.len() > self.total.saturating_sub(page.offset)
+        {
+            return false;
+        }
+        self.pending = None;
+        self.visible += page.messages.len();
+        true
+    }
+
+    fn fail(&mut self, origin: ChatOrigin, ticket: u64) -> bool {
+        if self.owner != Some(origin) || !self.pending.is_some_and(|(pending, _)| pending == ticket)
+        {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
+
+fn pager_status(window: &AppWindow, pager: &HistoryPager) {
+    window.set_chat_has_older(pager.at.is_some() && pager.visible < pager.total);
+    window.set_chat_older_loading(pager.pending.is_some());
+}
+
+pub(super) fn bind_history_actions(
+    window: &AppWindow,
+    dispatch: Rc<dyn Fn(Command)>,
+    revision: Arc<AtomicU64>,
+    pager: Arc<Mutex<HistoryPager>>,
+) {
+    let weak = window.as_weak();
+    window.on_chat_load_older(move || {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let Some(origin) = current_origin(&window, &revision) else {
+            return;
+        };
+        let command = pager
+            .lock()
+            .expect("history pager mutex poisoned")
+            .request(origin);
+        if let Some((ticket, at, selection, offset)) = command {
+            pager_status(
+                &window,
+                &pager.lock().expect("history pager mutex poisoned"),
+            );
+            dispatch(Command::LoadOlder(origin, ticket, at, selection, offset));
+        }
+    });
+}
 
 pub fn attach(
     window: &AppWindow,
@@ -35,27 +150,43 @@ pub fn attach(
     let weak = window.as_weak();
     let selection_revision = Arc::new(AtomicU64::new(0));
     let update_revision = selection_revision.clone();
+    let pager = Arc::new(Mutex::new(HistoryPager::default()));
+    let update_pager = pager.clone();
     let runtime = DesktopRuntime::spawn(directory, model, move |update| {
         let editor = editor.clone();
         let update_revision = update_revision.clone();
+        let update_pager = update_pager.clone();
         let _ = weak.upgrade_in_event_loop(move |window| {
-            apply(&window, update, &editor, &update_revision);
+            apply_with_pager(
+                &window,
+                update,
+                &editor,
+                &update_revision,
+                Some(&update_pager),
+            );
         });
     })?;
     let weak = window.as_weak();
     let commands = runtime.commands.clone();
     let queue_editor = memory_editor.clone();
+    let queue_pager = pager.clone();
     let dispatch = std::rc::Rc::new(move |command| {
         if let Err(error) = commands.try_send(command)
             && let Some(window) = weak.upgrade()
         {
-            if let Command::MemoryEdit(edit_id, ..) = error.into_inner() {
-                super::memory::failed(
+            match error.into_inner() {
+                Command::MemoryEdit(edit_id, ..) => super::memory::failed(
                     &window,
                     &queue_editor,
                     edit_id,
                     "Desktop command queue is full or closed".into(),
-                );
+                ),
+                Command::LoadOlder(origin, ticket, ..) => {
+                    let mut pager = queue_pager.lock().expect("history pager mutex poisoned");
+                    pager.fail(origin, ticket);
+                    pager_status(&window, &pager);
+                }
+                _ => {}
             }
             window.set_chat_sending(false);
             window.set_core_connecting(false);
@@ -72,6 +203,12 @@ pub fn attach(
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     bind_chat_actions(window, dispatch.clone(), selection_revision.clone());
+    bind_history_actions(
+        window,
+        dispatch.clone(),
+        selection_revision.clone(),
+        pager.clone(),
+    );
     let send = dispatch.clone();
     window.on_chat_refresh(move || send(Command::Refresh));
     window.on_chat_set_volume(move |value| {
@@ -181,6 +318,9 @@ pub(super) fn bind_chat_actions(
             return;
         };
         window.set_chat_character(id);
+        window.set_chat_has_older(false);
+        window.set_chat_older_loading(false);
+        reconcile_rows(&window, Vec::new());
         let next = previous + 1;
         let conversation = window.global::<ConversationUi>();
         conversation.set_confirmation(0);
@@ -270,11 +410,22 @@ pub(super) fn render_catalog(
         .set_entries(ModelRc::new(VecModel::from(entries)));
 }
 
+#[cfg(test)]
 pub(super) fn apply(
     window: &AppWindow,
     update: Update,
     memory_editor: &super::memory::EditorState,
     revision: &Arc<AtomicU64>,
+) {
+    apply_with_pager(window, update, memory_editor, revision, None);
+}
+
+pub(super) fn apply_with_pager(
+    window: &AppWindow,
+    update: Update,
+    memory_editor: &super::memory::EditorState,
+    revision: &Arc<AtomicU64>,
+    pager: Option<&Arc<Mutex<HistoryPager>>>,
 ) {
     match update {
         Update::RecognizedText {
@@ -423,8 +574,52 @@ pub(super) fn apply(
         }
         Update::Snapshot(origin, snapshot) => {
             if matches_origin(window, origin, revision) {
-                render(window, &snapshot);
+                let limit = if let Some(pager) = pager {
+                    let mut state = pager.lock().expect("history pager mutex poisoned");
+                    state.observe(
+                        origin,
+                        snapshot.at,
+                        snapshot.selection,
+                        snapshot.messages.len(),
+                    );
+                    pager_status(window, &state);
+                    state.visible
+                } else {
+                    HISTORY_PAGE_SIZE
+                };
+                render(window, &snapshot, limit);
             }
+        }
+        Update::OlderPage(origin, ticket, result) => {
+            let Some(pager) = pager else {
+                return;
+            };
+            if !matches_origin(window, origin, revision) {
+                return;
+            }
+            let mut state = pager.lock().expect("history pager mutex poisoned");
+            match result {
+                Ok(page) if state.accept(origin, ticket, &page) => {
+                    let mut updated = page.messages.iter().map(history_row).collect::<Vec<_>>();
+                    let model = window.get_chat_messages();
+                    let mut existing = (0..model.row_count())
+                        .filter_map(|index| model.row_data(index))
+                        .collect::<Vec<_>>();
+                    let seen: HashSet<String> = existing
+                        .iter()
+                        .filter(|row| !row.event_id.is_empty())
+                        .map(|row| row.event_id.to_string())
+                        .collect();
+                    updated.retain(|row| !seen.contains(row.event_id.as_str()));
+                    updated.append(&mut existing);
+                    reconcile_rows(window, updated);
+                }
+                Err(error) if state.fail(origin, ticket) => {
+                    window.set_chat_error(error.into());
+                }
+                _ => {}
+            }
+            pager_status(window, &state);
         }
         Update::Sent(origin, text) => {
             if matches_origin(window, origin, revision) {
@@ -471,7 +666,7 @@ pub(super) fn apply(
     }
 }
 
-fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
+fn render(window: &AppWindow, snapshot: &ConversationSnapshot, visible: usize) {
     window.set_chat_character(snapshot.character.index() as i32);
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
@@ -509,7 +704,7 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
             .filter(|r| !r.snapshot.state.is_terminal())
             .count() as i32,
     );
-    reconcile_rows(window, rows(snapshot));
+    reconcile_rows(window, rows(snapshot, visible));
     if let Some(error) = &snapshot.requests.discovery_error {
         window.set_chat_error(error.to_string().into());
     }
@@ -561,7 +756,43 @@ pub(super) fn reconcile_rows(window: &AppWindow, next: Vec<ChatRow>) {
     }
 }
 
-fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
+fn history_row(message: &ProjectedMessage) -> ChatRow {
+    ChatRow {
+        text: message.content.clone().into(),
+        attachment_summary: message
+            .fields
+            .get("content")
+            .and_then(|content| neuromita::timeline::domain::parse_message_content(content).ok())
+            .map(|parts| {
+                parts
+                    .into_iter()
+                    .filter_map(|part| {
+                        part.asset()
+                            .map(|asset| format!("{} · {} bytes", asset.media_type, asset.size))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            })
+            .unwrap_or_default()
+            .into(),
+        user: message.speaker.as_deref() == Some("player")
+            || (message.speaker.is_none() && message.role == MessageRole::User),
+        speaker: message.speaker.as_deref().unwrap_or_default().into(),
+        character_index: message
+            .speaker
+            .as_deref()
+            .and_then(CharacterId::parse)
+            .map(|id| id.index() as i32)
+            .unwrap_or(-1),
+        sequence: format!("#{}", message.sequence).into(),
+        event_id: message.event_id.0.to_string().into(),
+        can_hide: message.role != MessageRole::System,
+        status: ChatStatus::History,
+        ..Default::default()
+    }
+}
+
+fn rows(snapshot: &ConversationSnapshot, visible: usize) -> Vec<ChatRow> {
     let committed: HashSet<_> = snapshot
         .messages
         .iter()
@@ -588,45 +819,10 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         .messages
         .iter()
         .rev()
-        .take(200)
+        .take(visible)
         .rev()
         .map(|message| {
-            let mut row = ChatRow {
-                text: message.content.clone().into(),
-                attachment_summary: message
-                    .fields
-                    .get("content")
-                    .and_then(|content| {
-                        neuromita::timeline::domain::parse_message_content(content).ok()
-                    })
-                    .map(|parts| {
-                        parts
-                            .into_iter()
-                            .filter_map(|part| {
-                                part.asset().map(|asset| {
-                                    format!("{} · {} bytes", asset.media_type, asset.size)
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    })
-                    .unwrap_or_default()
-                    .into(),
-                user: message.speaker.as_deref() == Some("player")
-                    || (message.speaker.is_none() && message.role == MessageRole::User),
-                speaker: message.speaker.as_deref().unwrap_or_default().into(),
-                character_index: message
-                    .speaker
-                    .as_deref()
-                    .and_then(CharacterId::parse)
-                    .map(|id| id.index() as i32)
-                    .unwrap_or(-1),
-                sequence: format!("#{}", message.sequence).into(),
-                event_id: message.event_id.0.to_string().into(),
-                can_hide: message.role != MessageRole::System,
-                status: ChatStatus::History,
-                ..Default::default()
-            };
+            let mut row = history_row(message);
             if let Some(request) = accepted.get(&message.event_id) {
                 row.status = ChatStatus::Success;
                 if let RequestState::Finished(RequestOutcome::VoiceGenerationFailed {

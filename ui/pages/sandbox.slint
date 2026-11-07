@@ -10,6 +10,8 @@ export { ChatRow, ChatStatus }
 
 export component SandboxPage inherits Rectangle {
     in property <[ChatRow]> messages;
+    in property <bool> has-older;
+    in property <bool> older-loading;
     in property <int> clients;
     in property <bool> server-running;
     in property <bool> connected;
@@ -41,6 +43,7 @@ export component SandboxPage inherits Rectangle {
     callback hide-message(string);
     callback select-character(int);
     callback refresh();
+    callback load-older();
     callback set-volume(int);
     callback dismiss-error();
     callback home();
@@ -76,7 +79,7 @@ export component SandboxPage inherits Rectangle {
             Rectangle {
                 horizontal-stretch: 1; min-width: 0px;
                 SandboxChat {
-                    width: 100%; height: 100%; messages: root.messages; character: root.character;
+                    width: 100%; height: 100%; messages: root.messages; has-older: root.has-older; older-loading: root.older-loading; character: root.character;
                     connected: root.generation-ready; storage-connected: root.connected; sending: root.sending;
                     draft <=> root.draft; attachment-path <=> root.attachment-path;
                     follow-tail <=> root.follow-tail;
@@ -85,6 +88,7 @@ export component SandboxPage inherits Rectangle {
                     cancel(id) => { root.cancel(id); }
                     hide-message(id) => { root.hide-message(id); }
                     refresh => { root.refresh(); }
+                    load-older => { root.load-older(); }
                 }
             }
             SandboxInspector {

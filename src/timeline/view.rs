@@ -121,6 +121,11 @@ impl MitaView {
         self.projection.messages()
     }
 
+    /// A typed, bounded page of observer-visible canonical messages.
+    pub fn message_page(&self, limit: usize, offset: usize) -> Vec<ProjectedMessage> {
+        self.projection.page(limit, offset)
+    }
+
     pub fn world_events(&self) -> Vec<ProjectedWorldEvent> {
         self.world.events()
     }

@@ -88,6 +88,13 @@ pub enum Command {
     AttachFile(ChatOrigin, String, String),
     Cancel(ChatOrigin, RequestId),
     Refresh,
+    LoadOlder(
+        ChatOrigin,
+        u64,
+        neuromita::timeline::ContextAnchor,
+        neuromita::timeline::selection::TimelineSelection,
+        usize,
+    ),
     Volume(u8),
     SpeechSessionEnabled(bool),
     SpeechPushToTalk(bool),
@@ -131,6 +138,11 @@ pub enum Update {
     Connecting,
     Connected(String),
     Snapshot(ChatOrigin, Box<ConversationSnapshot>),
+    OlderPage(
+        ChatOrigin,
+        u64,
+        Result<neuromita::presentation::ConversationHistoryPage, String>,
+    ),
     Sent(ChatOrigin, String),
     FileAttached(ChatOrigin, String, String),
     Error(String),
@@ -593,6 +605,19 @@ async fn observe(
                     publish(Update::Confirmation(origin, None));
                 },
                 Some(Command::Refresh) => {},
+                Some(Command::LoadOlder(origin, ticket, at, expected, offset)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    let page = presenter.history_page(origin.character, at, expected, offset)
+                        .await.map_err(|error| error.to_string());
+                    publish(Update::OlderPage(origin, ticket, page));
+                },
                 Some(Command::Send(origin, text)) => {
                     if !chat_fence::accepts(
                         origin.character.index() as i32,

@@ -56,9 +56,19 @@ impl ConversationChangePreview {
     }
 }
 
+pub struct ConversationHistoryPage {
+    pub character: CharacterId,
+    pub at: ContextAnchor,
+    pub selection: TimelineSelection,
+    pub offset: usize,
+    pub total: usize,
+    pub messages: Vec<ProjectedMessage>,
+}
+
 pub struct ConversationSnapshot {
     pub character: CharacterId,
     pub at: ContextAnchor,
+    pub selection: TimelineSelection,
     pub state: CharacterState,
     pub messages: Vec<ProjectedMessage>,
     pub requests: Arc<ChatModel>,
@@ -219,6 +229,44 @@ impl ConversationPresenter {
             .observe_selection())
     }
 
+    /// Reads at most 200 older visible messages from one immutable Timeline prefix.
+    /// Both the branch head and its selection generation must match at both ends
+    /// of the asynchronous capture; a stale page is never silently rebased.
+    pub async fn history_page(
+        &self,
+        character: CharacterId,
+        at: ContextAnchor,
+        expected: TimelineSelection,
+        offset: usize,
+    ) -> Result<ConversationHistoryPage, ConversationError> {
+        {
+            let timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| ConversationError::TimelineUnavailable)?;
+            if timeline.anchor() != at || timeline.selection() != expected {
+                return Err(ConversationError::StalePreview);
+            }
+        }
+        let captured = self.characters.context(character, at).await?;
+        let timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| ConversationError::TimelineUnavailable)?;
+        if timeline.anchor() != at || timeline.selection() != expected {
+            return Err(ConversationError::StalePreview);
+        }
+        let total = captured.view.count();
+        Ok(ConversationHistoryPage {
+            character,
+            at,
+            selection: expected,
+            offset,
+            total,
+            messages: captured.view.message_page(200, offset),
+        })
+    }
+
     /// Returns a fixed-prefix character view and independent request observations.
     /// A terminal request alone does not prove membership in the selected branch.
     pub async fn snapshot(
@@ -226,11 +274,13 @@ impl ConversationPresenter {
         character: CharacterId,
     ) -> Result<ConversationSnapshot, ConversationError> {
         let requests = self.chat.snapshot();
-        let at = self
-            .timeline
-            .lock()
-            .map_err(|_| ConversationError::TimelineUnavailable)?
-            .anchor();
+        let (at, selection) = {
+            let timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| ConversationError::TimelineUnavailable)?;
+            (timeline.anchor(), timeline.selection())
+        };
         let view = self.characters.context(character, at).await?;
         let settings = self.settings.snapshot_all()?;
         let assigned = settings
@@ -258,6 +308,7 @@ impl ConversationPresenter {
         Ok(ConversationSnapshot {
             character,
             at,
+            selection,
             state: view.state,
             messages: view.view.messages(),
             requests,

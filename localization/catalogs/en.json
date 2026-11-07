@@ -371,6 +371,14 @@
     "source": "История",
     "translation": "History"
   },
+  "sandbox.history.loading": {
+    "source": "Загрузка истории…",
+    "translation": "Loading history…"
+  },
+  "sandbox.history.older": {
+    "source": "Загрузить предыдущие 200 сообщений",
+    "translation": "Load 200 older messages"
+  },
   "sandbox.label.active": {
     "source": "Активных запросов",
     "translation": "Active requests"

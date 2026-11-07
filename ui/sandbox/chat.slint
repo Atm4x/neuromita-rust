@@ -128,6 +128,8 @@ component ChatComposer inherits VerticalLayout {
 
 export component SandboxChat inherits Rectangle {
     in property <[ChatRow]> messages;
+    in property <bool> has-older;
+    in property <bool> older-loading;
     in property <int> character;
     in property <bool> connected;
     in property <bool> storage-connected;
@@ -140,6 +142,7 @@ export component SandboxChat inherits Rectangle {
     callback cancel(string);
     callback hide-message(string);
     callback refresh();
+    callback load-older();
     background: #0e101ff7; border-color: SandboxTheme.border; border-width: 1px; border-radius: 20px;
     VerticalLayout {
         padding: 14px; spacing: 12px;
@@ -152,6 +155,14 @@ export component SandboxChat inherits Rectangle {
                 VerticalLayout {
                     padding-left: 6px; padding-right: 6px; padding-top: 4px; padding-bottom: 4px;
                     spacing: 4px; alignment: start;
+                    if root.has-older || root.older-loading: HorizontalLayout {
+                        padding: 4px; spacing: 4px; alignment: center;
+                        GhostButton {
+                            text: root.older-loading ? I18n.i18n("sandbox.history.loading", "Загрузка истории…") : I18n.i18n("sandbox.history.older", "Загрузить предыдущие 200 сообщений");
+                            enabled: root.has-older && !root.older-loading;
+                            activated => { root.load-older(); }
+                        }
+                    }
                     for item in root.messages: MessageRow {
                         item: item;
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
