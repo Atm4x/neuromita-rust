@@ -61,3 +61,9 @@ The integration mounts the correlated operation confirmation at the full AI Hub 
 The projection explicitly distinguishes discovered, package+asset installed evidence, and unavailable worker/inference readiness. A partial package/asset state remains `unknown`, not `installed`; readiness remains `unknown` even when both exist. Runtime/package receipts are **not** proof of load/inference readiness. GUI action gates remain disabled. The read-only status label avoids showing a false "unsupported" verdict for models whose compatibility is not known.
 
 Added pure projection regression tests (`hub_inventory_tests`) for partially installed models, readiness not inferred from receipts, no write actions, and empty inventories. **Tests authored, not run:** Rust toolchain unavailable in this execution environment. This is material progress on metadata discovery, not proof of full #37 acceptance.
+
+## Live Core worker-status projection
+
+The existing `Update::RuntimeStatus(RuntimeSnapshot)` path now additionally updates AI Hub row gates after Voice/ASR. Only an explicit Core `RuntimePhase::ModelReady` with a worker generation and **matching** `active_model.plugin_id` marks the specific model inference-ready; an unrelated model stays unknown. Worker-running with generation can mark only worker readiness, not model readiness. Stopped/Failed is shown separately from unknown/missing status. Service-wide error messages are shown only when the snapshot identifies the same pending/active plugin, avoiding misattribution. Updates apply to all catalog rows regardless of selected category; no new service/event-bus is introduced.
+
+Core status projection regression tests authored: matching vs unrelated plugin, missing generation, absent status, failed worker and source-keyed error. No GUI/runtime compilation has been executed. The Refresh request no longer enters an indefinite optimistic spinner when the bounded GUI dispatch rejects the message.

@@ -63,6 +63,7 @@ export component AiHubCard inherits Rectangle {
     // reach the UI. This flag does not block an unrelated component's actions.
     in property <bool> operation-busy: false;
     callback action-requested(string, string, int, string);
+    callback inspect-requested(string, int, string);
 
     property <bool> request-pending: false;
     property <int> pending-revision: -1;
@@ -109,6 +110,18 @@ export component AiHubCard inherits Rectangle {
                 text: root.component.title != "" ? root.component.title : root.component.component-id;
                 font-size: 15px; font-weight: 750; horizontal-stretch: 1;
                 overflow: elide;
+            }
+            ActionSurface {
+                width: 97px; height: 26px;
+                label: root.localized("ai-hub.card.details", "Подробнее", "Details");
+                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                activated => {
+                    root.inspect-requested(
+                        root.component.component-id,
+                        root.component.revision,
+                        root.component.token
+                    );
+                }
             }
             SettingsLabel {
                 text: !root.action-adapter-connected

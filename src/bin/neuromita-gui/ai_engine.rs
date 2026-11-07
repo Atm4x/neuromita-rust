@@ -6,10 +6,14 @@ use super::{
     },
 };
 use neuromita::{
-    ai_runtime::speech_catalog::{SpeechInventory, SpeechModelOption},
+    ai_runtime::{
+        runtime_status::{RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
+        speech_catalog::{SpeechInventory, SpeechModelOption},
+        AiService,
+    },
     presentation::hardware::HardwareView,
 };
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::rc::Rc;
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
@@ -32,9 +36,8 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
         if !window.get_core_connected() {
             return;
         }
-        let mut catalog = window.get_ai_hub_catalog();
-        catalog.phase = AiHubLoadPhase::Loading;
-        window.set_ai_hub_catalog(catalog);
+        // No optimistic spinner: the dispatch channel has no success acknowledgement.
+        // A new Core inventory snapshot is the only confirmation of Refresh.
         refresh_send(Command::RefreshSpeechInventory);
     });
     let weak = window.as_weak();
@@ -67,8 +70,8 @@ pub fn render(window: &AppWindow, snapshot: HardwareView) {
 }
 
 // The only production AI Hub data source here is Core-owned SpeechInventory.
- // Overlay detection is NOT a worker or inference readiness proof, and a
- // partially installed environment must not be labelled Installed.
+// Overlay detection is NOT a worker or inference readiness proof, and a
+// partially installed environment must not be labelled Installed.
 fn installation_truth(model: &SpeechModelOption) -> AiHubTruth {
      match (model.package_detected, model.verified_assets) {
          (true, true) => AiHubTruth::Yes,
@@ -135,6 +138,87 @@ pub fn inventory(window: &AppWindow, inventory: &SpeechInventory) {
      });
  }
 
+// Component-level readiness must be correlated with the exact Core-issued
+// active plugin, never inferred from any other model's worker lifecycle.
+fn status_gates(
+    status: Option<&ServiceRuntimeStatus>,
+    component_id: &str,
+) -> (AiHubTruth, AiHubTruth, AiHubLoadPhase, Option<&str>) {
+    let Some(status) = status else {
+        return (
+            AiHubTruth::Unknown,
+            AiHubTruth::Unknown,
+            AiHubLoadPhase::Idle,
+            None,
+        );
+    };
+    let worker = match status.phase {
+        RuntimePhase::WorkerRunning | RuntimePhase::ModelReady
+            if status.generation.is_some() => AiHubTruth::Yes,
+        RuntimePhase::Stopped | RuntimePhase::Failed => AiHubTruth::No,
+        _ => AiHubTruth::Unknown,
+    };
+    let model = match status.phase {
+        RuntimePhase::ModelReady
+            if status.generation.is_some()
+                && status
+                    .active_model
+                    .as_ref()
+                    .is_some_and(|model| model.plugin_id == component_id) =>
+        {
+            AiHubTruth::Yes
+        }
+        RuntimePhase::Stopped | RuntimePhase::Failed => AiHubTruth::No,
+        _ => AiHubTruth::Unknown,
+    };
+    let phase = match status.phase {
+        RuntimePhase::Starting => AiHubLoadPhase::Checking,
+        RuntimePhase::Failed => AiHubLoadPhase::Failed,
+        _ => AiHubLoadPhase::Loaded,
+    };
+    // A service-wide failure is not necessarily an individual model failure.
+    // Only label the exact pending or active model with its backend error.
+    let associated = status.pending_model.as_deref() == Some(component_id)
+        || status
+            .active_model
+            .as_ref()
+            .is_some_and(|model| model.plugin_id == component_id);
+    let error = if associated {
+        status.last_error.as_deref()
+    } else {
+        None
+    };
+    (worker, model, phase, error)
+}
+
+pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
+    if !window.get_ai_hub_catalog().available {
+        // Do not materialize catalog rows from worker/status data alone.
+        return;
+    }
+    let rows = window.get_ai_hub_components();
+    let updated = rows
+        .iter()
+        .map(|mut row| {
+            let service = match row.category.as_str() {
+                "tts" => Some(AiService::Tts),
+                "asr" => Some(AiService::Asr),
+                _ => None,
+            };
+            if let Some(service) = service {
+                let (worker, model, phase, error) =
+                    status_gates(snapshot.services.get(&service), row.component_id.as_str());
+                row.worker_ready = worker;
+                row.model_ready = model;
+                row.phase = phase;
+                row.error = error.unwrap_or_default().into();
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    window.set_ai_hub_components(ModelRc::new(VecModel::from(updated)));
+}
+
 pub fn disconnected(window: &AppWindow) {
      let revision = window.get_ai_hub_catalog().revision.saturating_add(1);
      window.set_ai_hub_components(ModelRc::new(VecModel::<AiHubComponent>::default()));
@@ -180,6 +264,52 @@ mod hub_inventory_tests {
              assert!(!row.can_install && !row.can_uninstall && !row.can_open_settings);
              assert_eq!(row.revision, 7);
          }
+     }
+
+     #[test]
+     fn explicit_generation_and_matching_plugin_prove_model_ready() {
+         let generation = uuid::Uuid::new_v4();
+         let status = ServiceRuntimeStatus {
+             phase: RuntimePhase::ModelReady,
+             generation: Some(generation),
+             active_model: Some(neuromita::ai_runtime::runtime_status::LoadedModel {
+                 plugin_id: "tts-one".into(),
+                 asset_revision: Some("rev1".into()),
+             }),
+             pending_model: None,
+             last_error: None,
+         };
+         let (worker, model, _, _) = status_gates(Some(&status), "tts-one");
+         assert_eq!(worker, AiHubTruth::Yes);
+         assert_eq!(model, AiHubTruth::Yes);
+         let (_, other, _, _) = status_gates(Some(&status), "tts-two");
+         assert_eq!(other, AiHubTruth::Unknown);
+         let mut stale = status.clone();
+         stale.generation = None;
+         let (worker, model, _, _) = status_gates(Some(&stale), "tts-one");
+         assert_eq!(worker, AiHubTruth::Unknown);
+         assert_eq!(model, AiHubTruth::Unknown);
+     }
+
+     #[test]
+     fn absent_status_and_failed_worker_do_not_claim_ready() {
+         let (worker, model, _, _) = status_gates(None, "asr-a");
+         assert_eq!(worker, AiHubTruth::Unknown);
+         assert_eq!(model, AiHubTruth::Unknown);
+         let failed = ServiceRuntimeStatus {
+             phase: RuntimePhase::Failed,
+             generation: None,
+             active_model: None,
+             pending_model: Some("asr-a".into()),
+             last_error: Some("worker unavailable".into()),
+         };
+         let (worker, model, phase, error) = status_gates(Some(&failed), "asr-a");
+         assert_eq!(worker, AiHubTruth::No);
+         assert_eq!(model, AiHubTruth::No);
+         assert_eq!(phase, AiHubLoadPhase::Failed);
+         assert_eq!(error, Some("worker unavailable"));
+         let (_, _, _, other_error) = status_gates(Some(&failed), "asr-b");
+         assert_eq!(other_error, None);
      }
 
      #[test]

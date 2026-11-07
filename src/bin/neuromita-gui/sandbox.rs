@@ -203,6 +203,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
+            super::ai_engine::runtime_status(window, &snapshot);
         }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::SpeechInventory(catalog, devices) => {

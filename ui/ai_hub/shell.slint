@@ -270,6 +270,11 @@ export component AiHubShell inherits Rectangle {
                                             operations: root.operations;
                                             action-adapter-connected: root.operation-adapter-connected;
                                             card-visible: root.show-component(component) && root.card-rank(component) == rank;
+                                            inspect-requested(id, revision, token) => {
+                                                // The selection only changes visible details;
+                                                // it never admits an install operation.
+                                                root.operation-target = component;
+                                            }
                                             action-requested(id, verb, revision, token) => {
                                                 root.operation-target = component;
                                                 root.component-action-requested(id, verb, revision, token);
