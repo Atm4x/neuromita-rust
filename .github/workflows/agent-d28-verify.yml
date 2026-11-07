@@ -33,7 +33,7 @@ jobs:
       - name: Core atomic three-file import
         run: cargo +1.98.1 test --locked --offline --test python_preset_three_file
       - name: Preset activation crash recovery
-        run: cargo +1.98.1 test --locked --offline --lib settings::preset_activation::tests
+        run: cargo +1.98.1 test --locked --offline --lib settings::preset_activation::tests -- --test-threads=1
       - name: Existing Python settings import regression
         run: cargo +1.98.1 test --locked --offline --test python_settings_import
       - name: Compile all GUI targets and examples
@@ -41,4 +41,4 @@ jobs:
       - name: Full Rust library regression on Python 3.12
         env:
           NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
-        run: cargo +1.98.1 test --locked --offline --lib
+        run: cargo +1.98.1 test --locked --offline --lib -- --test-threads=1
