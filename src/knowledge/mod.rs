@@ -247,8 +247,9 @@ impl Default for KnowledgeRetrieval {
 mod tests {
     use super::*;
     use crate::{
+        app::historical_recall::{ExplicitRecallError, recall_from_character},
         character::CharacterMemorySnapshot,
-        knowledge::forgotten_recall::{RecallSelector, recall_forgotten},
+        knowledge::forgotten_recall::{RecallError, RecallSelector, recall_forgotten},
         memory::{CharacterMemories, MemoryChange, MemoryState},
         timeline::{
             ContextAnchor,
@@ -589,6 +590,173 @@ mod tests {
             pending.finalize(&advanced),
             Err(HistoricalMemorySelectionError::StaleRecall)
         ));
+    }
+
+    #[tokio::test]
+    async fn explicit_character_action_reads_live_owner_without_exposing_unselected_facts() {
+        use crate::{
+            character::CharacterRegistry, memory::MemoryCommand, timeline::SessionTimeline,
+        };
+        use std::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(
+            Arc::new(Mutex::new(SessionTimeline::new())),
+            stop.clone(),
+            16,
+        );
+        let owner = registry.get(CharacterId::Crazy).unwrap();
+        let other = registry.get(CharacterId::Kind).unwrap();
+        let first = owner.memories().await.unwrap();
+        let added = owner
+            .edit_memories(
+                first,
+                vec![
+                    MemoryCommand::Add {
+                        priority: MemoryPriority::Normal,
+                        content: "secret forgotten orange tea".into(),
+                    },
+                    MemoryCommand::Add {
+                        priority: MemoryPriority::Normal,
+                        content: "other forgotten purple tea".into(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let ids = added
+            .snapshot
+            .records()
+            .iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        let selected_id = added
+            .snapshot
+            .records()
+            .iter()
+            .find(|record| record.content == "secret forgotten orange tea")
+            .unwrap()
+            .id;
+        let first_forgotten = owner
+            .edit_memories(
+                added.snapshot,
+                vec![
+                    MemoryCommand::Forget { id: ids[0] },
+                    MemoryCommand::Forget { id: ids[1] },
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(
+            first_forgotten
+                .snapshot
+                .records()
+                .iter()
+                .all(|r| r.state == MemoryState::Forgotten)
+        );
+        let query = KnowledgeRetrieval::lexical();
+        let selected = recall_from_character(
+            &query,
+            &owner,
+            RecallSelector::Ids(vec![selected_id]),
+            "tea",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(selected.contains("secret forgotten orange tea"));
+        assert!(!selected.contains("other forgotten purple tea"));
+        assert!(selected.contains("[FORGOTTEN]"));
+        assert!(matches!(
+            recall_from_character(
+                &query,
+                &other,
+                RecallSelector::Ids(vec![selected_id]),
+                "tea"
+            )
+            .await,
+            Err(ExplicitRecallError::Selector(RecallError::IneligibleId))
+        ));
+        assert!(
+            owner
+                .memories()
+                .await
+                .unwrap()
+                .records()
+                .iter()
+                .all(|r| r.state == MemoryState::Forgotten)
+        );
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_character_action_rechecks_live_timeline_after_async_embedding() {
+        use crate::{
+            character::CharacterRegistry, memory::MemoryCommand, timeline::SessionTimeline,
+        };
+        use std::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+
+        let stop = CancellationToken::new();
+        let (registry, tasks) = CharacterRegistry::spawn(
+            Arc::new(Mutex::new(SessionTimeline::new())),
+            stop.clone(),
+            16,
+        );
+        let owner = registry.get(CharacterId::Crazy).unwrap().clone();
+        let initial = owner.memories().await.unwrap();
+        let added = owner
+            .edit_memories(
+                initial,
+                vec![MemoryCommand::Add {
+                    priority: MemoryPriority::Normal,
+                    content: "forgotten live jasmine tea".into(),
+                }],
+            )
+            .await
+            .unwrap();
+        let id = added.snapshot.records()[0].id;
+        owner
+            .edit_memories(added.snapshot, vec![MemoryCommand::Forget { id }])
+            .await
+            .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let provider = Arc::new(PausedQueryFixture {
+            space: EmbeddingSpace::new("fixture", "real-owner-recall", "v1", 2).unwrap(),
+            started: started.clone(),
+            resume: resume.clone(),
+        });
+        let retriever = Arc::new(SemanticMemoryRetriever::new(provider, 10).unwrap());
+        let query = KnowledgeRetrieval::semantic(retriever);
+        let handle = owner.clone();
+        let task = tokio::spawn(async move {
+            recall_from_character(&query, &handle, RecallSelector::Ids(vec![id]), "tea").await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+            .await
+            .unwrap();
+        let snapshot = owner.memories().await.unwrap();
+        owner
+            .edit_memories(snapshot, vec![MemoryCommand::Restore { id }])
+            .await
+            .unwrap();
+        resume.notify_one();
+        let result = task.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(ExplicitRecallError::Retrieval(
+                HistoricalMemorySelectionError::StaleRecall
+            ))
+        ));
+        stop.cancel();
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

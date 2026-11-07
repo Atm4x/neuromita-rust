@@ -1,3 +1,5 @@
+pub mod historical_recall;
+
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
