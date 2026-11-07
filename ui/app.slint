@@ -165,7 +165,12 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
-                guide => { root.onboarding-guide-visible = true; root.onboarding-guide-navigate(0); }
+                guide => {
+                    root.onboarding-guide-zoom = 1.0;
+                    root.onboarding-guide-select-step(0);
+                    root.onboarding-guide-visible = true;
+                    root.onboarding-guide-navigate(0);
+                }
                 language-selected(code) => { root.language-selected(code); }
             }
             if root.page == PageId.releases: ReleasesPage {
@@ -240,6 +245,21 @@ export component AppWindow inherits Window {
                         background: root.onboarding-guide-level == 2 ? Theme.selected : Theme.hover;
                         Label { text: root.onboarding-language == "ru" ? "Все возможности" : "Everything"; horizontal-alignment: center; }
                         activated => { root.onboarding-guide-select-level(2); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language Russian";
+                        selected: root.onboarding-language == "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "RU"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("ru"); }
+                    }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language English";
+                        selected: root.onboarding-language != "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "EN"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("en"); }
                     }
                 }
                 if root.onboarding-guide-sections.length > 0: HorizontalLayout {

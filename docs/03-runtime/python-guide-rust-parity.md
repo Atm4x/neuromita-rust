@@ -56,6 +56,16 @@ existing Guide callback. Both models are derived by the GUI presenter from the
 same Rust catalog and reflect guide level and RU/EN language changes. There is
 no extra page list or persisted progress state in Slint.
 
+**Guide locale and reopen:** D17 adds RU/EN buttons inside the Guide while
+keeping the app's global language setting independent. During a visible Guide
+session, `render()` no longer overwrites the guide-local language with the
+global locale. Closing the Guide allows its language to resynchronize on
+subsequent app render; reopening from the launcher starts at page zero and
+clears zoom/focus. Changing the Guide language or level also resets the
+selected screenshot step and zoom, mirroring Python `show_page()` behavior.
+The EULA consent path still uses its existing language selection and remains
+unchanged.
+
 **Not implemented:** rich-text inline step links/hover, full PyQt image toolbar parity (fit-width/actual-pixel-size,
 scrollbars and free panning), direct page-specific *local* Wiki navigation,
 advanced keyboard/accessibility E2E and Windows GUI behavioral E2E. The Help button now links to the exact historical

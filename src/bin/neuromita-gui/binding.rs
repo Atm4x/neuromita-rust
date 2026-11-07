@@ -181,6 +181,9 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let language_window = window.as_weak();
     window.on_onboarding_language_selected(move |code| {
         if let Some(window) = language_window.upgrade() {
+            if window.get_onboarding_language() != code {
+                reset_guide_image_view(&window);
+            }
             window.set_onboarding_language(code.clone());
             window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
             update_guide(&window, window.get_onboarding_guide_page());
@@ -298,7 +301,15 @@ pub(super) fn sync_guide_level(
         next,
     );
     window.set_onboarding_guide_level(next.index());
+    reset_guide_image_view(window);
     update_guide(window, destination as i32);
+}
+
+fn reset_guide_image_view(window: &AppWindow) {
+    window.set_onboarding_guide_zoom(1.0);
+    window.set_onboarding_guide_focus_step(0);
+    window.set_onboarding_guide_focus_x(0.5);
+    window.set_onboarding_guide_focus_y(0.5);
 }
 
 fn set_guide_focus(window: &AppWindow, number: i32) {
@@ -335,10 +346,7 @@ fn update_guide(window: &AppWindow, requested_index: i32) {
     let page = guide::page(level, index as usize).expect("guide has a visible page");
     let language = window.get_onboarding_language();
     if window.get_onboarding_guide_page() != index {
-        window.set_onboarding_guide_zoom(1.0);
-        window.set_onboarding_guide_focus_step(0);
-        window.set_onboarding_guide_focus_x(0.5);
-        window.set_onboarding_guide_focus_y(0.5);
+        reset_guide_image_view(window);
     }
     window.set_onboarding_guide_count(count as i32);
     window.set_onboarding_guide_page(index);
@@ -389,7 +397,13 @@ fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
     let translations = window.global::<I18n>();
     translations.set_locale(presenter.locale().as_str().into());
     if !window.get_onboarding_required() {
-        window.set_onboarding_language(presenter.locale().as_str().into());
+        if !window.get_onboarding_guide_visible() {
+            let locale = presenter.locale().as_str();
+            if window.get_onboarding_language().to_string() != locale {
+                window.set_onboarding_language(locale.into());
+                reset_guide_image_view(window);
+            }
+        }
         update_guide(window, window.get_onboarding_guide_page());
     }
     translations.set_revision((catalog.revision() % i32::MAX as u64) as i32);
