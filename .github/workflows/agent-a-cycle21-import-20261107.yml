@@ -1,0 +1,44 @@
+name: Agent A cycle21 verified graph-maintenance bundle import
+on:
+  push:
+    branches:
+      - bridge/import-agent-a-cycle21-20261107
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Graph Maintenance commit and fast-forward
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BLOB: b880f1ec8d40e71bdf7e3f34c148fbacccce1f00
+          BUNDLE_SHA256: db0e08637e83ebe497ce6aebaa444670009771808aaa6e0530c059bb1bdaf759
+          START_SHA: 1878719b7715bfcf156e70d52f015fed4bd195f1
+          HEAD_SHA: 1bb3af00982fd08828d71b60d3e4a6395a498d55
+          FEATURE_REF: codex/knowledge-graph-live-maintenance-20261107
+          BASE_REF: codex/knowledge-history-active-archive-window-20261107
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/blobs/$SOURCE_BLOB" \
+            | jq -r '.content' | base64 --decode > agent-a-cycle21-return.bundle
+          printf '%s  %s\n' "$BUNDLE_SHA256" agent-a-cycle21-return.bundle | sha256sum -c -
+          test "$(stat -c%s agent-a-cycle21-return.bundle)" = 7926
+          git fetch origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          test "$(git rev-parse "refs/remotes/origin/$BASE_REF")" = "$START_SHA"
+          git bundle verify agent-a-cycle21-return.bundle
+          git fetch ./agent-a-cycle21-return.bundle "refs/heads/$FEATURE_REF:refs/heads/$FEATURE_REF"
+          test "$(git rev-parse "refs/heads/$FEATURE_REF")" = "$HEAD_SHA"
+          git merge-base --is-ancestor "$START_SHA" "$HEAD_SHA"
+          git fsck --full
+          git push origin "refs/heads/$FEATURE_REF:refs/heads/$FEATURE_REF"
+          git fetch origin "+refs/heads/$FEATURE_REF:refs/remotes/origin/$FEATURE_REF"
+          test "$(git rev-parse "refs/remotes/origin/$FEATURE_REF")" = "$HEAD_SHA"
+          echo "PUBLISHED ORIGINAL HEAD $HEAD_SHA"
