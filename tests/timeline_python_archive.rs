@@ -1230,3 +1230,87 @@ fn python_redundant_disclosure_is_still_rejected_by_native_conversion() {
         ))
     ));
 }
+
+fn binary_archive_with_redundant_disclosure() -> Vec<u8> {
+    let mut archive: Value = serde_json::from_slice(include_bytes!(
+        "fixtures/python_session_archive_asset_20261107.json"
+    ))
+    .unwrap();
+    archive["branches"][1]["head_sequence"] = json!(3);
+    append_disclosure_audit_event(
+        &mut archive,
+        "main",
+        3,
+        "disclose:existing",
+        "EventObserved",
+        &["A"],
+        json!([["observes", "59bcbaeb163b57fb939cc4589b16d8c4"]]),
+    );
+    serde_json::to_vec(&archive).unwrap()
+}
+
+#[test]
+fn python_disclosure_import_refuses_before_staging_binary_or_publishing_memory() {
+    use neuromita::timeline::domain::TimelineStore;
+    use neuromita::timeline::storage::archive::export_memory;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let archive = binary_archive_with_redundant_disclosure();
+    let inspected = inspect_python_archive(&archive).unwrap();
+    assert_eq!(inspected.disclosure_sites().len(), 1);
+    assert!(inspected.disclosure_sites()[0].witnesses[0].target_known_before);
+    let mut destination = TimelineStore::new();
+    let bound = inspected
+        .bind_memory(&destination, &explicit_observers())
+        .unwrap();
+    let session = bound.native_session();
+    let root = std::env::temp_dir().join(format!("nm-python-disclosure-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&root, 16 * 1024 * 1024).unwrap();
+
+    assert!(bound.import_memory(&mut destination, &assets).is_err());
+    assert!(export_memory(&destination, session, &assets).is_err());
+    assert!(!root.join("objects").exists());
+    assert!(!root.join("staging").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn python_disclosure_import_refuses_before_sqlite_mutation_or_binary_staging() {
+    use neuromita::timeline::storage::SqliteTimelineRepository;
+    use neuromita::timeline::storage::archive::export_sqlite;
+    use neuromita::timeline::storage::assets::TimelineAssetStore;
+
+    let archive = binary_archive_with_redundant_disclosure();
+    let inspected = inspect_python_archive(&archive).unwrap();
+    let root = std::env::temp_dir().join(format!("nm-python-disclosure-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("timeline.sqlite");
+    let assets = TimelineAssetStore::new(root.join("assets"), 16 * 1024 * 1024).unwrap();
+    let mut destination = SqliteTimelineRepository::open(&path).unwrap();
+    let bound = inspected
+        .bind_sqlite(&destination, &explicit_observers())
+        .unwrap();
+    let session = bound.native_session();
+
+    assert!(bound.import_sqlite(&mut destination, &assets).is_err());
+    for table in [
+        "timeline_branches",
+        "timeline_events",
+        "timeline_receipts",
+        "timeline_session_provenance",
+    ] {
+        let rows: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "partial publication in {table}");
+    }
+    assert!(export_sqlite(&destination, session, &assets).is_err());
+    assert!(!root.join("assets").join("objects").exists());
+    assert!(!root.join("assets").join("staging").exists());
+    drop(destination);
+    std::fs::remove_dir_all(root).unwrap();
+}
