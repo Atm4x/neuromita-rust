@@ -881,6 +881,39 @@ impl AiSupervisor {
         .await
     }
 
+    /// Recover only a failed hardware-profiled generation. The selected profile
+    /// must match the failed worker and be revalidated on the new OS child.
+    pub async fn recover_failed_hardware_guarded(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        profile: &RuntimeProfile,
+        verify: &(dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
+        check_current: &(dyn Fn() -> Result<(), AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.refresh_status().await;
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: Some(profile),
+            verify: Some(verify),
+            expected_failed_generation: Some(expected_generation),
+            check_current: Some(check_current),
+        })
+        .await
+    }
+
     /// Prepare a candidate worker for an explicit device profile. The candidate
     /// must prove device execution and loaded-model readiness, and `verify` runs
     /// immediately before publication so a superseded selection cannot replace
@@ -1027,6 +1060,11 @@ impl AiSupervisor {
                 return Err(AiRuntimeError::ActivationGuard(
                     "device-profiled recovery requires hardware revalidation".into(),
                 ));
+            }
+            if let Some(requested) = profile {
+                if process.runtime_profiles.get(&service) != Some(requested) {
+                    return Err(AiRuntimeError::ActivationSuperseded);
+                }
             }
         }
         let mut runtime_profiles = HashMap::new();

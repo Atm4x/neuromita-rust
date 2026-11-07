@@ -106,23 +106,84 @@ pub enum SpeechReconfigurationError {
 const RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_RECOVERY_ATTEMPTS_PER_GENERATION: u8 = 2;
 
-#[derive(Default)]
+/// Controls automatic speech retry admission without changing Python ownership.
+/// A zero backoff still limits retries to one per poll interval.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryPolicy {
+    poll_interval: Duration,
+    retry_backoff: Duration,
+    max_attempts: u8,
+}
+
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            poll_interval: RECOVERY_POLL_INTERVAL,
+            retry_backoff: Duration::ZERO,
+            max_attempts: MAX_RECOVERY_ATTEMPTS_PER_GENERATION,
+        }
+    }
+}
+
+impl RecoveryPolicy {
+    pub fn new(
+        poll_interval: Duration,
+        retry_backoff: Duration,
+        max_attempts: u8,
+    ) -> Result<Self, &'static str> {
+        if poll_interval.is_zero() || max_attempts == 0 || retry_backoff > Duration::from_secs(300)
+        {
+            return Err(
+                "recovery poll must be nonzero, max attempts positive and backoff at most 300 seconds",
+            );
+        }
+        Ok(Self {
+            poll_interval,
+            retry_backoff,
+            max_attempts,
+        })
+    }
+}
+
 struct RecoveryBudget {
     observed: HashMap<Uuid, u8>,
+    last_attempt: HashMap<Uuid, tokio::time::Instant>,
+    policy: RecoveryPolicy,
+}
+
+impl Default for RecoveryBudget {
+    fn default() -> Self {
+        Self::with_policy(RecoveryPolicy::default())
+    }
 }
 
 impl RecoveryBudget {
+    fn with_policy(policy: RecoveryPolicy) -> Self {
+        Self {
+            observed: HashMap::new(),
+            last_attempt: HashMap::new(),
+            policy,
+        }
+    }
+
     fn claim(&mut self, generation: Uuid) -> Option<RecoveryAttempts> {
+        let now = tokio::time::Instant::now();
         let attempted = self.observed.entry(generation).or_default();
-        if *attempted >= MAX_RECOVERY_ATTEMPTS_PER_GENERATION {
+        if *attempted >= self.policy.max_attempts
+            || self
+                .last_attempt
+                .get(&generation)
+                .is_some_and(|last| now.duration_since(*last) < self.policy.retry_backoff)
+        {
             return None;
         }
         *attempted += 1;
+        self.last_attempt.insert(generation, now);
         Some(RecoveryAttempts {
             generation,
             attempted: *attempted,
-            maximum: MAX_RECOVERY_ATTEMPTS_PER_GENERATION,
-            exhausted: *attempted == MAX_RECOVERY_ATTEMPTS_PER_GENERATION,
+            maximum: self.policy.max_attempts,
+            exhausted: *attempted == self.policy.max_attempts,
         })
     }
 
@@ -135,10 +196,13 @@ impl RecoveryBudget {
             .collect();
         self.observed
             .retain(|generation, _| failed.contains(generation));
+        self.last_attempt
+            .retain(|generation, _| failed.contains(generation));
     }
 
     fn reset(&mut self) {
         self.observed.clear();
+        self.last_attempt.clear();
     }
 }
 
@@ -149,6 +213,7 @@ pub struct LiveSpeechRuntime {
     applied_selection: Mutex<SelectionKey>,
     status: watch::Sender<RuntimeSnapshot>,
     shutting_down: AtomicBool,
+    recovery_policy: RecoveryPolicy,
 }
 
 impl LiveSpeechRuntime {
@@ -177,7 +242,20 @@ impl LiveSpeechRuntime {
             applied_selection: Mutex::new(applied_selection),
             status: watch::channel(snapshot).0,
             shutting_down: AtomicBool::new(false),
+            recovery_policy: RecoveryPolicy::default(),
         }
+    }
+
+    pub fn new_with_recovery_policy(
+        installed: InstalledSpeechEnvironment,
+        initial: Option<RunningAiApplication>,
+        settings: &SpeechSettings,
+        startup_error: Option<&str>,
+        policy: RecoveryPolicy,
+    ) -> Self {
+        let mut runtime = Self::new(installed, initial, settings, startup_error);
+        runtime.recovery_policy = policy;
+        runtime
     }
 
     pub fn observe(&self) -> watch::Receiver<RuntimeSnapshot> {
@@ -500,8 +578,8 @@ pub(crate) async fn watch_speech_settings(
     stop: CancellationToken,
 ) {
     let mut previous = SelectionKey::from_settings(&initial);
-    let mut budget = RecoveryBudget::default();
-    let mut poll = tokio::time::interval(RECOVERY_POLL_INTERVAL);
+    let mut budget = RecoveryBudget::with_policy(runtime.recovery_policy);
+    let mut poll = tokio::time::interval(runtime.recovery_policy.poll_interval);
     poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         let speech = updates.borrow_and_update().values.speech.clone();
@@ -574,6 +652,33 @@ mod tests {
         assert!(budget.claim(replacement).is_none());
         budget.reset();
         assert_eq!(budget.claim(replacement).unwrap().attempted, 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_policy_caps_attempts_and_enforces_real_backoff_per_generation() {
+        assert!(RecoveryPolicy::new(Duration::ZERO, Duration::ZERO, 2).is_err());
+        assert!(RecoveryPolicy::new(Duration::from_secs(1), Duration::ZERO, 0).is_err());
+        assert!(RecoveryPolicy::new(Duration::from_secs(1), Duration::from_secs(301), 2).is_err());
+        let policy =
+            RecoveryPolicy::new(Duration::from_millis(5), Duration::from_millis(30), 2).unwrap();
+        let mut budget = RecoveryBudget::with_policy(policy);
+        let generation = Uuid::new_v4();
+        let first = budget.claim(generation).unwrap();
+        assert_eq!(
+            (first.attempted, first.maximum, first.exhausted),
+            (1, 2, false)
+        );
+        assert!(budget.claim(generation).is_none());
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        let second = budget.claim(generation).unwrap();
+        assert_eq!(
+            (second.attempted, second.maximum, second.exhausted),
+            (2, 2, true)
+        );
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(budget.claim(generation).is_none());
+        budget.reset();
+        assert_eq!(budget.claim(generation).unwrap().attempted, 1);
     }
 
     #[test]

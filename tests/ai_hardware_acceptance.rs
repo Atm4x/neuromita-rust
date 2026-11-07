@@ -673,3 +673,167 @@ async fn split_startup_rejects_selection_changed_after_selected_worker_before_fi
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn hardware_worker_crash_recovery_requires_same_persisted_profile_and_reproves_execution() {
+    use neuromita::ai_runtime::{AiRuntimeError, runtime_status::RuntimePhase};
+
+    let fixture = Fixture::new().await;
+    let selection = fixture.config();
+    let store = HardwareConfigStore::new(fixture.root.join("hardware-selection.json"));
+    store.save(&selection).unwrap();
+    let plan = fixture.app_config();
+    let running = fixture
+        .app_config()
+        .activate_with_hardware(&selection, &store)
+        .await
+        .unwrap();
+    let hardware = HardwareRuntime::new(&running, fixture.root.clone(), store.path().to_path_buf());
+    let original = running
+        .status_snapshot()
+        .service(AiService::Tts)
+        .generation
+        .unwrap();
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).phase,
+        RuntimePhase::ModelReady
+    );
+    fixture.write(json!({"infer": {"exit": true}}));
+    assert!(
+        hardware
+            .supervisor()
+            .call(AiService::Tts, "infer", json!({}))
+            .await
+            .is_err()
+    );
+    let failed = running.refresh_status().await.service(AiService::Tts);
+    assert_eq!(failed.generation, Some(original));
+    assert_eq!(failed.phase, RuntimePhase::Failed);
+    assert!(failed.active_model.is_none());
+
+    assert!(matches!(
+        running
+            .recover_failed_worker(AiService::Tts, original, &plan, &|| Ok(()))
+            .await,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::ActivationGuard(_)
+            )
+        )
+    ));
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).generation,
+        Some(original)
+    );
+
+    let mut mismatched_profile = selection.selection.profile();
+    mismatched_profile.backend = BackendKind::OnnxCpu;
+    assert!(matches!(
+        hardware
+            .supervisor()
+            .recover_failed_hardware_guarded(
+                AiService::Tts,
+                original,
+                &plan.workers[0].composition,
+                &plan.workers[0].models,
+                &mismatched_profile,
+                &|| unreachable!("mismatched profile must be rejected before candidate launch"),
+                &|| Ok(()),
+            )
+            .await,
+        Err(AiRuntimeError::ActivationSuperseded)
+    ));
+
+    let mut changed = selection.clone();
+    changed.revision += 1;
+    store.save(&changed).unwrap();
+    assert!(matches!(
+        running
+            .recover_failed_hardware_worker(
+                AiService::Tts,
+                original,
+                &plan,
+                &selection,
+                &store,
+                &|| Ok(())
+            )
+            .await,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::ActivationSuperseded
+            )
+        )
+    ));
+    store.save(&selection).unwrap();
+
+    fixture.write(json!({"hardware": {
+        "schema_version": 1, "platform": "fixture", "python": "3.12",
+        "backends": [{"kind": "torch", "available": true}],
+        "devices": []
+    }}));
+    assert!(matches!(
+        running
+            .recover_failed_hardware_worker(
+                AiService::Tts,
+                original,
+                &plan,
+                &selection,
+                &store,
+                &|| Ok(())
+            )
+            .await,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::DeviceUnavailable { .. }
+            )
+        )
+    ));
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).phase,
+        RuntimePhase::Failed
+    );
+    assert_eq!(
+        running.status_snapshot().service(AiService::Tts).generation,
+        Some(original)
+    );
+
+    fixture.write(json!({}));
+    let report = hardware
+        .recover_failed(original, &selection, &plan)
+        .await
+        .unwrap();
+    assert_eq!(report.backend, BackendKind::TorchCpu);
+    assert_eq!(report.device, "cpu");
+    assert_eq!(report.plugin_id, "fixture_tts");
+    let replacement = report.generation;
+    assert_ne!(replacement, original);
+    let restored = running.status_snapshot().service(AiService::Tts);
+    assert_eq!(restored.generation, Some(replacement));
+    assert_eq!(restored.phase, RuntimePhase::ModelReady);
+    assert_eq!(restored.active_model.unwrap().plugin_id, "fixture_tts");
+    assert!(
+        hardware
+            .supervisor()
+            .call(AiService::Tts, "infer", json!({}))
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        running
+            .recover_failed_hardware_worker(
+                AiService::Tts,
+                original,
+                &plan,
+                &selection,
+                &store,
+                &|| Ok(())
+            )
+            .await,
+        Err(
+            neuromita::ai_runtime::application::AiApplicationError::Runtime(
+                AiRuntimeError::ActivationSuperseded
+            )
+        )
+    ));
+    running.shutdown().await.unwrap();
+}

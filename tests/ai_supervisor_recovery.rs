@@ -479,3 +479,150 @@ async fn cancel_inflight_python_initialize_keeps_failed_generation_retryable() {
     supervisor.stop(AiService::Tts).await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
+
+#[tokio::test]
+async fn split_tts_model_switch_is_atomic_and_does_not_restart_healthy_asr() {
+    let root = std::env::temp_dir().join(format!("nm-split-switch-{}", Uuid::new_v4()));
+    let (supervisor, tts_composition, tts_models) =
+        fixture(&root, ProcessTopology::Split, &[AiService::Tts]).await;
+    let (_, asr_composition, asr_models) =
+        fixture(&root, ProcessTopology::Split, &[AiService::Asr]).await;
+    let original_tts = supervisor
+        .activate_composed(AiService::Tts, &tts_composition, &tts_models)
+        .await
+        .unwrap();
+    let original_asr = supervisor
+        .activate_composed(AiService::Asr, &asr_composition, &asr_models)
+        .await
+        .unwrap();
+
+    let alternate_id = "mock_tts_alt";
+    let plugin = root.join("plugins").join(alternate_id);
+    tokio::fs::create_dir_all(&plugin).await.unwrap();
+    let sdk = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(sdk.join("plugins/builtin/mock_tts/plugin.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    manifest["id"] = json!(alternate_id);
+    tokio::fs::write(
+        plugin.join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::copy(
+        sdk.join("plugins/builtin/mock_tts/plugin.py"),
+        plugin.join("plugin.py"),
+    )
+    .await
+    .unwrap();
+    let overlays = OverlayInstaller {
+        uv_executable: root.join("uv"),
+        python_executable: test_python(),
+        overlays_directory: root.join("overlays"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(5),
+    };
+    let version = tts_composition.python_version().to_owned();
+    let alternate_layer = LockedOverlay {
+        plugin_id: alternate_id.into(),
+        revision: "fixture".into(),
+        python_version: version,
+        packages: vec![],
+        actions: vec![],
+    };
+    let alternate_path = overlays.installed_path(&alternate_layer).unwrap();
+    tokio::fs::create_dir_all(&alternate_path).await.unwrap();
+    tokio::fs::write(
+        alternate_path.join(".neuromita-overlay.json"),
+        serde_json::to_vec(&alternate_layer).unwrap(),
+    )
+    .await
+    .unwrap();
+    let backends = BackendInstaller {
+        uv_executable: root.join("uv"),
+        python_executable: test_python(),
+        backends_directory: root.join("backends"),
+        cache_directory: root.join("cache"),
+        timeout: Duration::from_secs(5),
+    };
+    let selected = RuntimeComposition::resolve(
+        ProcessTopology::Split,
+        AiService::Tts,
+        &[ServiceSelection {
+            service: AiService::Tts,
+            backends: vec![],
+            overlays: vec![alternate_layer],
+        }],
+        &backends,
+        &overlays,
+    )
+    .await
+    .unwrap();
+    let mut model = ModelActivation {
+        service: AiService::Tts,
+        plugin_id: alternate_id.into(),
+        settings: json!({"speaker":"unknown"}),
+        asset_revision: None,
+    };
+    assert!(
+        supervisor
+            .activate_composed(AiService::Tts, &selected, &[model.clone()])
+            .await
+            .is_err()
+    );
+    let before = supervisor.status_snapshot();
+    assert_eq!(
+        before.service(AiService::Tts).generation,
+        Some(original_tts)
+    );
+    assert_eq!(
+        before.service(AiService::Tts).phase,
+        RuntimePhase::ModelReady
+    );
+    assert_eq!(
+        before.service(AiService::Asr).generation,
+        Some(original_asr)
+    );
+    assert_eq!(
+        before.service(AiService::Asr).phase,
+        RuntimePhase::ModelReady
+    );
+
+    model.settings = json!({"speaker":"bright"});
+    let switched = supervisor
+        .activate_composed(AiService::Tts, &selected, &[model])
+        .await
+        .unwrap();
+    assert_ne!(switched, original_tts);
+    assert_eq!(
+        supervisor.selected_model(AiService::Tts).await.unwrap().0,
+        alternate_id
+    );
+    let after = supervisor.status_snapshot();
+    assert_eq!(after.service(AiService::Tts).generation, Some(switched));
+    assert_eq!(
+        after.service(AiService::Tts).phase,
+        RuntimePhase::ModelReady
+    );
+    assert_eq!(after.service(AiService::Asr).generation, Some(original_asr));
+    assert_eq!(
+        after.service(AiService::Asr).phase,
+        RuntimePhase::ModelReady
+    );
+    let transcript = supervisor
+        .call(
+            AiService::Asr,
+            "infer",
+            json!({"kind":"asr", "input": {"mock_transcript":"asr-unchanged"}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(transcript["text"], "asr-unchanged");
+    supervisor.stop(AiService::Tts).await.unwrap();
+    supervisor.stop(AiService::Asr).await.unwrap();
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}

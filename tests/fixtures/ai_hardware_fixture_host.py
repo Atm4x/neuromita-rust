@@ -98,6 +98,8 @@ class FixtureHost:
             }
         if op == "infer":
             config = fixture.get("infer", {})
+            if config.get("exit"):
+                os._exit(73)
             delay = float(config.get("delay_ms", 0)) / 1000.0
             if delay > 0:
                 time.sleep(delay)
