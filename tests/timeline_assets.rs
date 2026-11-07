@@ -626,3 +626,18 @@ fn verification_streams_multi_chunk_content_and_still_rejects_same_length_corrup
     ));
     assert_eq!(timeline.branch(branch).unwrap().head_sequence, 1);
 }
+
+#[test]
+fn root_injection_rejects_relative_or_empty_paths_without_writing_to_cwd() {
+    let relative = PathBuf::from(format!("timeline-relative-assets-{}", Uuid::new_v4()));
+    assert!(!relative.exists());
+    assert!(matches!(
+        TimelineAssetStore::new(&relative, 1024),
+        Err(TimelineAssetError::InvalidRoot)
+    ));
+    assert!(!relative.exists());
+    assert!(matches!(
+        TimelineAssetStore::new(Path::new(""), 1024),
+        Err(TimelineAssetError::InvalidRoot)
+    ));
+}

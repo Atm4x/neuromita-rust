@@ -1,6 +1,6 @@
 # Timeline binary attachments: current contract
 
-`timeline::storage::assets::TimelineAssetStore` stores binary objects by SHA-256 of `media_type + NUL + bytes`. The digest binds a declared MIME type to the bytes; it does not sniff or decode the file. This is deliberately different from the AI model artifact store. The application supplies an explicit directory and maximum per-object size; the store does not use `cwd`, AppData or XDG. Until the shared portable-root composition is available, no parallel path resolver is introduced here.
+`timeline::storage::assets::TimelineAssetStore` stores binary objects by SHA-256 of `media_type + NUL + bytes`. The digest binds a declared MIME type to the bytes; it does not sniff or decode the file. This is deliberately different from the AI model artifact store. The application supplies an explicit **absolute** directory and maximum per-object size; the store rejects relative or empty directory paths rather than implicitly using `cwd`, AppData or XDG. Until the shared portable-root composition is available, no parallel path resolver is introduced here.
 
 A canonical message stores ordered JSON content parts containing `{"type":"image"|"audio"|"file", "asset": {"digest":"...", "size": n, "media_type":"..."}}`. Raw bytes never go into Timeline events or receipts. `append_checked` validates every binary reference and its integrity before asking `TimelineRepository` to append. Timeline remains the sole authority for identity, observers, branch history and receipts.
 

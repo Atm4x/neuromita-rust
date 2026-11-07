@@ -32,6 +32,8 @@ pub use super::super::domain::TimelineAssetRef;
 pub enum TimelineAssetError {
     #[error("invalid Timeline asset reference or media type")]
     InvalidReference,
+    #[error("Timeline asset root must be an absolute path")]
+    InvalidRoot,
     #[error("Timeline asset exceeds the configured byte limit")]
     TooLarge,
     #[error("Timeline asset is missing")]
@@ -163,6 +165,9 @@ impl TimelineAssetStore {
             return Err(TimelineAssetError::TooLarge);
         }
         let directory = directory.as_ref().to_owned();
+        if !directory.is_absolute() {
+            return Err(TimelineAssetError::InvalidRoot);
+        }
         fs::create_dir_all(&directory)?;
         real_directory(&directory)?;
         Ok(Self {
