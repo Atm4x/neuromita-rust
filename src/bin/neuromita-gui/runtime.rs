@@ -326,8 +326,17 @@ async fn open_telegram_session(
     let script = std::env::var_os("NEUROMITA_TELEGRAM_SIDECAR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
+            let beside_executable = std::env::current_exe().ok().and_then(|exe| {
+                exe.parent()
+                    .map(|parent| parent.join("tools/telegram_sidecar.py"))
+            });
+            beside_executable.filter(|candidate| candidate.is_file()).unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/telegram_sidecar.py")
+            })
         });
+    if !script.is_file() {
+        return Err(format!("Telegram sidecar не найден: {}", script.display()));
+    }
     let session = TelethonSession::spawn(std::path::Path::new(&python), &script)
         .map_err(|e| e.to_string())?;
     let authorized = session
