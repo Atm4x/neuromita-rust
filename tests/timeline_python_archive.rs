@@ -1061,3 +1061,172 @@ fn python_sqlite_import_reexports_losslessly_through_native_memory_and_sqlite() 
     assert_eq!(export_sqlite(&reopened, session, &assets).unwrap(), archive);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+fn append_disclosure_audit_event(
+    archive: &mut Value,
+    branch: &str,
+    sequence: u64,
+    id: &str,
+    kind: &str,
+    observers: &[&str],
+    links: Value,
+) {
+    let event = json!({
+        "event_id":id,
+        "session_id":"session:русский",
+        "branch_id":branch,
+        "sequence":sequence,
+        "kind":kind,
+        "payload":{},
+        "actor_id":null,
+        "observers":observers,
+        "links":links,
+        "occurred_at":"2026-11-07T06:28:45.123456+00:00",
+        "schema_version":1
+    });
+    let mut intent_event = event.clone();
+    for field in ["session_id", "branch_id", "sequence", "occurred_at"] {
+        intent_event.as_object_mut().unwrap().remove(field);
+    }
+    intent_event["observers"]
+        .as_array_mut()
+        .unwrap()
+        .sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    archive["events"].as_array_mut().unwrap().push(event);
+    archive["operations"].as_array_mut().unwrap().push(json!({
+        "branch_id":branch,
+        "key":id,
+        "event_ids":[id],
+        "intent":{"command":{},"events":[intent_event]}
+    }));
+}
+
+#[test]
+fn python_disclosure_audit_distinguishes_prior_knowledge_and_context_reset() {
+    let original = "59bcbaeb163b57fb939cc4589b16d8c4";
+    let modified = alter(|archive| {
+        archive["branches"][1]["head_sequence"] = json!(6);
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            3,
+            "disclose:initial",
+            "EventObserved",
+            &["B", "A"],
+            json!([["observes", original]]),
+        );
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            4,
+            "disclose:repeated",
+            "EventObserved",
+            &["B"],
+            json!([["observes", original]]),
+        );
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            5,
+            "reset:B",
+            "CharacterContextReset",
+            &["B"],
+            json!([]),
+        );
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            6,
+            "disclose:after-reset",
+            "EventObserved",
+            &["B"],
+            json!([["observes", original]]),
+        );
+    });
+    let inspected = inspect_python_archive(&modified).unwrap();
+    let sites = inspected.disclosure_sites();
+    assert_eq!(sites.len(), 3);
+    assert_eq!(sites[0].branch_id, "main");
+    assert_eq!(sites[0].sequence, 3);
+    assert_eq!(sites[0].disclosure_event_id, "disclose:initial");
+    assert_eq!(sites[0].target_event_id, original);
+    assert_eq!(sites[0].witnesses.len(), 2);
+    assert_eq!(sites[0].witnesses[0].observer_id, "A");
+    assert!(sites[0].witnesses[0].target_known_before);
+    assert_eq!(sites[0].witnesses[1].observer_id, "B");
+    assert!(!sites[0].witnesses[1].target_known_before);
+    assert!(sites[1].witnesses[0].target_known_before);
+    assert!(!sites[2].witnesses[0].target_known_before);
+    assert!(
+        inspect_python_archive(PYTHON_ARCHIVE)
+            .unwrap()
+            .disclosure_sites()
+            .is_empty()
+    );
+}
+
+#[test]
+fn python_disclosure_audit_does_not_inherit_parent_events_after_fork() {
+    let original = "59bcbaeb163b57fb939cc4589b16d8c4";
+    let modified = alter(|archive| {
+        archive["branches"][1]["head_sequence"] = json!(3);
+        archive["branches"][0]["head_sequence"] = json!(4);
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            3,
+            "disclose:parent",
+            "EventObserved",
+            &["B"],
+            json!([["observes", original]]),
+        );
+        append_disclosure_audit_event(
+            archive,
+            "child",
+            4,
+            "disclose:child",
+            "EventObserved",
+            &["B"],
+            json!([["observes", original]]),
+        );
+    });
+    let inspected = inspect_python_archive(&modified).unwrap();
+    let sites = inspected.disclosure_sites();
+    assert_eq!(sites.len(), 2);
+    assert_eq!(sites[0].branch_id, "child");
+    assert_eq!(sites[1].branch_id, "main");
+    assert!(
+        sites
+            .iter()
+            .all(|site| !site.witnesses[0].target_known_before)
+    );
+}
+
+#[test]
+fn python_redundant_disclosure_is_still_rejected_by_native_conversion() {
+    use neuromita::timeline::domain::TimelineStore;
+    let original = "59bcbaeb163b57fb939cc4589b16d8c4";
+    let modified = alter(|archive| {
+        archive["branches"][1]["head_sequence"] = json!(3);
+        append_disclosure_audit_event(
+            archive,
+            "main",
+            3,
+            "disclose:redundant",
+            "EventObserved",
+            &["A"],
+            json!([["observes", original]]),
+        );
+    });
+    let inspected = inspect_python_archive(&modified).unwrap();
+    assert!(inspected.disclosure_sites()[0].witnesses[0].target_known_before);
+    let bound = inspected
+        .bind_memory(&TimelineStore::new(), &explicit_observers())
+        .unwrap();
+    assert!(matches!(
+        bound.prepare_canonical(),
+        Err(PythonArchiveError::Invalid(
+            "Python event semantics not representable in Rust"
+        ))
+    ));
+}

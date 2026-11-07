@@ -65,11 +65,31 @@ impl PythonIdentityPlan {
     }
 }
 
+/// Observation in the Python archive that may retroactively grant knowledge of
+/// a different event. This is diagnostic evidence, not a native permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonDisclosureWitness {
+    pub observer_id: String,
+    /// Whether the target was known at this exact Python branch position,
+    /// after the last context reset. Prior knowledge may itself be indirect.
+    pub target_known_before: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonDisclosureSite {
+    pub branch_id: String,
+    pub sequence: u64,
+    pub disclosure_event_id: String,
+    pub target_event_id: String,
+    pub witnesses: Vec<PythonDisclosureWitness>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InspectedPythonArchive {
     envelope: PythonEnvelope,
     pub identities: PythonIdentityPlan,
     pub event_times: BTreeMap<String, ExactPythonTimestamp>,
+    disclosure_sites: Vec<PythonDisclosureSite>,
 }
 
 impl InspectedPythonArchive {
@@ -85,6 +105,14 @@ impl InspectedPythonArchive {
 
     pub fn event_count(&self) -> usize {
         self.envelope.events.len()
+    }
+
+    /// Every source `EventObserved`, with exact branch-local knowledge before
+    /// disclosure. Both previously known and newly disclosed targets remain
+    /// incompatible with native Timeline: even a redundant disclosure is an
+    /// independent Python event with its own receipt and identity.
+    pub fn disclosure_sites(&self) -> &[PythonDisclosureSite] {
+        &self.disclosure_sites
     }
 }
 
@@ -293,6 +321,7 @@ pub fn inspect_python_archive(bytes: &[u8]) -> Result<InspectedPythonArchive, Py
         done.insert(branch.branch_id.as_str());
     }
     let mut worlds = HashMap::<&str, Vec<&PythonEvent>>::new();
+    let mut disclosure_sites = Vec::new();
     for branch in ordered {
         let inherited = if let Some(parent_id) = &branch.parent_branch_id {
             let parent_world = worlds
@@ -378,6 +407,34 @@ pub fn inspect_python_archive(bytes: &[u8]) -> Result<InspectedPythonArchive, Py
                 return Err(PythonArchiveError::Invalid("unexpected fork marker"));
             } else {
                 validate_python_event(event, &available, &knowledge)?;
+            }
+            if event.kind == "EventObserved" {
+                let target = event
+                    .links
+                    .iter()
+                    .find(|(relation, _)| relation == "observes")
+                    .map(|(_, target)| target)
+                    .ok_or(PythonArchiveError::Invalid(
+                        "invalid observation disclosure",
+                    ))?;
+                let mut witnesses = event
+                    .observers
+                    .iter()
+                    .map(|observer| PythonDisclosureWitness {
+                        observer_id: observer.clone(),
+                        target_known_before: knowledge
+                            .get(observer.as_str())
+                            .is_some_and(|seen: &HashSet<&str>| seen.contains(target.as_str())),
+                    })
+                    .collect::<Vec<_>>();
+                witnesses.sort_by(|left, right| left.observer_id.cmp(&right.observer_id));
+                disclosure_sites.push(PythonDisclosureSite {
+                    branch_id: branch.branch_id.clone(),
+                    sequence: event.sequence,
+                    disclosure_event_id: event.event_id.clone(),
+                    target_event_id: target.clone(),
+                    witnesses,
+                });
             }
             available.insert(event.event_id.as_str(), event);
             observe_python(event, &mut knowledge);
@@ -473,9 +530,17 @@ pub fn inspect_python_archive(bytes: &[u8]) -> Result<InspectedPythonArchive, Py
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    disclosure_sites.sort_by(|left, right| {
+        (&left.branch_id, left.sequence, &left.disclosure_event_id).cmp(&(
+            &right.branch_id,
+            right.sequence,
+            &right.disclosure_event_id,
+        ))
+    });
     Ok(InspectedPythonArchive {
         envelope,
         identities,
         event_times,
+        disclosure_sites,
     })
 }
