@@ -1,0 +1,45 @@
+name: Agent D24 inspect Python release ZIP layout
+on:
+  push:
+    branches:
+      - bridge/agent-d24-archive-layout-20261107
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Inspect actual upstream Python ZIP (read-only)
+        env:
+          GH_REPO: Atm4x/NeuroMita
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, zipfile, io, collections, hashlib
+          url='https://api.github.com/repos/Atm4x/NeuroMita/releases/latest'
+          headers={'User-Agent':'neuromita-d24-layout-probe','Accept':'application/vnd.github+json'}
+          data=json.load(urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=30))
+          tag=data['tag_name']
+          print('TAG',tag,flush=True)
+          for a in data['assets']:
+              print('ASSET',a['name'],'SIZE',a['size'],'DIGEST',a.get('digest'),flush=True)
+          target=next((a for a in data['assets'] if a['name']==f'PythonBuild-{tag}.zip'),None)
+          if target is None: raise SystemExit('Python release archive missing')
+          if target['size']>100*1024*1024: raise SystemExit('Archive beyond bounded inspection')
+          response=urllib.request.urlopen(urllib.request.Request(target['browser_download_url'],headers=headers),timeout=120)
+          archive=response.read(100*1024*1024+1)
+          if len(archive)!=target['size']: raise SystemExit('Size mismatch')
+          digest=hashlib.sha256(archive).hexdigest()
+          if target.get('digest')!=f'sha256:{digest}': raise SystemExit('Digest mismatch')
+          with zipfile.ZipFile(io.BytesIO(archive)) as z:
+              items=z.infolist()
+              print('VERIFIED_ZIP_ENTRIES',len(items))
+              print('COMPRESSION',dict(collections.Counter(i.compress_type for i in items)))
+              print('TOTAL_UNCOMPRESSED',sum(i.file_size for i in items))
+              print('ROOTS',sorted({i.filename.split('/')[0] for i in items})[:50])
+              print('FIRST_PATHS',[i.filename for i in items[:40]])
+              bad=[i.filename for i in items if i.filename.startswith('/') or '..' in i.filename.split('/') or '\\' in i.filename]
+              symlinks=[i.filename for i in items if (i.external_attr>>16)&0o170000==0o120000]
+              print('INVALID_PATHS',bad[:20],'COUNT',len(bad))
+              print('SYMLINKS',symlinks[:20],'COUNT',len(symlinks))
+          PY
