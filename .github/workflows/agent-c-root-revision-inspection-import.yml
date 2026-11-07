@@ -1,0 +1,50 @@
+name: Agent C C3.3 root and revision inspection exact import and Windows proof
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-root-revision-inspection-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-root-revision-inspection-20261107
+          fetch-depth: 0
+      - name: Verify exact Git bundle and publish C3.3 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=244290fc373267dacd63dc7e7a31b623bbcffaa6
+          HEAD=beff2daba0c2bd49d1e68486fe898975bbdcad21
+          TARGET=codex/ai-platform-hub-c3-root-revision-inspection-20261107
+          git cat-file -e "$BASE^{commit}"
+          base64 -d .github/agent-c-bundles/c3-root-revision-inspection.bundle.b64 >/tmp/agent-c-removal.bundle
+          echo '7fd33fd0086ae097de66db57ef10718c19322001fafd9d93b0c5ed9f89bb6521  /tmp/agent-c-removal.bundle' | sha256sum -c -
+          git bundle verify /tmp/agent-c-removal.bundle
+          git fetch --no-tags /tmp/agent-c-removal.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$TARGET")"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-root-revision-inspection-20261107
+      - name: Native Windows Rust 1.98.1 revision ownership tests
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::removal::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::revision_lease::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::instance_lease::tests -- --nocapture
