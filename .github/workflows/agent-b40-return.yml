@@ -1,0 +1,41 @@
+name: Publish Agent B40 verified Git bundle
+on:
+  push:
+    branches:
+      - bridge/agent-b40-return-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/timeline-python-asset-mime-20261107
+          fetch-depth: 0
+      - name: Verify and import B40 incremental Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=b0b745082a8b844b3043c868369ed735d00fca3b
+          EXPECTED=83edc228d3ee0179a9712c19ad603a40873fd4ef
+          SHA256=8a8dfd939bee02c1ecce663bb8994b7304b47077539f8c70a3aa73a9266f1160
+          TARGET=refs/heads/codex/timeline-python-direct-image-content-20261107
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git fetch origin refs/heads/bridge/agent-b40-return-20261107
+          git show FETCH_HEAD:.bridge/agent-b40-20261107.bundle.b64 | base64 --decode > /tmp/b40.bundle
+          echo "$SHA256  /tmp/b40.bundle" | sha256sum --check
+          git bundle verify /tmp/b40.bundle
+          git fetch /tmp/b40.bundle refs/heads/codex/timeline-python-direct-image-content-20261107
+          IMPORTED="$(git rev-parse FETCH_HEAD)"
+          test "$IMPORTED" = "$EXPECTED"
+          git merge-base --is-ancestor "$BASE" "$IMPORTED"
+          REMOTE="$(git ls-remote origin "$TARGET" | cut -f1)"
+          if [[ -n "$REMOTE" && "$REMOTE" != "$EXPECTED" ]]; then
+            echo "Remote branch unexpectedly changed: $REMOTE" >&2
+            exit 1
+          fi
+          git update-ref "$TARGET" "$IMPORTED"
+          if [[ "$REMOTE" != "$EXPECTED" ]]; then
+            git push origin "$TARGET:$TARGET"
+          fi
