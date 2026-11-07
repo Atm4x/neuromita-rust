@@ -1055,7 +1055,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn second_sqlite_insert_failure_rolls_back_memory_and_variables_together() {
         let db = TestDb::new();
