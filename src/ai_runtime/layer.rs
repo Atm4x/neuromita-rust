@@ -65,7 +65,6 @@ fn remove_stage_lock(path: &Path) {
     }
 }
 
-#[cfg(not(windows))]
 fn is_owned_stage_name(name: &str) -> bool {
     name.strip_prefix(".staging-")
         .and_then(|id| {
@@ -100,7 +99,57 @@ fn open_stage_owner(lock_path: &Path) -> Option<File> {
 }
 
 #[cfg(windows)]
-fn reclaim_abandoned_staging(_parent: &Path) -> Result<(), LayerError> {
+fn staging_job_witness(path: &Path) -> PathBuf {
+    let mut marker = path.as_os_str().to_os_string();
+    marker.push(".job");
+    PathBuf::from(marker)
+}
+
+#[cfg(windows)]
+fn reclaim_abandoned_staging(parent: &Path) -> Result<(), LayerError> {
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_owned_stage_name(name) || !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let stage = entry.path();
+        let witness = staging_job_witness(&stage);
+        let Ok(metadata) = std::fs::symlink_metadata(&witness) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 24 {
+            continue;
+        }
+        let Ok(session) = std::fs::read_to_string(&witness) else {
+            continue;
+        };
+        let Ok(session) = session.parse::<u32>() else {
+            continue;
+        };
+        let Some(stage_id) = name
+            .strip_prefix(".staging-")
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            continue;
+        };
+        let lock_path = staging_lock_path(&stage);
+        let Some(owner) = open_stage_owner(&lock_path) else {
+            continue;
+        };
+        match super::windows_uv_job::job_is_gone(stage_id, session) {
+            Ok(true) if remove_abandoned_staging(&stage) => {
+                remove_stage_lock(&witness);
+                remove_stage_lock(&lock_path);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(path = %stage.display(), error = %error, "Windows uv job ownership not provably released");
+            }
+        }
+        drop(owner);
+    }
     Ok(())
 }
 
@@ -142,6 +191,8 @@ struct StagingCleanup {
     published: bool,
     child_may_be_running: bool,
     #[cfg(windows)]
+    witness_path: PathBuf,
+    #[cfg(windows)]
     job: Option<WindowsUvJob>,
 }
 
@@ -162,6 +213,8 @@ impl StagingCleanup {
             return Err(LayerError::Io(error));
         }
         Ok(Self {
+            #[cfg(windows)]
+            witness_path: staging_job_witness(&path),
             path,
             lock_path,
             owner: Some(owner),
@@ -184,7 +237,22 @@ impl StagingCleanup {
 
     #[cfg(windows)]
     fn attach_child(&mut self, handle: std::os::windows::io::RawHandle) -> Result<(), LayerError> {
-        self.job = Some(WindowsUvJob::attach(handle)?);
+        let stage_id = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix(".staging-"))
+            .and_then(|name| Uuid::parse_str(name).ok())
+            .ok_or_else(|| LayerError::Invalid("invalid staging UUID".into()))?;
+        self.job = Some(WindowsUvJob::attach(handle, stage_id)?);
+        let session = super::windows_uv_job::current_session()?;
+        let mut witness = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&self.witness_path)?;
+        use std::io::Write;
+        witness.write_all(session.to_string().as_bytes())?;
+        witness.sync_all()?;
         Ok(())
     }
 
@@ -195,6 +263,8 @@ impl StagingCleanup {
     fn disarm(&mut self) {
         self.published = true;
         remove_stage_lock(&self.lock_path);
+        #[cfg(windows)]
+        remove_stage_lock(&self.witness_path);
     }
 }
 
@@ -211,6 +281,8 @@ impl Drop for StagingCleanup {
         let path = std::mem::take(&mut self.path);
         let lock_path = std::mem::take(&mut self.lock_path);
         let owner = self.owner.take();
+        #[cfg(windows)]
+        let witness = std::mem::take(&mut self.witness_path);
         #[cfg(windows)]
         let job = self.job.take();
         let cleanup = move || {
@@ -232,6 +304,8 @@ impl Drop for StagingCleanup {
             for _ in 0..40 {
                 if let Some(reclaimed_owner) = open_stage_owner(&lock_path) {
                     if remove_abandoned_staging(&path) {
+                        #[cfg(windows)]
+                        remove_stage_lock(&witness);
                         remove_stage_lock(&lock_path);
                     }
                     drop(reclaimed_owner);
@@ -473,11 +547,18 @@ impl LayerInstaller<'_> {
                     timeout(self.timeout, child.wait_with_output()).await
                 };
                 if matches!(&outcome, Ok(Ok(_))) {
-                    cleanup.child_finished();
                     #[cfg(windows)]
                     {
+                        if let Some(job) = cleanup.job.as_ref() {
+                            match job.terminate_and_wait(Duration::from_secs(4)) {
+                                Ok(true) => {}
+                                Ok(false) => return Err(LayerError::Timeout),
+                                Err(error) => return Err(LayerError::Io(error)),
+                            }
+                        }
                         cleanup.job.take();
                     }
+                    cleanup.child_finished();
                 }
                 let output = outcome.map_err(|_| LayerError::Timeout)??;
                 if !output.status.success() {
@@ -650,6 +731,51 @@ mod tests {
         drop(cleanup);
         assert!(pending.is_dir());
         assert!(staging_lock_path(&pending).is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reclaims_only_closed_named_jobs_with_verified_witness() {
+        use std::{os::windows::io::AsRawHandle, process::Command};
+
+        let root = std::env::temp_dir().join(format!("nm-win-orphan-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let stage_id = Uuid::new_v4();
+        let stage = root.join(format!(".staging-{stage_id}"));
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(staging_lock_path(&stage), []).unwrap();
+        reclaim_abandoned_staging(&root).unwrap();
+        assert!(stage.is_dir(), "unwitnessed staging must never be deleted");
+
+        let witness = staging_job_witness(&stage);
+        let session = super::super::windows_uv_job::current_session().unwrap();
+        std::fs::write(&witness, (session ^ 1).to_string()).unwrap();
+        reclaim_abandoned_staging(&root).unwrap();
+        assert!(
+            stage.is_dir(),
+            "a different session cannot attest Job ownership"
+        );
+        std::fs::write(&witness, session.to_string()).unwrap();
+
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+        let job = WindowsUvJob::attach(child.as_raw_handle(), stage_id).unwrap();
+        reclaim_abandoned_staging(&root).unwrap();
+        assert!(stage.is_dir(), "a live Job Object retains its stage");
+
+        assert!(job.terminate_and_wait(Duration::from_secs(10)).unwrap());
+        child.wait().unwrap();
+        drop(job);
+        reclaim_abandoned_staging(&root).unwrap();
+        assert!(
+            !stage.exists(),
+            "closed Job Object permits proven orphan recovery"
+        );
+        assert!(!staging_lock_path(&stage).exists());
+        assert!(!witness.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
