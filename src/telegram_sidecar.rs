@@ -60,19 +60,35 @@ impl TelethonSession {
     async fn call(&self, request: Value) -> Result<Value, TelegramError> {
         let encoded = serde_json::to_vec(&request).map_err(|_| TelegramError::Unavailable)?;
         let mut process = self.process.lock().await;
-        process.stdin.write_all(&encoded).await.map_err(|_| TelegramError::Disconnected)?;
-        process.stdin.write_all(b"\n").await.map_err(|_| TelegramError::Disconnected)?;
-        process.stdin.flush().await.map_err(|_| TelegramError::Disconnected)?;
+        process
+            .stdin
+            .write_all(&encoded)
+            .await
+            .map_err(|_| TelegramError::Disconnected)?;
+        process
+            .stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|_| TelegramError::Disconnected)?;
+        process
+            .stdin
+            .flush()
+            .await
+            .map_err(|_| TelegramError::Disconnected)?;
         let mut reply = String::new();
-        let len = process.stdout.read_line(&mut reply).await
+        let len = process
+            .stdout
+            .read_line(&mut reply)
+            .await
             .map_err(|_| TelegramError::Disconnected)?;
         if len == 0 || len > 48 * 1024 * 1024 {
             return Err(TelegramError::Disconnected);
         }
-        let response: Value =
-            serde_json::from_str(&reply).map_err(|_| TelegramError::Network)?;
+        let response: Value = serde_json::from_str(&reply).map_err(|_| TelegramError::Network)?;
         if response["ok"] != true {
-            return Err(error_code(response["error"].as_str().unwrap_or("telegram_failure")));
+            return Err(error_code(
+                response["error"].as_str().unwrap_or("telegram_failure"),
+            ));
         }
         Ok(response["result"].clone())
     }
@@ -90,10 +106,12 @@ impl TelethonSession {
             return Err(TelegramError::Unavailable);
         }
         let session = session_path.to_str().ok_or(TelegramError::Unavailable)?;
-        let result = self.call(json!({
-            "op": "connect", "api_id": api_id,
-            "api_hash": api_hash, "phone": phone, "session": session
-        })).await?;
+        let result = self
+            .call(json!({
+                "op": "connect", "api_id": api_id,
+                "api_hash": api_hash, "phone": phone, "session": session
+            }))
+            .await?;
         Ok(result["authorized"] == true)
     }
 
@@ -109,7 +127,9 @@ impl TelethonSession {
     }
 
     pub async fn sign_in_password(&self, password: &str) -> Result<(), TelegramError> {
-        let result = self.call(json!({"op":"password","password":password})).await?;
+        let result = self
+            .call(json!({"op":"password","password":password}))
+            .await?;
         if result["authorized"] != true {
             return Err(TelegramError::Unauthorized);
         }
@@ -143,41 +163,55 @@ impl TelegramTransport for TelethonSession {
 
     fn send<'a>(&'a self, peer: &'a str, text: &'a str) -> TelegramFuture<'a, i64> {
         Box::pin(async move {
-            let result = self.call(json!({"op":"send","peer":peer,"text":text})).await?;
+            let result = self
+                .call(json!({"op":"send","peer":peer,"text":text}))
+                .await?;
             result["id"].as_i64().ok_or(TelegramError::Network)
         })
     }
 
     fn recent<'a>(&'a self, peer: &'a str, after: i64) -> TelegramFuture<'a, Vec<Incoming>> {
         Box::pin(async move {
-            let result = self.call(json!({"op":"recent","peer":peer,"after":after})).await?;
-            let rows = result["messages"].as_array().ok_or(TelegramError::Network)?;
-            rows.iter().map(|row| {
-                let id = row["id"].as_i64().ok_or(TelegramError::Network)?;
-                let actual_peer = row["peer"].as_str().ok_or(TelegramError::Network)?;
-                let outgoing = row["outgoing"].as_bool().ok_or(TelegramError::Network)?;
-                let kind = match row["kind"].as_str() {
-                    Some("mp3") => Some(MediaKind::Mp3),
-                    Some("voice_ogg") => Some(MediaKind::VoiceOgg),
-                    Some(_) => Some(MediaKind::Other),
-                    None => None,
-                };
-                Ok(Incoming { id, peer: actual_peer.into(), outgoing, kind })
-            }).collect()
+            let result = self
+                .call(json!({"op":"recent","peer":peer,"after":after}))
+                .await?;
+            let rows = result["messages"]
+                .as_array()
+                .ok_or(TelegramError::Network)?;
+            rows.iter()
+                .map(|row| {
+                    let id = row["id"].as_i64().ok_or(TelegramError::Network)?;
+                    let actual_peer = row["peer"].as_str().ok_or(TelegramError::Network)?;
+                    let outgoing = row["outgoing"].as_bool().ok_or(TelegramError::Network)?;
+                    let kind = match row["kind"].as_str() {
+                        Some("mp3") => Some(MediaKind::Mp3),
+                        Some("voice_ogg") => Some(MediaKind::VoiceOgg),
+                        Some(_) => Some(MediaKind::Other),
+                        None => None,
+                    };
+                    Ok(Incoming {
+                        id,
+                        peer: actual_peer.into(),
+                        outgoing,
+                        kind,
+                    })
+                })
+                .collect()
         })
     }
 
-    fn download<'a>(&'a self, peer: &'a str, id: i64, limit: usize)
-        -> TelegramFuture<'a, Vec<u8>>
-    {
+    fn download<'a>(&'a self, peer: &'a str, id: i64, limit: usize) -> TelegramFuture<'a, Vec<u8>> {
         Box::pin(async move {
-            let result = self.call(json!({"op":"download","peer":peer,"id":id,"limit":limit})).await?;
+            let result = self
+                .call(json!({"op":"download","peer":peer,"id":id,"limit":limit}))
+                .await?;
             let encoded = result["data"].as_str().ok_or(TelegramError::InvalidMedia)?;
             // Bound the returned allocation before base64 decoding.
             if encoded.len() > limit.saturating_mul(4).saturating_div(3).saturating_add(16) {
                 return Err(TelegramError::MediaTooLarge);
             }
-            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
                 .map_err(|_| TelegramError::InvalidMedia)?;
             if bytes.len() > limit {
                 return Err(TelegramError::MediaTooLarge);
