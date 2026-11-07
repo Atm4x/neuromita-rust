@@ -184,3 +184,36 @@ fn source_reader_returns_immutable_bounded_file_snapshot() {
     fs::write(&path, b"changed").unwrap();
     assert_eq!(bytes, source);
 }
+
+#[test]
+fn batch_indexes_only_wav_and_reuses_existing_entries() {
+    let tmp = Temp::new();
+    let media = tmp.0.join("media");
+    fs::create_dir_all(media.join("sub")).unwrap();
+    fs::write(media.join("a.wav"), wav_pulses()).unwrap();
+    fs::write(media.join("sub").join("b.wav"), wav_pulses()).unwrap();
+    fs::write(media.join("ignored.mp3"), b"unsupported").unwrap();
+    let service = BeatRuntime::new(BeatCache::new(tmp.0.join("cache")));
+    let mut updates = Vec::new();
+    let first = service.index_wav_directory(&media, &job(false), &|| false, |s| updates.push(s)).unwrap();
+    assert_eq!(first.scanned, 2);
+    // Equal bytes intentionally share a content-addressed cache entry.
+    assert_eq!(first.generated, 1);
+    assert_eq!(first.cache_hits, 1);
+    assert_eq!(first.failed, 0);
+    assert_eq!(updates.len(), 2);
+    let second = service.index_wav_directory(&media, &job(false), &|| false, |_| {}).unwrap();
+    assert_eq!(second.cache_hits, 2);
+    assert_eq!(second.generated, 0);
+}
+
+#[test]
+fn batch_preflight_cancellation_never_publishes_cache_entries() {
+    use neuromita::music::batch::BatchError;
+    let tmp = Temp::new();
+    fs::write(tmp.0.join("track.wav"), wav_pulses()).unwrap();
+    let service = BeatRuntime::new(BeatCache::new(tmp.0.join("cache")));
+    let result = service.index_wav_directory(&tmp.0, &job(false), &|| true, |_| {});
+    assert!(matches!(result, Err(BatchError::Cancelled)));
+    assert!(!service.cache.root().exists());
+}
