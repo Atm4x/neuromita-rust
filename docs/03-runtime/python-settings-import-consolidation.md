@@ -8,10 +8,10 @@ This change ports the independent, verified behavior from #109 into the existing
 
 ```text
 neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --preview
-neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --allow-unmapped
+neuromita settings import --format python --source PYTHON/Settings/settings.json --destination RUST/UserData/settings.json --expect-source-sha256 <SOURCE_SHA_FROM_PREVIEW> --expect-target-sha256 <TARGET_SHA_FROM_PREVIEW_OR_absent> --accept-skipped-key KEY_NAME
 ```
 
-`--dry-run` remains an alias for `--preview` (read-only). `--allow-unmapped` explicitly accepts skipping unknown names. Without it, the import is rejected if *any* unmapped keys exist, regardless of whether the known keys would have changed. Unknown **values are never printed**. Invalid mapped values always fail, even with approval. A direct generic `SettingsRepository::import_from(Python)` is rejected; the reviewed merge API is required.
+`--dry-run` remains an alias for `--preview` (it does not write settings or backup files; a stable writer lock sidecar may be created). The preview prints the SHA-256 of the exact Python source and existing Rust target, or `absent` for a new target, plus imported and skipped key **names only**. To approve omissions, provide both fingerprints and exactly one `--accept-skipped-key NAME` for **each** skipped key in preview order (repeat the flag as needed). Old `--allow-unmapped` is rejected: a one-bit allowance cannot attest which values were omitted. Under the existing writer lock, the repository recomputes the hashes and complete key lists before backup/publish. Missing, duplicate or reordered keys, value-only edits, foreign target edits and newly appearing keys fail without changing the target. If there are no skipped keys, an ordinary import without approvals remains supported. Invalid mapped values fail even with approval. A direct generic `SettingsRepository::import_from(Python)` is rejected.
 
 ### Known mappings
 
@@ -30,7 +30,7 @@ neuromita settings import --format python --source PYTHON/Settings/settings.json
 
 Settings that do not have a confirmed destination are *not* inferred, including credentials, complete preset bodies, neural model binaries and Python-specific plugin state. This is a selective settings migration, not a full backup. The existing Rust profile must validate; it is not silently replaced by defaults. Initial settings are used only for an absent Rust target.
 
-When an import changes settings, the CLI stores an exact Python-source backup named `python-source-<basename>.pre-python-import-<uuid>.bak` beside the Rust target, then the repository stores a backup of the previous Rust settings (if one existed) before atomic replace. The legacy Python source is never modified. On Unix, source backups, destination backups and newly published settings use mode `0600`. Operators must protect these files: backups may contain API secrets. Repeated imports that produce the same Rust profile do not write new backups. Unchanged previews and rejected imports have no write side effects.
+When an import changes settings, the CLI stores an exact Python-source backup named `python-source-<basename>.pre-python-import-<uuid>.bak` beside the Rust target, then the repository stores a backup of the previous Rust settings (if one existed) before atomic replace. A failed receipt check removes any newly created Python-source backup; no target backup or replacement occurs. The legacy Python source is never modified. On Unix, source backups, destination backups and newly published settings use mode `0600`. Operators must protect these files: backups may contain API secrets. Repeated imports that produce the same Rust profile do not write new backups. Rejected imports do not alter the settings target; stable lock files may remain.
 
 ## Non-goals and follow-up
 

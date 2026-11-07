@@ -6,14 +6,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use neuromita::settings::{JsonSettingsRepository, PythonUnmappedPolicy, SettingsImportFormat};
+use neuromita::settings::{JsonSettingsRepository, PythonSettingsFileReview, SettingsImportFormat};
 
 pub const HELP: &str = "neuromita settings export --source STORE.json --destination BACKUP.json\n\
-    neuromita settings import --source BACKUP.json --destination STORE.json [--format rust|python] [--dry-run|--preview] [--allow-unmapped]\n\n\
+    neuromita settings import --source BACKUP.json --destination STORE.json [--format rust|python] [--dry-run|--preview]\n\
+    For Python settings with skipped keys: --expect-source-sha256 HEX --expect-target-sha256 HEX|absent --accept-skipped-key NAME (repeat for every skipped key)\n\n\
     Offline operations: no Core and no GEMINI_API_KEY. Stop the application first.\n\
     Rust imports require the current strict settings format; no dev migrations.\n\
     The default format is rust. Python import overlays supported keys, lists omissions,\n\
-    and requires --allow-unmapped to skip unsupported fields.\n\
+    and requires exact source/target fingerprints and skipped-key approvals to omit fields.\n\
     Backups of both source and destination are kept by the Rust target.\n\
     Preset bodies, credentials and Timeline are not included.\n";
 
@@ -35,7 +36,9 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let mut destination = None;
     let mut format = None;
     let mut dry_run = false;
-    let mut allow_unmapped = false;
+    let mut source_sha256 = None;
+    let mut target_sha256 = None;
+    let mut accepted_skipped_keys = Vec::new();
     while let Some(option) = arguments.next() {
         if option == "--help" {
             print!("{HELP}");
@@ -45,7 +48,23 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
             Some("--source") => path_argument(&mut source, arguments.next())?,
             Some("--destination") => path_argument(&mut destination, arguments.next())?,
             Some("--dry-run" | "--preview") if import && !dry_run => dry_run = true,
-            Some("--allow-unmapped") if import && !allow_unmapped => allow_unmapped = true,
+            Some("--expect-source-sha256") if import => {
+                string_argument(&mut source_sha256, arguments.next())?;
+            }
+            Some("--expect-target-sha256") if import => {
+                string_argument(&mut target_sha256, arguments.next())?;
+            }
+            Some("--accept-skipped-key") if import => {
+                let key = arguments
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| invalid("--accept-skipped-key requires a nonempty key"))?;
+                accepted_skipped_keys.push(key);
+            }
+            Some("--allow-unmapped") => {
+                return Err(invalid("--allow-unmapped is unsafe; use exact SHA-256 and --accept-skipped-key confirmations").into());
+            }
             Some("--format") if import => {
                 let value = match arguments.next().as_deref().and_then(|value| value.to_str()) {
                     Some("rust") => SettingsImportFormat::Rust,
@@ -62,10 +81,13 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     let source = source.ok_or_else(|| invalid("--source is required"))?;
     let destination = destination.ok_or_else(|| invalid("--destination is required"))?;
     let format = format.unwrap_or(SettingsImportFormat::Rust);
-    if (dry_run || allow_unmapped) && (!import || format != SettingsImportFormat::Python) {
-        return Err(
-            invalid("--preview, --dry-run and --allow-unmapped require Python import").into(),
-        );
+    let has_approval =
+        source_sha256.is_some() || target_sha256.is_some() || !accepted_skipped_keys.is_empty();
+    if (dry_run || has_approval) && (!import || format != SettingsImportFormat::Python) {
+        return Err(invalid("--preview and review approval require Python import").into());
+    }
+    if dry_run && has_approval {
+        return Err(invalid("preview does not accept approval flags").into());
     }
     if import && format == SettingsImportFormat::Python {
         if source.exists()
@@ -78,29 +100,59 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
         }
         let bytes = std::fs::read(&source)?;
         let repository = JsonSettingsRepository::new(destination.clone());
-        let preview = repository.preview_python(&bytes)?;
+        let (preview, review) = repository.review_python(&bytes)?;
         if dry_run {
             print_python_report(&preview, true, None);
+            print_python_review(&review);
         } else {
-            if !allow_unmapped && !preview.skipped_keys.is_empty() {
-                return Err(invalid(
-                    "unmapped Python settings require --allow-unmapped after preview",
-                )
-                .into());
+            let approval = match (source_sha256, target_sha256) {
+                (Some(source), Some(target)) => Some(PythonSettingsFileReview {
+                    source_sha256: source,
+                    target_settings_sha256: if target == "absent" {
+                        None
+                    } else {
+                        Some(target)
+                    },
+                    imported_keys: preview.imported_keys.clone(),
+                    skipped_keys: accepted_skipped_keys,
+                }),
+                (None, None) if !has_approval => None,
+                _ => {
+                    return Err(invalid(
+                        "approval requires both SHA-256 values and the exact skipped-key list",
+                    )
+                    .into());
+                }
+            };
+            if approval.is_none() && !preview.skipped_keys.is_empty() {
+                return Err(invalid("unmapped Python settings require exact SHA-256 and --accept-skipped-key approval after preview").into());
+            }
+            if let Some(approved) = &approval {
+                if *approved != review {
+                    return Err(invalid(
+                        "Python import approval does not match source, target or skipped keys",
+                    )
+                    .into());
+                }
             }
             let source_backup = if preview.changed {
                 Some(backup_python_source(&source, &destination, &bytes)?)
             } else {
                 None
             };
-            let applied = repository.import_python_with_policy(
-                &bytes,
-                if allow_unmapped {
-                    PythonUnmappedPolicy::SkipAfterReview
-                } else {
-                    PythonUnmappedPolicy::Reject
-                },
-            )?;
+            let result = match &approval {
+                Some(approved) => repository.import_python_reviewed(&bytes, approved),
+                None => repository.import_python(&bytes),
+            };
+            let applied = match result {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(path) = source_backup {
+                        let _ = fs::remove_file(path);
+                    }
+                    return Err(error.into());
+                }
+            };
             print_python_report(&applied.preview, false, applied.backup_path.as_deref());
             if let Some(source_backup) = source_backup {
                 println!("Python source backup: {}", source_backup.display());
@@ -120,6 +172,26 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
         );
     }
     Ok(())
+}
+
+fn string_argument(slot: &mut Option<String>, value: Option<OsString>) -> io::Result<()> {
+    let value = value
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid("option requires a value"))?;
+    if slot.replace(value).is_some() {
+        return Err(invalid("duplicate approval option"));
+    }
+    Ok(())
+}
+
+fn print_python_review(review: &PythonSettingsFileReview) {
+    println!("Source SHA-256: {}", review.source_sha256);
+    println!(
+        "Target SHA-256: {}",
+        review.target_settings_sha256.as_deref().unwrap_or("absent")
+    );
+    println!("Approve the exact skipped-key list before applying; no secret values are printed");
 }
 
 fn path_argument(slot: &mut Option<PathBuf>, value: Option<OsString>) -> io::Result<()> {

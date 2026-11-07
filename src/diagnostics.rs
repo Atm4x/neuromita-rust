@@ -214,17 +214,24 @@ impl SessionLog {
             let entry = entry?;
             let filename = entry.file_name();
             let name = filename.to_string_lossy();
-            if name.starts_with("session-")
-                && name.ends_with(".log")
-                && entry.file_type()?.is_file()
-            {
+            let file_type = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if name.starts_with("session-") && name.ends_with(".log") && file_type.is_file() {
                 previous.push((filename, entry.path()));
             }
         }
         previous.sort_by(|left, right| left.0.cmp(&right.0));
         let remove_count = previous.len().saturating_sub(MAX_SESSION_LOGS);
         for (_, path) in previous.into_iter().take(remove_count) {
-            fs::remove_file(path)?;
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -276,6 +283,25 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(files.len(), 6);
         assert!(files.iter().any(|name| name == "user.log"));
+    }
+
+    #[test]
+    fn simultaneous_session_open_does_not_fail_if_another_pruner_removed_an_entry() {
+        let root = Scratch::new();
+        let directory = Arc::new(root.0.clone());
+        let threads = (0..12)
+            .map(|_| {
+                let directory = directory.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..15 {
+                        SessionLog::open(&directory).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
     }
 
     #[test]

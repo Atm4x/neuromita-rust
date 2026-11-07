@@ -210,10 +210,44 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
 
     let rejected = execute(&[]);
     assert!(!rejected.status.success());
-    assert!(stderr(&rejected).contains("--allow-unmapped"));
+    assert!(stderr(&rejected).contains("--accept-skipped-key"));
     assert_eq!(fs::read(&target).unwrap(), original);
 
-    let applied = execute(&["--allow-unmapped"]);
+    let preview_report = stdout(&dry_run);
+    let source_sha = preview_report
+        .lines()
+        .find_map(|line| line.strip_prefix("Source SHA-256: "))
+        .unwrap();
+    let target_sha = preview_report
+        .lines()
+        .find_map(|line| line.strip_prefix("Target SHA-256: "))
+        .unwrap();
+    let approval = [
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        target_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+    ];
+    let boolean_denied = execute(&["--allow-unmapped"]);
+    assert!(!boolean_denied.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+    let wrong_key = execute(&[
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        target_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "NOT_THE_ORIGINAL",
+    ]);
+    assert!(!wrong_key.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+    let applied = execute(&approval);
     assert!(applied.status.success(), "{}", stderr(&applied));
     assert!(stdout(&applied).contains("Previous Rust settings backup:"));
     assert_eq!(fs::read(&source).unwrap(), python_source);
@@ -232,8 +266,26 @@ fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import
             .count(),
         2
     );
-    let second = execute(&["--allow-unmapped"]);
-    assert!(second.status.success());
+    let stale = execute(&approval);
+    assert!(!stale.status.success());
+    let second_report = execute(&["--preview"]);
+    assert!(second_report.status.success());
+    let report = stdout(&second_report);
+    let current_sha = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Target SHA-256: "))
+        .unwrap();
+    let second = execute(&[
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        current_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+    ]);
+    assert!(second.status.success(), "{}", stderr(&second));
     assert!(stdout(&second).contains("changed=false"));
     assert_eq!(
         JsonSettingsRepository::new(target).load().unwrap(),

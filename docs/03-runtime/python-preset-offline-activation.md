@@ -142,11 +142,12 @@ Source JSON and Rust settings bytes are not logged. Neither preview nor
 rejected activation writes an active settings file or creates a journal; the
 stable OS lock files may be created as part of cooperative locking.
 
-This exact receipt applies **only** to the combined offline preset + settings
-activation. The standalone `neuromita settings import --format python` workflow
-has its own existing preview and `--allow-unmapped` contract; it must not be
-mistaken for a transaction-level approval. A complete backup is not implied by
-this selective import.
+The combined activation receipt covers presets and three-file journal ownership.
+The standalone `neuromita settings import --format python` now has its own
+independent exact-source/target/skipped-key receipt, but uses a **single-file**
+atomic replacement and cannot be mistaken for a three-file transaction. Its
+former `--allow-unmapped` opt-in is rejected. Neither workflow is a complete
+Python user-data backup; see `python-settings-import-consolidation.md`.
 
 Supported settings are merged onto the existing, validated Rust `settings.json` (never generic
 Python defaults), with the selected preset ID resolved against the staged preset catalog.

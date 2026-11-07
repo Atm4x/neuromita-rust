@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use super::python_presets::sha256_hex;
 use super::{
     AppSettings, PythonSettingsMigration, PythonSettingsPreview, SettingsError,
     SettingsImportFormat, SettingsTransfer, SettingsTransferError,
@@ -73,6 +74,16 @@ pub enum PythonUnmappedPolicy {
     SkipAfterReview,
 }
 
+/// Exact, value-free receipt for a standalone, stopped-app Python settings import.
+/// A missing Rust target is distinct from any present file, including an empty one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonSettingsFileReview {
+    pub source_sha256: String,
+    pub target_settings_sha256: Option<String>,
+    pub imported_keys: Vec<String>,
+    pub skipped_keys: Vec<String>,
+}
+
 pub struct JsonSettingsRepository {
     path: PathBuf,
 }
@@ -112,6 +123,43 @@ impl JsonSettingsRepository {
         Ok(preview)
     }
 
+    /// Reads a single target snapshot under the same writer lock as application.
+    /// Does not create or modify either settings document.
+    pub fn review_python(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(PythonSettingsPreview, PythonSettingsFileReview), SettingsError> {
+        let _lock = writer_lock(&self.path)?;
+        self.python_review_snapshot(bytes)
+    }
+
+    fn python_review_snapshot(
+        &self,
+        bytes: &[u8],
+    ) -> Result<(PythonSettingsPreview, PythonSettingsFileReview), SettingsError> {
+        let original = if self.path.exists() {
+            Some(std::fs::read(&self.path).map_err(|e| SettingsError::Storage(e.to_string()))?)
+        } else {
+            None
+        };
+        let baseline = match &original {
+            Some(raw) => SettingsTransfer::decode(raw)?.into_stored(),
+            None => StoredSettings {
+                revision: 0,
+                settings: AppSettings::initial_profile(),
+            },
+        };
+        let mut preview = PythonSettingsMigration.preview(bytes, &baseline)?;
+        preview.changed |= original.is_none();
+        let review = PythonSettingsFileReview {
+            source_sha256: sha256_hex(bytes),
+            target_settings_sha256: original.as_deref().map(sha256_hex),
+            imported_keys: preview.imported_keys.clone(),
+            skipped_keys: preview.skipped_keys.clone(),
+        };
+        Ok((preview, review))
+    }
+
     /// Intended only for a stopped application. Uses the settings writer lock
     /// for read/prepare/backup/publish; repeated imports are no-ops.
     pub fn import_python(&self, bytes: &[u8]) -> Result<PythonImportOutcome, SettingsError> {
@@ -123,11 +171,39 @@ impl JsonSettingsRepository {
         bytes: &[u8],
         policy: PythonUnmappedPolicy,
     ) -> Result<PythonImportOutcome, SettingsError> {
+        if policy == PythonUnmappedPolicy::SkipAfterReview {
+            return Err(SettingsError::Validation(
+                "Python skipped-key approval requires an exact review receipt".into(),
+            ));
+        }
+        self.import_python_internal(bytes, None)
+    }
+
+    /// Atomically revalidates the exact preview receipt before preparing a backup
+    /// or changing the stopped profile. No one-bit permission can bypass it.
+    pub fn import_python_reviewed(
+        &self,
+        bytes: &[u8],
+        approved: &PythonSettingsFileReview,
+    ) -> Result<PythonImportOutcome, SettingsError> {
+        self.import_python_internal(bytes, Some(approved))
+    }
+
+    fn import_python_internal(
+        &self,
+        bytes: &[u8],
+        approved: Option<&PythonSettingsFileReview>,
+    ) -> Result<PythonImportOutcome, SettingsError> {
         let _lock = writer_lock(&self.path)?;
-        let baseline = self.python_import_baseline()?;
-        let mut preview = PythonSettingsMigration.preview(bytes, &baseline)?;
-        preview.changed |= !self.path.exists();
-        if policy == PythonUnmappedPolicy::Reject && !preview.skipped_keys.is_empty() {
+        let (mut preview, actual) = self.python_review_snapshot(bytes)?;
+        if let Some(approved) = approved {
+            if actual != *approved {
+                return Err(SettingsError::Validation(
+                    "Python settings review no longer matches the source, target or skipped keys"
+                        .into(),
+                ));
+            }
+        } else if !preview.skipped_keys.is_empty() {
             return Err(SettingsTransferError::UnmappedPythonFields(preview.skipped_keys).into());
         }
         if !preview.changed {
@@ -136,7 +212,9 @@ impl JsonSettingsRepository {
                 backup_path: None,
             });
         }
-        let next_revision = baseline
+        let next_revision = preview
+            .transfer
+            .stored()
             .revision
             .checked_add(1)
             .ok_or_else(|| SettingsError::Validation("settings revision exhausted".into()))?;

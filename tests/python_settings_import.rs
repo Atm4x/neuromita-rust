@@ -127,9 +127,8 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
     let readonly_preview = repository.preview_python(&bytes).unwrap();
     assert_eq!(readonly_preview.transfer.stored().revision, 7);
     assert_eq!(fs::read(&path).unwrap(), original);
-    let result = repository
-        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
-        .unwrap();
+    let receipt = repository.review_python(&bytes).unwrap().1;
+    let result = repository.import_python_reviewed(&bytes, &receipt).unwrap();
     assert!(result.preview.changed);
     assert_eq!(result.preview.transfer.stored().revision, 8);
     let backup = result.backup_path.unwrap();
@@ -141,9 +140,8 @@ fn offline_import_creates_prewrite_backup_and_is_idempotent() {
         current.settings.presets.active
     );
     let after = fs::read(&path).unwrap();
-    let repeated = repository
-        .import_python_with_policy(&bytes, PythonUnmappedPolicy::SkipAfterReview)
-        .unwrap();
+    let receipt = repository.review_python(&bytes).unwrap().1;
+    let repeated = repository.import_python_reviewed(&bytes, &receipt).unwrap();
     assert!(!repeated.preview.changed);
     assert!(repeated.backup_path.is_none());
     assert_eq!(fs::read(&path).unwrap(), after);
@@ -291,9 +289,11 @@ fn unknown_fields_are_rejected_by_default_and_never_overwrite() {
     assert!(err.contains("API_KEY"));
     assert!(!err.contains("private-token"));
     assert_eq!(fs::read(&target).unwrap(), before);
-    let applied = repo
-        .import_python_with_policy(&python, PythonUnmappedPolicy::SkipAfterReview)
-        .unwrap();
+    let denied = repo.import_python_with_policy(&python, PythonUnmappedPolicy::SkipAfterReview);
+    assert!(denied.is_err());
+    assert_eq!(fs::read(&target).unwrap(), before);
+    let receipt = repo.review_python(&python).unwrap().1;
+    let applied = repo.import_python_reviewed(&python, &receipt).unwrap();
     assert!(applied.preview.changed);
     assert_eq!(
         repo.load().unwrap().settings.interface.language,
@@ -331,4 +331,125 @@ fn invalid_new_fields_are_rejected_without_coercing_defaults() {
     ] {
         assert!(PythonSettingsMigration.preview(&source, &current).is_err());
     }
+}
+
+#[test]
+fn standalone_receipt_fails_closed_for_source_value_target_and_key_changes() {
+    let dir = Directory::new();
+    let target = dir.path("settings.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    repo.save(&baseline()).unwrap();
+    let original = fs::read(&target).unwrap();
+    let python = source(json!({"LANGUAGE":"EN", "API_KEY":"secret-one"}));
+    let (preview, receipt) = repo.review_python(&python).unwrap();
+    assert_eq!(preview.skipped_keys, vec!["API_KEY"]);
+    assert_eq!(receipt.skipped_keys, vec!["API_KEY"]);
+
+    let source_changed = source(json!({"LANGUAGE":"EN", "API_KEY":"secret-two"}));
+    assert!(
+        repo.import_python_reviewed(&source_changed, &receipt)
+            .is_err()
+    );
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let more_unknown = source(json!({"LANGUAGE":"EN", "API_KEY":"secret-one", "EXTRA":42}));
+    assert!(
+        repo.import_python_reviewed(&more_unknown, &receipt)
+            .is_err()
+    );
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let mut invalid_approval = receipt.clone();
+    invalid_approval.skipped_keys = vec!["NOT_A_PYTHON_KEY".into()];
+    assert!(
+        repo.import_python_reviewed(&python, &invalid_approval)
+            .is_err()
+    );
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let mut active = repo.load().unwrap();
+    active.settings.interface.hide_private = !active.settings.interface.hide_private;
+    repo.save(&active).unwrap();
+    let modified = fs::read(&target).unwrap();
+    assert!(repo.import_python_reviewed(&python, &receipt).is_err());
+    assert_eq!(fs::read(&target).unwrap(), modified);
+    assert!(
+        fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-python-import"))
+    );
+}
+
+#[test]
+fn standalone_receipt_distinguishes_absent_target_from_installed_profile() {
+    let dir = Directory::new();
+    let target = dir.path("new-settings.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    let source = source(json!({"LANGUAGE":"EN", "UNKNOWN_FIELD":"not-imported"}));
+    let (_, receipt) = repo.review_python(&source).unwrap();
+    assert!(receipt.target_settings_sha256.is_none());
+    repo.save(&baseline()).unwrap();
+    let preserved = fs::read(&target).unwrap();
+    assert!(repo.import_python_reviewed(&source, &receipt).is_err());
+    assert_eq!(fs::read(&target).unwrap(), preserved);
+}
+
+#[test]
+fn standalone_receipt_prevents_first_install_loss_on_bad_source_or_unknown_list() {
+    let dir = Directory::new();
+    let target = dir.path("new.json");
+    let repo = JsonSettingsRepository::new(target.clone());
+    let source = source(json!({"LANGUAGE":"EN", "UNSUPPORTED":"secret"}));
+    let (_, receipt) = repo.review_python(&source).unwrap();
+    let mut invalid = receipt.clone();
+    invalid.skipped_keys.clear();
+    assert!(repo.import_python_reviewed(&source, &invalid).is_err());
+    assert!(!target.exists());
+    assert!(repo.import_python_reviewed(b"{", &receipt).is_err());
+    assert!(!target.exists());
+    let installed = repo.import_python_reviewed(&source, &receipt).unwrap();
+    assert!(installed.preview.changed);
+    assert!(installed.backup_path.is_none());
+    let actual = repo.load().unwrap();
+    assert_eq!(actual.revision, 1);
+    assert_eq!(actual.settings.interface.language, Language::English);
+}
+
+#[test]
+fn parallel_standalone_imports_cannot_reuse_the_same_receipt() {
+    let dir = Directory::new();
+    let path = dir.path("settings.json");
+    let repo = JsonSettingsRepository::new(path.clone());
+    repo.save(&baseline()).unwrap();
+    let input = source(json!({"LANGUAGE":"EN", "UNMAPPED":"private"}));
+    let receipt = repo.review_python(&input).unwrap().1;
+    let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let handles = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let input = input.clone();
+            let receipt = receipt.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                JsonSettingsRepository::new(path)
+                    .import_python_reviewed(&input, &receipt)
+                    .is_ok()
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|&&ok| ok).count(), 1);
+    assert_eq!(
+        JsonSettingsRepository::new(path).load().unwrap().revision,
+        8
+    );
 }
