@@ -28,6 +28,7 @@ pub mod server;
 pub mod settings;
 pub mod timeline;
 pub mod voice;
+pub mod telegram_voice;
 
 pub use character::memory;
 pub use interaction::UserInput;
