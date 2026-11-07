@@ -227,3 +227,141 @@ fn blocked_preset_reason_cannot_expose_credential_values() {
     assert!(!error.to_string().contains("unknown-private-credential"));
     assert!(!target.exists());
 }
+
+fn existing_profile(imported: &PythonPresetStage) -> (Vec<u8>, Vec<u8>) {
+    let temp = TestDirectory::new();
+    let staged = temp.path().join("imported");
+    imported.stage_new_directory(&staged).unwrap();
+    let mut catalog: Value =
+        serde_json::from_slice(&std::fs::read(staged.join("presets.json")).unwrap()).unwrap();
+    let mut record = catalog["entries"]
+        .as_object_mut()
+        .unwrap()
+        .remove("18")
+        .unwrap();
+    record["name"] = json!("Preserved existing profile");
+    let definition = &mut record["definition"]["configuration"]["credential"];
+    if definition.is_object() {
+        *definition = json!({"source":"local","name":"imported_7"});
+    }
+    catalog["entries"]["7"] = record;
+    catalog["next_id"] = json!(8);
+    (
+        serde_json::to_vec(&catalog).unwrap(),
+        serde_json::to_vec(&json!({"imported_7":"old-private-fixture"})).unwrap(),
+    )
+}
+
+#[test]
+fn merged_review_preserves_old_record_credential_and_source_backups() {
+    let (presets, templates) = fixture();
+    let imported = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let (old_catalog, old_credentials) = existing_profile(&imported);
+    let merged = imported
+        .merge_with_existing(Some(&old_catalog), Some(&old_credentials))
+        .unwrap();
+    assert_eq!(merged.preview.preserved_ids, [7]);
+    let (_parent, dest) = fresh_directory();
+    merged.stage_new_directory(&dest).unwrap();
+    let catalog: Value =
+        serde_json::from_slice(&std::fs::read(dest.join("presets.json")).unwrap()).unwrap();
+    let credentials: Value =
+        serde_json::from_slice(&std::fs::read(dest.join("preset-credentials.json")).unwrap())
+            .unwrap();
+    assert_eq!(catalog["entries"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        catalog["entries"]["7"]["name"],
+        "Preserved existing profile"
+    );
+    assert_eq!(catalog["entries"]["18"]["name"], "Private preset");
+    assert_eq!(catalog["next_id"], 19);
+    assert_eq!(credentials["imported_7"], "old-private-fixture");
+    assert_eq!(credentials["python_preset_18"], "private-fixture-key");
+    assert_eq!(
+        std::fs::read(dest.join("existing-source-presets.json")).unwrap(),
+        old_catalog
+    );
+    assert_eq!(
+        std::fs::read(dest.join("existing-source-preset-credentials.json")).unwrap(),
+        old_credentials
+    );
+    let no_secret_catalog = std::fs::read_to_string(dest.join("presets.json")).unwrap();
+    assert!(!no_secret_catalog.contains("old-private-fixture"));
+    assert!(!no_secret_catalog.contains("private-fixture-key"));
+    let catalog = neuromita::generation::PresetCatalog::open(
+        Default::default(),
+        std::sync::Arc::new(neuromita::generation::JsonPresetRepository::new(
+            dest.join("presets.json"),
+        )),
+        std::sync::Arc::new(neuromita::generation::ApplicationPresetCredentials::new(
+            dest.join("preset-credentials.json"),
+        )),
+    )
+    .unwrap();
+    assert_eq!(catalog.list().len(), 2);
+    assert!(
+        catalog
+            .get(neuromita::generation::PresetId(7))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        catalog
+            .get(neuromita::generation::PresetId(18))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn merge_rejects_existing_and_retired_identifier_collisions_without_publication() {
+    let (presets, templates) = fixture();
+    let imported = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let (mut old_catalog, old_credentials) = existing_profile(&imported);
+    let mut catalog: Value = serde_json::from_slice(&old_catalog).unwrap();
+    catalog["next_id"] = json!(19);
+    old_catalog = serde_json::to_vec(&catalog).unwrap();
+    assert!(
+        imported
+            .merge_with_existing(Some(&old_catalog), Some(&old_credentials))
+            .is_err()
+    );
+    catalog["next_id"] = json!(20);
+    catalog["entries"]["18"] = catalog["entries"]["7"].clone();
+    old_catalog = serde_json::to_vec(&catalog).unwrap();
+    assert!(
+        imported
+            .merge_with_existing(Some(&old_catalog), Some(&old_credentials))
+            .is_err()
+    );
+}
+
+#[test]
+fn merge_rejects_credential_collision_even_if_values_are_equal() {
+    let (presets, templates) = fixture();
+    let imported = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let old = json!({"python_preset_18":"private-fixture-key"});
+    let old = serde_json::to_vec(&old).unwrap();
+    assert!(imported.merge_with_existing(None, Some(&old)).is_err());
+}
+
+#[test]
+fn merge_rejects_invalid_existing_json_and_missing_local_credentials() {
+    let (presets, templates) = fixture();
+    let imported = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let (catalog, credentials) = existing_profile(&imported);
+    assert!(
+        imported
+            .merge_with_existing(Some(br#"{"entries":{},"entries":{}}"#), Some(&credentials))
+            .is_err()
+    );
+    assert!(
+        imported
+            .merge_with_existing(
+                Some(&catalog),
+                Some(br#"{"imported_7":"x","imported_7":"y"}"#)
+            )
+            .is_err()
+    );
+    assert!(imported.merge_with_existing(Some(&catalog), None).is_err());
+}

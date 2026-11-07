@@ -30,3 +30,5 @@ The example prints only numeric converted/blocked IDs and counts. No API keys, t
 - Python preset custom display `order`, legacy formats, non-convertible provider fields, active preset selection, historical IDs, external credentials policy, fallback chains and unsupported model options are **not** migrated into the active Rust application. The original inputs are retained precisely for later recovery and manual comparison. `PythonPresetStagePreview` flags that Python order is present but cannot be represented by current Rust catalog metadata.
 
 **Next:** integrate reviewed staging with a unified installer transaction, preserve preset ordering if Rust UI requires it, test Windows permissions and blocked/legacy fixtures, and only then consider full issue #45 acceptance.
+
+**Existing Rust profile review (D6):** [python-preset-existing-profile-review.md](python-preset-existing-profile-review.md) documents the opt-in `--existing-dir` merge of validated snapshots into a new directory, preserving existing/retired preset IDs and separate credentials without live activation.

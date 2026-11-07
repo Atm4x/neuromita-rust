@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::Write,
     path::PathBuf,
@@ -400,6 +400,48 @@ impl StoredPresets {
         };
         stored.validate()?;
         Ok(stored)
+    }
+
+    /// Form a reviewed offline snapshot without reusing retired IDs or changing existing records.
+    pub(crate) fn merge_for_import(
+        existing: Option<&Self>,
+        imported: &Self,
+    ) -> Result<Self, PresetCatalogError> {
+        imported.validate()?;
+        let mut merged = existing.cloned().unwrap_or_else(|| Self::empty(1));
+        merged.validate()?;
+        if imported
+            .entries
+            .keys()
+            .any(|id| id.0 == 0 || id.0 < merged.next_id || merged.entries.contains_key(id))
+        {
+            return Err(PresetCatalogError::Invalid(
+                "imported preset ID overlaps existing or retired ID space".into(),
+            ));
+        }
+        merged.entries.extend(imported.entries.clone());
+        merged.next_id = merged.next_id.max(imported.next_id);
+        merged.validate()?;
+        Ok(merged)
+    }
+
+    pub(crate) fn id_values(&self) -> Vec<u32> {
+        self.entries.keys().map(|id| id.0).collect()
+    }
+
+    pub(crate) fn local_credentials(&self) -> BTreeSet<&str> {
+        self.entries
+            .values()
+            .filter_map(|record| match &record.definition {
+                PresetDefinition::Unconfigured => None,
+                PresetDefinition::Gemini(config) => Some(&config.credential),
+                PresetDefinition::OpenAi(config) => config.credential.as_ref(),
+            })
+            .filter_map(|reference| match reference {
+                super::CredentialReference::Local(name) => Some(name.as_str()),
+                super::CredentialReference::Environment(_) => None,
+            })
+            .collect()
     }
 
     fn empty(next_id: u32) -> Self {
