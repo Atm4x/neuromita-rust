@@ -5,7 +5,7 @@ on:
       - codex/telegram-voice-47
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -22,16 +22,6 @@ jobs:
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy
           rustup default 1.89.0
-      - name: Format Rust source and publish a non-force formatting commit
-        run: |
-          cargo fmt --all
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -- '*.rs'
-            git commit -m "style(telegram): apply cargo fmt"
-            git push origin HEAD:codex/telegram-voice-47
-          fi
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Unit and integration tests
