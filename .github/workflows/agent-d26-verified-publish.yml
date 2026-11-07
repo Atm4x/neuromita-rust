@@ -1,0 +1,67 @@
+name: Agent D26 verified Python core transaction publish
+on:
+  push:
+    branches:
+      - bridge/agent-d26-publish-20261107
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct and authenticate exact D26 patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp .github/bridge/d26.patch.xz.b64 /tmp/d26.patch.xz.b64
+          git checkout --detach 5f682d2ce56e950168c0c04deb158a1775d92f39
+          test "$(git rev-parse HEAD^{tree})" = "22eb0666798b102d54b8998951ff977447b45f4d"
+          base64 -d /tmp/d26.patch.xz.b64 | xz -dc > /tmp/d26.patch
+          printf '%s  %s\n' b7947bb5e42f2824b4dc3b23c0cec7ebae5b94244d19de33f10ea0337e128e9e /tmp/d26.patch | sha256sum -c -
+          git apply --check /tmp/d26.patch
+          git apply /tmp/d26.patch
+          git add docs/03-runtime/updater-helper-handoff.md src/updater.rs src/updater/activation.rs src/updater/python_core_activation.rs
+          git diff --cached --check
+          test "$(git write-tree)" = "a7c8ff88262a5e70bbbdc987042b84650821c238"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux native build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Install Rust 1.98.1
+        shell: bash
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Verify format
+        shell: bash
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Verify updater tests
+        shell: bash
+        run: cargo +1.98.1 test --locked --offline --lib updater::
+      - name: Verify all GUI targets
+        shell: bash
+        run: cargo +1.98.1 check --locked --offline --all-targets --features gui
+      - name: Full library regression with Python 3.12
+        shell: bash
+        env:
+          NEUROMITA_TEST_PYTHON: ${{ env.pythonLocation }}/bin/python3.12
+        run: cargo +1.98.1 test --locked --offline --lib
+      - name: Publish exact tested tree as one fast-forward product commit
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git write-tree)" = "a7c8ff88262a5e70bbbdc987042b84650821c238"
+          git config user.name "Agent D26"
+          git config user.email "96025052+Atm4x@users.noreply.github.com"
+          git commit -m "feat(updater): recoverable Python entry-file transaction (Refs #44)"
+          test "$(git rev-parse HEAD^{tree})" = "a7c8ff88262a5e70bbbdc987042b84650821c238"
+          git push origin HEAD:refs/heads/codex/updater-python-core-transaction-20261107
