@@ -1,4 +1,4 @@
-name: Import Agent A Memory Git Bundle
+name: Import Agent A Explicit Forgotten RAG Scope
 on:
   push:
     branches:
@@ -12,21 +12,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and publish Agent A Slint memory settings
+      - name: Verify and publish Agent A explicit scoped RAG
         shell: bash
         run: |
           set -euo pipefail
-          BASE=ed490d65b3556a360807131b426a0c963da4292b
-          TARGET=caf94d9b1243ebba5b44751b426aa71334210d0c
-          BRANCH=codex/knowledge-memory-settings-ui-20261107
+          BASE=caf94d9b1243ebba5b44751b426aa71334210d0c
+          TARGET=0bfeb0d7589739344c240ef429bba88e08069428
+          BRANCH=codex/knowledge-forgotten-rag-scope-20261107
           git cat-file -e "$BASE^{commit}"
-          sha256sum -c .bridge/agent-a-memory-settings-ui.bundle.sha256
-          git bundle verify .bridge/agent-a-memory-settings-ui.bundle
-          git fetch --no-tags .bridge/agent-a-memory-settings-ui.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
+          cat .bridge/agent-a-forgotten-rag-scope.b64.part{1,2,3,4} | base64 -d > /tmp/agent-a-forgotten-rag-scope.bundle
+          echo "963cd929eeccaa780ed69ab2ae12c56fca2718ee25ea31a60098007a4f9b682b  /tmp/agent-a-forgotten-rag-scope.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-forgotten-rag-scope.bundle
+          git fetch --no-tags /tmp/agent-a-forgotten-rag-scope.bundle "refs/heads/$BRANCH:refs/remotes/imported/agent-a"
           test "$(git rev-parse refs/remotes/imported/agent-a)" = "$TARGET"
           git merge-base --is-ancestor "$BASE" "$TARGET"
           if git ls-remote --exit-code origin "refs/heads/$BRANCH" >/dev/null; then
-            echo "Target branch exists; refusing overwrite."
+            echo "Target exists, refusing overwrite"
             exit 1
           fi
           git push origin "$TARGET:refs/heads/$BRANCH"
