@@ -432,6 +432,7 @@ enum GameCommand {
     },
     Ping {},
     GetGameSettings {},
+    GetMusicBeatStatus {},
     GetMusicBeats {
         request_id: Uuid,
         audio_path: String,
@@ -851,6 +852,21 @@ async fn client(
                                 Some(h)=>tx.send(json!({"type":"cancel_ack","command_id":id,"request_id":request_id,"result":format!("{:?}",h.cancel())})).await.map_err(io::Error::other)?,
                                 None=>tx.send(error(Some(id),"ownership_denied","request is not owned by game session")).await.map_err(io::Error::other)?,
                             }
+                        }
+                        GameCommand::GetMusicBeatStatus {} => {
+                            let (enabled, root) = beats.as_ref().map_or((false, None), |service| (
+                                service.enabled, Some(service.media_root.to_string_lossy().to_string()),
+                            ));
+                            tx.send(json!({
+                                "type":"music_beats_status",
+                                "command_id":id,
+                                "enabled":enabled,
+                                "available_backends":["dsp"],
+                                "unavailable_backends":["beat_this","librosa"],
+                                "model_loaded":false,
+                                "max_source_bytes":crate::music::runtime::MAX_SOURCE_BYTES,
+                                "media_root":root,
+                            })).await.map_err(io::Error::other)?;
                         }
                         GameCommand::GetMusicBeats { request_id, audio_path, track_name, stream, min_confidence, backend } => {
                             let Some(service) = &beats else {
