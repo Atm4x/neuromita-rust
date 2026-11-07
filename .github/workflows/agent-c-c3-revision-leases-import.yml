@@ -52,3 +52,4 @@ jobs:
           rustup run 1.98.1 rustc --version
           rustup run 1.98.1 cargo test --locked --offline --lib revision_lease -- --nocapture
           rustup run 1.98.1 cargo test --locked --offline --lib removal_inventory_records_actual_worker_layers_and_denies_busy_observation -- --nocapture
+# Strictly isolated bridge; no production checkout changes.
