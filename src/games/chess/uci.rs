@@ -3,7 +3,7 @@
 use std::{path::PathBuf, process::Stdio, time::Duration};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
     process::{Child, ChildStdin, Command},
     time::{Instant, timeout, timeout_at},
 };

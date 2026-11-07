@@ -1,0 +1,39 @@
+name: Chess PR 76 verification
+
+on:
+  push:
+    branches:
+      - codex/issue-33-chess-current
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chess-issue-33
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install system build requirements
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Default tests
+        run: cargo test --locked --offline
+      - name: Minimal tests
+        run: cargo test --locked --offline --no-default-features
+      - name: Clippy
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
