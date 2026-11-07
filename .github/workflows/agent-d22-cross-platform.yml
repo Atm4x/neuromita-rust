@@ -1,0 +1,52 @@
+name: Agent D22 independent Windows and Linux validation
+on:
+  push:
+    branches:
+      - bridge/agent-d22-cross-platform-verification-20261107
+permissions:
+  contents: read
+jobs:
+  windows-helper:
+    runs-on: windows-2022
+    timeout-minutes: 23
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-post-exit-helper-20261107
+          persist-credentials: false
+      - name: Verify pinned D22 commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "172efc83665de0fa5e761602222697e0fdb7ad68"
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check Windows updater binary
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo +1.98.1 check --locked --offline --bin neuromita-updater
+  linux-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/updater-post-exit-helper-20261107
+          persist-credentials: false
+      - name: Verify pinned D22 commit
+        run: test "$(git rev-parse HEAD)" = "172efc83665de0fa5e761602222697e0fdb7ad68"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Native Linux build requirements
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libfreetype-dev
+      - name: Install Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+      - name: Check Rust formatting
+        run: cargo +1.98.1 fmt --all -- --check
+      - name: Run updater unit tests
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo +1.98.1 test --locked --offline --lib updater
