@@ -26,7 +26,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/agent-d30-export"
           git bundle create "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle" refs/heads/agent-d30-source
           git bundle verify "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle"
-          git clone --quiet "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle" "$RUNNER_TEMP/agent-d30-clone"
+          git clone --quiet --branch agent-d30-source "$RUNNER_TEMP/agent-d30-export/agent-d30-source.bundle" "$RUNNER_TEMP/agent-d30-clone"
           test "$(git -C "$RUNNER_TEMP/agent-d30-clone" rev-parse HEAD)" = "$EXPECTED"
           test "$(git -C "$RUNNER_TEMP/agent-d30-clone" rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
           (cd "$RUNNER_TEMP/agent-d30-export" && sha256sum agent-d30-source.bundle > agent-d30-source.bundle.sha256)
