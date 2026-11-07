@@ -1,0 +1,50 @@
+name: Agent C C3.2 final manual JSON writer fix import and Windows regressions
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-settings-owned-writer-fix-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-settings-owned-writer-fix-20261107
+          fetch-depth: 0
+      - name: Verify bundle and fast forward existing owned-writer branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=30e8b9d6d3e44e279023be7c1b55b4268bdf7469
+          HEAD=244290fc373267dacd63dc7e7a31b623bbcffaa6
+          TARGET=codex/ai-platform-hub-c3-settings-owned-writer-20261107
+          base64 -d .github/agent-c-bundles/c3-manual-bind.bundle.b64 >/tmp/c3-manual-bind.bundle
+          echo 'e59578ab369808990f79bd5781ed4276084df7680f0cabc94fcf840bcd95aac5  /tmp/c3-manual-bind.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-manual-bind.bundle
+          git fetch --no-tags /tmp/c3-manual-bind.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$BASE"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-settings-owned-writer-20261107
+      - name: Windows Rust 1.98.1 settings owner and native integrations
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup run 1.98.1 rustc --version
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::storage::tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --lib app::settings_instance_tests -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --test settings_cli -- --nocapture
+          rustup run 1.98.1 cargo test --locked --offline --test settings_migrations -- --nocapture
