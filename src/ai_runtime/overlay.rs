@@ -107,6 +107,7 @@ pub fn load_installed_overlay(
     }
     let path = overlays_directory.join(plugin_id).join(revision);
     reject_symlinked_layer_components(&path)?;
+    let _reader = super::revision_lease::RevisionLease::shared(&path)?;
     let marker = path.join(".neuromita-overlay.json");
     reject_unsafe_layer_receipt(&marker)?;
     let bytes = std::fs::read(&marker).map_err(|error| {

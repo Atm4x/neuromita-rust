@@ -20,6 +20,7 @@ pub mod overlay;
 pub mod production;
 pub mod removal;
 pub mod resolver;
+mod revision_lease;
 pub mod runtime_status;
 pub mod speech;
 pub mod speech_catalog;
@@ -166,6 +167,7 @@ struct WorkerProcess {
     generation: Uuid,
     failed: bool,
     layers: Vec<PathBuf>,
+    _layer_leases: Vec<revision_lease::RevisionLease>,
     selections: HashMap<AiService, (String, Option<String>)>,
     runtime_profiles: HashMap<AiService, RuntimeProfile>,
 }
@@ -190,6 +192,7 @@ impl WorkerProcess {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Self, AiRuntimeError> {
+        let layer_leases = revision_lease::shared_layers(layers).map_err(AiRuntimeError::Spawn)?;
         let mut imports = vec![config.sdk_root.clone()];
         imports.extend(layers.iter().cloned());
         let python_path = std::env::join_paths(&imports)
@@ -265,6 +268,7 @@ impl WorkerProcess {
             generation: Uuid::new_v4(),
             failed: false,
             layers: layers.to_vec(),
+            _layer_leases: layer_leases,
             selections: HashMap::new(),
             runtime_profiles: HashMap::new(),
         };
@@ -1892,6 +1896,10 @@ class Plugin:
             )
             .await
             .unwrap();
+        assert!(matches!(
+            revision_lease::RevisionLease::exclusive(&dependency),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
         let observed = supervisor.observed_worker_layers().unwrap();
         assert_eq!(
             observed,
@@ -1924,6 +1932,8 @@ class Plugin:
         drop(_updating);
         supervisor.stop(AiService::Tts).await.unwrap();
         assert!(supervisor.observed_worker_layers().unwrap().is_empty());
+        drop(active_worker);
+        assert!(revision_lease::RevisionLease::exclusive(&dependency).is_ok());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
