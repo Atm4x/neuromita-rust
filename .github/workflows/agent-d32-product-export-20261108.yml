@@ -1,0 +1,33 @@
+name: Agent D32 pinned product source export
+on:
+  push:
+    branches: [codex/bridge-agent-d32-product-export-20261108]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact original Git history
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=7b166a718eebfb03ec099a83112a673c6a9b46c0
+          REF=codex/python-settings-standalone-review-20261108
+          git fetch --no-tags origin "refs/heads/$REF:refs/remotes/origin/$REF"
+          test "$(git rev-parse "refs/remotes/origin/$REF^{commit}")" = "$EXPECTED"
+          test "$(git rev-parse "$EXPECTED^{tree}")" = 9120a8ce266ffadc42839af05ea6edae9e56b58c
+          mkdir transfer
+          git bundle create transfer/agent-d32-product.bundle "refs/remotes/origin/$REF"
+          git bundle verify transfer/agent-d32-product.bundle
+          sha256sum transfer/agent-d32-product.bundle > transfer/agent-d32-product.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d32-pinned-product
+          path: transfer/
+          retention-days: 1
