@@ -812,3 +812,494 @@ async fn reply_and_react_share_lexical_memory_history_admission_without_cross_ch
     ));
     app.shutdown().await.unwrap();
 }
+
+struct JointEmbedding {
+    space: neuromita::knowledge::embedding::EmbeddingSpace,
+    queries: std::sync::atomic::AtomicUsize,
+    documents: std::sync::atomic::AtomicUsize,
+}
+
+impl JointEmbedding {
+    fn new() -> Self {
+        Self {
+            space: neuromita::knowledge::embedding::EmbeddingSpace::new(
+                "fixture",
+                "joint-generation",
+                "v1",
+                2,
+            )
+            .unwrap(),
+            queries: std::sync::atomic::AtomicUsize::new(0),
+            documents: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl neuromita::knowledge::embedding::EmbeddingProvider for JointEmbedding {
+    fn space(&self) -> &neuromita::knowledge::embedding::EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(
+        &self,
+        purpose: neuromita::knowledge::embedding::EmbeddingPurpose,
+        _: String,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        neuromita::knowledge::embedding::Embedding,
+    > {
+        Box::pin(async move {
+            if purpose == neuromita::knowledge::embedding::EmbeddingPurpose::Query {
+                self.queries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            neuromita::knowledge::embedding::Embedding::new(vec![1.0, 0.0], &self.space)
+        })
+    }
+
+    fn embed_documents(
+        &self,
+        texts: Vec<String>,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        Vec<neuromita::knowledge::embedding::Embedding>,
+    > {
+        Box::pin(async move {
+            self.documents
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            texts
+                .into_iter()
+                .map(|_| {
+                    neuromita::knowledge::embedding::Embedding::new(vec![1.0, 0.0], &self.space)
+                })
+                .collect()
+        })
+    }
+}
+
+struct JointReranker {
+    calls: std::sync::atomic::AtomicUsize,
+    candidate_count: std::sync::atomic::AtomicUsize,
+    failure: bool,
+}
+
+impl neuromita::knowledge::reranking::RerankProvider for JointReranker {
+    fn score<'a>(
+        &'a self,
+        _: &'a str,
+        texts: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.candidate_count
+                .store(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            if self.failure {
+                return Err(neuromita::knowledge::embedding::EmbeddingError::Transport(
+                    "joint reranker offline".into(),
+                ));
+            }
+            Ok(texts
+                .iter()
+                .map(|text| if text.contains("Gallery") { 0.99 } else { 0.1 })
+                .collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn joint_vector_generation_uses_one_embedding_query_and_one_cross_source_rerank() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    use std::sync::atomic::Ordering;
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let embedding = Arc::new(JointEmbedding::new());
+    let rerank = Arc::new(JointReranker {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        candidate_count: std::sync::atomic::AtomicUsize::new(0),
+        failure: false,
+    });
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+        SemanticMemoryRetriever::new(embedding.clone(), 64)
+            .unwrap()
+            .with_reranker(
+                rerank.clone(),
+                RerankPolicy {
+                    alpha: 1.0,
+                    limit: 4,
+                },
+            )
+            .unwrap(),
+    ));
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Orchid belongs to memory",
+    );
+    let memory_id = memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Gallery contains the archived orchid photograph".into()).unwrap(),
+    )
+    .unwrap();
+    let active = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("This is the current unrelated message".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::reply(ReplyRequest::new(
+        CharacterId::Crazy,
+        active,
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&active.0.to_string()), "{evidence}");
+    assert_eq!(embedding.queries.load(Ordering::SeqCst), 1);
+    assert_eq!(embedding.documents.load(Ordering::SeqCst), 1);
+    assert_eq!(rerank.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(rerank.candidate_count.load(Ordering::SeqCst), 2);
+    call.reply.send("Both".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn joint_fusion_one_budget_reranker_selects_history_over_memory_and_rejects_failed_provider()
+{
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{
+            reranking::RerankPolicy, retrieval_fusion::FusionMode,
+            semantic_memory::SemanticMemoryRetriever,
+        },
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    use std::sync::atomic::Ordering;
+    let _lock = ONE_APP.lock().await;
+    for fail in [false, true] {
+        let (tx, mut calls) = mpsc::unbounded_channel();
+        let embedding = Arc::new(JointEmbedding::new());
+        let rerank = Arc::new(JointReranker {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            candidate_count: std::sync::atomic::AtomicUsize::new(0),
+            failure: fail,
+        });
+        let mut application = config(tx);
+        application.knowledge = KnowledgeRetrieval::semantic_fusion(
+            Arc::new(
+                SemanticMemoryRetriever::new(embedding.clone(), 64)
+                    .unwrap()
+                    .with_reranker(
+                        rerank.clone(),
+                        RerankPolicy {
+                            alpha: 1.0,
+                            limit: 4,
+                        },
+                    )
+                    .unwrap(),
+            ),
+            FusionMode::Union,
+        )
+        .unwrap();
+        let app = ApplicationLifecycle::start(application).await.unwrap();
+        let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+        let memory = MemoryRecord::fact(
+            MemoryId::new(),
+            MemoryPriority::Critical,
+            "Orchid belongs to memory",
+        );
+        let memory_id = memory.id;
+        owner
+            .edit_memories(
+                owner.memories().await.unwrap(),
+                vec![MemoryCommand::ImportRecord { record: memory }],
+            )
+            .await
+            .unwrap();
+        let archived = ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Gallery contains the archived orchid photograph".into()).unwrap(),
+        )
+        .unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("An unrelated active message".into()).unwrap(),
+        )
+        .unwrap();
+        let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+        SettingsApi::replace(
+            settings.revision,
+            HistoryGenerationSettings {
+                mode: HistoryGenerationMode::Fusion,
+                max_results: 1,
+                active_messages: 1,
+                ..settings.value
+            },
+        )
+        .unwrap();
+        let request = ChatApi::initiate(InitiateRequest::new(
+            CharacterId::Crazy,
+            "Orchid",
+            RequestSource::Presenter,
+        ))
+        .unwrap();
+        if fail {
+            let done = timeout(Duration::from_secs(5), request.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(
+                    done.state,
+                    RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+                ),
+                "{:?}",
+                done.state
+            );
+            assert!(
+                calls.try_recv().is_err(),
+                "failed reranker leaked an LLM request"
+            );
+        } else {
+            let call = next_call(&mut calls).await;
+            let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+            assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+            assert!(!evidence.contains(&memory_id.0.to_string()), "{evidence}");
+            assert_eq!(evidence.matches("[RETRIEVED TIMELINE EVIDENCE]").count(), 1);
+            call.reply.send("Chosen".into()).unwrap();
+            assert!(matches!(
+                timeout(Duration::from_secs(5), request.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                RequestState::Finished(RequestOutcome::Success(_))
+            ));
+        }
+        assert_eq!(embedding.queries.load(Ordering::SeqCst), 1);
+        assert_eq!(rerank.calls.load(Ordering::SeqCst), 1);
+        app.shutdown().await.unwrap();
+    }
+}
+
+struct PausedJointReranker {
+    started: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+
+impl neuromita::knowledge::reranking::RerankProvider for PausedJointReranker {
+    fn score<'a>(
+        &'a self,
+        _: &'a str,
+        texts: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.resume.notified().await;
+            Ok(vec![0.5; texts.len()])
+        })
+    }
+}
+
+#[tokio::test]
+async fn timeline_revision_change_during_joint_rerank_cancels_before_llm_admission() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let reranker = Arc::new(PausedJointReranker {
+        started: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+        SemanticMemoryRetriever::new(Arc::new(JointEmbedding::new()), 64)
+            .unwrap()
+            .with_reranker(
+                reranker.clone(),
+                RerankPolicy {
+                    alpha: 0.5,
+                    limit: 3,
+                },
+            )
+            .unwrap(),
+    ));
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord {
+                record: MemoryRecord::fact(MemoryId::new(), MemoryPriority::High, "Orchid memory"),
+            }],
+        )
+        .await
+        .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Gallery archived orchid".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Active topic".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    timeout(Duration::from_secs(5), reranker.started.notified())
+        .await
+        .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Timeline changed during joint reranking".into()).unwrap(),
+    )
+    .unwrap();
+    reranker.resume.notify_one();
+    let done = timeout(Duration::from_secs(5), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !matches!(
+            done.state,
+            RequestState::Finished(RequestOutcome::Success(_))
+        ),
+        "{:?}",
+        done.state
+    );
+    assert!(
+        calls.try_recv().is_err(),
+        "stale History/Memory selection leaked to LLM"
+    );
+    app.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn joint_generation_retains_memory_intersection_policy_without_suppressing_history() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{retrieval_fusion::FusionMode, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic_fusion(
+        Arc::new(SemanticMemoryRetriever::new(Arc::new(JointEmbedding::new()), 32).unwrap()),
+        FusionMode::Intersect {
+            min_methods: 2,
+            require_vector: true,
+        },
+    )
+    .unwrap();
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Unrelated orchard memory",
+    );
+    let ignored_id = memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Gallery has the antique orchid".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Active topic".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            max_results: 1,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+    let request = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    assert!(!evidence.contains(&ignored_id.0.to_string()), "{evidence}");
+    call.reply.send("Selected".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+}

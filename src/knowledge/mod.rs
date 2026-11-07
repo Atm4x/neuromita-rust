@@ -222,6 +222,39 @@ impl KnowledgeRetrieval {
         Ok(retriever.clear_cache_confirmed(preview, confirmed)?)
     }
 
+    /// One joint semantic selection for generation; all source admission is
+    /// caller-owned and source-derived, with one shared reranker and budget.
+    pub(crate) async fn select_joint_semantic_generation(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        islands: &[MemoryRecord],
+        relations: &[MemoryRelation],
+        view: &crate::timeline::view::MitaView,
+        window: &history_window::HistoryWindow,
+        query: &str,
+        config: history_retrieval::HistorySearchConfig,
+        history_fusion: bool,
+    ) -> Result<Option<String>, generation_fusion::GenerationFusionError> {
+        let KnowledgeMode::Semantic { retriever, fusion } = &self.mode else {
+            return Err(generation_fusion::GenerationFusionError::InvalidEvidence);
+        };
+        generation_fusion::select_semantic_generation(
+            retriever,
+            *fusion,
+            character,
+            memories,
+            islands,
+            relations,
+            view,
+            window,
+            query,
+            config,
+            history_fusion,
+        )
+        .await
+    }
+
     pub(crate) fn is_lexical(&self) -> bool {
         matches!(self.mode, KnowledgeMode::Lexical)
     }

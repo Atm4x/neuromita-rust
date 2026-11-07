@@ -240,9 +240,11 @@ impl MessageHandler {
             response = async {
                 let query = LlmConversation::memory_query(&context);
                 let history_policy = settings.values.history_generation;
+                let joint_semantic = !self.knowledge.is_lexical()
+                    && matches!(history_policy.mode, HistoryGenerationMode::Vector | HistoryGenerationMode::Fusion);
                 let joint_lexical = self.knowledge.is_lexical()
                     && matches!(history_policy.mode, HistoryGenerationMode::Keyword | HistoryGenerationMode::Fts);
-                let mut selected = if joint_lexical {
+                let mut selected = if joint_lexical || joint_semantic {
                     None
                 } else {
                     self.knowledge
@@ -266,64 +268,81 @@ impl MessageHandler {
                         limit: if joint_lexical { 32 } else { usize::from(history_policy.max_results) },
                         max_content_chars: usize::from(history_policy.max_content_chars),
                     };
-                    let history_result = match history_policy.mode {
-                        HistoryGenerationMode::Off => unreachable!(),
-                        HistoryGenerationMode::Keyword => {
-                            search_archived_history(context.character_id, &context.view, &window, &history_query, config)
-                        }
-                        HistoryGenerationMode::Fts => {
-                            search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
-                        }
-                        HistoryGenerationMode::Vector => {
-                            self.knowledge.search_archived_history_semantic(
-                                context.character_id, &context.view, &window, &history_query,
-                                config, FusionMode::VectorOnly, None,
-                            ).await
-                        }
-                        HistoryGenerationMode::Fusion => {
-                            self.knowledge.search_archived_history_semantic(
-                                context.character_id, &context.view, &window, &history_query,
-                                config, FusionMode::Union, None,
-                            ).await
-                        }
-                    }
-                    .map_err(|error| GenerationError::Response(format!(
-                        "selected history retrieval failed: {error}"
-                    )))?;
-                    if joint_lexical {
-                        let method = if history_policy.mode == HistoryGenerationMode::Fts {
-                            RetrievalMethod::Fts
-                        } else {
-                            RetrievalMethod::Keyword
-                        };
-                        selected = select_lexical_generation(
+                    if joint_semantic {
+                        selected = self.knowledge.select_joint_semantic_generation(
                             context.character_id,
                             &context.memories,
                             &context.memory_islands,
                             &context.memory_relations,
                             &context.view,
                             &window,
-                            &history_result,
-                            method,
                             &history_query,
                             HistorySearchConfig {
                                 limit: usize::from(history_policy.max_results),
                                 max_content_chars: usize::from(history_policy.max_content_chars),
                             },
-                        )
-                        .map_err(|error| GenerationError::Response(format!(
-                            "combined generation evidence rejected: {error}"
+                            history_policy.mode == HistoryGenerationMode::Fusion,
+                        ).await.map_err(|error| GenerationError::Response(
+                            format!("combined semantic generation evidence rejected: {error}")
+                        ))?;
+                    } else {
+                        let history_result = match history_policy.mode {
+                            HistoryGenerationMode::Off => unreachable!(),
+                            HistoryGenerationMode::Keyword => {
+                                search_archived_history(context.character_id, &context.view, &window, &history_query, config)
+                            }
+                            HistoryGenerationMode::Fts => {
+                                search_archived_history_fts(context.character_id, &context.view, &window, &history_query, config)
+                            }
+                            HistoryGenerationMode::Vector => {
+                                self.knowledge.search_archived_history_semantic(
+                                    context.character_id, &context.view, &window, &history_query,
+                                    config, FusionMode::VectorOnly, None,
+                                ).await
+                            }
+                            HistoryGenerationMode::Fusion => {
+                                self.knowledge.search_archived_history_semantic(
+                                    context.character_id, &context.view, &window, &history_query,
+                                    config, FusionMode::Union, None,
+                                ).await
+                            }
+                        }.map_err(|error| GenerationError::Response(format!(
+                            "selected history retrieval failed: {error}"
                         )))?;
-                    } else if let Some(evidence) = render_archived_history_evidence(
-                        context.character_id, &context.view, &window, &history_result,
-                        usize::from(history_policy.max_results),
-                        usize::from(history_policy.max_content_chars),
-                    ).map_err(|error| GenerationError::Response(format!(
-                        "history evidence rejected: {error}"
-                    )))? {
-                        match &mut selected {
-                            Some(text) => { text.push_str("\n"); text.push_str(&evidence); }
-                            None => selected = Some(evidence),
+                        if joint_lexical {
+                            let method = if history_policy.mode == HistoryGenerationMode::Fts {
+                                RetrievalMethod::Fts
+                            } else {
+                                RetrievalMethod::Keyword
+                            };
+                            selected = select_lexical_generation(
+                                context.character_id,
+                                &context.memories,
+                                &context.memory_islands,
+                                &context.memory_relations,
+                                &context.view,
+                                &window,
+                                &history_result,
+                                method,
+                                &history_query,
+                                HistorySearchConfig {
+                                    limit: usize::from(history_policy.max_results),
+                                    max_content_chars: usize::from(history_policy.max_content_chars),
+                                },
+                            ).map_err(|error| GenerationError::Response(format!(
+                                "combined generation evidence rejected: {error}"
+                            )))?;
+                        } else if let Some(evidence) = render_archived_history_evidence(
+                            context.character_id, &context.view, &window, &history_result,
+                            usize::from(history_policy.max_results),
+                            usize::from(history_policy.max_content_chars),
+                        ).map_err(|error| GenerationError::Response(format!(
+                            "history evidence rejected: {error}"
+                        )))? {
+                            match &mut selected {
+                                Some(text) => { text.push_str("\n"); text.push_str(&evidence); }
+                                None => selected = Some(evidence),
+                            }
                         }
                     }
                     history_window = Some(window);

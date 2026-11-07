@@ -1,4 +1,4 @@
-//! Generation-only composition of immutable, character-scoped lexical sources.
+//! Generation-only composition of immutable, character-scoped retrieval sources.
 //! Neither the candidate selection nor the rendered context owns canonical facts.
 
 use std::collections::BTreeMap;
@@ -7,22 +7,26 @@ use thiserror::Error;
 
 use crate::{
     identity::CharacterId,
-    memory::{MemoryRelation, MemoryState},
+    memory::{MemoryKind, MemoryRelation, MemoryState},
     timeline::{domain::MemoryRecord, view::MitaView},
 };
 
 use super::{
+    embedding::{EmbeddingError, EmbeddingSpace},
     history_generation::{HistoryEvidenceError, render_archived_history_evidence},
-    history_retrieval::{HistorySearchConfig, HistorySearchResult, HistorySearchStatus},
+    history_retrieval::{
+        self, HistorySearchConfig, HistorySearchError, HistorySearchResult, HistorySearchStatus,
+    },
     history_window::HistoryWindow,
     memory_context::{
-        lexical_ranked_scoped, render_memory_islands, render_ranked_memory_context_scoped,
-        render_relation_context, tokens,
+        lexical_ranked_scoped, priority_rank, render_memory_islands,
+        render_ranked_memory_context_scoped, render_relation_context, tokens,
     },
     retrieval_fusion::{
-        FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit, RetrievalKey,
-        RetrievalMethod, RetrievalSource, fuse,
+        FusedHit, FusionConfig, FusionError, FusionMode, RetrievalBucket, RetrievalHit,
+        RetrievalKey, RetrievalMethod, RetrievalSource, fuse,
     },
+    semantic_memory::{RetrievalCost, SemanticMemoryRetriever},
 };
 
 #[derive(Debug, Error)]
@@ -35,6 +39,10 @@ pub enum GenerationFusionError {
     Fusion(#[from] FusionError),
     #[error(transparent)]
     History(#[from] HistoryEvidenceError),
+    #[error(transparent)]
+    HistorySearch(#[from] HistorySearchError),
+    #[error(transparent)]
+    Embedding(#[from] EmbeddingError),
 }
 
 /// Choose one bounded set of source-qualified candidates *before* rendering
@@ -127,51 +135,257 @@ pub(crate) fn select_lexical_generation(
         },
     )?;
 
-    let (facts, _) = render_ranked_memory_context_scoped(
-        combined
-            .iter()
-            .filter(|hit| hit.key.source == RetrievalSource::Memory)
-            .filter_map(|hit| {
-                memories.iter().find(|record| {
-                    record.id.0.to_string() == hit.key.id && record.content == hit.content
-                })
-            }),
-        false,
-    );
-    let chosen_history = combined
-        .into_iter()
-        .filter(|hit| hit.key.source == RetrievalSource::History)
+    render_generation_selection(
+        character, memories, islands, relations, view, window, query, config, combined, None,
+    )
+}
+
+/// Single semantic admission: one embedding query, one cross-source RRF, and one
+/// reranker. Only snapshot-owned Memory facts and archived Timeline messages may
+/// enter; subsequent rendering independently validates exact event provenance.
+pub(crate) async fn select_semantic_generation(
+    retriever: &SemanticMemoryRetriever,
+    memory_mode: FusionMode,
+    character: CharacterId,
+    memories: &[MemoryRecord],
+    islands: &[MemoryRecord],
+    relations: &[MemoryRelation],
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+    history_fusion: bool,
+) -> Result<Option<String>, GenerationFusionError> {
+    if view.character() != character || !window.matches(view) {
+        return Err(GenerationFusionError::StaleSelection);
+    }
+    history_retrieval::validate(character, view, query, config)?;
+    if config.limit > 8 || config.max_content_chars > 1200 {
+        return Err(GenerationFusionError::InvalidEvidence);
+    }
+    let facts = memories
+        .iter()
+        .filter(|record| {
+            matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                && record.state == MemoryState::Active
+        })
         .collect::<Vec<_>>();
-    let history_result = HistorySearchResult {
+    let messages =
+        history_retrieval::scoped_candidates(view, config.max_content_chars, Some(window))?;
+    if facts.len() + messages.len() > 1024 {
+        return Err(GenerationFusionError::Embedding(
+            EmbeddingError::Configuration(
+                "combined semantic source exceeds bounded per-query capacity".into(),
+            ),
+        ));
+    }
+    let admitted = facts
+        .iter()
+        .map(|record| (*record).clone())
+        .collect::<Vec<_>>();
+    let (space, memory_scores, history_scores, cost) = retriever
+        .score_joint_generation(character, &admitted, &messages, query)
+        .await?;
+    let mut ranked_facts = facts.iter().copied().zip(memory_scores).collect::<Vec<_>>();
+    ranked_facts.sort_by(|(a, a_score), (b, b_score)| {
+        b_score
+            .total_cmp(a_score)
+            .then_with(|| priority_rank(b.priority).cmp(&priority_rank(a.priority)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let searchable = tokens(query);
+    let lexical = lexical_ranked_scoped(&admitted, query, false)
+        .into_iter()
+        .filter(|record| !tokens(&record.content).is_disjoint(&searchable))
+        .map(|record| RetrievalHit {
+            key: RetrievalKey {
+                character,
+                source: RetrievalSource::Memory,
+                id: record.id.0.to_string(),
+            },
+            content: record.content.clone(),
+            raw_score: None,
+            metadata: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    let matched = lexical
+        .iter()
+        .map(|hit| hit.key.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let memory_vectors = ranked_facts
+        .iter()
+        .filter(|(record, _)| match memory_mode {
+            FusionMode::Intersect { min_methods, .. } if min_methods >= 3 => false,
+            FusionMode::Intersect { min_methods: 2, .. } => {
+                let id = record.id.0.to_string();
+                matched.contains(id.as_str())
+            }
+            _ => true,
+        })
+        .map(|(record, score)| RetrievalHit {
+            key: RetrievalKey {
+                character,
+                source: RetrievalSource::Memory,
+                id: record.id.0.to_string(),
+            },
+            content: record.content.clone(),
+            raw_score: Some(*score),
+            metadata: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut ranked_history = messages.iter().zip(history_scores).collect::<Vec<_>>();
+    ranked_history.sort_by(|(a, a_score), (b, b_score)| {
+        b_score
+            .total_cmp(a_score)
+            .then_with(|| b.learned_at.cmp(&a.learned_at))
+            .then_with(|| a.event_id.cmp(&b.event_id))
+    });
+    let history_vectors = ranked_history
+        .iter()
+        .map(|(message, score)| history_retrieval::hit(character, view, message, *score))
+        .collect::<Vec<_>>();
+    let mut buckets = vec![
+        RetrievalBucket {
+            method: RetrievalMethod::Vector,
+            hits: memory_vectors,
+        },
+        RetrievalBucket {
+            method: RetrievalMethod::Vector,
+            hits: history_vectors,
+        },
+    ];
+    if matches!(
+        memory_mode,
+        FusionMode::Union | FusionMode::Rrf { .. } | FusionMode::Intersect { .. }
+    ) {
+        let lexical = if matches!(
+            memory_mode,
+            FusionMode::Intersect {
+                min_methods: 3..,
+                ..
+            }
+        ) {
+            Vec::new()
+        } else {
+            lexical
+        };
+        buckets.push(RetrievalBucket {
+            method: RetrievalMethod::Keyword,
+            hits: lexical,
+        });
+    }
+    if history_fusion {
+        buckets.push(history_retrieval::lexical_bucket(
+            character, view, &messages, query,
+        ));
+    }
+    let nonempty = buckets
+        .into_iter()
+        .filter(|bucket| !bucket.hits.is_empty())
+        .collect::<Vec<_>>();
+    let mut combined = fuse(
+        character,
+        &nonempty,
+        FusionConfig {
+            mode: FusionMode::Rrf {
+                k: match memory_mode {
+                    FusionMode::Rrf { k } => k,
+                    _ => 60,
+                },
+            },
+            limit: config.limit.max(retriever.rerank_candidate_limit()),
+            minimum_graph: 0,
+        },
+    )?;
+    retriever.rerank_fused(query, &mut combined).await?;
+    combined.truncate(config.limit);
+    render_generation_selection(
+        character,
+        memories,
+        islands,
+        relations,
+        view,
+        window,
+        query,
+        config,
+        combined,
+        Some((space, cost)),
+    )
+}
+
+fn render_generation_selection(
+    character: CharacterId,
+    memories: &[MemoryRecord],
+    islands: &[MemoryRecord],
+    relations: &[MemoryRelation],
+    view: &MitaView,
+    window: &HistoryWindow,
+    query: &str,
+    config: HistorySearchConfig,
+    selected: Vec<FusedHit>,
+    semantic: Option<(EmbeddingSpace, RetrievalCost)>,
+) -> Result<Option<String>, GenerationFusionError> {
+    if view.character() != character || !window.matches(view) {
+        return Err(GenerationFusionError::StaleSelection);
+    }
+    if selected.len() > config.limit || config.limit > 8 || config.max_content_chars > 1200 {
+        return Err(GenerationFusionError::InvalidEvidence);
+    }
+    let mut chosen_memory = Vec::new();
+    let mut chosen_history = Vec::new();
+    for hit in selected {
+        if hit.key.character != character {
+            return Err(GenerationFusionError::InvalidEvidence);
+        }
+        match hit.key.source {
+            RetrievalSource::Memory => {
+                let Some(record) = memories.iter().find(|record| {
+                    record.id.0.to_string() == hit.key.id
+                        && record.content == hit.content
+                        && matches!(record.kind, MemoryKind::Fact | MemoryKind::RagOnly)
+                        && record.state == MemoryState::Active
+                }) else {
+                    return Err(GenerationFusionError::InvalidEvidence);
+                };
+                chosen_memory.push(record);
+            }
+            RetrievalSource::History => chosen_history.push(hit),
+            _ => return Err(GenerationFusionError::InvalidEvidence),
+        }
+    }
+    let (memory_text, _) = render_ranked_memory_context_scoped(chosen_memory.into_iter(), false);
+    let (space, cost) = match semantic {
+        Some((space, cost)) => (Some(space), Some(cost)),
+        None => (None, None),
+    };
+    let history = HistorySearchResult {
         status: if chosen_history.is_empty() {
             HistorySearchStatus::NoMatches
         } else {
             HistorySearchStatus::Selected
         },
         hits: chosen_history,
-        branch: history.branch,
-        through: history.through,
-        embedding_space: None,
-        cost: None,
+        branch: view.branch,
+        through: view.through,
+        embedding_space: space,
+        cost,
     };
     let history_text = render_archived_history_evidence(
         character,
         view,
         window,
-        &history_result,
+        &history,
         config.limit,
         config.max_content_chars,
     )?;
-    let mut sections = Vec::new();
-    for section in [
+    let sections = [
         render_memory_islands(islands),
-        facts,
+        memory_text,
         render_relation_context(relations, query),
         history_text,
-    ] {
-        if let Some(section) = section {
-            sections.push(section);
-        }
-    }
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     Ok((!sections.is_empty()).then(|| sections.join("\n")))
 }

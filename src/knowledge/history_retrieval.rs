@@ -77,7 +77,7 @@ pub enum HistorySearchError {
     Embedding(#[from] EmbeddingError),
 }
 
-fn validate(
+pub(crate) fn validate(
     character: CharacterId,
     view: &MitaView,
     query: &str,
@@ -111,7 +111,7 @@ fn candidates(view: &MitaView, max_content_chars: usize) -> Vec<ProjectedMessage
         .collect()
 }
 
-fn scoped_candidates(
+pub(crate) fn scoped_candidates(
     view: &MitaView,
     max_content_chars: usize,
     window: Option<&HistoryWindow>,
@@ -127,7 +127,7 @@ fn scoped_candidates(
         .collect())
 }
 
-fn hit(
+pub(crate) fn hit(
     character: CharacterId,
     view: &MitaView,
     message: &ProjectedMessage,
@@ -160,7 +160,7 @@ fn hit(
     }
 }
 
-fn lexical_bucket(
+pub(crate) fn lexical_bucket(
     character: CharacterId,
     view: &MitaView,
     messages: &[ProjectedMessage],

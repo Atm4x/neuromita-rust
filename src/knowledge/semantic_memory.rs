@@ -401,6 +401,32 @@ impl SemanticMemoryRetriever {
             .await
     }
 
+    /// Score one caller-admitted Memory+History corpus using one query embedding.
+    /// Source identity remains typed in the existing derived embedding cache.
+    pub(crate) async fn score_joint_generation(
+        &self,
+        character: CharacterId,
+        memories: &[MemoryRecord],
+        messages: &[ProjectedMessage],
+        query: &str,
+    ) -> Result<(EmbeddingSpace, Vec<f64>, Vec<f64>, RetrievalCost), EmbeddingError> {
+        let sources = memories
+            .iter()
+            .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
+            .chain(messages.iter().map(|message| {
+                (
+                    CachedSourceId::History(message.event_id),
+                    message.content.as_str(),
+                )
+            }))
+            .collect::<Vec<_>>();
+        let (space, similarities, cost) = self
+            .score_canonical_documents(character, &sources, query)
+            .await?;
+        let (memory, history) = similarities.split_at(memories.len());
+        Ok((space, memory.to_vec(), history.to_vec(), cost))
+    }
+
     /// Only source identity + content + immutable model-space enter this cache.
     /// No Timeline membership, branch visibility, or historical access survives
     /// between calls; each caller must supply its freshly captured projection.
