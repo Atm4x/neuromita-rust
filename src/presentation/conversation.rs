@@ -6,9 +6,7 @@ use tokio::sync::watch;
 use super::{BoundProperty, CharactersPresenter, ChatModel, ChatPresenter, PresenterError};
 use crate::{
     character::{CharacterError, CharacterId, CharacterState},
-    generation::{
-        PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetId, ProviderTemplate,
-    },
+    generation::{PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetId},
     request::{CancelResult, RequestHandle, RequestId},
     settings::{PresetSelection, SettingsError, SettingsOwner, SettingsSnapshot, Volume},
     timeline::{
@@ -63,6 +61,7 @@ pub struct ConversationSnapshot {
     pub requests: Arc<ChatModel>,
     pub settings: Arc<SettingsSnapshot>,
     pub preset: PresetId,
+    pub preset_name: Option<String>,
     pub model: Result<String, PresetCatalogError>,
 }
 
@@ -227,9 +226,14 @@ impl ConversationPresenter {
             .presets
             .get(preset)
             .and_then(|value| value.ok_or(PresetCatalogError::NotFound(preset)))
-            .map(|resolved| match resolved.template() {
-                ProviderTemplate::Gemini(template) => template.model().to_owned(),
-            });
+            .map(|resolved| resolved.template().model().to_owned());
+        let preset_name = self
+            .presets
+            .observe()
+            .borrow()
+            .entries
+            .get(&preset)
+            .map(|record| record.name.clone());
         Ok(ConversationSnapshot {
             character,
             at,
@@ -238,6 +242,7 @@ impl ConversationPresenter {
             requests,
             settings,
             preset,
+            preset_name,
             model,
         })
     }

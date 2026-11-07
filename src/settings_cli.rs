@@ -5,7 +5,7 @@ use neuromita::settings::{JsonSettingsRepository, SettingsImportFormat};
 pub const HELP: &str = "neuromita settings export --source STORE.json --destination BACKUP.json\n\
     neuromita settings import --source BACKUP.json --destination STORE.json [--format rust|python]\n\n\
     Offline operations: no Core and no GEMINI_API_KEY. Stop the application first.\n\
-    Rust schema 1 is migrated to schema 2; import replaces the whole settings file.\n\
+    Only the current strict Rust dev settings format is accepted; no dev migrations.\n\
     The default format is rust. Python migration is an unimplemented extension point.\n\
     Preset bodies, credentials and Timeline are not included.\n";
 
@@ -57,9 +57,8 @@ pub fn run(arguments: Vec<OsString>) -> Result<(), Box<dyn Error>> {
         JsonSettingsRepository::new(source).export_to(&destination)?
     };
     println!(
-        "{} full Rust AppSettings (schema {}, revision {})",
+        "{} full Rust AppSettings (revision {})",
         if import { "Imported" } else { "Exported" },
-        transfer.stored().schema_version,
         transfer.stored().revision
     );
     Ok(())

@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
 
 use super::GeminiTemplate;
 use crate::{
     character::CharacterContext,
     generation::{
-        GenerationError,
+        GenerationError, PromptMessage, PromptRole, ProviderUsage,
         conversation::{LlmConversation, LlmRole},
         structured::{StructuredResponse, gemini_message_schema},
     },
@@ -19,7 +21,8 @@ use crate::{
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GenerateContent {
-    system_instruction: Content,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<Content>,
     contents: Vec<Content>,
     generation_config: Config,
 }
@@ -42,11 +45,21 @@ struct Part {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Config {
-    temperature: f32,
-    max_output_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<Value>,
     candidate_count: u32,
-    response_mime_type: String,
-    response_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_schema: Option<Value>,
 }
 
 fn content(role: Option<&str>, text: &str) -> Content {
@@ -61,7 +74,7 @@ fn content(role: Option<&str>, text: &str) -> Content {
 
 #[cfg(test)]
 fn history_contents(view: &MitaView) -> Vec<Content> {
-    project_history(view, crate::identity::CharacterId::Mita, None)
+    project_history(view, crate::identity::CharacterId::Crazy, None)
         .0
         .into_iter()
         .map(|message| {
@@ -82,33 +95,124 @@ pub(super) fn encode(context: CharacterContext, template: &GeminiTemplate) -> Ge
     encode_with_memory(context, template, &selected)
 }
 
+#[cfg(test)]
 pub(super) fn encode_with_memory(
     context: CharacterContext,
     template: &GeminiTemplate,
     memory: &Option<String>,
 ) -> GenerateContent {
+    encode_observed(context, template, memory).body
+}
+
+pub(super) struct EncodedRequest {
+    pub(super) body: GenerateContent,
+    pub(super) prompt: Vec<PromptMessage>,
+}
+
+pub(super) fn encode_observed(
+    context: CharacterContext,
+    template: &GeminiTemplate,
+    memory: &Option<String>,
+) -> EncodedRequest {
     let conversation = LlmConversation::from_context_with_memory(&context, memory);
-    GenerateContent {
-        system_instruction: content(None, &conversation.system_instruction),
-        contents: conversation
-            .messages
-            .into_iter()
+    let mut prompt = Vec::with_capacity(conversation.messages.len() + 1);
+    prompt.push(PromptMessage {
+        role: PromptRole::System,
+        text: Arc::from(conversation.system_instruction.as_str()),
+    });
+    prompt.extend(conversation.messages.iter().map(|message| PromptMessage {
+        role: match message.role {
+            LlmRole::User => PromptRole::User,
+            LlmRole::Assistant => PromptRole::Assistant,
+        },
+        text: Arc::from(message.text.as_str()),
+    }));
+    encode_prompt(prompt, template)
+}
+
+fn encode_prompt(mut prompt: Vec<PromptMessage>, template: &GeminiTemplate) -> EncodedRequest {
+    if !template.options().structured_output {
+        prompt[0].text = format!(
+            "{}\nReturn only JSON conforming to this response schema:\n{}",
+            prompt[0].text,
+            gemini_message_schema()
+        )
+        .into();
+    }
+    let prompt = crate::generation::apply_message_transforms(prompt, template.transforms());
+    let mut prompt = crate::generation::apply_message_transforms(
+        prompt,
+        &[crate::generation::MessageTransform::SystemMessagesToUser {
+            tag: "[SYSTEM INFO]".into(),
+        }],
+    );
+    if let super::SystemInstructionMode::UserPrefix { tag } = &template.options().system_instruction
+    {
+        let instructions = prompt
+            .iter()
+            .filter(|m| m.role == PromptRole::System)
+            .map(|m| m.text.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        prompt.retain(|m| m.role != PromptRole::System);
+        if !instructions.trim().is_empty() {
+            let prefix = format!("{tag}\n{}\n\n", instructions.trim());
+            if let Some(message) = prompt.iter_mut().find(|m| m.role == PromptRole::User) {
+                message.text = format!("{prefix}{}", message.text).into();
+            } else {
+                prompt.insert(
+                    0,
+                    PromptMessage {
+                        role: PromptRole::User,
+                        text: prefix.into(),
+                    },
+                );
+            }
+        }
+    }
+    let instructions = prompt
+        .iter()
+        .filter(|m| m.role == PromptRole::System)
+        .map(|m| m.text.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let body = GenerateContent {
+        system_instruction: (!instructions.is_empty()).then(|| content(None, &instructions)),
+        contents: prompt
+            .iter()
+            .filter(|m| m.role != PromptRole::System)
             .map(|message| {
                 let role = match message.role {
-                    LlmRole::User => "user",
-                    LlmRole::Assistant => "model",
+                    PromptRole::Assistant => "model",
+                    _ => "user",
                 };
                 content(Some(role), &message.text)
             })
             .collect(),
         generation_config: Config {
-            temperature: template.settings().temperature(),
-            max_output_tokens: template.settings().max_output_tokens(),
+            temperature: template
+                .options()
+                .send_temperature
+                .then(|| template.settings().temperature()),
+            max_output_tokens: template
+                .options()
+                .send_max_output_tokens
+                .then(|| template.settings().max_output_tokens()),
+            top_p: template.options().top_p,
+            top_k: template.options().top_k,
+            thinking_config: template.options().thinking_json(),
             candidate_count: 1,
-            response_mime_type: "application/json".into(),
-            response_schema: gemini_message_schema(),
+            response_mime_type: template
+                .options()
+                .structured_output
+                .then(|| "application/json".into()),
+            response_schema: template
+                .options()
+                .structured_output
+                .then(gemini_message_schema),
         },
-    }
+    };
+    EncodedRequest { body, prompt }
 }
 
 #[derive(Deserialize)]
@@ -177,6 +281,50 @@ pub(super) fn decode(bytes: &[u8]) -> Result<StructuredResponse, GenerationError
     StructuredResponse::parse(&text)
 }
 
+type ResponseObservation = crate::generation::http::ResponseMetadata;
+
+pub(super) fn observation_metadata(bytes: &[u8]) -> ResponseObservation {
+    let Ok(Value::Object(root)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return ResponseObservation::default();
+    };
+    let answer_text = root
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part.get("thought").and_then(Value::as_bool) != Some(true))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<String>()
+        })
+        .map(Arc::from);
+    let finish_reason = root
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.get("finishReason"))
+        .and_then(serde_json::Value::as_str)
+        .map(Arc::from);
+    let usage = root.get("usageMetadata").and_then(|usage| {
+        let field = |name| usage.get(name).and_then(serde_json::Value::as_u64);
+        let parsed = ProviderUsage {
+            input_tokens: field("promptTokenCount"),
+            output_tokens: field("candidatesTokenCount"),
+            total_tokens: field("totalTokenCount"),
+        };
+        (parsed != ProviderUsage::default()).then_some(parsed)
+    });
+    ResponseObservation {
+        answer_text,
+        finish_reason,
+        usage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -204,30 +352,30 @@ mod tests {
                 .unwrap();
         }
         let mut private = EventDraft::new(EventKind::PlayerMessage);
-        private.observers.insert(CharacterId::Mita);
+        private.observers.insert(CharacterId::Crazy);
         private.actor = Some("player".into());
         private.payload.insert("content".into(), json!("secret"));
         let secret_id = private.id;
         add(&mut repository, branch, "private", private);
         let mut other = EventDraft::new(EventKind::PlayerMessage);
-        other.observers.insert(CharacterId::KindMita);
+        other.observers.insert(CharacterId::Kind);
         other.actor = Some("player".into());
         other
             .payload
             .insert("content".into(), json!("other secret"));
         add(&mut repository, branch, "other", other);
         let mut assistant = EventDraft::new(EventKind::CharacterMessage);
-        assistant.observers.insert(CharacterId::Mita);
-        assistant.actor = Some(CharacterId::Mita.to_string());
+        assistant.observers.insert(CharacterId::Crazy);
+        assistant.actor = Some(CharacterId::Crazy.to_string());
         assistant.payload.insert("content".into(), json!("I know"));
         add(&mut repository, branch, "assistant", assistant);
         let mut note = EventDraft::new(EventKind::SessionNote);
-        note.observers.insert(CharacterId::Mita);
+        note.observers.insert(CharacterId::Crazy);
         note.payload
             .insert("content".into(), json!("private world note"));
         add(&mut repository, branch, "note", note);
         let visible =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&visible);
         let encoded: Vec<_> = contents
             .iter()
@@ -246,22 +394,22 @@ mod tests {
         assert!(!format!("{encoded:?}").contains("other secret"));
 
         let mut hidden = EventDraft::new(EventKind::MessageHidden);
-        hidden.observers.insert(CharacterId::Mita);
+        hidden.observers.insert(CharacterId::Crazy);
         hidden
             .payload
             .insert("event_ids".into(), json!([secret_id.0.to_string()]));
         add(&mut repository, branch, "hide", hidden);
         let after_hide =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&after_hide);
         assert_eq!(contents.len(), 2);
         assert_eq!(serde_json::to_value(&contents[0]).unwrap()["role"], "model");
 
         let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-        reset.observers.insert(CharacterId::Mita);
+        reset.observers.insert(CharacterId::Crazy);
         add(&mut repository, branch, "reset", reset);
         let after_reset =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let contents = history_contents(&after_reset);
         assert!(contents.is_empty());
     }
@@ -288,11 +436,11 @@ mod tests {
             match kind {
                 EventKind::PlayerMessage => draft.actor = Some("player".into()),
                 EventKind::CharacterObservation => {
-                    draft.actor = Some(CharacterId::Mita.to_string())
+                    draft.actor = Some(CharacterId::Crazy.to_string())
                 }
                 _ => {}
             }
-            draft.observers.insert(CharacterId::Mita);
+            draft.observers.insert(CharacterId::Crazy);
             draft.payload.insert("content".into(), json!(content));
             let head = repository.branch(branch).unwrap().head_sequence;
             repository
@@ -301,12 +449,12 @@ mod tests {
         }
 
         let before_question =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, Some(1))
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, Some(1))
                 .unwrap();
         assert_eq!(history_contents(&before_question).len(), 1);
 
         let when_generation_starts =
-            TimelineMessageQueries::capture(&repository, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&repository, branch, CharacterId::Crazy, None).unwrap();
         let encoded: Vec<_> = history_contents(&when_generation_starts)
             .iter()
             .map(|message| serde_json::to_value(message).unwrap())
@@ -339,7 +487,7 @@ mod tests {
         for (key, content) in [("target", "old question"), ("newer", "new question")] {
             let mut draft = EventDraft::new(EventKind::PlayerMessage);
             draft.actor = Some("player".into());
-            draft.observers.insert(CharacterId::Mita);
+            draft.observers.insert(CharacterId::Crazy);
             draft.payload.insert("content".into(), json!(content));
             ids.push(draft.id);
             let head = store.branch(branch).unwrap().head_sequence;
@@ -348,11 +496,12 @@ mod tests {
                 .unwrap();
         }
         let view =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
-            character_id: CharacterId::Mita,
+            character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
+            runtime_context: None,
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
@@ -387,10 +536,13 @@ mod tests {
                     generation: 1,
                 },
                 context_head: 2,
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 context_epoch: 0,
                 trigger: Some(ids[0]),
             },
+            game: None,
+            game_key: None,
+            game_guard: None,
         };
         let template = GeminiTemplate::google(
             "test-model",
@@ -434,17 +586,17 @@ mod tests {
         let mut store = TimelineStore::new();
         store.create_session(SessionId::new(), branch).unwrap();
         let mut cause = EventDraft::new(EventKind::UnityEvent);
-        cause.observers.insert(CharacterId::Mita);
+        cause.observers.insert(CharacterId::Crazy);
         cause.payload.insert("content".into(), json!("door opened"));
         let cause_id = cause.id;
         let mut question = EventDraft::new(EventKind::PlayerMessage);
-        question.observers.insert(CharacterId::Mita);
+        question.observers.insert(CharacterId::Crazy);
         question.actor = Some("player".into());
         question
             .payload
             .insert("content".into(), json!("Why did the door open?"));
         let mut secret = EventDraft::new(EventKind::PlayerMessage);
-        secret.observers.insert(CharacterId::KindMita);
+        secret.observers.insert(CharacterId::Kind);
         secret.actor = Some("player".into());
         secret
             .payload
@@ -460,11 +612,12 @@ mod tests {
                 .unwrap();
         }
         let view =
-            TimelineMessageQueries::capture(&store, branch, CharacterId::Mita, None).unwrap();
+            TimelineMessageQueries::capture(&store, branch, CharacterId::Crazy, None).unwrap();
         let context = CharacterContext {
-            character_id: CharacterId::Mita,
+            character_id: CharacterId::Crazy,
             description: Arc::from("Mita"),
             prompt: Arc::from("Speak naturally"),
+            runtime_context: None,
             state: CharacterState {
                 accepted_replies: 0,
                 revision: 0,
@@ -503,10 +656,13 @@ mod tests {
                     generation: 1,
                 },
                 context_head: 3,
-                character: CharacterId::Mita,
+                character: CharacterId::Crazy,
                 context_epoch: 0,
                 trigger: None,
             },
+            game: None,
+            game_key: None,
+            game_guard: None,
         };
         let template = GeminiTemplate::google(
             "test-model",
@@ -547,6 +703,11 @@ mod tests {
     #[test]
     fn reasoning_is_not_returned_as_answer() {
         let body = json!({"candidates":[{"content":{"parts":[{"text":"secret thought","thought":true},{"text":"{\"segments\":[{\"text\":\"answer\"}]}"}]},"finishReason":"STOP"}]});
+        let observation = observation_metadata(&serde_json::to_vec(&body).unwrap());
+        assert_eq!(
+            observation.answer_text.as_deref(),
+            Some("{\"segments\":[{\"text\":\"answer\"}]}")
+        );
         assert_eq!(
             decode(&serde_json::to_vec(&body).unwrap())
                 .unwrap()
@@ -582,5 +743,71 @@ mod tests {
             assert!(decode(&serde_json::to_vec(&body).unwrap()).is_err());
         }
         assert!(decode(b"not json").is_err());
+    }
+
+    #[test]
+    fn wire_and_diagnostic_prompt_use_the_same_transformed_messages_and_enabled_options() {
+        use crate::generation::{
+            MessageTransform,
+            gemini::{GeminiRequestOptions, GeminiThinking, ThinkingLevel},
+        };
+        let settings =
+            super::super::GenerationSettings::new(1.0, 3000, std::time::Duration::from_secs(2))
+                .unwrap();
+        let template = GeminiTemplate::google("fixture-model", "fixture-key", settings)
+            .unwrap()
+            .with_transforms(vec![
+                MessageTransform::SystemToUserPrefix {
+                    tag: "[SYSTEM CONTEXT]".into(),
+                },
+                MessageTransform::EnsureAlternatingRoles,
+            ])
+            .with_options(GeminiRequestOptions {
+                system_instruction: super::super::SystemInstructionMode::Native,
+                send_temperature: false,
+                send_max_output_tokens: true,
+                top_p: None,
+                top_k: None,
+                thinking: Some(GeminiThinking::Level {
+                    level: ThinkingLevel::Minimal,
+                    include_thoughts: None,
+                }),
+                structured_output: true,
+            })
+            .unwrap();
+        let encoded = encode_prompt(
+            vec![
+                PromptMessage {
+                    role: PromptRole::System,
+                    text: "instructions".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::User,
+                    text: "hello".into(),
+                },
+                PromptMessage {
+                    role: PromptRole::User,
+                    text: "world".into(),
+                },
+            ],
+            &template,
+        );
+        let body = serde_json::to_value(encoded.body).unwrap();
+        assert!(body.get("systemInstruction").is_none());
+        assert!(body["generationConfig"].get("temperature").is_none());
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 3000);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel":"minimal"})
+        );
+        assert_eq!(body["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            body["contents"][0]["parts"][0]["text"],
+            encoded.prompt[0].text.as_ref()
+        );
+        assert_eq!(
+            encoded.prompt[0].text.as_ref(),
+            "[SYSTEM CONTEXT] instructions\n\nhello\n\nworld"
+        );
     }
 }

@@ -22,8 +22,9 @@ use crate::{
     identity::EventId,
     lifecycle::Lifecycle,
     request::{
-        InitiateRequest, ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId,
-        RequestOutcome, RequestSnapshot, RequestSource, RequestState, SubmitError, UserInput,
+        DiagnosticLookupError, DiagnosticScope, DiagnosticSection, InitiateRequest,
+        ProcessingStage, ReactRequest, ReplyRequest, RequestHandle, RequestId, RequestOutcome,
+        RequestSnapshot, RequestSource, RequestState, SubmitError,
     },
     runtime::{self, ApiBindings},
     settings::{SettingsError, VoiceSettings, Volume},
@@ -32,7 +33,6 @@ use crate::{
 
 pub struct ServerConfig {
     pub bind: SocketAddr,
-    pub test_character: CharacterId,
     pub max_clients: NonZeroUsize,
     pub outbound_capacity: NonZeroUsize,
     pub max_command_bytes: NonZeroUsize,
@@ -40,10 +40,9 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn test_protocol(bind: SocketAddr, test_character: CharacterId) -> Self {
+    pub fn local_control(bind: SocketAddr) -> Self {
         Self {
             bind,
-            test_character,
             max_clients: NonZeroUsize::new(16).expect("positive"),
             outbound_capacity: NonZeroUsize::new(64).expect("positive"),
             max_command_bytes: NonZeroUsize::new(65536).expect("positive"),
@@ -96,6 +95,12 @@ pub struct ServerLifecycle {
 }
 impl ServerLifecycle {
     pub async fn bind(config: ServerConfig) -> io::Result<(Self, ServerHandle)> {
+        if !config.bind.ip().is_loopback() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "LocalControl requires a loopback bind address",
+            ));
+        }
         let listener = TcpListener::bind(config.bind).await?;
         let address = listener.local_addr()?;
         let snapshot = ServerSnapshot {
@@ -203,7 +208,7 @@ macro_rules! commands {
 }
 
 commands! {
-    Ping {}, Methods {}, ServerStatus {}, Test {},
+    Ping {}, Methods {}, ServerStatus {},
     PublishMessage {
         event_id: Uuid,
         occurred_at_unix_ms: u64,
@@ -236,6 +241,22 @@ commands! {
     Cancel {
         request_id: Uuid,
     },
+    Diagnostics {
+        character: CharacterId,
+        request_id: Uuid,
+        #[serde(default)]
+        section: Option<String>,
+    },
+    DiagnosticsRecent {
+        character: CharacterId,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    DiagnosticsErrors {
+        character: CharacterId,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Settings {},
     SetVolume {
         value: Volume,
@@ -253,6 +274,9 @@ enum ErrorCode {
     QueueFull,
     ReceiptCapacity,
     OwnershipDenied,
+    DiagnosticsUnavailable,
+    DiagnosticsNotFound,
+    DiagnosticsExpired,
     CoreUnavailable,
     SettingsConflict,
     SettingsStorage,
@@ -267,12 +291,6 @@ fn error_response(id: Option<Uuid>, code: ErrorCode, message: impl std::fmt::Dis
 }
 
 fn decode(line: &str) -> Result<Envelope, Value> {
-    if line == "test" {
-        return Ok(Envelope {
-            command_id: Uuid::new_v4(),
-            command: Command::Test {},
-        });
-    }
     match serde_json::from_str::<Envelope>(line) {
         Ok(envelope) => Ok(envelope),
         Err(error) => {
@@ -310,6 +328,19 @@ fn settings_code(error: &SettingsError) -> ErrorCode {
         SettingsError::Conflict { .. } => ErrorCode::SettingsConflict,
         SettingsError::Storage(_) => ErrorCode::SettingsStorage,
         SettingsError::Uninitialized | SettingsError::Stopped => ErrorCode::CoreUnavailable,
+    }
+}
+
+fn diagnostic_code(error: &DiagnosticLookupError) -> ErrorCode {
+    match error {
+        DiagnosticLookupError::Unavailable | DiagnosticLookupError::Stopped => {
+            ErrorCode::DiagnosticsUnavailable
+        }
+        DiagnosticLookupError::NotFound(_) | DiagnosticLookupError::Empty => {
+            ErrorCode::DiagnosticsNotFound
+        }
+        DiagnosticLookupError::Expired(_) => ErrorCode::DiagnosticsExpired,
+        DiagnosticLookupError::OwnershipDenied(_) => ErrorCode::OwnershipDenied,
     }
 }
 
@@ -481,7 +512,7 @@ async fn client(
                 }
                 continue;
             }
-            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Test {} | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
+            let track = matches!(envelope.command, Command::PublishMessage { .. } | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. });
             let eviction = if track && receipts.len() >= config.receipt_capacity.get() {
                 match receipts.iter().position(|receipt| match &receipt.result {
                     ReceiptResult::Published(_) => true,
@@ -521,15 +552,9 @@ async fn client(
                         Err(error) => send(&outbound, error_response(Some(envelope.command_id), submit_code(&error), error), &stop).await?,
                     }
                 }
-                Command::Test {} | Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. } => {
+                Command::Reply { .. } | Command::React { .. } | Command::Initiate { .. } => {
                     let source = RequestSource::Client(client_id);
                     let handle = match envelope.command {
-                        Command::Test {} => {
-                            UserInput::new("test".to_owned())
-                                .map_err(|error| (ErrorCode::InvalidValue, error.to_string()))
-                                .and_then(|input| api.chat.publish_message(config.test_character, input).map_err(|error| (submit_code(&error), error.to_string())))
-                                .and_then(|message| api.chat.send(ReplyRequest::new(config.test_character, message, source)).map_err(|error| (submit_code(&error), error.to_string())))
-                        }
                         Command::Reply { character, message_id, audience } => {
                             api.chat.send(ReplyRequest::new(character, EventId(message_id), source).with_audience(audience.into_audience(Some(character)))).map_err(|error| (submit_code(&error), error.to_string()))
                         }
@@ -565,6 +590,60 @@ async fn client(
                     };
                     send(&outbound, response, &stop).await?;
                 }
+                Command::Diagnostics { character, request_id, section } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => {
+                            let section = match section.as_deref() {
+                                None => Ok(DiagnosticSection::All),
+                                Some(value) => DiagnosticSection::parse(value).ok_or_else(|| {
+                                    error_response(Some(envelope.command_id), ErrorCode::InvalidValue, "unknown diagnostic section")
+                                }),
+                            };
+                            match section {
+                                Err(error) => error,
+                                Ok(section) => match access.request(RequestId(request_id)) {
+                                    Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                                    Ok(record) => match record.export(section) {
+                                        Err(error) => error_response(Some(envelope.command_id), ErrorCode::InvalidValue, error),
+                                        Ok(text) => {
+                                            let content = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+                                            json!({"type":"diagnostics", "command_id":envelope.command_id,
+                                                "request_id":request_id, "section":section.to_string(),
+                                                "content":content})
+                                        }
+                                    },
+                                },
+                            }
+                        }
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::DiagnosticsRecent { character, limit } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => match access.recent(limit.unwrap_or(16).clamp(1, 64)) {
+                            Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                            Ok(rows) => json!({"type":"diagnostics_recent", "command_id":envelope.command_id,
+                                "character":character, "requests":rows}),
+                        },
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
+                Command::DiagnosticsErrors { character, limit } => {
+                    let scope = DiagnosticScope::owner(character, RequestSource::Client(client_id));
+                    let response = match api.chat.diagnostics(scope) {
+                        Err(error) => error_response(Some(envelope.command_id), submit_code(&error), error),
+                        Ok(access) => match access.errors(limit.unwrap_or(16).clamp(1, 64)) {
+                            Err(error) => error_response(Some(envelope.command_id), diagnostic_code(&error), error),
+                            Ok(errors) => json!({"type":"diagnostics_errors", "command_id":envelope.command_id,
+                                "character":character, "errors":errors}),
+                        },
+                    };
+                    send(&outbound, response, &stop).await?;
+                }
                 Command::Settings {} => {
                     let response = match api.settings.snapshot_all() {
                         Ok(snapshot) => json!({"type":"settings","command_id":envelope.command_id,"revision":snapshot.revision,"settings":snapshot.values}),
@@ -590,7 +669,15 @@ async fn client(
 }
 
 pub fn status(snapshot: &RequestSnapshot) -> Value {
+    status_with_audio(snapshot, true)
+}
+
+pub(crate) fn status_with_audio(snapshot: &RequestSnapshot, include_audio: bool) -> Value {
     let mut message = json!({"type":"request_status","request_id":snapshot.metadata.id.0,"character":snapshot.metadata.character_id.to_string(),"revision":snapshot.revision,"can_cancel":snapshot.can_cancel()});
+    message["dataset_sample_id"] = json!(snapshot.dataset.sample_id);
+    if let Some(warning) = &snapshot.dataset.warning {
+        message["dataset_warning"] = json!(warning);
+    }
     match &snapshot.state {
         RequestState::Pending => message["state"] = json!("pending"),
         RequestState::Processing(stage) => {
@@ -614,7 +701,7 @@ pub fn status(snapshot: &RequestSnapshot) -> Value {
                     message["outcome"] = json!("success");
                     message["text"] = json!(response.text);
                     message["event_id"] = json!(response.event_id);
-                    if let Some(audio) = &response.audio {
+                    if include_audio && let Some(audio) = &response.audio {
                         message["audio"] = json!({"format":"wave","bytes":audio.bytes.as_ref()});
                     }
                 }

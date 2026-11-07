@@ -59,7 +59,7 @@ fn contract(repo: &mut dyn TimelineRepository) {
     let root = BranchId::new();
     let info = repo.create_session(session, root).unwrap();
     assert_eq!(repo.create_session(session, root), Ok(info));
-    let mut first = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let mut first = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     first
         .payload
         .insert("value".into(), json!({"nested": [2, 4]}));
@@ -73,7 +73,7 @@ fn contract(repo: &mut dyn TimelineRepository) {
         repo,
         root,
         "advance",
-        mk(EventKind::UnityEvent, &[CharacterId::Mita]),
+        mk(EventKind::UnityEvent, &[CharacterId::Crazy]),
     );
     assert_eq!(
         repo.append(root, 0, "first", json!({"a": 1}), vec![replay.clone()]),
@@ -83,13 +83,12 @@ fn contract(repo: &mut dyn TimelineRepository) {
         repo.append(root, 0, "first", json!({"a": 2}), vec![replay]),
         Err(TimelineError::Conflict)
     );
-    assert!(repo.knows(root, CharacterId::Mita, first_id, None).unwrap());
     assert!(
-        !repo
-            .knows(root, CharacterId::KindMita, first_id, None)
+        repo.knows(root, CharacterId::Crazy, first_id, None)
             .unwrap()
     );
-    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::KindMita]);
+    assert!(!repo.knows(root, CharacterId::Kind, first_id, None).unwrap());
+    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::Kind]);
     retelling.actor = Some("player".into());
     retelling.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
@@ -97,13 +96,9 @@ fn contract(repo: &mut dyn TimelineRepository) {
     });
     let retold_id = retelling.id;
     append(repo, root, "retelling", retelling);
+    assert!(!repo.knows(root, CharacterId::Kind, first_id, None).unwrap());
     assert!(
-        !repo
-            .knows(root, CharacterId::KindMita, first_id, None)
-            .unwrap()
-    );
-    assert!(
-        repo.knows(root, CharacterId::KindMita, retold_id, None)
+        repo.knows(root, CharacterId::Kind, retold_id, None)
             .unwrap()
     );
     let mut checkpoint = mk(EventKind::Checkpoint, &[]);
@@ -115,7 +110,7 @@ fn contract(repo: &mut dyn TimelineRepository) {
     let child = BranchId::new();
     let info = repo.fork(root, checkpoint_id, child).unwrap();
     assert_eq!(repo.fork(root, checkpoint_id, child), Ok(info));
-    let old_future = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let old_future = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     let old_future_id = old_future.id;
     append(repo, root, "future", old_future);
     assert!(
@@ -148,7 +143,7 @@ fn committed_facts_and_receipts_survive_reopen() {
     let branch = BranchId::new();
     let mut original = db.open();
     original.create_session(session, branch).unwrap();
-    let draft = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let draft = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     let committed = original
         .append(branch, 0, "once", json!({"id": 1}), vec![draft.clone()])
         .unwrap();
@@ -274,9 +269,9 @@ fn page_contract(
     repo.create_session(session, root).unwrap();
     for i in 0..9 {
         let observers = if i % 2 == 0 {
-            &[CharacterId::Mita][..]
+            &[CharacterId::Crazy][..]
         } else {
-            &[CharacterId::KindMita][..]
+            &[CharacterId::Kind][..]
         };
         append(
             repo,
@@ -296,14 +291,14 @@ fn page_contract(
             repo,
             child,
             &format!("child:{i}"),
-            mk(EventKind::UnityEvent, &[CharacterId::Mita]),
+            mk(EventKind::UnityEvent, &[CharacterId::Crazy]),
         );
     }
     append(
         repo,
         root,
         "unrelated parent future",
-        mk(EventKind::UnityEvent, &[CharacterId::KindMita]),
+        mk(EventKind::UnityEvent, &[CharacterId::Kind]),
     );
     let mut all = Vec::new();
     let mut observed = Vec::new();
@@ -311,7 +306,7 @@ fn page_contract(
         for through in [None, Some(2), Some(9), Some(10), Some(13), Some(15)] {
             for limit in [1, 2, 4, 100] {
                 let result = repo.read(child, after, through, limit, None);
-                let witness = repo.read(child, after, through, limit, Some(CharacterId::Mita));
+                let witness = repo.read(child, after, through, limit, Some(CharacterId::Crazy));
                 if through.is_some_and(|upper| upper > 15) {
                     assert!(result.is_err());
                     assert!(witness.is_err());
@@ -355,14 +350,14 @@ fn workspace_pins_validate_against_sqlite_without_a_timeline_store_dependency() 
     repo.create_session(SessionId::new(), root).unwrap();
     let mut workspace = SessionWorkspace::default();
     workspace.select(&repo, root, None).unwrap();
-    let pin = workspace.capture(&repo, CharacterId::Mita, None).unwrap();
+    let pin = workspace.capture(&repo, CharacterId::Crazy, None).unwrap();
     append(&mut repo, root, "unrelated", mk(EventKind::UnityEvent, &[]));
     assert_eq!(workspace.assert_current(&repo, pin), Ok(()));
     append(
         &mut repo,
         root,
         "reset",
-        mk(EventKind::CharacterContextReset, &[CharacterId::Mita]),
+        mk(EventKind::CharacterContextReset, &[CharacterId::Crazy]),
     );
     assert_eq!(
         workspace.assert_current(&repo, pin),
@@ -411,7 +406,7 @@ fn cached_receipts_survive_reopen_and_stale_retry_returns_original_result() {
     let branch = BranchId::new();
     let mut repo = db.open();
     repo.create_session(SessionId::new(), branch).unwrap();
-    let original = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let original = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     let first = repo
         .append(
             branch,
@@ -459,10 +454,10 @@ fn branch_scoped_append_cache_keeps_sibling_worlds_and_receipts_independent() {
     repo.append(root, 0, "checkpoint", json!({}), vec![checkpoint])
         .unwrap();
     repo.fork(root, checkpoint_id, child).unwrap();
-    let mut root_event = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let mut root_event = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     root_event.external_message_id = Some("same-external".into());
     append(&mut repo, root, "parent-future", root_event.clone());
-    let mut child_event = mk(EventKind::UnityEvent, &[CharacterId::KindMita]);
+    let mut child_event = mk(EventKind::UnityEvent, &[CharacterId::Kind]);
     child_event.external_message_id = Some("same-external".into());
     let child_events = repo
         .append(
@@ -484,7 +479,7 @@ fn branch_scoped_append_cache_keeps_sibling_worlds_and_receipts_independent() {
         repo.append(child, 2, "child-future", json!({}), vec![child_event]),
         Ok(child_events)
     );
-    let fresh = mk(EventKind::UnityEvent, &[CharacterId::Mita]);
+    let fresh = mk(EventKind::UnityEvent, &[CharacterId::Crazy]);
     let root_result = repo
         .append(root, 2, "root-new", json!({}), vec![fresh.clone()])
         .unwrap();
@@ -507,7 +502,7 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
     for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
         repo.create_session(session, root).unwrap();
     }
-    let mut secret = mk(EventKind::PlayerMessage, &[CharacterId::Mita]);
+    let mut secret = mk(EventKind::PlayerMessage, &[CharacterId::Crazy]);
     secret.actor = Some("Player".into());
     secret.external_message_id = Some("secret-from-unity".into());
     let secret_id = secret.id;
@@ -524,14 +519,14 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
         repo.fork(root, checkpoint_id, child).unwrap();
         repo.fork(root, checkpoint_id, sibling).unwrap();
     }
-    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::KindMita]);
+    let mut retelling = mk(EventKind::PlayerMessage, &[CharacterId::Kind]);
     retelling.actor = Some("player".into());
     retelling.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
         event_id: secret_id,
     });
     let retold_id = retelling.id;
-    let mut reset = mk(EventKind::CharacterContextReset, &[CharacterId::KindMita]);
+    let mut reset = mk(EventKind::CharacterContextReset, &[CharacterId::Kind]);
     reset.external_message_id = Some("context-reset".into());
     for repo in [&mut sql as &mut dyn TimelineRepository, &mut memory] {
         let head = repo.branch(child).unwrap().head_sequence;
@@ -544,16 +539,16 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
     drop(sql);
     let mut sql = db.open();
     assert_eq!(
-        sql.knows(child, CharacterId::KindMita, secret_id, None),
+        sql.knows(child, CharacterId::Kind, secret_id, None),
         Ok(false)
     );
     assert_eq!(
-        sql.knows(sibling, CharacterId::KindMita, secret_id, None),
+        sql.knows(sibling, CharacterId::Kind, secret_id, None),
         Ok(false)
     );
     let head = sql.branch(child).unwrap().head_sequence;
-    let mut reply = mk(EventKind::CharacterMessage, &[CharacterId::KindMita]);
-    reply.actor = Some(CharacterId::KindMita.to_string());
+    let mut reply = mk(EventKind::CharacterMessage, &[CharacterId::Kind]);
+    reply.actor = Some(CharacterId::Kind.to_string());
     reply.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
         event_id: secret_id,
@@ -582,19 +577,19 @@ fn cold_index_matches_domain_knowledge_after_reset_and_cross_branch_disclosure()
     let actual = sql.append(child, head, "new-retelling", json!({}), commands);
     assert_eq!(actual, expected);
     assert_eq!(
-        sql.knows(child, CharacterId::KindMita, secret_id, None),
+        sql.knows(child, CharacterId::Kind, secret_id, None),
         Ok(false)
     );
     assert_eq!(
-        sql.knows(child, CharacterId::KindMita, new_retelling_id, None),
+        sql.knows(child, CharacterId::Kind, new_retelling_id, None),
         Ok(true)
     );
     assert_eq!(
-        sql.knows(child, CharacterId::KindMita, retold_id, None),
+        sql.knows(child, CharacterId::Kind, retold_id, None),
         Ok(false)
     );
     assert_eq!(
-        sql.knows(sibling, CharacterId::KindMita, secret_id, None),
+        sql.knows(sibling, CharacterId::Kind, secret_id, None),
         Ok(false)
     );
     let duplicated = mk(EventKind::UnityEvent, &[]);
@@ -619,7 +614,7 @@ fn historic_epoch_contract(repo: &mut dyn TimelineRepository) {
         repo,
         root,
         "root-mita-reset",
-        mk(EventKind::CharacterContextReset, &[CharacterId::Mita]),
+        mk(EventKind::CharacterContextReset, &[CharacterId::Crazy]),
     );
     let mut checkpoint = mk(EventKind::Checkpoint, &[]);
     checkpoint.payload.insert("snapshot".into(), json!({}));
@@ -631,39 +626,39 @@ fn historic_epoch_contract(repo: &mut dyn TimelineRepository) {
         repo,
         root,
         "root-kind-reset",
-        mk(EventKind::CharacterContextReset, &[CharacterId::KindMita]),
+        mk(EventKind::CharacterContextReset, &[CharacterId::Kind]),
     );
     append(
         repo,
         fork,
         "fork-mita-reset",
-        mk(EventKind::CharacterContextReset, &[CharacterId::Mita]),
+        mk(EventKind::CharacterContextReset, &[CharacterId::Crazy]),
     );
 
     assert_eq!(
-        repo.context_epoch_at(root, CharacterId::Mita, Some(0)),
+        repo.context_epoch_at(root, CharacterId::Crazy, Some(0)),
         Ok(0)
     );
     assert_eq!(
-        repo.context_epoch_at(root, CharacterId::Mita, Some(1)),
+        repo.context_epoch_at(root, CharacterId::Crazy, Some(1)),
         Ok(1)
     );
-    assert_eq!(repo.context_epoch(root, CharacterId::KindMita), Ok(3));
+    assert_eq!(repo.context_epoch(root, CharacterId::Kind), Ok(3));
     assert_eq!(
-        repo.context_epoch_at(fork, CharacterId::Mita, Some(1)),
-        Ok(1)
-    );
-    assert_eq!(
-        repo.context_epoch_at(fork, CharacterId::Mita, Some(fork_start)),
+        repo.context_epoch_at(fork, CharacterId::Crazy, Some(1)),
         Ok(1)
     );
     assert_eq!(
-        repo.context_epoch(fork, CharacterId::Mita),
+        repo.context_epoch_at(fork, CharacterId::Crazy, Some(fork_start)),
+        Ok(1)
+    );
+    assert_eq!(
+        repo.context_epoch(fork, CharacterId::Crazy),
         Ok(fork_start + 1)
     );
-    assert_eq!(repo.context_epoch(fork, CharacterId::KindMita), Ok(0));
+    assert_eq!(repo.context_epoch(fork, CharacterId::Kind), Ok(0));
     assert!(
-        repo.context_epoch_at(fork, CharacterId::Mita, Some(fork_start + 2))
+        repo.context_epoch_at(fork, CharacterId::Crazy, Some(fork_start + 2))
             .is_err()
     );
 }

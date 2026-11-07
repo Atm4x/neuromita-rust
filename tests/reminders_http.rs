@@ -232,7 +232,7 @@ async fn tool_add_uses_fixture_schema_persists_due_and_stays_private_from_neighb
     let mut server = GeminiServer::start().await;
     let app = start_app(&server.endpoint, Arc::clone(&clock)).await;
 
-    let first = request(CharacterId::Mita, "поставь напоминание");
+    let first = request(CharacterId::Crazy, "поставь напоминание");
     let call = server.next().await;
     assert!(call.path.contains(":generateContent?key=test-key "));
     let schema = &call.body["generationConfig"]["responseSchema"]["properties"];
@@ -246,7 +246,7 @@ async fn tool_add_uses_fixture_schema_persists_due_and_stays_private_from_neighb
     call.respond.send(ADD).unwrap();
     assert_accepted(finish(first).await);
 
-    let reminders = RemindersApi::list(CharacterId::Mita).await.unwrap();
+    let reminders = RemindersApi::list(CharacterId::Crazy).await.unwrap();
     assert_eq!(reminders.len(), 1);
     assert_eq!(reminders[0].text, SECRET);
     assert_eq!(
@@ -257,7 +257,7 @@ async fn tool_add_uses_fixture_schema_persists_due_and_stays_private_from_neighb
             .unwrap()
     );
 
-    let own = request(CharacterId::Mita, "покажи pending");
+    let own = request(CharacterId::Crazy, "покажи pending");
     let own_call = server.next().await;
     let own_prompt = prompt_text(&own_call.body);
     assert!(own_prompt.contains("[PENDING REMINDERS]"));
@@ -265,7 +265,7 @@ async fn tool_add_uses_fixture_schema_persists_due_and_stays_private_from_neighb
     own_call.respond.send(PLAIN).unwrap();
     assert_accepted(finish(own).await);
 
-    let neighbor = request(CharacterId::KindMita, "чужой prompt");
+    let neighbor = request(CharacterId::Kind, "чужой prompt");
     let neighbor_call = server.next().await;
     let neighbor_prompt = prompt_text(&neighbor_call.body);
     assert!(!neighbor_prompt.contains(SECRET));
@@ -285,19 +285,19 @@ async fn tool_list_result_is_really_present_in_the_next_prompt() {
     let app = start_app(&server.endpoint, Arc::clone(&clock)).await;
 
     RemindersApi::create(CreateReminder::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         "list-secret",
         DueSpec::after(Duration::from_secs(3600)).unwrap(),
     ))
     .await
     .unwrap();
 
-    let listed = request(CharacterId::Mita, "проверь список");
+    let listed = request(CharacterId::Crazy, "проверь список");
     let call = server.next().await;
     call.respond.send(LIST).unwrap();
     assert_accepted(finish(listed).await);
 
-    let next = request(CharacterId::Mita, "после list");
+    let next = request(CharacterId::Crazy, "после list");
     let next_call = server.next().await;
     let prompt = prompt_text(&next_call.body);
     assert!(prompt.contains("Активные напоминания: 1"), "{prompt}");
@@ -318,7 +318,7 @@ async fn tool_update_and_delete_commit_together() {
 
     for text in ["first", "second"] {
         RemindersApi::create(CreateReminder::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             text,
             DueSpec::after(Duration::from_secs(3600)).unwrap(),
         ))
@@ -326,11 +326,11 @@ async fn tool_update_and_delete_commit_together() {
         .unwrap();
     }
 
-    let changed = request(CharacterId::Mita, "обнови и удали");
+    let changed = request(CharacterId::Crazy, "обнови и удали");
     let call = server.next().await;
     call.respond.send(UPDATE_DELETE).unwrap();
     assert_accepted(finish(changed).await);
-    let reminders = RemindersApi::list(CharacterId::Mita).await.unwrap();
+    let reminders = RemindersApi::list(CharacterId::Crazy).await.unwrap();
     assert_eq!(reminders.len(), 1);
     assert_eq!(reminders[0].number, 1);
     assert_eq!(reminders[0].text, "first updated");

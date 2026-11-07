@@ -38,35 +38,35 @@ fn contract(
         "dialogue:player:1",
         ConversationSpeaker::Player,
         json!([{"type":"text", "text":"Private question"}]),
-        [CharacterId::Mita],
+        [CharacterId::Crazy],
     );
     incoming
         .audience
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::Mita));
+        .insert(ConversationSpeaker::Character(CharacterId::Crazy));
     incoming.audience.participants.extend([
         ConversationSpeaker::Player,
-        ConversationSpeaker::Character(CharacterId::Mita),
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
     let first = publish(repo, branch, incoming.clone()).unwrap();
     assert_eq!(first.sequence, 1);
     assert_eq!(first.draft.observers.len(), 1);
 
-    let before = TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None).unwrap();
+    let before = TimelineMessageQueries::capture(repo, branch, CharacterId::Crazy, None).unwrap();
     assert_eq!(before.count(), 1);
     let initial = before.provider_messages();
     assert_eq!(initial[0]["role"], "user");
     assert_eq!(initial[0]["speaker"], "player");
     assert_eq!(initial[0]["message_id"], "dialogue:player:1");
-    assert_eq!(initial[0]["targets"], json!(["mita"]));
+    assert_eq!(initial[0]["targets"], json!(["Crazy"]));
     assert_eq!(
         initial[0]["participants"],
-        json!(["player", "mita", "kind-mita"])
+        json!(["player", "Crazy", "Kind"])
     );
     assert_eq!(initial[0]["content"], incoming.content);
     assert_eq!(
-        TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None)
+        TimelineMessageQueries::capture(repo, branch, CharacterId::Kind, None)
             .unwrap()
             .count(),
         0,
@@ -79,7 +79,7 @@ fn contract(
     different
         .audience
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+        .insert(ConversationSpeaker::Character(CharacterId::Kind));
     assert_eq!(
         publish(repo, branch, different),
         Err(TimelineError::Conflict)
@@ -99,18 +99,18 @@ fn contract(
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 1);
 
     let mut assistant = ConversationMessage::new(
-        "dialogue:mita:1",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        "dialogue:Crazy:1",
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!("Answer"),
-        [CharacterId::KindMita],
+        [CharacterId::Kind],
     );
     assistant
         .audience
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+        .insert(ConversationSpeaker::Character(CharacterId::Kind));
     assistant.audience.participants.extend([
-        ConversationSpeaker::Character(CharacterId::Mita),
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
     assistant.links.push(CausalLink {
         relation: CausalRelation::ReplyTo,
@@ -121,21 +121,21 @@ fn contract(
     assert_eq!(answer.draft.observers.len(), 2);
     assert_eq!(repo.world(branch).unwrap().len(), 2);
 
-    let mita = TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None).unwrap();
-    let kind = TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None).unwrap();
+    let mita = TimelineMessageQueries::capture(repo, branch, CharacterId::Crazy, None).unwrap();
+    let kind = TimelineMessageQueries::capture(repo, branch, CharacterId::Kind, None).unwrap();
     assert_eq!(mita.count(), 2);
     assert_eq!(kind.count(), 1);
     assert_eq!(mita.provider_messages()[1]["role"], "assistant");
     assert_eq!(kind.provider_messages()[0]["role"], "user");
-    assert_eq!(kind.provider_messages()[0]["speaker"], "mita");
+    assert_eq!(kind.provider_messages()[0]["speaker"], "Crazy");
     assert_eq!(mita.messages()[1].event_id, kind.messages()[0].event_id);
     assert_eq!(kind.messages()[0].learned_at, 2);
 
     let mut retelling = ConversationMessage::new(
         "dialogue:kind:retelling",
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Kind),
         json!("Mita answered a question before you arrived"),
-        [CharacterId::Mita],
+        [CharacterId::Crazy],
     );
     retelling.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
@@ -144,31 +144,31 @@ fn contract(
     let retold = publish(repo, branch, retelling.clone()).unwrap();
     assert_eq!(retold.sequence, 3);
     assert_eq!(publish(repo, branch, retelling).unwrap(), retold);
-    let kind = TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None).unwrap();
+    let kind = TimelineMessageQueries::capture(repo, branch, CharacterId::Kind, None).unwrap();
     assert_eq!(kind.count(), 2);
     assert!(
         !repo
-            .knows(branch, CharacterId::KindMita, incoming.id, None)
+            .knows(branch, CharacterId::Kind, incoming.id, None)
             .unwrap()
     );
     assert!(
-        repo.knows(branch, CharacterId::KindMita, retold.draft.id, None)
+        repo.knows(branch, CharacterId::Kind, retold.draft.id, None)
             .unwrap()
     );
     assert_eq!(before.count(), 1);
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::Mita);
+    reset.observers.insert(CharacterId::Crazy);
     repo.append(branch, 3, "reset:mita", json!({}), vec![reset])
         .unwrap();
     assert_eq!(
-        TimelineMessageQueries::capture(repo, branch, CharacterId::Mita, None)
+        TimelineMessageQueries::capture(repo, branch, CharacterId::Crazy, None)
             .unwrap()
             .count(),
         0
     );
     assert_eq!(
-        TimelineMessageQueries::capture(repo, branch, CharacterId::KindMita, None)
+        TimelineMessageQueries::capture(repo, branch, CharacterId::Kind, None)
             .unwrap()
             .count(),
         2
@@ -203,8 +203,8 @@ fn one_canonical_conversation_message_for_multiple_listeners_sqlite_reopen() {
         let mut reopened = SqliteTimelineRepository::open(&path).unwrap();
         assert_eq!(publish(&mut reopened, branch, input).unwrap(), original);
         assert_eq!(reopened.branch(branch).unwrap().head_sequence, 4);
-        let kind = TimelineMessageQueries::capture(&reopened, branch, CharacterId::KindMita, None)
-            .unwrap();
+        let kind =
+            TimelineMessageQueries::capture(&reopened, branch, CharacterId::Kind, None).unwrap();
         assert_eq!(kind.count(), 2);
         assert_eq!(kind.provider_messages()[0]["role"], "user");
         assert_eq!(
@@ -238,10 +238,10 @@ fn structured_segments_survive_sqlite_reopen_as_one_message() {
         repository.create_session(SessionId::new(), branch).unwrap();
         repository.select_branch(branch, None).unwrap();
         original = ConversationMessage::new(
-            "structured:kind-mita:1",
-            ConversationSpeaker::Character(CharacterId::KindMita),
+            "structured:Kind:1",
+            ConversationSpeaker::Character(CharacterId::Kind),
             segments.clone(),
-            [CharacterId::Mita],
+            [CharacterId::Crazy],
         );
         publish(&mut repository, branch, original.clone()).unwrap();
     }
@@ -252,7 +252,7 @@ fn structured_segments_survive_sqlite_reopen_as_one_message() {
             1
         );
         assert_eq!(reopened.branch(branch).unwrap().head_sequence, 1);
-        for listener in [CharacterId::Mita, CharacterId::KindMita] {
+        for listener in [CharacterId::Crazy, CharacterId::Kind] {
             let view = TimelineMessageQueries::capture(&reopened, branch, listener, None).unwrap();
             assert_eq!(view.provider_messages()[0]["content"], segments);
             assert_eq!(view.messages()[0].content, "Hello How are you?");
@@ -275,7 +275,7 @@ fn invalid_empty_audience_and_unknown_reply_do_not_write() {
     ));
     let mut message = ConversationMessage::new(
         "character",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!("Hello"),
         [],
     );
@@ -355,14 +355,14 @@ async fn application_publishes_shared_conversation_without_generating() {
         "private:1",
         ConversationSpeaker::Player,
         json!("only Mita"),
-        [CharacterId::Mita],
+        [CharacterId::Crazy],
     );
     let private_fact = app
         .publish_conversation_message(selection, private)
         .unwrap();
     let old_at = app.at();
     let before_disclosure = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(old_at)
         .await
@@ -370,9 +370,9 @@ async fn application_publishes_shared_conversation_without_generating() {
     assert_eq!(before_disclosure.view.count(), 1);
     let mut report = ConversationMessage::new(
         "shared:retelling",
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
         json!("A private question was asked"),
-        [CharacterId::KindMita],
+        [CharacterId::Kind],
     );
     report.links.push(CausalLink {
         relation: CausalRelation::CausedBy,
@@ -381,7 +381,7 @@ async fn application_publishes_shared_conversation_without_generating() {
     let shared = app.publish_conversation_message(selection, report).unwrap();
     assert_eq!(shared.draft.kind, EventKind::CharacterMessage);
     let after = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await

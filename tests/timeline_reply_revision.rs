@@ -64,24 +64,24 @@ fn acceptance_revision_contract(
     repo.append(branch, 0, "source", json!({}), vec![source])
         .unwrap();
 
-    guarded_reply(repo, branch, generation, CharacterId::Mita, target, 0).unwrap();
+    guarded_reply(repo, branch, generation, CharacterId::Crazy, target, 0).unwrap();
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
 
     assert_eq!(
-        guarded_reply(repo, branch, generation, CharacterId::Mita, target, 0),
+        guarded_reply(repo, branch, generation, CharacterId::Crazy, target, 0),
         Err(TimelineError::ConcurrentWrite),
     );
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 2);
 
-    guarded_reply(repo, branch, generation, CharacterId::KindMita, target, 0).unwrap();
-    guarded_reply(repo, branch, generation, CharacterId::Mita, target, 1).unwrap();
+    guarded_reply(repo, branch, generation, CharacterId::Kind, target, 0).unwrap();
+    guarded_reply(repo, branch, generation, CharacterId::Crazy, target, 1).unwrap();
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 4);
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::Mita);
+    reset.observers.insert(CharacterId::Crazy);
     repo.append(branch, 4, "reset", json!({}), vec![reset])
         .unwrap();
-    let stale = guarded_reply(repo, branch, generation, CharacterId::Mita, target, 0);
+    let stale = guarded_reply(repo, branch, generation, CharacterId::Crazy, target, 0);
     assert_eq!(stale, Err(TimelineError::ConcurrentWrite));
     assert_eq!(repo.branch(branch).unwrap().head_sequence, 5);
 }
@@ -105,7 +105,7 @@ fn reply_revision_follows_fork_cutoff_not_parent_future() {
     store
         .append(parent, 0, "source", json!({}), vec![source])
         .unwrap();
-    guarded_reply(&mut store, parent, 1, CharacterId::Mita, target, 0).unwrap();
+    guarded_reply(&mut store, parent, 1, CharacterId::Crazy, target, 0).unwrap();
 
     let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
     checkpoint.payload.insert("snapshot".into(), json!({}));
@@ -115,12 +115,12 @@ fn reply_revision_follows_fork_cutoff_not_parent_future() {
         .unwrap();
     store.fork(parent, checkpoint_id, child).unwrap();
 
-    guarded_reply(&mut store, parent, 1, CharacterId::Mita, target, 1).unwrap();
+    guarded_reply(&mut store, parent, 1, CharacterId::Crazy, target, 1).unwrap();
     assert_eq!(
-        guarded_reply(&mut store, child, 1, CharacterId::Mita, target, 0),
+        guarded_reply(&mut store, child, 1, CharacterId::Crazy, target, 0),
         Err(TimelineError::ConcurrentWrite)
     );
-    guarded_reply(&mut store, child, 1, CharacterId::Mita, target, 1).unwrap();
+    guarded_reply(&mut store, child, 1, CharacterId::Crazy, target, 1).unwrap();
     assert_eq!(store.branch(parent).unwrap().head_sequence, 4);
     assert_eq!(store.branch(child).unwrap().head_sequence, 5);
 }
@@ -149,7 +149,7 @@ fn independent_sqlite_writers_cannot_accept_the_same_character_revision() {
         &mut first,
         branch,
         selection.generation,
-        CharacterId::Mita,
+        CharacterId::Crazy,
         target,
         0,
     )
@@ -160,7 +160,7 @@ fn independent_sqlite_writers_cannot_accept_the_same_character_revision() {
             &mut second,
             branch,
             selection.generation,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             target,
             0
         ),
@@ -171,7 +171,7 @@ fn independent_sqlite_writers_cannot_accept_the_same_character_revision() {
         &mut second,
         branch,
         selection.generation,
-        CharacterId::KindMita,
+        CharacterId::Kind,
         target,
         0,
     )
@@ -185,7 +185,7 @@ fn independent_sqlite_writers_cannot_accept_the_same_character_revision() {
         &mut reopened,
         branch,
         selection.generation,
-        CharacterId::Mita,
+        CharacterId::Crazy,
         target,
         1,
     )

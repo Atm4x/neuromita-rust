@@ -16,6 +16,21 @@
               "type": "string"
             },
             "description": "Declarative emotional tags for this segment, not executable commands"
+          },
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Executable Sea Battle commands only: PlaceShip,<A1..J10>,<1..4>,<H|V>; PlaceShipsRandomly; MakeMove,<A1..J10>"
+          },
+          "start_game": {
+            "type": "string",
+            "description": "Start a match; the only supported identifier is seabattle"
+          },
+          "end_game": {
+            "type": "string",
+            "description": "End the current match; the only supported identifier is seabattle"
           }
         },
         "required": [

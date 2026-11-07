@@ -9,11 +9,14 @@ use neuromita::{
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
     timeline::domain::MessageRole,
 };
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{
     runtime::{Command, DesktopRuntime, Update},
-    view::{AppWindow, ChatRow, ChatStatus, ConversationUi, MemoryUi, SettingsUi},
+    view::{
+        AppWindow, CharacterCatalog, CharacterOption, ChatRow, ChatStatus, ConversationUi,
+        MemoryUi, SettingsUi,
+    },
 };
 
 pub fn attach(
@@ -54,6 +57,9 @@ pub fn attach(
         }
     });
     super::settings::bind(window, dispatch.clone());
+    super::ai_engine::bind(window, dispatch.clone());
+    super::voice::bind(window, dispatch.clone());
+    super::asr::bind(window, dispatch.clone());
     super::releases::bind(window, dispatch.clone());
     super::memory::bind(window, dispatch.clone(), &memory_editor);
     let send = dispatch.clone();
@@ -88,10 +94,8 @@ pub fn attach(
     });
     let send = dispatch.clone();
     window.on_chat_select_character(move |id| {
-        let character = match id {
-            0 => CharacterId::Mita,
-            1 => CharacterId::KindMita,
-            _ => return,
+        let Some(character) = CharacterId::from_index(id) else {
+            return;
         };
         send(Command::Select(character));
     });
@@ -121,8 +125,90 @@ pub fn attach(
     Ok(runtime)
 }
 
+pub(super) fn render_catalog(
+    window: &AppWindow,
+    catalog: Vec<neuromita::character::CharacterDefinition>,
+) {
+    let entries = catalog
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| CharacterOption {
+            index: index as i32,
+            id: item.id.as_str().into(),
+            name: item.name.source().into(),
+            name_key: item.name.id().into(),
+            conversation_name: item.conversation_name.source().into(),
+            conversation_key: item.conversation_name.id().into(),
+            initial: item.id.as_str().chars().next().unwrap().to_string().into(),
+        })
+        .collect::<Vec<_>>();
+    window
+        .global::<CharacterCatalog>()
+        .set_entries(ModelRc::new(VecModel::from(entries)));
+}
+
 fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
     match update {
+        Update::RecognizedText {
+            text,
+            auto_send_after,
+            merge_with_draft,
+        } => {
+            let previous = window.get_chat_draft();
+            let combined = if previous.trim().is_empty() {
+                text
+            } else {
+                format!(
+                    "{}{}{}",
+                    previous,
+                    if merge_with_draft { " " } else { "\n" },
+                    text
+                )
+            };
+            window.set_chat_draft(combined.clone().into());
+            if let Some(delay) = auto_send_after {
+                if delay.is_zero() {
+                    window.invoke_chat_send(combined.into());
+                } else {
+                    let weak = window.as_weak();
+                    slint::Timer::single_shot(delay, move || {
+                        if let Some(window) = weak.upgrade()
+                            && window.get_chat_draft() == combined
+                            && !window.get_chat_sending()
+                        {
+                            window.invoke_chat_send(combined.into());
+                        }
+                    });
+                }
+            }
+        }
+        Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
+        Update::MicrophoneTestStatus(snapshot) => {
+            let ui = window.global::<super::view::AsrUi>();
+            ui.set_testing(snapshot.running);
+            ui.set_mic_level(i32::from(snapshot.level));
+            ui.set_monitored_device(
+                ui.get_device_entries()
+                    .iter()
+                    .find(|entry| entry.id == snapshot.device.as_str())
+                    .map(|entry| entry.caption)
+                    .unwrap_or_else(|| snapshot.device.into()),
+            );
+            if let Some(error) = snapshot.error {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+            }
+        }
+        Update::RuntimeStatus(snapshot) => {
+            super::voice::runtime_status(window, &snapshot);
+            super::asr::runtime_status(window, &snapshot);
+        }
+        Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
+        Update::SpeechInventory(catalog, devices) => {
+            super::voice::inventory(window, &catalog);
+            super::asr::inventory(window, &catalog, &devices);
+        }
         Update::Releases(snapshot) => super::releases::render(window, &snapshot),
         Update::ReleaseError(error) => window.set_release_error(error.into()),
         Update::Memory(page) => super::memory::render(window, memory_editor, &page),
@@ -150,18 +236,30 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .global::<ConversationUi>()
                 .set_diagnostics(value.into());
         }
+        Update::Hardware(snapshot) => super::ai_engine::render(window, snapshot),
         Update::Connections(snapshot) => {
             window.set_chat_clients(i32::try_from(snapshot.connected_clients).unwrap_or(i32::MAX));
             window.set_chat_server_running(snapshot.running);
         }
-        Update::Administration(snapshot) => super::settings::render(window, &snapshot),
+        Update::Administration(snapshot) => {
+            super::settings::render(window, &snapshot);
+            super::voice::render(window, &snapshot.settings.values.speech.tts);
+            super::asr::render(window, &snapshot.settings.values.speech.asr);
+        }
+        Update::PresetCreated(id, record) => super::settings::created(window, id, &record),
         Update::AdminError(error) => {
+            window.global::<SettingsUi>().set_preset_pending_save(false);
             window
                 .global::<SettingsUi>()
                 .set_settings_error(error.into());
         }
-        Update::AdminSaved(created) => super::settings::saved(window, created),
+        Update::AdminSaved => super::settings::saved(window, None),
+        Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
+            let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
+            super::voice::runtime_status(window, &stopped);
+            super::asr::runtime_status(window, &stopped);
+            super::asr::session_status(window, &Default::default());
             window.set_core_connected(false);
             window.set_core_connecting(false);
             window.set_chat_sending(false);
@@ -197,14 +295,14 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
 }
 
 fn render(window: &AppWindow, snapshot: &ConversationSnapshot) {
-    window.set_chat_character(match snapshot.character {
-        CharacterId::Mita => 0,
-        CharacterId::KindMita => 1,
-    });
+    window.set_chat_character(snapshot.character.index() as i32);
     window.set_chat_generation_ready(snapshot.model.is_ok());
     match &snapshot.model {
         Ok(model) => {
-            window.set_chat_model(model.as_str().into());
+            window.set_chat_model(match &snapshot.preset_name {
+                Some(name) => format!("{name} ({model})").into(),
+                None => model.as_str().into(),
+            });
             window.set_chat_generation_error("".into());
         }
         Err(error) => {
@@ -275,6 +373,12 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
                 user: message.speaker.as_deref() == Some("player")
                     || (message.speaker.is_none() && message.role == MessageRole::User),
                 speaker: message.speaker.as_deref().unwrap_or_default().into(),
+                character_index: message
+                    .speaker
+                    .as_deref()
+                    .and_then(CharacterId::parse)
+                    .map(|id| id.index() as i32)
+                    .unwrap_or(-1),
                 sequence: format!("#{}", message.sequence).into(),
                 status: ChatStatus::History,
                 ..Default::default()
@@ -298,6 +402,7 @@ fn rows(snapshot: &ConversationSnapshot) -> Vec<ChatRow> {
         }
         let mut row = ChatRow {
             request_id: request.metadata.id.to_string().into(),
+            character_index: request.metadata.character_id.index() as i32,
             can_cancel: request.snapshot.can_cancel(),
             ..Default::default()
         };

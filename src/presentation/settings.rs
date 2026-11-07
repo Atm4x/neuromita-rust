@@ -1,13 +1,13 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use tokio::sync::watch;
 
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, CharactersSettings, OperationPresets, PresetId, PresetSelection,
-        PresetSettings, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
-        VoiceSettings, Volume,
+        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
+        PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
+        SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences, VoiceSettings, Volume,
     },
 };
 
@@ -95,6 +95,16 @@ pub struct VoiceSettingsPresenter {
     pub voice: BoundProperty<String>,
 }
 
+pub struct TtsSettingsPresenter {
+    pub preferences: BoundProperty<TtsPreferences>,
+    pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
+}
+
+pub struct AsrSettingsPresenter {
+    pub preferences: BoundProperty<AsrPreferences>,
+    pub model_options: BoundProperty<BTreeMap<String, serde_json::Value>>,
+}
+
 pub struct PresetsSettingsPresenter {
     pub active: BoundProperty<PresetId>,
 }
@@ -107,6 +117,7 @@ pub enum PresetSlot {
 }
 
 pub struct CharacterSettingsPresenter {
+    pub prompt_set: BoundProperty<Option<String>>,
     pub assignments: BoundProperty<OperationPresets>,
     pub reply: BoundProperty<PresetSelection>,
     pub react: BoundProperty<PresetSelection>,
@@ -116,6 +127,23 @@ pub struct CharacterSettingsPresenter {
 impl CharacterSettingsPresenter {
     fn new(owner: Arc<SettingsOwner>, character: CharacterId) -> Self {
         Self {
+            prompt_set: BoundProperty::new(
+                Arc::clone(&owner),
+                move |settings| {
+                    settings
+                        .characters
+                        .for_character(character)
+                        .prompt_set
+                        .clone()
+                },
+                move |owner, value| {
+                    owner
+                        .edit::<CharactersSettings>(|settings| {
+                            settings.for_character_mut(character).prompt_set = value;
+                        })
+                        .map(|_| ())
+                },
+            ),
             assignments: BoundProperty::new(
                 Arc::clone(&owner),
                 move |settings| settings.characters.for_character(character).presets,
@@ -171,22 +199,42 @@ impl CharacterSettingsPresenter {
 }
 
 pub struct CharactersSettingsPresenter {
-    pub mita: CharacterSettingsPresenter,
-    pub kind_mita: CharacterSettingsPresenter,
+    characters: BTreeMap<CharacterId, CharacterSettingsPresenter>,
 }
 
 impl CharactersSettingsPresenter {
-    pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
-        match character {
-            CharacterId::Mita => &self.mita,
-            CharacterId::KindMita => &self.kind_mita,
+    fn new(owner: Arc<SettingsOwner>) -> Self {
+        Self {
+            characters: CharacterId::ALL
+                .into_iter()
+                .map(|id| (id, CharacterSettingsPresenter::new(Arc::clone(&owner), id)))
+                .collect(),
         }
+    }
+    pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
+        &self.characters[&character]
+    }
+}
+
+pub struct InterfaceSettingsPresenter {
+    owner: Arc<SettingsOwner>,
+    pub hide_private: BoundProperty<bool>,
+}
+
+impl InterfaceSettingsPresenter {
+    pub fn set_visible(&self, area: SettingsArea, visible: bool) -> Result<(), SettingsError> {
+        self.owner
+            .edit::<InterfaceSettings>(|settings| settings.visibility.set_visible(area, visible))
+            .map(|_| ())
     }
 }
 
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
+    pub tts: TtsSettingsPresenter,
+    pub asr: AsrSettingsPresenter,
     pub presets: PresetsSettingsPresenter,
     pub characters: CharactersSettingsPresenter,
 }
@@ -194,6 +242,18 @@ impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            interface: InterfaceSettingsPresenter {
+                owner: Arc::clone(&owner),
+                hide_private: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.hide_private,
+                    |owner, value| {
+                        owner
+                            .edit::<InterfaceSettings>(|s| s.hide_private = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
             presets: PresetsSettingsPresenter {
                 active: BoundProperty::new(
                     Arc::clone(&owner),
@@ -205,11 +265,45 @@ impl SettingsPresenter {
                     },
                 ),
             },
-            characters: CharactersSettingsPresenter {
-                mita: CharacterSettingsPresenter::new(Arc::clone(&owner), CharacterId::Mita),
-                kind_mita: CharacterSettingsPresenter::new(
+            characters: CharactersSettingsPresenter::new(Arc::clone(&owner)),
+            tts: TtsSettingsPresenter {
+                preferences: BoundProperty::new(
                     Arc::clone(&owner),
-                    CharacterId::KindMita,
+                    |settings| settings.speech.tts.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.tts = value)
+                            .map(|_| ())
+                    },
+                ),
+                model_options: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.tts_model_options.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.tts_model_options = value)
+                            .map(|_| ())
+                    },
+                ),
+            },
+            asr: AsrSettingsPresenter {
+                preferences: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.asr.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.asr = value)
+                            .map(|_| ())
+                    },
+                ),
+                model_options: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.speech.asr_model_options.clone(),
+                    |owner, value| {
+                        owner
+                            .edit::<SpeechSettings>(|settings| settings.asr_model_options = value)
+                            .map(|_| ())
+                    },
                 ),
             },
             voice: VoiceSettingsPresenter {
@@ -278,9 +372,44 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn tts_asr_preferences_round_trip_through_settings_owner() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut tts_updates = presenter.tts.preferences.observe();
+        let mut asr_updates = presenter.asr.preferences.observe();
+        assert_eq!(tts_updates.next().await.unwrap(), TtsPreferences::default());
+        assert_eq!(asr_updates.next().await.unwrap(), AsrPreferences::default());
+
+        let mut tts = presenter.tts.preferences.get();
+        tts.backend = crate::settings::TtsBackend::Local;
+        tts.local_model_id = "f5_tts_ru".into();
+        tts.character_voice_ids
+            .insert(CharacterId::ShortHair, "voice3".into());
+        presenter.tts.preferences.set(tts.clone()).unwrap();
+        assert_eq!(tts_updates.next().await.unwrap(), tts);
+
+        let mut asr = presenter.asr.preferences.get();
+        asr.recognizer_id = "whisper".into();
+        asr.model_languages.insert("whisper".into(), "en".into());
+        asr.model_languages.insert("gigaam".into(), "ru".into());
+        presenter.asr.preferences.set(asr.clone()).unwrap();
+        assert_eq!(asr_updates.next().await.unwrap(), asr);
+        assert_eq!(presenter.tts.preferences.get(), tts);
+        assert_eq!(presenter.asr.preferences.get(), asr);
+        assert_eq!(owner.snapshot_all().unwrap().values.speech.tts, tts);
+        assert_eq!(owner.snapshot_all().unwrap().values.speech.asr, asr);
+    }
+
+    #[tokio::test]
     async fn character_preset_bindings_are_independent_and_observable() {
         let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
-            source: SettingsSource::Initial(AppSettings::initial_profile()),
+            source: SettingsSource::initial(AppSettings::initial_profile()),
             repository: Arc::new(MemorySettingsRepository::new()),
         })
         .await
@@ -288,7 +417,7 @@ mod tests {
         let owner = lifecycle.owner();
         let presenter = SettingsPresenter::new(Arc::clone(&owner));
 
-        let react = &presenter.characters.mita.react;
+        let react = &presenter.characters.for_character(CharacterId::Crazy).react;
         let mut updates = react.observe();
         assert_eq!(updates.next().await.unwrap(), PresetSelection::Active);
         react.set(PresetSelection::Specific(PresetId(7))).unwrap();
@@ -298,17 +427,25 @@ mod tests {
         );
         assert_eq!(react.get(), PresetSelection::Specific(PresetId(7)));
         assert_eq!(
-            presenter.characters.kind_mita.react.get(),
+            presenter
+                .characters
+                .for_character(CharacterId::Kind)
+                .react
+                .get(),
             PresetSelection::Active
         );
         assert_eq!(
-            presenter.characters.mita.reply.get(),
+            presenter
+                .characters
+                .for_character(CharacterId::Crazy)
+                .reply
+                .get(),
             PresetSelection::Active
         );
 
         owner
             .edit::<CharactersSettings>(|settings| {
-                settings.mita.presets.react = PresetSelection::Specific(PresetId(9));
+                settings.crazy.presets.react = PresetSelection::Specific(PresetId(9));
             })
             .unwrap();
         assert_eq!(
@@ -325,12 +462,12 @@ mod tests {
                 .snapshot_all()
                 .unwrap()
                 .values
-                .selected_preset(CharacterId::Mita, crate::interaction::TurnIntent::Initiate),
+                .selected_preset(CharacterId::Crazy, crate::interaction::TurnIntent::Initiate),
             PresetId(5)
         );
         assert_eq!(
             owner.snapshot_all().unwrap().values.selected_preset(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 crate::interaction::TurnIntent::React(crate::identity::EventId::new())
             ),
             PresetId(9)

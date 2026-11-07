@@ -19,6 +19,10 @@ use crate::{
     character::memory_access::{
         CharacterMemorySnapshot, MemoryEditResult, edit_memory_snapshot, read_memory_snapshot,
     },
+    games::{
+        GameError, GamePolicy, GameReceipt, GameReply, GameSlot, InviteCause, PendingInvite,
+        ReactionInvite, UserGameCommand, seabattle::Side as GameSide,
+    },
     identity::RequestId,
     interaction::{TurnIntent, UserInput},
     memory::MemoryCommand,
@@ -54,6 +58,8 @@ pub enum CharacterError {
     InvalidMemory(&'static str),
     #[error("character operation failed: {0}")]
     Internal(String),
+    #[error("invalid mini-game command: {0}")]
+    InvalidGame(GameError),
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +71,8 @@ pub struct AcceptedResponse {
     pub event_id: EventId,
     pub context: ContextAnchor,
     pub audio: Option<AudioArtifact>,
+    /// Follow-up reaction requested by an accepted match action.
+    pub game_invite: Option<ReactionInvite>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +81,8 @@ pub(crate) struct AcceptanceContext {
     pub intent: TurnIntent,
     pub state_revision: u64,
     pub turn: TimelineTurn,
+    pub game: Option<EventId>,
+    pub game_guard: Option<EventId>,
 }
 
 enum Command {
@@ -86,7 +96,7 @@ enum Command {
     },
     Accept {
         request: RequestId,
-        context: AcceptanceContext,
+        context: Box<AcceptanceContext>,
         proposed: TurnProposal,
         audio: Option<AudioArtifact>,
         audience: ConversationAudience,
@@ -107,6 +117,14 @@ enum Command {
         input: UserInput,
         reply: oneshot::Sender<Result<EventId, CharacterError>>,
     },
+    Game {
+        command: UserGameCommand,
+        reply: oneshot::Sender<Result<GameReply, CharacterError>>,
+    },
+    GameView {
+        reply: oneshot::Sender<Result<GameReceipt, CharacterError>>,
+    },
+    GamePolicy(GamePolicy),
 }
 
 #[derive(Clone)]
@@ -171,6 +189,37 @@ impl CharacterHandle {
             .map_err(|_| CharacterError::Unavailable)?;
         receive.await.map_err(|_| CharacterError::Unavailable)?
     }
+
+    /// Typed owner command for the character's own mini-game.
+    pub async fn game(&self, command: UserGameCommand) -> Result<GameReply, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::Game { command, reply })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    /// Read-only snapshot of the character's own match, if it still belongs
+    /// to the selected timeline branch.
+    pub async fn game_view(&self) -> Result<GameReceipt, CharacterError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Command::GameView { reply })
+            .await
+            .map_err(|_| CharacterError::Unavailable)?;
+        receive.await.map_err(|_| CharacterError::Unavailable)?
+    }
+
+    pub(crate) async fn configure_game_policy(
+        &self,
+        policy: GamePolicy,
+    ) -> Result<(), CharacterError> {
+        self.commands
+            .send(Command::GamePolicy(policy))
+            .await
+            .map_err(|_| CharacterError::Unavailable)
+    }
     pub(crate) async fn prepare(
         &self,
         request: RequestId,
@@ -206,7 +255,7 @@ impl CharacterHandle {
         self.commands
             .send(Command::Accept {
                 request,
-                context,
+                context: Box::new(context),
                 proposed,
                 audio,
                 audience,
@@ -307,6 +356,7 @@ impl CharacterRegistry {
             let handler = CharacterHandler {
                 character,
                 timeline: Arc::clone(&timeline),
+                policy: GamePolicy::default(),
                 reminders: reminders.clone(),
             };
             let memory_updates = timeline
@@ -354,6 +404,7 @@ impl CharacterRegistry {
 struct CharacterHandler {
     character: Character,
     timeline: Arc<Mutex<SessionTimeline>>,
+    policy: GamePolicy,
     reminders: Option<ReminderBridge>,
 }
 
@@ -385,7 +436,7 @@ impl CharacterHandler {
                     audience,
                     reply,
                 } => {
-                    let _ = reply.send(self.accept(request, context, proposed, audio, audience));
+                    let _ = reply.send(self.accept(request, *context, proposed, audio, audience));
                 }
                 Command::MemorySnapshot(reply) => {
                     let result = self
@@ -458,6 +509,13 @@ impl CharacterHandler {
                         });
                     let _ = reply.send(result);
                 }
+                Command::Game { command, reply } => {
+                    let _ = reply.send(self.game_command(command));
+                }
+                Command::GameView { reply } => {
+                    let _ = reply.send(self.game_view());
+                }
+                Command::GamePolicy(policy) => self.policy = policy,
             }
         }
     }
@@ -502,6 +560,14 @@ impl CharacterHandler {
                     ContextCaptureError::Invalid(reason) => CharacterError::Internal(reason),
                 })?;
         let anchor = captured.history.at;
+        let game_guard = if anchor == timeline.anchor() {
+            captured.game_token
+        } else {
+            timeline
+                .game_at(self.character.id, timeline.anchor())
+                .map_err(CharacterError::Internal)?
+                .1
+        };
         let state = captured.state;
         let working_state = captured.working_state;
         let now = CharacterRegistry::now_unix_ms();
@@ -557,17 +623,21 @@ impl CharacterHandler {
             character_id: self.character.id,
             description: Arc::clone(&self.character.description),
             prompt: Arc::clone(&self.character.prompt),
+            runtime_context: None,
             state,
             working_state,
             memories,
             memory_islands,
             history: captured.history,
             view: captured.view,
+            game: captured.game.projection(GameSide::Mita),
             reminders,
             current_input: guidance,
             focus: GenerationFocus { intent, reaction },
             anchor,
             turn,
+            game_key: captured.game_token,
+            game_guard,
         })
     }
 
@@ -583,8 +653,9 @@ impl CharacterHandler {
             .timeline
             .lock()
             .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        let current_at = timeline.anchor();
         let current = timeline
-            .inspect_context_at(self.character.id, timeline.anchor())
+            .inspect_context_at(self.character.id, current_at)
             .map_err(CharacterError::Internal)?;
         self.character.state = current.state;
         if context.state_revision != self.character.state.revision {
@@ -593,6 +664,31 @@ impl CharacterHandler {
         timeline
             .assert_turn(context.turn)
             .map_err(|_| CharacterError::StaleState)?;
+        if context.game_guard != current.game_token {
+            return Err(CharacterError::StaleState);
+        }
+        let branch = timeline.selection().branch_id;
+        let mut next_game = current.game;
+        let mut game_effects = Vec::new();
+        let mut pending_invite = None;
+        if let Some(actions) = proposed.effects().iter().find_map(|effect| match effect {
+            ResponseEffect::Game(actions) => Some(actions.as_slice()),
+            _ => None,
+        }) {
+            if !self.policy.enabled && actions.contains(&crate::games::ModelGameAction::Start) {
+                return Err(CharacterError::InvalidGame(GameError::Disabled));
+            }
+            if context.game != current.game_token {
+                return Err(CharacterError::StaleState);
+            }
+            let applied = next_game
+                .apply_model(branch, actions, uuid::Uuid::new_v4().as_u128() as u64)
+                .map_err(CharacterError::InvalidGame)?;
+            for fact in applied.facts {
+                game_effects.push(AppliedEffect::GameAdvanced(fact));
+            }
+            pending_invite = applied.invite;
+        }
         if let TurnIntent::React(cause) = context.intent
             && self.reminders.is_some()
         {
@@ -641,6 +737,7 @@ impl CharacterHandler {
                             .map(AppliedEffect::CharacterMemoryChanged),
                     );
                 }
+                ResponseEffect::Game(_) => {}
                 ResponseEffect::MutateReminders(requests) => {
                     let Some(bridge) = &self.reminders else {
                         return Err(CharacterError::Internal(
@@ -702,24 +799,48 @@ impl CharacterHandler {
                 }
             }
         }
-        let event_id = timeline
-            .append_reply(GeneratedReply {
-                request,
-                intent: context.intent,
-                turn: context.turn,
-                expected_revision: context.state_revision,
-                content: serde_json::to_value(proposed.segments()).map_err(|error| {
-                    CharacterError::Internal(format!("invalid accepted message segments: {error}"))
-                })?,
-                audience,
-                effects: effects.clone(),
-            })
+        let has_game_effects = proposed
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, ResponseEffect::Game(_)));
+        effects.extend(game_effects);
+        let persisted_segments = proposed
+            .segments()
+            .iter()
+            .map(|segment| segment.sanitized_for_persistence())
+            .collect::<Vec<_>>();
+        let accepted = timeline
+            .append_reply_tracked(
+                GeneratedReply {
+                    request,
+                    intent: context.intent,
+                    turn: context.turn,
+                    expected_revision: context.state_revision,
+                    content: serde_json::to_value(&persisted_segments).map_err(|error| {
+                        CharacterError::Internal(format!(
+                            "invalid accepted message segments: {error}"
+                        ))
+                    })?,
+                    audience,
+                    effects: effects.clone(),
+                },
+                has_game_effects.then(|| crate::timeline::GameCommit {
+                    state: next_game.clone(),
+                    expected_head: current_at.through,
+                }),
+            )
             .map_err(|error| match error {
                 crate::timeline::domain::TimelineError::ConcurrentWrite => {
                     CharacterError::StaleState
                 }
                 other => CharacterError::Internal(other.to_string()),
             })?;
+        for event in &accepted.game {
+            next_game.record_event(*event);
+        }
+        let game_invite = pending_invite.and_then(|pending| {
+            Self::resolve_invite(pending, &accepted.game, next_game.last_event())
+        });
         self.character.state = state_at(&timeline, self.character.id, timeline.anchor())?;
         if proposed
             .effects()
@@ -734,10 +855,85 @@ impl CharacterHandler {
             text: Arc::clone(proposed.text()),
             segments: Arc::from(proposed.segments()),
             effects: effects.into(),
-            event_id,
+            event_id: accepted.message,
             context: context.anchor,
             audio,
+            game_invite,
         })
+    }
+
+    fn resolve_invite(
+        pending: PendingInvite,
+        events: &[EventId],
+        last_event: Option<EventId>,
+    ) -> Option<ReactionInvite> {
+        let event_id = match pending.cause {
+            InviteCause::Fact(index) => events.get(index).copied(),
+            InviteCause::LastEvent => last_event,
+        }?;
+        Some(ReactionInvite {
+            event_id,
+            instruction: pending.instruction,
+            auto_gated: pending.auto_gated,
+        })
+    }
+
+    fn game_command(&mut self, command: UserGameCommand) -> Result<GameReply, CharacterError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        let branch = timeline.selection().branch_id;
+        if !self.policy.enabled && matches!(command, UserGameCommand::Start { .. }) {
+            return Err(CharacterError::InvalidGame(GameError::Disabled));
+        }
+        let at = timeline.anchor();
+        let (mut next, _) = timeline
+            .game_at(self.character.id, at)
+            .map_err(CharacterError::Internal)?;
+        let applied = next
+            .apply_user(branch, command)
+            .map_err(CharacterError::InvalidGame)?;
+        let events = timeline
+            .append_game_facts(self.character.id, &applied.facts, &mut next, at.through)
+            .map_err(|error| CharacterError::Internal(error.to_string()))?;
+        for event in &events {
+            next.record_event(*event);
+        }
+        let invite = applied
+            .invite
+            .and_then(|pending| Self::resolve_invite(pending, &events, next.last_event()));
+        let receipt = Self::game_receipt(&next, next.projection(GameSide::Player), events);
+        Ok(GameReply { receipt, invite })
+    }
+
+    fn game_view(&mut self) -> Result<GameReceipt, CharacterError> {
+        let timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| CharacterError::Internal("timeline lock poisoned".into()))?;
+        let (game, _) = timeline
+            .game_at(self.character.id, timeline.anchor())
+            .map_err(CharacterError::Internal)?;
+        Ok(Self::game_receipt(
+            &game,
+            game.projection(GameSide::Player),
+            Vec::new(),
+        ))
+    }
+
+    fn game_receipt(
+        slot: &GameSlot,
+        view: Option<crate::games::GameProjection>,
+        events: Vec<EventId>,
+    ) -> GameReceipt {
+        GameReceipt {
+            game: crate::games::GameId::SeaBattle,
+            key: slot.key(),
+            view,
+            events,
+            auto_reactions: slot.auto_reactions(),
+        }
     }
     fn view(&self, at: ContextAnchor) -> Result<CharacterView, CharacterError> {
         let timeline = self
@@ -753,6 +949,7 @@ impl CharacterHandler {
             prompt: Arc::clone(&self.character.prompt),
             state: captured.state,
             working_state: captured.working_state,
+            game: captured.game.projection(GameSide::Mita),
             memories: captured.memories.list(),
             memory_islands: captured.memories.islands(),
             history: captured.history,
@@ -779,9 +976,185 @@ mod turn_tests {
 
     fn handler() -> CharacterHandler {
         CharacterHandler {
-            character: Character::create(CharacterId::Mita),
+            character: Character::create(CharacterId::Crazy),
             timeline: Arc::new(Mutex::new(SessionTimeline::new())),
+            policy: GamePolicy::default(),
             reminders: None,
+        }
+    }
+
+    fn game_proposal() -> TurnProposal {
+        let mut response = crate::generation::StructuredResponse::spoken("placed");
+        response.attitude_change = 5.0;
+        response.segments[0].commands = vec!["PlaceShip,A1,4,H".into()];
+        TurnProposal::from_structured(response).unwrap()
+    }
+
+    #[test]
+    fn stale_game_context_rejects_a_reply_without_game_commands() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let (request, context) = prepare(&mut handler);
+        handler
+            .game_command(UserGameCommand::SetAutoReactions(true))
+            .unwrap();
+        let before = handler.timeline.lock().unwrap().anchor();
+        let mut response = crate::generation::StructuredResponse::spoken("stale game commentary");
+        response.attitude_change = 5.0;
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            TurnProposal::from_structured(response).unwrap(),
+            None,
+            ConversationAudience::private_to(CharacterId::Crazy),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+    }
+
+    #[test]
+    fn game_token_rejects_flag_change_and_epoch_rejects_game_proposal_atomically() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let (request, context) = prepare(&mut handler);
+        handler
+            .game_command(UserGameCommand::SetAutoReactions(true))
+            .unwrap();
+        let before = handler.timeline.lock().unwrap().anchor();
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            game_proposal(),
+            None,
+            ConversationAudience::private_to(CharacterId::Crazy),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+        let (request, context) = prepare(&mut handler);
+        {
+            let mut timeline = handler.timeline.lock().unwrap();
+            let selection = timeline.selection();
+            timeline
+                .reset_character_context(selection, CharacterId::Crazy, EventId::new())
+                .unwrap();
+        }
+        let before = handler.timeline.lock().unwrap().anchor();
+        let result = handler.accept(
+            request,
+            acceptance(&context),
+            game_proposal(),
+            None,
+            ConversationAudience::private_to(CharacterId::Crazy),
+        );
+        assert!(matches!(result, Err(CharacterError::StaleState)));
+        assert_eq!(handler.timeline.lock().unwrap().anchor(), before);
+    }
+
+    #[test]
+    fn private_game_commit_rejects_a_head_changed_after_preparation() {
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        let mut timeline = handler.timeline.lock().unwrap();
+        let at = timeline.anchor();
+        let (mut next, _) = timeline.game_at(CharacterId::Crazy, at).unwrap();
+        let applied = next
+            .apply_user(
+                timeline.selection().branch_id,
+                UserGameCommand::SetAutoReactions(true),
+            )
+            .unwrap();
+        timeline
+            .publish_player_message(
+                CharacterId::Crazy,
+                EventId::new(),
+                Arc::from("concurrent write"),
+            )
+            .unwrap();
+        let before = timeline.anchor();
+        assert!(matches!(
+            timeline.append_game_facts(CharacterId::Crazy, &applied.facts, &mut next, at.through),
+            Err(crate::timeline::domain::TimelineError::ConcurrentWrite)
+        ));
+        assert_eq!(timeline.anchor(), before);
+        assert!(
+            !timeline
+                .game_at(CharacterId::Crazy, before)
+                .unwrap()
+                .0
+                .auto_reactions()
+        );
+    }
+
+    #[test]
+    fn private_game_snapshot_boundary_rejects_leaks_bad_replay_and_unknown_fields() {
+        use crate::timeline::domain::{SessionId, TimelineStore};
+        use serde_json::json;
+        let mut handler = handler();
+        handler
+            .game_command(UserGameCommand::Start {
+                auto_reactions: false,
+            })
+            .unwrap();
+        handler
+            .game_command(UserGameCommand::PlaceShip {
+                coord: crate::games::seabattle::Coordinate::parse("A1").unwrap(),
+                length: 4,
+                orientation: crate::games::seabattle::Orientation::Horizontal,
+            })
+            .unwrap();
+        let timeline = handler.timeline.lock().unwrap();
+        let (game, _) = timeline
+            .game_at(CharacterId::Crazy, timeline.anchor())
+            .unwrap();
+        let canonical = serde_json::to_value(game).unwrap();
+        let mut store = TimelineStore::new();
+        let branch = BranchId::new();
+        store.create_session(SessionId::new(), branch).unwrap();
+        for mode in 0..6 {
+            let mut draft = EventDraft::new(EventKind::GameStateCaptured);
+            draft.actor = Some("mita".into());
+            draft.observers.insert(CharacterId::Crazy);
+            let mut state = canonical.clone();
+            match mode {
+                0 => {
+                    draft.observers.insert(CharacterId::Kind);
+                }
+                1 => {
+                    state["unknown"] = json!(true);
+                }
+                2 => {
+                    state["current"]["game"]["actions"][0]["start"] = json!("K11");
+                }
+                3 => {
+                    state["current"]["game"]["actions"][0]["length"] = json!(5);
+                }
+                4 => {
+                    state["current"]["generation"] = json!(123);
+                }
+                _ => {
+                    draft.actor = Some("kind-mita".into());
+                }
+            }
+            draft.payload.insert("game_state".into(), state);
+            assert!(
+                store
+                    .append(branch, 0, &format!("bad:{mode}"), json!({}), vec![draft])
+                    .is_err(),
+                "mode {mode}"
+            );
+            assert!(store.world(branch).unwrap().is_empty());
         }
     }
 
@@ -792,7 +1165,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .publish_player_message(CharacterId::Mita, event, Arc::from("hello"))
+            .publish_player_message(CharacterId::Crazy, event, Arc::from("hello"))
             .unwrap();
         let context = handler
             .context(
@@ -811,6 +1184,8 @@ mod turn_tests {
             intent: context.focus.intent,
             state_revision: context.state.revision,
             turn: context.turn,
+            game: context.game_key,
+            game_guard: context.game_guard,
         }
     }
 
@@ -827,7 +1202,7 @@ mod turn_tests {
             ))
             .unwrap(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         )
     }
 
@@ -848,7 +1223,7 @@ mod turn_tests {
             context,
             ProposedResponse::from_structured(structured).unwrap(),
             None,
-            ConversationAudience::private_to(CharacterId::Mita),
+            ConversationAudience::private_to(CharacterId::Crazy),
         )
     }
 
@@ -884,13 +1259,13 @@ mod turn_tests {
         let timeline = handler.timeline.lock().unwrap();
         assert_ne!(response.event_id, EventId::default());
         assert_eq!(
-            state_at(&timeline, CharacterId::Mita, before)
+            state_at(&timeline, CharacterId::Crazy, before)
                 .unwrap()
                 .attitude,
             60.0
         );
         assert_eq!(
-            state_at(&timeline, CharacterId::KindMita, after)
+            state_at(&timeline, CharacterId::Kind, after)
                 .unwrap()
                 .attitude,
             60.0
@@ -901,17 +1276,17 @@ mod turn_tests {
             let mut timeline = handler.timeline.lock().unwrap();
             let expected = timeline.selection();
             timeline
-                .reset_character_context(expected, CharacterId::Mita, reset)
+                .reset_character_context(expected, CharacterId::Crazy, reset)
                 .unwrap();
             let now = timeline.anchor();
             assert_eq!(
-                state_at(&timeline, CharacterId::Mita, now)
+                state_at(&timeline, CharacterId::Crazy, now)
                     .unwrap()
                     .attitude,
                 66.0
             );
             assert_eq!(
-                state_at(&timeline, CharacterId::Mita, now)
+                state_at(&timeline, CharacterId::Crazy, now)
                     .unwrap()
                     .accepted_replies,
                 1
@@ -927,7 +1302,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline
                 .append_test_fact("cancel-before-accept", reset)
                 .unwrap();
@@ -957,8 +1332,9 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
+                policy: GamePolicy::default(),
                 reminders: None,
             };
             let (request, context) = prepare(&mut handler);
@@ -975,7 +1351,7 @@ mod turn_tests {
             .unwrap();
             let at = timeline.anchor();
             assert_eq!(at.through, 3);
-            let state = state_at(&timeline, CharacterId::Mita, at).unwrap();
+            let state = state_at(&timeline, CharacterId::Crazy, at).unwrap();
             assert_eq!(state.accepted_replies, 1);
             assert_eq!(state.attitude, 63.2);
             assert_eq!(state.boredom, 9.0);
@@ -1023,7 +1399,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline.append_test_fact("reset", reset).unwrap();
         }
         assert!(matches!(
@@ -1041,7 +1417,7 @@ mod turn_tests {
         assert_eq!(
             state_at(
                 &handler.timeline.lock().unwrap(),
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 before_reset
             )
             .unwrap()
@@ -1051,27 +1427,27 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             let mut hidden = EventDraft::new(EventKind::MessageHidden);
-            hidden.observers.insert(CharacterId::Mita);
+            hidden.observers.insert(CharacterId::Crazy);
             hidden.payload.insert(
                 "event_ids".into(),
                 serde_json::json!([reply.event_id.0.to_string()]),
             );
             timeline.append_test_fact("hide-accepted", hidden).unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline
                 .append_test_fact("reset-after-accepted", reset)
                 .unwrap();
             let now = timeline.anchor();
             assert_eq!(
                 timeline
-                    .accepted_replies_at(CharacterId::Mita, now)
+                    .accepted_replies_at(CharacterId::Crazy, now)
                     .unwrap(),
                 1
             );
             assert_eq!(
                 timeline
-                    .accepted_replies_at(CharacterId::KindMita, now)
+                    .accepted_replies_at(CharacterId::Kind, now)
                     .unwrap(),
                 0
             );
@@ -1097,17 +1473,17 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             timeline
-                .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+                .observe(CharacterId::Crazy, cause, Arc::from("door opened"))
                 .unwrap();
             timeline
                 .publish_player_message(
-                    CharacterId::Mita,
+                    CharacterId::Crazy,
                     EventId::new(),
                     Arc::from("later, unrelated user input"),
                 )
                 .unwrap();
             let mut note = EventDraft::new(EventKind::SessionNote);
-            note.observers.insert(CharacterId::Mita);
+            note.observers.insert(CharacterId::Crazy);
             note.payload
                 .insert("content".into(), serde_json::json!("weather became rainy"));
             timeline.append_test_fact("world-note", note).unwrap();
@@ -1137,7 +1513,7 @@ mod turn_tests {
             .lock()
             .unwrap()
             .capture_context(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 ContextPosition::At(ContextAnchor {
                     branch_id: context.anchor.branch_id,
                     through: 1,
@@ -1156,7 +1532,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .observe(CharacterId::Mita, cause, Arc::from("door opened"))
+            .observe(CharacterId::Crazy, cause, Arc::from("door opened"))
             .unwrap();
         let result = handler.context(
             RequestId::new(),
@@ -1184,15 +1560,16 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
+                policy: GamePolicy::default(),
                 reminders: None,
             };
             let (request, context) = prepare(&mut handler);
             accept(&mut handler, request, acceptance(&context)).unwrap();
             let mut timeline = handler.timeline.lock().unwrap();
             let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-            reset.observers.insert(CharacterId::Mita);
+            reset.observers.insert(CharacterId::Crazy);
             timeline.append_test_fact("persisted-reset", reset).unwrap();
         }
         {
@@ -1203,8 +1580,9 @@ mod turn_tests {
             })
             .unwrap();
             let mut handler = CharacterHandler {
-                character: Character::create(CharacterId::Mita),
+                character: Character::create(CharacterId::Crazy),
                 timeline: Arc::new(Mutex::new(timeline)),
+                policy: GamePolicy::default(),
                 reminders: None,
             };
             let (request, context) = prepare(&mut handler);
@@ -1225,7 +1603,7 @@ mod turn_tests {
         {
             let mut timeline = handler.timeline.lock().unwrap();
             timeline
-                .observe(CharacterId::Mita, original, Arc::from("seen by Mita"))
+                .observe(CharacterId::Crazy, original, Arc::from("seen by Mita"))
                 .unwrap();
         }
         let input_id = EventId::new();
@@ -1233,7 +1611,7 @@ mod turn_tests {
             .timeline
             .lock()
             .unwrap()
-            .publish_player_message(CharacterId::Mita, input_id, Arc::from("new request"))
+            .publish_player_message(CharacterId::Crazy, input_id, Arc::from("new request"))
             .unwrap();
         let snapshot = handler
             .context(
@@ -1285,8 +1663,9 @@ mod turn_tests {
         })
         .unwrap();
         let mut handler = CharacterHandler {
-            character: Character::create(CharacterId::Mita),
+            character: Character::create(CharacterId::Crazy),
             timeline: Arc::new(Mutex::new(timeline)),
+            policy: GamePolicy::default(),
             reminders: None,
         };
         let (request, context) = prepare(&mut handler);

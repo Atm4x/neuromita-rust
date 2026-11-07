@@ -32,7 +32,9 @@ export component AboutPage inherits Rectangle {
             Rectangle {
                 height: 183px; border-radius: 22px; border-width: 1px; border-color: Theme.border;
                 background: @linear-gradient(135deg, #171928f5, #0e101ff5);
-                Rectangle { x: 0px; y: 0px; width: 3px; height: parent.height; background: Theme.accent; border-radius: 2px; }
+                HorizontalLayout { padding: 0px; alignment: start;
+                    Rectangle { width: 3px; background: Theme.accent; border-radius: 2px; }
+                }
                 HorizontalLayout {
                     padding: 20px; spacing: 18px;
                     Image { width: 112px; height: 112px; source: @image-url("../../assets/launcher_ui/NM_Logo.png"); image-fit: contain; }

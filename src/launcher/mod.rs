@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod controller;
 mod discovery;
 mod opener;
 mod process;
@@ -13,6 +14,7 @@ use std::{
 use thiserror::Error;
 
 pub use config::{ConfigStore, LauncherConfig};
+pub use controller::{LauncherCommand, LauncherController, LauncherUpdate};
 pub use discovery::InstallSelection;
 pub use opener::{LocationOpener, SystemLocationOpener};
 pub use process::{IdentityProbe, ProcessIdentity, ProcessScan, identity_for_pid};

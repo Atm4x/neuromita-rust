@@ -4,6 +4,7 @@ use neuromita::{
     api::ChatApi,
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     character::CharacterId,
+    game_link::GameLinkConfig,
     generation::{
         GenerationError, GenerationPreset, GenerationProvider, ProviderFuture, ProviderKind,
         ProviderTemplate, ResponseGenerator, StructuredResponse,
@@ -11,8 +12,9 @@ use neuromita::{
     },
     request::UserInput,
     request::{RequestHandle, RequestId, RequestOutcome, RequestSource, RequestState},
-    server::{ServerConfig, ServerHandle, ServerSnapshot},
+    server::{ServerConfig, ServerHandle, ServerLifecycle, ServerSnapshot},
     settings::{SettingsApi, VoiceSettings, Volume},
+    voice::{AudioArtifact, AudioFormat, VoiceFuture, VoiceOptions, VoiceProvider},
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -72,6 +74,18 @@ impl GenerationProvider for ControlledGeneration {
     }
 }
 
+struct FixtureVoice;
+impl VoiceProvider for FixtureVoice {
+    fn synthesize(&self, _text: Arc<str>, _options: VoiceOptions) -> VoiceFuture<'_> {
+        Box::pin(async {
+            Ok(AudioArtifact {
+                format: AudioFormat::Wave,
+                bytes: Arc::from(b"RIFF-fixture-wave".as_slice()),
+            })
+        })
+    }
+}
+
 struct Fixture {
     app: ApplicationLifecycle,
     calls: mpsc::UnboundedReceiver<GenerationCall>,
@@ -84,6 +98,14 @@ impl Fixture {
     }
 
     async fn with_queue(queue: usize, configure: impl FnOnce(&mut ServerConfig)) -> Self {
+        Self::with_voice(queue, configure, false).await
+    }
+
+    async fn with_voice(
+        queue: usize,
+        configure: impl FnOnce(&mut ServerConfig),
+        enabled: bool,
+    ) -> Self {
         let serial = APPLICATION.lock().await;
         let preset = GenerationPreset::new(ProviderTemplate::Gemini(
             GeminiTemplate::google(
@@ -108,8 +130,15 @@ impl Fixture {
             "127.0.0.1:0".parse().unwrap(),
         );
         configure(&mut config.server);
+        if enabled {
+            config.voice = Arc::new(FixtureVoice);
+        }
+        config.game_link = Some(GameLinkConfig::new("127.0.0.1:0".parse().unwrap()));
         let app = bounded(ApplicationLifecycle::start(config)).await.unwrap();
         bounded(SettingsApi::flush()).await.unwrap();
+        if enabled {
+            SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+        }
         Self {
             app,
             calls,
@@ -280,10 +309,10 @@ fn active(id: Uuid) -> RequestHandle {
 #[tokio::test]
 async fn voice_failure_keeps_the_accepted_message_identity_in_status_and_replay() {
     let mut fixture = Fixture::start(|_| {}).await;
-    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_game = true).unwrap();
+    SettingsApi::edit::<VoiceSettings>(|voice| voice.in_launcher = true).unwrap();
     let mut client = fixture.connect().await;
     let command_id = Uuid::new_v4();
-    let request = reply(command_id, "mita", "reply with unavailable voice");
+    let request = reply(command_id, "Crazy", "reply with unavailable voice");
     client.send(request.clone()).await;
     let accepted = client.accepted(command_id).await;
     let request_id = uuid(&accepted["request_id"]);
@@ -343,12 +372,14 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         "ping",
         "methods",
         "server_status",
-        "test",
         "publish_message",
         "reply",
         "react",
         "initiate",
         "cancel",
+        "diagnostics",
+        "diagnostics_recent",
+        "diagnostics_errors",
         "settings",
         "set_volume",
     ];
@@ -357,25 +388,26 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         let mut cmd = command(name);
         match name {
             "reply" => {
-                cmd = reply(uuid(&cmd["command_id"]), "mita", "catalog execution");
+                cmd = reply(uuid(&cmd["command_id"]), "Crazy", "catalog execution");
             }
             "publish_message" => {
                 cmd["event_id"] = json!(Uuid::new_v4());
                 cmd["occurred_at_unix_ms"] = json!(123);
                 cmd["speaker"] = json!("player");
                 cmd["content"] = json!("network publication");
-                cmd["seen_by"] = json!(["mita"]);
+                cmd["seen_by"] = json!(["Crazy"]);
             }
             "react" | "initiate" => {
-                cmd["character"] = json!("mita");
+                cmd["character"] = json!("Crazy");
                 cmd["instruction"] = json!("catalog execution");
                 if name == "react" {
                     cmd["event_id"] =
-                        reply(Uuid::new_v4(), "mita", "reaction target")["message_id"].clone();
+                        reply(Uuid::new_v4(), "Crazy", "reaction target")["message_id"].clone();
                 }
             }
             "cancel" => {
-                let start = command("test");
+                let mut start = command("initiate");
+                start["character"] = json!("Crazy");
                 client.send(start.clone()).await;
                 let accepted = client.accepted(uuid(&start["command_id"])).await;
                 let call = fixture.call().await;
@@ -388,6 +420,18 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
                 drop(call);
                 continue;
             }
+            "diagnostics" => {
+                cmd["character"] = json!("Crazy");
+                cmd["request_id"] = json!(Uuid::new_v4());
+                client.send(cmd.clone()).await;
+                let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
+                assert_eq!(response["type"], "error");
+                assert_eq!(response["code"], "diagnostics_not_found");
+                continue;
+            }
+            "diagnostics_recent" | "diagnostics_errors" => {
+                cmd["character"] = json!("Crazy");
+            }
             "set_volume" => cmd["value"] = json!(42),
             _ => {}
         }
@@ -395,13 +439,13 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
         let response = client.until(|v| v["command_id"] == cmd["command_id"]).await;
         let response_type = match name {
             "ping" => "pong",
-            "test" | "reply" | "react" | "initiate" => "accepted",
+            "reply" | "react" | "initiate" => "accepted",
             "publish_message" => "published",
             "set_volume" => "settings_applied",
             other => other,
         };
         assert_eq!(response["type"], response_type, "{name}: {response}");
-        if matches!(name, "test" | "reply" | "react" | "initiate") {
+        if matches!(name, "reply" | "react" | "initiate") {
             let id = uuid(&response["request_id"]);
             fixture.call().await.finish("catalog result");
             assert_eq!(client.terminal(id).await["text"], "catalog result");
@@ -434,7 +478,7 @@ async fn discovery_matches_executable_commands_and_all_control_replies_are_corre
     assert_eq!(responses[1]["type"], "settings_applied");
     assert_eq!(responses[2]["command_id"], last["command_id"]);
     assert_eq!(responses[2]["settings"]["voice"]["volume"], 43);
-    let instant = command("test");
+    let instant = json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"});
     client.send(instant.clone()).await;
     fixture.call().await.finish("immediate result");
     let accepted = client.until(|v| v["type"] != "settings").await;
@@ -465,7 +509,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
         (line(json!({"command_id": id, "command":"unknown"})), "unknown_command", Some(id)),
         (line(json!({"command_id": id, "command":"set_volume", "value":101})), "invalid_command", Some(id)),
         (line(json!({"command_id": id, "command":"ping", "extra":1})), "invalid_command", Some(id)),
-        (line(reply(id, "mita", " ")), "invalid_value", Some(id)),
+        (line(reply(id, "Crazy", " ")), "invalid_value", Some(id)),
         (line(json!({"command_id": id, "command":"cancel", "request_id":Uuid::new_v4()})), "ownership_denied", Some(id)),
         (format!("{{\"command_id\":\"{id}\",\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10}}\n").into_bytes(), "invalid_command", None),
         (format!("{{\"command_id\":\"{id}\",\"command\":\"set_volume\",\"value\":10,\"value\":11}}\n").into_bytes(), "invalid_command", Some(id)),
@@ -496,7 +540,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
             json!({"type":"pong", "command_id":ping["command_id"]})
         );
     }
-    let start = reply(id, "mita", "held");
+    let start = reply(id, "Crazy", "held");
     client.send(start).await;
     let accepted = client.accepted(id).await;
     let call = fixture.call().await;
@@ -505,7 +549,7 @@ async fn errors_have_stable_codes_recoverable_ids_and_no_mutations() {
     let error = client.error("different intent").await;
     assert_eq!(error["code"], "command_id_conflict");
     assert_eq!(error["command_id"], id.to_string());
-    let full = command("test");
+    let full = json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"});
     client.send(full.clone()).await;
     let error = client.error("too many tracked").await;
     assert_eq!(error["code"], "receipt_capacity");
@@ -572,18 +616,19 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
     let mut client = fixture.connect().await;
     let mut invalid = vec![
         b"{\n".to_vec(),
+        b"test\n".to_vec(),
+        line(command("test")),
         b"[]\n".to_vec(),
         b"null\n".to_vec(),
         b"\n".to_vec(),
         line(json!({"command":"settings"})),
-        line(json!({"command_id":"invalid", "command":"test"})),
+        line(json!({"command_id":"invalid", "command":"initiate"})),
         line(command("unknown")),
     ];
     for name in [
         "ping",
         "methods",
         "server_status",
-        "test",
         "settings",
         "reply",
         "cancel",
@@ -593,7 +638,7 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         value["extra"] = json!(true);
         match name {
             "reply" => {
-                value["character"] = json!("mita");
+                value["character"] = json!("Crazy");
                 value["text"] = json!("must not run");
             }
             "cancel" => value["request_id"] = json!(Uuid::new_v4()),
@@ -616,8 +661,10 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
     }
     invalid.extend([
         line(reply(Uuid::new_v4(), "missing", "hello")),
-        line(reply(Uuid::new_v4(), "mita", " \t")),
-        line(json!({"command_id":Uuid::new_v4(), "command":"reply", "character":"mita", "text":4})),
+        line(reply(Uuid::new_v4(), "Crazy", " \t")),
+        line(
+            json!({"command_id":Uuid::new_v4(), "command":"reply", "character":"Crazy", "text":4}),
+        ),
         line(json!({"command_id":Uuid::new_v4(), "command":"cancel", "request_id":"bad"})),
     ]);
     for bytes in invalid {
@@ -655,12 +702,10 @@ async fn rejected_commands_are_atomic_and_connection_recovers() {
         );
     }
     let id = Uuid::new_v4();
-    client
-        .send(reply(id, "kind-mita", "valid after errors"))
-        .await;
+    client.send(reply(id, "Kind", "valid after errors")).await;
     let accepted = client.accepted(id).await;
     let call = fixture.call().await;
-    assert_eq!(call.context.character_id, CharacterId::KindMita);
+    assert_eq!(call.context.character_id, CharacterId::Kind);
     assert!(call.context.history.events.iter().any(|event| matches!(&event.content, neuromita::timeline::EventContent::PlayerMessage { text } if &**text == "valid after errors")));
     call.finish("accepted");
     assert_eq!(
@@ -676,7 +721,7 @@ async fn fragmented_utf8_and_coalesced_lines_preserve_commands() {
     let mut client = fixture.connect().await;
     let id = Uuid::new_v4();
     let bytes = line(
-        json!({"command_id":id,"command":"initiate","character":"mita","instruction":"Привет"}),
+        json!({"command_id":id,"command":"initiate","character":"Crazy","instruction":"Привет"}),
     );
     let split = bytes.iter().position(|byte| *byte >= 128).unwrap() + 1;
     client.bytes(&bytes[..split]).await;
@@ -690,7 +735,7 @@ async fn fragmented_utf8_and_coalesced_lines_preserve_commands() {
     let mut rest = bytes[split..bytes.len() - 1].to_vec();
     rest.extend_from_slice(b"\r\n");
     rest.extend_from_slice(&line(command("settings")));
-    rest.extend_from_slice(b"test\n");
+    rest.extend_from_slice(&line(reply(Uuid::new_v4(), "Crazy", "test")));
     client.bytes(&rest).await;
     let accepted = client.accepted(id).await;
     let request = uuid(&accepted["request_id"]);
@@ -718,7 +763,7 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     let mut fixture = Fixture::start(|server| server.receipt_capacity = positive(2)).await;
     let mut client = fixture.connect().await;
     let first = Uuid::new_v4();
-    let first_command = reply(first, "mita", "long running");
+    let first_command = reply(first, "Crazy", "long running");
     client.send(first_command.clone()).await;
     let original = client.accepted(first).await;
     let first_request = uuid(&original["request_id"]);
@@ -728,8 +773,8 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     assert_eq!(replay["request_id"], original["request_id"]);
     assert_eq!(replay["replayed"], true);
     for changed in [
-        reply(first, "mita", "changed"),
-        reply(first, "kind-mita", "long running"),
+        reply(first, "Crazy", "changed"),
+        reply(first, "Kind", "long running"),
         json!({"command_id": first, "command":"set_volume", "value":1}),
     ] {
         client.send(changed).await;
@@ -744,20 +789,18 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
         80
     );
     let second = Uuid::new_v4();
-    let second_command = reply(second, "kind-mita", "short running");
+    let second_command = reply(second, "Kind", "short running");
     client.send(second_command.clone()).await;
     let accepted = client.accepted(second).await;
     let second_request = uuid(&accepted["request_id"]);
     let second_call = fixture.call().await;
-    client
-        .send(reply(Uuid::new_v4(), "kind-mita", "full"))
-        .await;
+    client.send(reply(Uuid::new_v4(), "Kind", "full")).await;
     client.error("too many tracked requests").await;
     assert!(fixture.calls.try_recv().is_err());
     second_call.finish("terminal result");
     let finished = client.terminal(second_request).await;
     assert_eq!(finished["outcome"], "success");
-    client.send(reply(Uuid::new_v4(), "kind-mita", " ")).await;
+    client.send(reply(Uuid::new_v4(), "Kind", " ")).await;
     client.error("target event is not observable").await;
     client.send(second_command).await;
     let replay = client.accepted(second).await;
@@ -767,7 +810,7 @@ async fn receipts_replay_terminal_results_and_evict_any_terminal_entry() {
     assert!(fixture.calls.try_recv().is_err());
     let third = Uuid::new_v4();
     client
-        .send(reply(third, "kind-mita", "reuse terminal slot"))
+        .send(reply(third, "Kind", "reuse terminal slot"))
         .await;
     let accepted = client.accepted(third).await;
     fixture.call().await.finish("third result");
@@ -793,7 +836,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
     let owner_id = owner.id;
     assert_ne!(owner.id, other.id);
     let command_id = Uuid::new_v4();
-    let original_command = reply(command_id, "mita", "survives disconnect");
+    let original_command = reply(command_id, "Crazy", "survives disconnect");
     owner.send(original_command.clone()).await;
     let accepted = owner.accepted(command_id).await;
     let request_id = uuid(&accepted["request_id"]);
@@ -804,7 +847,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
     assert!(!handle.snapshot().state.is_terminal());
     let other_command = Uuid::new_v4();
     other
-        .send(reply(other_command, "kind-mita", "other client"))
+        .send(reply(other_command, "Kind", "other client"))
         .await;
     let other_accepted = other.accepted(other_command).await;
     let other_id = uuid(&other_accepted["request_id"]);
@@ -857,7 +900,7 @@ async fn cancellation_and_reconnect_scopes_are_per_connection() {
             .app
             .presenter()
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -878,18 +921,18 @@ async fn queue_full_rejection_does_not_reserve_a_command_id() {
     let mut fixture = Fixture::with_queue(1, |_| {}).await;
     let mut client = fixture.connect().await;
     let first = Uuid::new_v4();
-    client.send(reply(first, "mita", "running")).await;
+    client.send(reply(first, "Crazy", "running")).await;
     let first_request = uuid(&client.accepted(first).await["request_id"]);
     let first_call = fixture.call().await;
     let second = Uuid::new_v4();
-    client.send(reply(second, "mita", "queued")).await;
+    client.send(reply(second, "Crazy", "queued")).await;
     let second_request = uuid(&client.accepted(second).await["request_id"]);
     assert!(matches!(
         active(second_request).snapshot().state,
         RequestState::Pending
     ));
     let third = Uuid::new_v4();
-    let third_command = reply(third, "mita", "retry after queue full");
+    let third_command = reply(third, "Crazy", "retry after queue full");
     let timeline = fixture.app.timeline().len();
     client.send(third_command.clone()).await;
     let rejected = client.until(|v| v["type"] == "error").await;
@@ -923,7 +966,7 @@ async fn queue_full_rejection_does_not_reserve_a_command_id() {
             .app
             .presenter()
             .characters
-            .state(CharacterId::Mita)
+            .state(CharacterId::Crazy)
             .await
             .unwrap()
             .accepted_replies,
@@ -1014,4 +1057,538 @@ async fn invalid_frames_close_connections_and_shutdown_interrupts_partial_reads(
     idle.closed().await;
     partial.closed().await;
     assert!(TcpStream::connect(server.address()).await.is_err());
+}
+
+#[tokio::test]
+async fn game_link_push_resume_idempotency_and_session_ownership() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut receive = String::new();
+    let hello = Uuid::new_v4();
+    write
+        .write_all(&line(json!({"command_id":hello,"command":"hello"})))
+        .await
+        .unwrap();
+    reader.read_line(&mut receive).await.unwrap();
+    let response: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(response["type"], "hello_ack");
+    let session_id = uuid(&response["session_id"]);
+    let token = uuid(&response["session_token"]);
+    let issued = Uuid::new_v4();
+    let command = json!({"command_id":issued,"command":"initiate","character":"Crazy","instruction":"from game"});
+    write.write_all(&line(command.clone())).await.unwrap();
+    receive.clear();
+    reader.read_line(&mut receive).await.unwrap();
+    let ack: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(ack["type"], "request_accepted");
+    let request_id = uuid(&ack["request_id"]);
+    assert_eq!(
+        active(request_id).snapshot().metadata.source,
+        RequestSource::Game(session_id)
+    );
+    let call = fixture.call().await;
+    drop(reader);
+    drop(write);
+
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    write.write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session_id,"session_token":token}))).await.unwrap();
+    receive.clear();
+    reader.read_line(&mut receive).await.unwrap();
+    let resumed: Value = serde_json::from_str(&receive).unwrap();
+    assert_eq!(resumed["type"], "session_resumed");
+    assert_eq!(resumed["requests"], 1);
+    write.write_all(&line(command)).await.unwrap();
+    let mut replay = None;
+    for _ in 0..5 {
+        receive.clear();
+        bounded(reader.read_line(&mut receive)).await.unwrap();
+        let event: Value = serde_json::from_str(&receive).unwrap();
+        if event["type"] == "request_accepted" {
+            replay = Some(event);
+            break;
+        }
+    }
+    let replay = replay.expect("command must replay after reconnect");
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(uuid(&replay["request_id"]), request_id);
+    assert!(fixture.calls.try_recv().is_err());
+    call.finish("game result");
+    let mut finished = false;
+    for _ in 0..8 {
+        receive.clear();
+        bounded(reader.read_line(&mut receive)).await.unwrap();
+        let event: Value = serde_json::from_str(&receive).unwrap();
+        if event["type"] == "request_completed" {
+            assert_eq!(event["request_id"], request_id.to_string());
+            assert_eq!(event["text"], "game result");
+            finished = true;
+            break;
+        }
+    }
+    assert!(finished);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_rejects_unidentified_and_cross_session_requests() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut buffer = String::new();
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}),
+        ))
+        .await
+        .unwrap();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "hello_required");
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"hello"}),
+        ))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["type"], "hello_ack");
+    let session_id = uuid(&response["session_id"]);
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"cancel","request_id":Uuid::new_v4()}),
+        ))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "ownership_denied");
+    drop(reader);
+    drop(write);
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    write.write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session_id,"session_token":Uuid::new_v4()}))).await.unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "session_denied");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_semantic_world_events_are_atomic_and_replay_safe() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut buffer = String::new();
+    write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"hello"}),
+        ))
+        .await
+        .unwrap();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&buffer).unwrap()["type"],
+        "hello_ack"
+    );
+    let command_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+    let batch = json!({
+        "command_id": command_id,
+        "command": "publish_events",
+        "events": [{
+            "event_id": event_id, "kind": "unity_event", "occurred_at_unix_ms": 42,
+            "actor": "Player", "observers": ["Crazy"],
+            "payload": {"name": "DoorOpened"}
+        }]
+    });
+    write.write_all(&line(batch.clone())).await.unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let receipt: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(receipt["type"], "events_published");
+    assert_eq!(receipt["event_ids"], json!([event_id]));
+    write.write_all(&line(batch.clone())).await.unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let receipt: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(receipt["replayed"], true);
+    let mut conflicting = batch;
+    conflicting["events"][0]["payload"]["name"] = json!("WindowOpened");
+    write.write_all(&line(conflicting)).await.unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let rejection: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(rejection["code"], "command_id_conflict");
+    write
+        .write_all(&line(json!({
+            "command_id": Uuid::new_v4(), "command": "react", "character": "Crazy",
+            "event_id": event_id, "instruction": "remember the door"
+        })))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let accepted: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(accepted["type"], "request_accepted");
+    let call = fixture.call().await;
+    call.finish("door acknowledged");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_resume_replaces_old_tcp_connection() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (old_read, mut old_write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut old_reader = BufReader::new(old_read);
+    let mut buffer = String::new();
+    old_write
+        .write_all(&line(
+            json!({"command_id":Uuid::new_v4(),"command":"hello"}),
+        ))
+        .await
+        .unwrap();
+    bounded(old_reader.read_line(&mut buffer)).await.unwrap();
+    let receipt: Value = serde_json::from_str(&buffer).unwrap();
+    let (new_read, mut new_write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut new_reader = BufReader::new(new_read);
+    new_write
+        .write_all(&line(json!({
+            "command_id":Uuid::new_v4(),"command":"resume",
+            "session_id":receipt["session_id"],"session_token":receipt["session_token"]
+        })))
+        .await
+        .unwrap();
+    buffer.clear();
+    bounded(new_reader.read_line(&mut buffer)).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&buffer).unwrap()["type"],
+        "session_resumed"
+    );
+    buffer.clear();
+    assert_eq!(bounded(old_reader.read_line(&mut buffer)).await.unwrap(), 0);
+    new_write
+        .write_all(&line(json!({"command_id":Uuid::new_v4(),"command":"ping"})))
+        .await
+        .unwrap();
+    let response = bounded(async {
+        loop {
+            buffer.clear();
+            new_reader.read_line(&mut buffer).await.unwrap();
+            let event: Value = serde_json::from_str(&buffer).unwrap();
+            if event["type"] == "pong" {
+                break event;
+            }
+        }
+    })
+    .await;
+    assert_eq!(response["type"], "pong");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_enforces_frame_size_while_receiving() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let (read, mut write) = bounded(TcpStream::connect(address))
+        .await
+        .unwrap()
+        .into_split();
+    let mut reader = BufReader::new(read);
+    let mut buffer = String::new();
+    write.write_all(&vec![b'X'; 100_000]).await.unwrap();
+    bounded(reader.read_line(&mut buffer)).await.unwrap();
+    let response: Value = serde_json::from_str(&buffer).unwrap();
+    assert_eq!(response["code"], "command_too_large");
+    buffer.clear();
+    assert_eq!(bounded(reader.read_line(&mut buffer)).await.unwrap(), 0);
+    fixture.shutdown().await;
+}
+
+struct GameClient {
+    read: BufReader<OwnedReadHalf>,
+    write: OwnedWriteHalf,
+}
+impl GameClient {
+    async fn connect(address: SocketAddr) -> Self {
+        let (read, write) = bounded(TcpStream::connect(address))
+            .await
+            .unwrap()
+            .into_split();
+        Self {
+            read: BufReader::new(read),
+            write,
+        }
+    }
+    async fn send(&mut self, command: Value) {
+        bounded(self.write.write_all(&line(command))).await.unwrap();
+    }
+    async fn next(&mut self) -> Value {
+        let mut frame = String::new();
+        assert_ne!(bounded(self.read.read_line(&mut frame)).await.unwrap(), 0);
+        serde_json::from_str(&frame).unwrap()
+    }
+    async fn until(&mut self, expected: &str) -> Value {
+        bounded(async {
+            loop {
+                let frame = self.next().await;
+                if frame["type"] == expected {
+                    return frame;
+                }
+            }
+        })
+        .await
+    }
+    async fn hello(&mut self) -> (Uuid, Uuid) {
+        self.send(json!({"command":"hello","command_id":Uuid::new_v4()}))
+            .await;
+        let answer = self.until("hello_ack").await;
+        (uuid(&answer["session_id"]), uuid(&answer["session_token"]))
+    }
+}
+
+#[tokio::test]
+async fn game_link_captures_world_context_at_admission_and_restores_revision() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    let (session, token) = game.hello().await;
+    let first = Uuid::new_v4();
+    let context = json!({"revision":1,"scene":"Kitchen","world":{"room":"Kitchen","actors":["Crazy","Player"]},"capabilities":["look","walk"]});
+    game.send(json!({"command_id":first,"command":"update_context","context":context}))
+        .await;
+    let ack = game.until("context_applied").await;
+    assert_eq!(ack["revision"], 1);
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy","instruction":"look around"})).await;
+    let accepted = game.until("request_accepted").await;
+    let first_id = uuid(&accepted["request_id"]);
+    let call = fixture.call().await;
+    assert_eq!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Kitchen")
+    );
+    assert_eq!(call.context.runtime_context.as_ref().unwrap().revision, 1);
+    assert_eq!(
+        call.context.runtime_context.as_ref().unwrap().capabilities,
+        vec!["look", "walk"]
+    );
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"update_context","context":{"revision":2,"scene":"Garden","world":{},"capabilities":[]}})).await;
+    assert_eq!(game.until("context_applied").await["revision"], 2);
+    assert_eq!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Kitchen")
+    );
+    call.finish("first game response");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let second = fixture.call().await;
+    assert_eq!(
+        second
+            .context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .as_deref(),
+        Some("Garden")
+    );
+    second.finish("second game response");
+    let cmd = Uuid::new_v4();
+    game.send(json!({"command_id":cmd,"command":"update_context","context":{"revision":2,"scene":"Kitchen","world":{},"capabilities":[]}})).await;
+    assert_eq!(game.until("error").await["code"], "context_rejected");
+    game.send(json!({"command_id":first,"command":"update_context","context":context}))
+        .await;
+    assert_eq!(
+        game.until("context_applied").await["command_id"],
+        first.to_string()
+    );
+    drop(game);
+    let mut resumed = GameClient::connect(address).await;
+    resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
+    assert_eq!(
+        resumed.until("session_resumed").await["session_id"],
+        session.to_string()
+    );
+    let state = resumed.until("session_state").await;
+    assert_eq!(state["context_revision"], 2);
+    assert_ne!(first_id, Uuid::nil());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_audio_chunks_delivery_ack_and_ptt_survive_resume() {
+    let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    let (session, token) = game.hello().await;
+    let capture = Uuid::new_v4();
+    let ptt_cmd = Uuid::new_v4();
+    game.send(json!({"command_id":ptt_cmd,"command":"report_ptt","capture_id":capture,"generation":4,"active":true})).await;
+    assert_eq!(game.until("ptt_accepted").await["generation"], 4);
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_ptt","capture_id":capture,"generation":3,"active":false})).await;
+    assert_eq!(game.until("error").await["code"], "ptt_rejected");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let request = uuid(&game.until("request_accepted").await["request_id"]);
+    fixture.call().await.finish("audio output");
+    let completed = game.until("request_completed").await;
+    assert_eq!(completed["request_id"], request.to_string());
+    assert_eq!(completed["audio_asset"]["format"], "wave");
+    assert_eq!(completed["audio_asset"]["size_bytes"], 17);
+    assert!(completed["audio"].is_null());
+    let event = uuid(&completed["event_id"]);
+    let read_id = Uuid::new_v4();
+    game.send(json!({"command_id":read_id,"command":"read_audio_chunk","request_id":request,"offset":0,"length":128})).await;
+    let chunk = game.until("audio_chunk").await;
+    assert_eq!(chunk["base64"], "UklGRi1maXh0dXJlLXdhdmU=");
+    let playback = Uuid::new_v4();
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":playback,"phase":"started"})).await;
+    assert_eq!(game.until("playback_accepted").await["phase"], "started");
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"report_playback","request_id":request,"playback_id":playback,"phase":"completed"})).await;
+    assert_eq!(game.until("playback_accepted").await["phase"], "completed");
+    let ack_id = Uuid::new_v4();
+    game.send(json!({"command_id":ack_id,"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
+    assert_eq!(game.until("result_acknowledged").await["applied"], true);
+    drop(game);
+    let mut resumed = GameClient::connect(address).await;
+    resumed.send(json!({"command_id":Uuid::new_v4(),"command":"resume","session_id":session,"session_token":token})).await;
+    resumed.until("session_resumed").await;
+    let state = resumed.until("session_state").await;
+    assert_eq!(state["ptt"]["capture_id"], capture.to_string());
+    assert_eq!(state["deliveries"][0]["ack"]["applied"], true);
+    assert_eq!(state["playback"][0]["report"]["phase"], "completed");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_restricts_audio_and_result_ack_to_session() {
+    let mut fixture = Fixture::with_voice(8, |_| {}, true).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut first = GameClient::connect(address).await;
+    first.hello().await;
+    let mut second = GameClient::connect(address).await;
+    second.hello().await;
+    first
+        .send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    let request = uuid(&first.until("request_accepted").await["request_id"]);
+    fixture.call().await.finish("secret");
+    let frame = first.until("request_completed").await;
+    let event = uuid(&frame["event_id"]);
+    second.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":1024})).await;
+    assert_eq!(second.until("error").await["code"], "ownership_denied");
+    second.send(json!({"command_id":Uuid::new_v4(),"command":"acknowledge_result","request_id":request,"event_id":event,"applied":true})).await;
+    assert_eq!(second.until("error").await["code"], "ownership_denied");
+    first.send(json!({"command_id":Uuid::new_v4(),"command":"read_audio_chunk","request_id":request,"offset":0,"length":20_000})).await;
+    assert_eq!(first.until("error").await["code"], "invalid_chunk");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_pushes_scoped_game_settings_without_polling() {
+    let fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut game = GameClient::connect(address).await;
+    game.hello().await;
+    game.send(json!({"command_id":Uuid::new_v4(),"command":"get_game_settings"}))
+        .await;
+    let initial = game.until("game_settings").await;
+    assert!(initial["voice"]["enabled"].is_boolean());
+    let revision = initial["revision"].as_u64().unwrap();
+    SettingsApi::edit::<VoiceSettings>(|voice| {
+        voice.in_game = !voice.in_game;
+    })
+    .unwrap();
+    let pushed = game.until("game_settings_updated").await;
+    assert!(pushed["revision"].as_u64().unwrap() > revision);
+    assert_ne!(pushed["voice"]["enabled"], initial["voice"]["enabled"]);
+    assert!(pushed.get("api").is_none());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn game_link_never_mixes_runtime_contexts_between_game_sessions() {
+    let mut fixture = Fixture::start(|_| {}).await;
+    let address = fixture.app.game_link().unwrap().address();
+    let mut first = GameClient::connect(address).await;
+    first.hello().await;
+    let mut second = GameClient::connect(address).await;
+    second.hello().await;
+    first.send(json!({"command_id":Uuid::new_v4(),"command":"update_context","context":{"revision":1,"scene":"PrivateKitchen","world":{},"capabilities":[]}})).await;
+    first.until("context_applied").await;
+    second
+        .send(json!({"command_id":Uuid::new_v4(),"command":"initiate","character":"Crazy"}))
+        .await;
+    second.until("request_accepted").await;
+    let call = fixture.call().await;
+    assert!(call.context.runtime_context.is_some());
+    assert!(
+        call.context
+            .runtime_context
+            .as_ref()
+            .unwrap()
+            .scene
+            .is_none()
+    );
+    call.finish("no shared runtime scene");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn local_control_accepts_only_loopback_bind_addresses() {
+    for address in ["0.0.0.0:0", "192.0.2.1:0", "[::]:0"] {
+        let config = ServerConfig::local_control(address.parse().unwrap());
+        let result = ServerLifecycle::bind(config).await;
+        assert!(
+            matches!(result, Err(error) if error.kind() == std::io::ErrorKind::InvalidInput),
+            "LocalControl allowed {address}"
+        );
+    }
+
+    let (lifecycle, handle) =
+        ServerLifecycle::bind(ServerConfig::local_control("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+    assert!(handle.address().ip().is_loopback());
+    drop(lifecycle);
 }

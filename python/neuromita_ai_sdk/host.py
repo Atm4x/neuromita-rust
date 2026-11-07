@@ -1,4 +1,12 @@
-"""Single-process plugin executor; OS process ownership and IPC are Rust responsibilities."""
+"""Single-process plugin executor; OS process ownership and IPC belong to Rust.
+
+Explicit runtime selection is optional for API v1 plugins. Opted-in plugins expose
+runtime_capabilities(): a list of {backend, devices: [...], precisions: [...]},
+initialize_runtime(settings, runtime): the normal model_ready result, and
+runtime_status(): {backend, device, precision} read from the loaded runtime/model,
+not copied from settings. All three are required before a selected model is ready.
+Legacy initialize(settings) remains available when no runtime profile is supplied.
+"""
 
 import argparse
 import base64
@@ -12,6 +20,8 @@ import sys
 from typing import Any
 
 from neuromita_ai_sdk import API_VERSION, InstallPlan, validate_settings
+from neuromita_ai_sdk.constraints import inspect_constraints, enforce_constraints
+from neuromita_ai_sdk import hardware
 
 
 class PluginHost:
@@ -19,6 +29,7 @@ class PluginHost:
         self.plugins_dir = plugins_dir.resolve()
         self.active_by_kind: dict[str, Any] = {}
         self.active_ids_by_kind: dict[str, str] = {}
+        self.active_runtime_by_kind: dict[str, Any] = {}
         self.audio_streams: dict[str, tuple[bytes, int]] = {}
 
     def _manifest(self, directory: Path) -> dict[str, Any]:
@@ -105,8 +116,31 @@ class PluginHost:
         return contract
 
     def dispatch(self, op: str, args: dict[str, Any]) -> Any:
+        if op == "configuration_constraints":
+            plugin = self._load_install_contract(args["plugin_id"])
+            with contextlib.redirect_stdout(sys.stderr):
+                settings = validate_settings(plugin.settings_schema(), args["settings"])
+                return inspect_constraints(plugin, settings, args.get("runtime"), hardware.probe())
         if op == "discover":
             return self.discover()
+        if op == "hardware":
+            with contextlib.redirect_stdout(sys.stderr):
+                return hardware.probe()
+        if op == "execute":
+            with contextlib.redirect_stdout(sys.stderr):
+                return hardware.execute(args["backend"], args["device"], args["precision"],
+                                        model_path=args.get("model_path"), tokens=args.get("tokens"))
+        if op == "status":
+            return {
+                "services": {
+                    kind: {
+                        "plugin_id": self.active_ids_by_kind[kind],
+                        "model_ready": True,
+                        "runtime": self.active_runtime_by_kind.get(kind),
+                    }
+                    for kind in self.active_by_kind
+                }
+            }
         if op in ("describe", "install_plan", "probe_install", "settings_schema", "validate_config"):
             plugin = (self._load_install_contract(args["plugin_id"])
                       if op in ("install_plan", "probe_install", "settings_schema", "validate_config")
@@ -135,10 +169,60 @@ class PluginHost:
             settings = args.get("settings", {})
             if not isinstance(settings, dict):
                 raise ValueError("settings must be an object")
-            with contextlib.redirect_stdout(sys.stderr):
-                result = plugin.initialize(settings)
+            runtime = args.get("runtime")
+            confirmed_runtime = None
+            if runtime is not None:
+                with contextlib.redirect_stdout(sys.stderr):
+                    runtime = hardware.verify_runtime(runtime)
+                if not all(callable(getattr(plugin, method, None))
+                           for method in ("runtime_capabilities", "initialize_runtime", "runtime_status")):
+                    raise ValueError("plugin does not support explicit runtime selection")
+                with contextlib.redirect_stdout(sys.stderr):
+                    capabilities = plugin.runtime_capabilities()
+                if not isinstance(capabilities, list) or not any(
+                    isinstance(item, dict) and item.get("backend") == runtime["backend"]
+                    and isinstance(item.get("devices"), list)
+                    and runtime["device"] in item["devices"]
+                    and isinstance(item.get("precisions"), list)
+                    and runtime["precision"] in item["precisions"]
+                    for item in capabilities
+                ):
+                    raise ValueError("plugin did not declare the selected backend, device and precision")
+            contract = (self._load_install_contract(plugin_id)
+                        if (self.plugins_dir / plugin_id / "installplan.py").exists() else plugin)
+            providers = [contract] if contract is plugin else [contract, plugin]
+            for provider in providers:
+                if callable(getattr(provider, "configuration_constraints", None)):
+                    with contextlib.redirect_stdout(sys.stderr):
+                        settings = validate_settings(provider.settings_schema(), settings)
+                        restrictions = inspect_constraints(provider, settings, runtime, hardware.probe())
+                        enforce_constraints(restrictions, settings, runtime)
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    if runtime is None:
+                        result = plugin.initialize(settings)
+                    else:
+                        result = plugin.initialize_runtime(dict(settings), dict(runtime))
+                        observed = plugin.runtime_status()
+                        if not isinstance(observed, dict) or observed != runtime:
+                            raise ValueError("plugin actual runtime does not match selected runtime")
+                        confirmed_runtime = dict(observed)
+                if not isinstance(result, dict):
+                    raise ValueError("plugin initialize must return an object")
+                if result.get("model_ready") is not True:
+                    raise ValueError("plugin did not confirm model readiness")
+            except Exception:
+                with contextlib.redirect_stdout(sys.stderr):
+                    try:
+                        plugin.unload()
+                    except Exception:
+                        pass
+                raise
             self.active_by_kind[kind] = plugin
             self.active_ids_by_kind[kind] = plugin_id
+            self.active_runtime_by_kind[kind] = confirmed_runtime
+            if confirmed_runtime is not None:
+                result = {**result, "runtime": dict(confirmed_runtime)}
             return result
         if op == "infer_stream_start":
             if self.audio_streams:
@@ -214,6 +298,7 @@ class PluginHost:
                     plugin.unload()
                 self.active_by_kind.pop(kind)
                 self.active_ids_by_kind.pop(kind)
+                self.active_runtime_by_kind.pop(kind, None)
             return {"unloaded": True}
         raise ValueError("unsupported host operation")
 
@@ -223,8 +308,8 @@ def serve(host: PluginHost) -> None:
     for line in sys.stdin:
         request_id: Any = None
         try:
-            if len(line) > 1024 * 1024:
-                raise ValueError("request exceeds 1 MiB")
+            if len(line) > 32 * 1024 * 1024:
+                raise ValueError("request exceeds 32 MiB")
             request = json.loads(line)
             if not isinstance(request, dict):
                 raise ValueError("request must be an object")

@@ -1,5 +1,6 @@
 use crate::{
     character::state::{CharacterStateDelta, CharacterWorkingState},
+    games::ModelGameAction,
     memory::MemoryCommand,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -13,6 +14,8 @@ pub enum ResponseEffect {
     ChangeCharacterState(CharacterStateDelta),
     ReplaceWorkingState(CharacterWorkingState),
     MutateMemory(Vec<MemoryCommand>),
+    /// Validated model-authored game commands, applied atomically with the reply.
+    Game(Vec<ModelGameAction>),
     MutateReminders(Vec<crate::reminders::ReminderRequest>),
 }
 
@@ -87,10 +90,11 @@ impl ResponseSegment {
         }
     }
 
-    pub(crate) fn has_unsupported_content(&self) -> bool {
+    /// Game commands are the only executable segment fields the core accepts;
+    /// everything else still has no executor.
+    pub(crate) fn has_unsupported_non_game_content(&self) -> bool {
         !self.animations.is_empty()
             || !self.idle_animations.is_empty()
-            || !self.commands.is_empty()
             || !self.movement_modes.is_empty()
             || !self.visual_effects.is_empty()
             || !self.clothes.is_empty()
@@ -98,11 +102,20 @@ impl ResponseSegment {
             || !self.interactions.is_empty()
             || !self.face_params.is_empty()
             || !self.intents.is_empty()
-            || self.start_game.is_some()
-            || self.end_game.is_some()
             || self.target.is_some()
             || self.hint.is_some()
             || self.allow_sleep.is_some()
+    }
+
+    /// Remove executable game fields before the segment is persisted as a
+    /// dialogue message. Placement commands would otherwise disclose a fleet
+    /// to anyone who can read the accepted message.
+    pub(crate) fn sanitized_for_persistence(&self) -> Self {
+        let mut segment = self.clone();
+        segment.commands.clear();
+        segment.start_game = None;
+        segment.end_game = None;
+        segment
     }
 }
 

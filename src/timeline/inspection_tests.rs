@@ -8,11 +8,11 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     let selected = timeline.selection();
     let root = timeline.branch;
     timeline
-        .publish_player_message(CharacterId::Mita, EventId::new(), Arc::from("shared"))
+        .publish_player_message(CharacterId::Crazy, EventId::new(), Arc::from("shared"))
         .unwrap();
     let mut answer = EventDraft::new(EventKind::CharacterMessage);
-    answer.actor = Some(CharacterId::Mita.to_string());
-    answer.observers.insert(CharacterId::Mita);
+    answer.actor = Some(CharacterId::Crazy.to_string());
+    answer.observers.insert(CharacterId::Crazy);
     answer
         .payload
         .insert("content".into(), json!("accepted reply"));
@@ -43,11 +43,11 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
         .unwrap();
     assert_eq!(fork_info.head_sequence, 4);
     timeline
-        .publish_player_message(CharacterId::Mita, EventId::new(), Arc::from("root-only"))
+        .publish_player_message(CharacterId::Crazy, EventId::new(), Arc::from("root-only"))
         .unwrap();
     let mut fork_message = EventDraft::new(EventKind::PlayerMessage);
     fork_message.actor = Some("player".into());
-    fork_message.observers.insert(CharacterId::Mita);
+    fork_message.observers.insert(CharacterId::Crazy);
     fork_message
         .payload
         .insert("content".into(), json!("fork-only"));
@@ -66,7 +66,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
         through: 5,
     };
     let fork = timeline
-        .inspect_context_at(CharacterId::Mita, fork_at)
+        .inspect_context_at(CharacterId::Crazy, fork_at)
         .unwrap();
     assert_eq!(fork.history.at, fork_at);
     assert_eq!(fork.view.branch, alternative);
@@ -77,37 +77,37 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     assert_eq!(fork.view.messages()[2].content, "fork-only");
     assert_eq!(fork.history.events.len(), 2);
     let other_character = timeline
-        .inspect_context_at(CharacterId::KindMita, fork_at)
+        .inspect_context_at(CharacterId::Kind, fork_at)
         .unwrap();
     assert_eq!(other_character.view.count(), 0);
     assert_eq!(
-        timeline.accepted_replies_at(CharacterId::KindMita, fork_at),
+        timeline.accepted_replies_at(CharacterId::Kind, fork_at),
         Ok(0)
     );
     assert_eq!(
-        timeline.accepted_replies_at(CharacterId::Mita, fork_at),
+        timeline.accepted_replies_at(CharacterId::Crazy, fork_at),
         Ok(1)
     );
     let root_at = timeline.anchor();
     let active = timeline
-        .capture_context(CharacterId::Mita, ContextPosition::Latest)
+        .capture_context(CharacterId::Crazy, ContextPosition::Latest)
         .unwrap();
     assert_eq!(active.view.messages()[2].content, "root-only");
     assert!(
         timeline
-            .capture_context(CharacterId::Mita, ContextPosition::At(fork_at))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(fork_at))
             .is_err()
     );
 
     let mut reset = EventDraft::new(EventKind::CharacterContextReset);
-    reset.observers.insert(CharacterId::Mita);
+    reset.observers.insert(CharacterId::Crazy);
     timeline
         .store
         .append(alternative, 5, "inspection:reset", json!({}), vec![reset])
         .unwrap();
     let forgotten = timeline
         .inspect_context_at(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             ContextAnchor {
                 branch_id: alternative.0,
                 through: 6,
@@ -118,7 +118,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     assert_eq!(fork.view.count(), 3);
     assert_eq!(
         timeline.accepted_replies_at(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             ContextAnchor {
                 branch_id: alternative.0,
                 through: 6,
@@ -128,7 +128,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     );
     assert_eq!(
         timeline
-            .inspect_context_at(CharacterId::Mita, fork_at)
+            .inspect_context_at(CharacterId::Crazy, fork_at)
             .unwrap()
             .view
             .count(),
@@ -136,7 +136,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     );
     assert_eq!(
         timeline
-            .inspect_context_at(CharacterId::Mita, root_at)
+            .inspect_context_at(CharacterId::Crazy, root_at)
             .unwrap()
             .view
             .messages()[2]
@@ -146,7 +146,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     assert!(
         timeline
             .inspect_context_at(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 ContextAnchor {
                     branch_id: alternative.0,
                     through: 100,
@@ -162,7 +162,7 @@ fn inspection_contract(timeline: &mut SessionTimeline) -> ContextAnchor {
     assert!(
         timeline
             .inspect_context_at(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 ContextAnchor {
                     branch_id: unrelated.0,
                     through: 0,
@@ -206,11 +206,11 @@ fn saved_branch_remains_readable_after_sqlite_reopen() {
     .unwrap();
     assert_eq!(reopened.selection().branch_id, root);
     let snapshot = reopened
-        .inspect_context_at(CharacterId::Mita, fork_at)
+        .inspect_context_at(CharacterId::Crazy, fork_at)
         .unwrap();
     assert_eq!(snapshot.view.messages()[2].content, "fork-only");
     assert_eq!(
-        reopened.accepted_replies_at(CharacterId::Mita, fork_at),
+        reopened.accepted_replies_at(CharacterId::Crazy, fork_at),
         Ok(1)
     );
     assert_eq!(reopened.selection().branch_id, root);
@@ -225,7 +225,7 @@ fn historical_reset_boundary_contract(
 ) -> (ContextAnchor, ContextAnchor) {
     timeline
         .publish_player_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             EventId::new(),
             Arc::from("forgotten secret"),
         )
@@ -233,13 +233,13 @@ fn historical_reset_boundary_contract(
     let before_reset = timeline.anchor();
     let selection = timeline.selection();
     timeline
-        .reset_character_context(selection, CharacterId::Mita, EventId::new())
+        .reset_character_context(selection, CharacterId::Crazy, EventId::new())
         .unwrap();
     let after_mita_reset = timeline.anchor();
 
     assert_eq!(
         timeline
-            .inspect_context_at(CharacterId::Mita, before_reset)
+            .inspect_context_at(CharacterId::Crazy, before_reset)
             .unwrap()
             .view
             .messages()[0]
@@ -248,22 +248,22 @@ fn historical_reset_boundary_contract(
     );
     assert!(
         timeline
-            .capture_context(CharacterId::Mita, ContextPosition::At(before_reset))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(before_reset))
             .is_err()
     );
     assert!(
         timeline
-            .capture_context(CharacterId::KindMita, ContextPosition::At(before_reset))
+            .capture_context(CharacterId::Kind, ContextPosition::At(before_reset))
             .is_ok()
     );
     assert!(
         timeline
-            .capture_context(CharacterId::Mita, ContextPosition::At(after_mita_reset))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(after_mita_reset))
             .is_ok()
     );
     assert!(
         timeline
-            .capture_context(CharacterId::Mita, ContextPosition::Latest)
+            .capture_context(CharacterId::Crazy, ContextPosition::Latest)
             .unwrap()
             .view
             .messages()
@@ -271,16 +271,16 @@ fn historical_reset_boundary_contract(
     );
 
     timeline
-        .reset_character_context(selection, CharacterId::KindMita, EventId::new())
+        .reset_character_context(selection, CharacterId::Kind, EventId::new())
         .unwrap();
     assert!(
         timeline
-            .capture_context(CharacterId::KindMita, ContextPosition::At(before_reset))
+            .capture_context(CharacterId::Kind, ContextPosition::At(before_reset))
             .is_err()
     );
     assert!(
         timeline
-            .capture_context(CharacterId::Mita, ContextPosition::At(after_mita_reset))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(after_mita_reset))
             .is_ok()
     );
 
@@ -318,22 +318,22 @@ fn historical_knowledge_epoch_remains_protected_after_sqlite_reopen() {
     .unwrap();
     assert!(
         reopened
-            .capture_context(CharacterId::Mita, ContextPosition::At(before))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(before))
             .is_err()
     );
     assert!(
         reopened
-            .capture_context(CharacterId::KindMita, ContextPosition::At(before))
+            .capture_context(CharacterId::Kind, ContextPosition::At(before))
             .is_err()
     );
     assert!(
         reopened
-            .capture_context(CharacterId::Mita, ContextPosition::At(after))
+            .capture_context(CharacterId::Crazy, ContextPosition::At(after))
             .is_ok()
     );
     assert_eq!(
         reopened
-            .inspect_context_at(CharacterId::Mita, before)
+            .inspect_context_at(CharacterId::Crazy, before)
             .unwrap()
             .view
             .messages()[0]

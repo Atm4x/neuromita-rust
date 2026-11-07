@@ -1,5 +1,51 @@
 # Preset selection at generation execution
 
+HTTP follow-up: [provider profiles and remaining scope](../../future/preset-http-protocols-20261104.md).
+Core now also supports typed Chat Completions and Responses templates, with
+Compatible, Mistral, OpenRouter, Ai.iO and LM Studio preparation profiles.
+`PresetGenerationEdit` explicitly identifies the protocol and authentication
+choice. `None` is an explicit no-auth request for these transports; Gemini still
+requires a credential. Actual protocol/dialect accompanies provider observations.
+The supported non-Gemini imports supersede the earlier blocker list below;
+ChatGPT Plan/OAuth remains separate and unavailable.
+
+## Current connection and preparation contract (2026-11-04)
+
+Current persisted Gemini definitions use a typed `credential` reference, required
+`options`, and an ordered `transforms` list. References explicitly choose
+`env:NAME` or `local:NAME`; local values are resolved from the application data
+directory's `preset-credentials.json`, never from a second source on failure.
+The older `credential_env` description below records the original implementation.
+It is not a second accepted dev storage format.
+
+`PresetTemplate` supplies Core defaults; configuring it requires explicit model
+and credential inputs. `PresetConnectionEdit` changes connection/editor fields
+atomically and preserves existing preparation options and transforms. The GUI
+cannot accidentally clear an imported pipeline when saving a model or URL edit.
+
+Transforms execute after subjective context assembly and before provider wire
+encoding. They never rewrite canonical history. Diagnostics and dataset capture
+observe the transformed prompt and exact payload. Omitted temperature/token
+parameters remain `None` in diagnostics and dataset metadata. JSON output can be
+requested through native schema configuration or an explicit prompt instruction;
+the application response validator remains mandatory in both modes.
+
+`examples/import_python_presets.rs` performs an explicit staged conversion to a
+**new** output directory. It never rewrites Python settings or performs a startup
+migration. Gemini imports preserve enabled settings, thinking configuration and
+structured-output support. Selected Python template protocol wins over stale raw
+preset `protocol_id`, matching `ApiPresetService.get_full()`.
+
+Other wire protocols, reserve-key routing and unsupported overrides are reported
+as blockers rather than silently discarded. The normalized template descriptors
+are an import inventory, not a claim that all template backends can execute.
+The current GUI does not edit the full ordered transform/options contract yet;
+existing imported settings are preserved.
+
+Text transform parity is checked against 28 fixtures generated from the read-only
+Python `src/handlers/llm_providers/message_transforms.py`, covering seven helpers.
+Multimodal parts and native tool histories are outside the present text contract.
+
 ## Invariant
 
 `ChatApi::reply`, `ChatApi::react`, and `ChatApi::initiate` express *what to do*, never a provider, model, preset or transport configuration. A pending `GenerationCommand` stores only character, operation, target/instruction, source and audience. It does **not** resolve or retain a preset at admission.

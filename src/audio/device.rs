@@ -33,12 +33,19 @@ pub trait AudioCapture: Send {
     fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>>;
 }
 
+impl AudioCapture for Box<dyn AudioCapture> {
+    fn next_frame(&mut self) -> DeviceFuture<'_, Option<MonoPcm16Frame>> {
+        self.as_mut().next_frame()
+    }
+}
+
 pub trait AudioPlayback: Send + Sync {
     fn play<'a>(&'a self, audio: AudioArtifact, stop: CancellationToken) -> DeviceFuture<'a, ()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
+    Native,
     Pulse,
     Alsa,
     Dshow,
@@ -49,6 +56,7 @@ pub enum CaptureBackend {
 impl CaptureBackend {
     fn ffmpeg_name(self) -> &'static str {
         match self {
+            Self::Native => "native",
             Self::Pulse => "pulse",
             Self::Alsa => "alsa",
             Self::Dshow => "dshow",

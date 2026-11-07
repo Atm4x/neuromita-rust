@@ -37,13 +37,17 @@ cargo run --locked --offline -- --model YOUR_GEMINI_MODEL --character mita --lis
 cargo run --locked --offline -- --model YOUR_GEMINI_MODEL --character mita --listen 127.0.0.1:5555 --message "Привет"
 ```
 
-YOUR_GEMINI_MODEL — доступный вам model ID. Стартовый состав: mita, kind-mita. Описания и промпты минимальные, без переноса всего функционала Python.
+YOUR_GEMINI_MODEL — доступный вам model ID. Канонический каталог: Crazy, Kind, Cappie, ShortHair, Mila, Sleepy, Ghost, Creepy, GameMaster. Описания и промпты минимальные, без переноса всего функционала Python.
 
-Консольные команды: /character mita, /character kind-mita, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
+Консольные команды: /character Crazy, /character Kind, /cancel REQUEST_UUID, /quit. Ctrl+C завершает приложение; EOF ждёт отправленные данным frontend обращения. Консоль вызывает ChatPresenter и наблюдает его модель. Она не готовит Gemini wire payload и не меняет Character напрямую.
 
 ## Launcher
 
 `neuromita launcher status` только читает выбранную установку и наблюдаемые процессы. `neuromita launcher session` владеет одним процессом игры на время интерактивной сессии и принимает `status`, `start`, `stop`, `open-location`, `quit`. Для launcher не нужен `GEMINI_API_KEY`. Сохраняются только root/candidate; PID и ownership между процессами не переносятся. Детали и матрица проверок: [rust-launcher](docs/03-runtime/rust-launcher.md).
+
+Fine-tuning dataset управляется offline-командой `neuromita dataset` без Core и ключа: enable/disable, лимит/unlimited, каталог, статистика, рейтинги, фильтры, Raw JSONL и ShareGPT/ChatML с явным предупреждением о потере non-text данных. Сбор использует фактический provider payload и ответ до application validation, а accepted outcome хранится отдельно. Команды, поля и границы: [rust-finetune-dataset](docs/03-runtime/rust-finetune-dataset.md).
+
+Диагностика отдельного `RequestId` доступна через `/diagnostics` в терминале и команды TCP. Подготовленный prompt, provider request/response, частичная ошибка, оценка токенов и фактический usage разделены; экспорт учитывает redaction, владельца запроса и ограниченное хранение. Подробности: [rust-request-diagnostics](docs/03-runtime/rust-request-diagnostics.md).
 
 ## Перезапуск Core в одном процессе
 

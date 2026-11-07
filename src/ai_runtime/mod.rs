@@ -8,14 +8,24 @@ pub mod assets;
 pub mod backend;
 pub mod bootstrap;
 pub mod composition;
+pub mod constraints;
 mod distribution;
+pub mod hardware;
 pub mod install;
+pub mod installed_speech;
 mod layer;
+pub mod live_speech;
 pub mod managed;
 pub mod overlay;
 pub mod production;
 pub mod resolver;
+pub mod runtime_status;
 pub mod speech;
+pub mod speech_catalog;
+pub mod speech_inspection;
+pub mod speech_languages;
+pub mod speech_selection;
+pub mod system_hardware;
 pub mod uv;
 pub mod voice_profile;
 
@@ -28,7 +38,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::Mutex,
+    sync::{Mutex, watch},
     time::timeout,
 };
 use uuid::Uuid;
@@ -36,18 +46,22 @@ use uuid::Uuid;
 use crate::voice::{
     AudioArtifact, AudioFormat, VoiceError, VoiceFuture, VoiceOptions, VoiceProvider,
 };
+use hardware::{HardwareProbe, RuntimeProfile, verify_execution, verify_probe};
+use runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const IPC_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcessTopology {
     Shared,
+    #[default]
     Split,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AiService {
     Tts,
     Asr,
@@ -98,6 +112,18 @@ pub enum AiRuntimeError {
     Protocol(String),
     #[error("Python plugin rejected request ({kind}): {message}")]
     Plugin { kind: String, message: String },
+    #[error("worker cannot use device {device}: {reason}")]
+    DeviceUnavailable { device: String, reason: String },
+    #[error("worker device {device} failed its execution probe: {reason}")]
+    DeviceNotExecutable { device: String, reason: String },
+    #[error("plugin {plugin_id} failed to load: {reason}")]
+    ModelLoadFailed { plugin_id: String, reason: String },
+    #[error("selected plugin {plugin_id} did not report the requested runtime profile")]
+    RuntimeProfileNotConfirmed { plugin_id: String },
+    #[error("activation was superseded by a newer selection")]
+    ActivationSuperseded,
+    #[error("activation guard could not read the persisted selection: {0}")]
+    ActivationGuard(String),
 }
 
 #[derive(Deserialize)]
@@ -137,6 +163,7 @@ struct WorkerProcess {
     generation: Uuid,
     failed: bool,
     selections: HashMap<AiService, (String, Option<String>)>,
+    runtime_profiles: HashMap<AiService, RuntimeProfile>,
 }
 
 struct InFlightRequest<'a> {
@@ -234,6 +261,7 @@ impl WorkerProcess {
             generation: Uuid::new_v4(),
             failed: false,
             selections: HashMap::new(),
+            runtime_profiles: HashMap::new(),
         };
         let line = worker.read_frame().await?;
         let hello: Hello =
@@ -424,7 +452,8 @@ impl WorkerProcess {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelActivation {
     pub service: AiService,
     pub plugin_id: String,
@@ -432,8 +461,17 @@ pub struct ModelActivation {
     pub asset_revision: Option<String>,
 }
 
+struct Activation<'a> {
+    service: AiService,
+    services: &'a [AiService],
+    layers: &'a [PathBuf],
+    models: &'a [ModelActivation],
+    profile: Option<&'a RuntimeProfile>,
+    verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+}
+
 impl AiService {
-    fn kind(self) -> &'static str {
+    pub(crate) fn kind(self) -> &'static str {
         match self {
             Self::Tts => "tts",
             Self::Asr => "asr",
@@ -449,6 +487,7 @@ pub struct AiSupervisor {
     config: PythonHostConfig,
     workers: Mutex<HashMap<WorkerKey, Arc<Mutex<WorkerProcess>>>>,
     activation_locks: Mutex<HashMap<WorkerKey, Arc<Mutex<()>>>>,
+    status: watch::Sender<RuntimeSnapshot>,
 }
 
 impl AiSupervisor {
@@ -458,7 +497,149 @@ impl AiSupervisor {
             config,
             workers: Mutex::new(HashMap::new()),
             activation_locks: Mutex::new(HashMap::new()),
+            status: watch::channel(RuntimeSnapshot::default()).0,
         }
+    }
+
+    pub fn observe_status(&self) -> watch::Receiver<RuntimeSnapshot> {
+        self.status.subscribe()
+    }
+
+    pub fn status_snapshot(&self) -> RuntimeSnapshot {
+        self.status.borrow().clone()
+    }
+
+    /// Refresh the observable state from child-process liveness without invoking plugin code.
+    pub async fn refresh_status(&self) -> RuntimeSnapshot {
+        let workers: Vec<_> = self.workers.lock().await.values().cloned().collect();
+        for worker in workers {
+            let mut process = worker.lock().await;
+            let generation = process.generation;
+            let failure = if process.failed {
+                Some("worker retired after an IPC failure".to_owned())
+            } else {
+                match process.child.try_wait() {
+                    Ok(None) => None,
+                    Ok(Some(exit)) => {
+                        process.failed = true;
+                        Some(format!("Python worker exited: {exit}"))
+                    }
+                    Err(error) => {
+                        process.failed = true;
+                        Some(format!("cannot query Python worker: {error}"))
+                    }
+                }
+            };
+            drop(process);
+            if let Some(reason) = failure {
+                self.status.send_modify(|snapshot| {
+                    for state in snapshot.services.values_mut() {
+                        if state.generation == Some(generation) {
+                            state.phase = RuntimePhase::Failed;
+                            state.active_model = None;
+                            state.pending_model = None;
+                            state.last_error = Some(reason.clone());
+                        }
+                    }
+                });
+            }
+        }
+        self.status_snapshot()
+    }
+
+    fn starting(&self, services: &[AiService], models: &[ModelActivation]) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.pending_model = models
+                    .iter()
+                    .find(|model| model.service == *service)
+                    .map(|model| model.plugin_id.clone());
+                state.last_error = None;
+                if state.active_model.is_none() {
+                    state.phase = RuntimePhase::Starting;
+                }
+            }
+        });
+    }
+
+    fn started(&self, services: &[AiService], models: &[ModelActivation], generation: Uuid) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.phase = if models.iter().any(|model| model.service == *service) {
+                    RuntimePhase::ModelReady
+                } else {
+                    RuntimePhase::WorkerRunning
+                };
+                state.generation = Some(generation);
+                state.active_model =
+                    models
+                        .iter()
+                        .find(|model| model.service == *service)
+                        .map(|model| LoadedModel {
+                            plugin_id: model.plugin_id.clone(),
+                            asset_revision: model.asset_revision.clone(),
+                        });
+                state.pending_model = None;
+                state.last_error = None;
+            }
+            if self.topology == ProcessTopology::Shared {
+                for (service, state) in &mut snapshot.services {
+                    if !services.contains(service) {
+                        *state = Default::default();
+                    }
+                }
+            }
+        });
+    }
+
+    fn activation_failed(&self, services: &[AiService], error: &AiRuntimeError) {
+        self.status.send_modify(|snapshot| {
+            for service in services {
+                let state = snapshot.services.entry(*service).or_default();
+                state.pending_model = None;
+                state.last_error = Some(error.to_string());
+                if state.active_model.is_none() {
+                    state.phase = if state.generation.is_some() {
+                        RuntimePhase::WorkerRunning
+                    } else {
+                        RuntimePhase::Failed
+                    };
+                }
+            }
+        });
+    }
+
+    fn request_failed(
+        &self,
+        service: AiService,
+        generation: Uuid,
+        error: &AiRuntimeError,
+        fatal: bool,
+    ) {
+        self.status.send_modify(|snapshot| {
+            let state = snapshot.services.entry(service).or_default();
+            if state.generation != Some(generation) {
+                return;
+            }
+            state.last_error = Some(error.to_string());
+            if fatal {
+                let affected = snapshot.services.values_mut().filter(|status| {
+                    self.topology == ProcessTopology::Shared
+                        && status.generation == Some(generation)
+                });
+                for status in affected {
+                    status.phase = RuntimePhase::Failed;
+                    status.active_model = None;
+                    status.pending_model = None;
+                }
+                let state = snapshot.services.entry(service).or_default();
+                state.phase = RuntimePhase::Failed;
+                state.active_model = None;
+                state.pending_model = None;
+            }
+        });
     }
 
     async fn activation_lock(&self, key: WorkerKey) -> Arc<Mutex<()>> {
@@ -477,12 +658,20 @@ impl AiSupervisor {
         if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config, &[], &[]).await?;
+        self.starting(&[service], &[]);
+        let worker = match WorkerProcess::launch(&self.config, &[], &[]).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(&[service], &error);
+                return Err(error);
+            }
+        };
         let generation = worker.generation;
         self.workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(worker)));
+        self.started(&[service], &[], generation);
         Ok(generation)
     }
 
@@ -507,12 +696,20 @@ impl AiSupervisor {
         if self.workers.lock().await.contains_key(&key) {
             return Err(AiRuntimeError::AlreadyRunning);
         }
-        let worker = WorkerProcess::launch(&self.config, composition.paths(), &[]).await?;
+        self.starting(composition.services(), &[]);
+        let worker = match WorkerProcess::launch(&self.config, composition.paths(), &[]).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(composition.services(), &error);
+                return Err(error);
+            }
+        };
         let generation = worker.generation;
         self.workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(worker)));
+        self.started(composition.services(), &[], generation);
         Ok(generation)
     }
 
@@ -535,6 +732,85 @@ impl AiSupervisor {
             .await
     }
 
+    /// Prepare a candidate worker for an explicit device profile. The candidate
+    /// must prove device execution and loaded-model readiness, and `verify` runs
+    /// immediately before publication so a superseded selection cannot replace
+    /// the working process.
+    pub async fn activate_hardware(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        profile: &RuntimeProfile,
+        verify: &(dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync),
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: Some(profile),
+            verify: Some(verify),
+        })
+        .await
+    }
+
+    /// Inventory a backend layer with a one-shot worker that is stopped before
+    /// returning. No inference worker or model is retained.
+    pub async fn inspect_layers(&self, layers: &[PathBuf]) -> Result<Value, AiRuntimeError> {
+        let mut worker = WorkerProcess::launch(&self.config, layers, &[]).await?;
+        let result = worker.request("hardware", &json!({})).await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+        result
+    }
+
+    pub async fn inspect_plugin_constraints(
+        &self,
+        layers: &[PathBuf],
+        plugin_id: &str,
+        settings: &Value,
+        runtime: Option<&Value>,
+    ) -> Result<Vec<constraints::ConfigurationConstraint>, AiRuntimeError> {
+        let mut worker = WorkerProcess::launch(&self.config, layers, &[]).await?;
+        let result = worker
+            .request(
+                "configuration_constraints",
+                &json!({
+                    "plugin_id": plugin_id, "settings": settings, "runtime": runtime,
+                }),
+            )
+            .await;
+        let _ = worker.child.start_kill();
+        let _ = worker.child.wait().await;
+        let items: Vec<constraints::ConfigurationConstraint> = serde_json::from_value(result?)
+            .map_err(|error| AiRuntimeError::Protocol(format!("invalid constraints: {error}")))?;
+        constraints::validate_constraints(&items).map_err(AiRuntimeError::Protocol)?;
+        Ok(items)
+    }
+
+    pub async fn hardware_probe(
+        &self,
+        service: AiService,
+    ) -> Result<HardwareProbe, AiRuntimeError> {
+        let value = self.call(service, "hardware", json!({})).await?;
+        serde_json::from_value(value)
+            .map_err(|error| AiRuntimeError::Protocol(format!("invalid hardware probe: {error}")))
+    }
+
+    /// Loaded-model readiness reported by the published worker, distinct from
+    /// discovery or file availability.
+    pub async fn readiness(&self, service: AiService) -> Result<Value, AiRuntimeError> {
+        self.call(service, "status", json!({})).await
+    }
+
     async fn reconfigure(
         &self,
         service: AiService,
@@ -542,6 +818,26 @@ impl AiSupervisor {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Uuid, AiRuntimeError> {
+        self.activate(Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile: None,
+            verify: None,
+        })
+        .await
+    }
+
+    async fn activate(&self, request: Activation<'_>) -> Result<Uuid, AiRuntimeError> {
+        let Activation {
+            service,
+            services,
+            layers,
+            models,
+            profile,
+            verify,
+        } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
         let configured: HashSet<_> = models.iter().map(|model| model.service).collect();
@@ -558,8 +854,58 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
-        let mut candidate = WorkerProcess::launch(&self.config, layers, models).await?;
+        let mut runtime_profiles = HashMap::new();
+        if let Some(profile) = profile {
+            let previous = self.workers.lock().await.get(&key).cloned();
+            if let Some(previous) = previous {
+                runtime_profiles = previous.lock().await.runtime_profiles.clone();
+            }
+            runtime_profiles.retain(|service, _| selected.contains(service));
+            runtime_profiles.insert(service, profile.clone());
+        }
+        self.starting(services, models);
+        let mut candidate = match WorkerProcess::launch(&self.config, layers, models).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.activation_failed(services, &error);
+                return Err(error);
+            }
+        };
         let prepare = async {
+            for (profile_service, profile) in &runtime_profiles {
+                if profile.backend == backend::BackendKind::RemoteApi {
+                    continue;
+                }
+                let probe_value = candidate.request("hardware", &json!({})).await?;
+                let probe: HardwareProbe =
+                    serde_json::from_value(probe_value).map_err(|error| {
+                        AiRuntimeError::Protocol(format!("invalid hardware probe: {error}"))
+                    })?;
+                if let Err(reason) = verify_probe(profile, &probe) {
+                    return Err(AiRuntimeError::DeviceUnavailable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+                let executed = candidate
+                    .request(
+                        "execute",
+                        &json!({
+                            "backend": profile.backend,
+                            "device": profile.device,
+                            "precision": profile.precision,
+                            "model_path": models.iter().find(|model| model.service == *profile_service).and_then(|model| model.settings.get("model_path")),
+                            "tokens": models.iter().find(|model| model.service == *profile_service).and_then(|model| model.settings.get("tokens")),
+                        }),
+                    )
+                    .await?;
+                if let Err(reason) = verify_execution(&executed) {
+                    return Err(AiRuntimeError::DeviceNotExecutable {
+                        device: profile.device.clone(),
+                        reason,
+                    });
+                }
+            }
             let available = candidate.request("discover", &json!({})).await?;
             let plugins = available
                 .as_array()
@@ -576,37 +922,81 @@ impl AiSupervisor {
                         model.service.kind()
                     )));
                 }
+                let mut args = json!({
+                    "plugin_id": model.plugin_id,
+                    "settings": model.settings,
+                });
+                if let Some(profile) = runtime_profiles.get(&model.service) {
+                    args["runtime"] = serde_json::to_value(profile)
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                }
                 let ready = candidate
-                    .request(
-                        "initialize",
-                        &json!({"plugin_id": model.plugin_id, "settings": model.settings}),
-                    )
-                    .await?;
+                    .request("initialize", &args)
+                    .await
+                    .map_err(|error| match error {
+                        AiRuntimeError::Plugin { kind, message } => {
+                            AiRuntimeError::ModelLoadFailed {
+                                plugin_id: model.plugin_id.clone(),
+                                reason: format!("{kind}: {message}"),
+                            }
+                        }
+                        other => other,
+                    })?;
                 if ready["model_ready"] != true {
-                    return Err(AiRuntimeError::Protocol(format!(
-                        "model {} did not report ready",
-                        model.plugin_id
-                    )));
+                    return Err(AiRuntimeError::ModelLoadFailed {
+                        plugin_id: model.plugin_id.clone(),
+                        reason: "model did not report ready".into(),
+                    });
+                }
+                if let Some(profile) = runtime_profiles.get(&model.service) {
+                    let echoed = ready.get("runtime").ok_or_else(|| {
+                        AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        }
+                    })?;
+                    let confirmed: RuntimeProfile = serde_json::from_value(echoed.clone())
+                        .map_err(|error| AiRuntimeError::Protocol(error.to_string()))?;
+                    if &confirmed != profile {
+                        return Err(AiRuntimeError::RuntimeProfileNotConfirmed {
+                            plugin_id: model.plugin_id.clone(),
+                        });
+                    }
                 }
                 candidate.selections.insert(
                     model.service,
                     (model.plugin_id.clone(), model.asset_revision.clone()),
                 );
             }
+            candidate.runtime_profiles = runtime_profiles;
             Ok(())
         }
         .await;
         if let Err(error) = prepare {
             let _ = candidate.child.start_kill();
             let _ = candidate.child.wait().await;
+            self.activation_failed(services, &error);
             return Err(error);
         }
+        let _selection_guard = match verify {
+            Some(verify) => match verify() {
+                Ok(guard) => Some(guard),
+                Err(error) => {
+                    let _ = candidate.child.start_kill();
+                    let _ = candidate.child.wait().await;
+                    self.activation_failed(services, &error);
+                    return Err(error);
+                }
+            },
+            None => None,
+        };
         let generation = candidate.generation;
         let old = self
             .workers
             .lock()
             .await
             .insert(key, Arc::new(Mutex::new(candidate)));
+        drop(_selection_guard);
+        self.started(services, models, generation);
         if let Some(old) = old {
             let mut old = old.lock().await;
             let _ = old.child.start_kill();
@@ -624,8 +1014,18 @@ impl AiSupervisor {
             return Err(AiRuntimeError::NotRunning);
         };
         let mut worker = worker.lock().await;
+        let generation = worker.generation;
         let _ = worker.child.start_kill();
         let _ = worker.child.wait().await;
+        self.status.send_modify(|snapshot| {
+            for (tracked, state) in &mut snapshot.services {
+                if (self.topology == ProcessTopology::Shared || *tracked == service)
+                    && state.generation == Some(generation)
+                {
+                    *state = Default::default();
+                }
+            }
+        });
         Ok(())
     }
 
@@ -660,6 +1060,10 @@ impl AiSupervisor {
         if current_generation != Some(generation) {
             return Err(AiRuntimeError::StaleGeneration);
         }
+        if let Err(error) = &result {
+            let fatal = worker.lock().await.failed;
+            self.request_failed(service, generation, error, fatal);
+        }
         result
     }
 
@@ -689,6 +1093,10 @@ impl AiSupervisor {
         };
         if current_generation != Some(generation) {
             return Err(AiRuntimeError::StaleGeneration);
+        }
+        if let Err(error) = &result {
+            let fatal = worker.lock().await.failed;
+            self.request_failed(service, generation, error, fatal);
         }
         result
     }
@@ -726,7 +1134,20 @@ impl AiSupervisor {
                     .and_then(|(_, revision)| revision.clone());
                 guard
                     .selections
-                    .insert(service, (plugin_id.into(), revision));
+                    .insert(service, (plugin_id.into(), revision.clone()));
+                let generation = guard.generation;
+                drop(guard);
+                self.status.send_modify(|snapshot| {
+                    let state = snapshot.services.entry(service).or_default();
+                    if state.generation == Some(generation) {
+                        state.active_model = Some(LoadedModel {
+                            plugin_id: plugin_id.into(),
+                            asset_revision: revision,
+                        });
+                        state.phase = RuntimePhase::ModelReady;
+                        state.last_error = None;
+                    }
+                });
             }
         }
         Ok(result)
@@ -778,6 +1199,133 @@ pub async fn fetch_install_plan_for(
     let value = result?;
     serde_json::from_value(value)
         .map_err(|error| AiRuntimeError::Protocol(format!("invalid install plan: {error}")))
+}
+
+/// Query SDK metadata and readiness without initializing a model or changing a running worker.
+/// Dependency layers must belong to the selected plugin's installed environment.
+pub async fn fetch_speech_plugin_inspection(
+    config: &PythonHostConfig,
+    service: AiService,
+    plugin_id: &str,
+    settings_overrides: Value,
+    language_hint: Option<&str>,
+    asset_revision: Option<&str>,
+    dependency_layers: &[PathBuf],
+) -> Result<speech_inspection::SpeechPluginInspection, AiRuntimeError> {
+    if !matches!(service, AiService::Tts | AiService::Asr)
+        || !layer::valid_segment(plugin_id)
+        || asset_revision.is_some_and(|revision| !layer::valid_segment(revision))
+        || language_hint.is_some_and(|language| language.len() > 64 || language.contains('\0'))
+        || !settings_overrides.is_object()
+        || serde_json::to_vec(&settings_overrides).is_ok_and(|bytes| bytes.len() > 32_768)
+    {
+        return Err(AiRuntimeError::Protocol(
+            "invalid speech plugin selection".into(),
+        ));
+    }
+    let model = ModelActivation {
+        service,
+        plugin_id: plugin_id.into(),
+        settings: json!({}),
+        asset_revision: asset_revision.map(str::to_owned),
+    };
+    let mut worker = WorkerProcess::launch(config, dependency_layers, &[model]).await?;
+    let result = async {
+        let discovered = worker.request("discover", &json!({})).await?;
+        let recognized = discovered.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("id").and_then(Value::as_str) == Some(plugin_id)
+                    && item.get("kind").and_then(Value::as_str) == Some(service.kind())
+                    && item.get("discovery_status").and_then(Value::as_str) == Some("available")
+            })
+        });
+        if !recognized {
+            return Err(AiRuntimeError::Protocol(
+                "selected plugin not discovered with the requested speech service".into(),
+            ));
+        }
+        let args = json!({ "plugin_id": plugin_id });
+        let schema = worker.request("settings_schema", &args).await?;
+        let fields = schema.as_object().ok_or_else(|| {
+            AiRuntimeError::Protocol("plugin settings schema is not an object".into())
+        })?;
+        if fields.len() > 128 || serde_json::to_vec(&schema).is_ok_and(|json| json.len() > 131_072)
+        {
+            return Err(AiRuntimeError::Protocol(
+                "plugin settings schema exceeds bounds".into(),
+            ));
+        }
+        let mut selected = settings_overrides.as_object().cloned().unwrap_or_default();
+        if fields.contains_key("language")
+            && let Some(language) = language_hint
+        {
+            let language = Value::String(language.into());
+            if selected
+                .get("language")
+                .is_some_and(|value| value != &language)
+            {
+                return Err(AiRuntimeError::Protocol(
+                    "conflicting language selection and model override".into(),
+                ));
+            }
+            selected.insert("language".into(), language);
+        }
+        let requested = Value::Object(selected);
+        let effective = worker
+            .request(
+                "validate_config",
+                &json!({"plugin_id": plugin_id, "settings": requested}),
+            )
+            .await?;
+        if !effective.is_object()
+            || serde_json::to_vec(&effective).is_ok_and(|json| json.len() > 65_536)
+        {
+            return Err(AiRuntimeError::Protocol(
+                "plugin validated settings are invalid or exceed bounds".into(),
+            ));
+        }
+        let dynamic = if requested
+            .as_object()
+            .is_some_and(|values| values.is_empty())
+        {
+            json!({})
+        } else {
+            effective.clone()
+        };
+        let install_plan = worker
+            .request(
+                "install_plan",
+                &json!({"plugin_id": plugin_id, "settings": dynamic}),
+            )
+            .await?;
+        let plan: install::PluginInstallPlan =
+            serde_json::from_value(install_plan).map_err(|error| {
+                AiRuntimeError::Protocol(format!("invalid plugin installation plan: {error}"))
+            })?;
+        let result = worker
+            .request(
+                "probe_install",
+                &json!({"plugin_id": plugin_id, "settings": dynamic}),
+            )
+            .await?;
+        let probe: speech_inspection::InstallProbe =
+            serde_json::from_value(result).map_err(|error| {
+                AiRuntimeError::Protocol(format!("invalid plugin installation probe: {error}"))
+            })?;
+        probe.validate()?;
+        Ok(speech_inspection::SpeechPluginInspection {
+            service,
+            plugin_id: plugin_id.into(),
+            settings_schema: schema,
+            effective_settings: effective,
+            install_plan: plan,
+            install_probe: probe,
+        })
+    }
+    .await;
+    let _ = worker.child.start_kill();
+    let _ = worker.child.wait().await;
+    result
 }
 
 pub struct PythonVoiceProvider {
@@ -1043,6 +1591,11 @@ class Plugin:
             settings: json!({}),
             asset_revision: Some("rev1".into()),
         };
+        let mut observed = supervisor.observe_status();
+        assert_eq!(
+            observed.borrow().service(AiService::Tts).phase,
+            RuntimePhase::Stopped
+        );
         supervisor
             .reconfigure(
                 AiService::Tts,
@@ -1052,6 +1605,11 @@ class Plugin:
             )
             .await
             .unwrap();
+        observed.changed().await.unwrap();
+        let active = observed.borrow_and_update().service(AiService::Tts);
+        assert_eq!(active.phase, RuntimePhase::ModelReady);
+        assert_eq!(active.active_model.unwrap().plugin_id, "fixture");
+        assert!(active.last_error.is_none());
         let result = supervisor
             .call(
                 AiService::Tts,
@@ -1071,6 +1629,11 @@ class Plugin:
                 .await
                 .is_err()
         );
+        let previous = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(previous.phase, RuntimePhase::ModelReady);
+        assert_eq!(previous.active_model.unwrap().plugin_id, "fixture");
+        assert!(previous.last_error.is_some());
+        assert!(previous.pending_model.is_none());
         assert!(
             supervisor
                 .call(
@@ -1081,7 +1644,34 @@ class Plugin:
                 .await
                 .is_ok()
         );
+        assert!(
+            supervisor
+                .call(AiService::Tts, "unknown_operation", json!({}))
+                .await
+                .is_err()
+        );
+        let nonfatal = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(nonfatal.phase, RuntimePhase::ModelReady);
+        assert!(nonfatal.last_error.is_some());
+        let worker = supervisor
+            .workers
+            .lock()
+            .await
+            .get(&WorkerKey::Service(AiService::Tts))
+            .cloned()
+            .unwrap();
+        {
+            let mut process = worker.lock().await;
+            process.child.start_kill().unwrap();
+            process.child.wait().await.unwrap();
+        }
+        let died = supervisor.refresh_status().await.service(AiService::Tts);
+        assert_eq!(died.phase, RuntimePhase::Failed);
+        assert!(died.active_model.is_none());
         supervisor.stop(AiService::Tts).await.unwrap();
+        let stopped = supervisor.status_snapshot().service(AiService::Tts);
+        assert_eq!(stopped.phase, RuntimePhase::Stopped);
+        assert!(stopped.active_model.is_none());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 

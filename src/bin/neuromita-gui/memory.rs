@@ -55,10 +55,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>, state: &EditorSta
             ui.set_total("0".into());
             ui.set_items(ModelRc::new(VecModel::from(Vec::<MemoryItem>::new())));
         }
-        let character = match id {
-            0 => neuromita::character::CharacterId::Mita,
-            1 => neuromita::character::CharacterId::KindMita,
-            _ => return,
+        let Some(character) = neuromita::character::CharacterId::from_index(id) else {
+            return;
         };
         send(Command::MemorySelect(character));
     });
@@ -197,10 +195,7 @@ pub fn render(window: &AppWindow, state: &EditorState, page: &MemoryListPage) {
         }
     };
     let ui = window.global::<MemoryUi>();
-    ui.set_character(match page.snapshot().character() {
-        neuromita::character::CharacterId::Mita => 0,
-        neuromita::character::CharacterId::KindMita => 1,
-    });
+    ui.set_character(page.snapshot().character().index() as i32);
     ui.set_offset(i32::try_from(offset).unwrap_or(i32::MAX));
     ui.set_next(
         page.next_offset()

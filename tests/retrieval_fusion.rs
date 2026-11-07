@@ -11,7 +11,7 @@ use neuromita::{
 fn hit(source: RetrievalSource, id: &str, content: &str) -> RetrievalHit {
     RetrievalHit {
         key: RetrievalKey {
-            character: CharacterId::Mita,
+            character: CharacterId::Crazy,
             source,
             id: id.into(),
         },
@@ -49,7 +49,7 @@ fn source_identity_prevents_cross_source_collisions() {
             vec![hit(RetrievalSource::History, "7", "history event")],
         ),
     ];
-    let hits = fuse(CharacterId::Mita, &buckets, config(FusionMode::Union, 5)).unwrap();
+    let hits = fuse(CharacterId::Crazy, &buckets, config(FusionMode::Union, 5)).unwrap();
     assert_eq!(hits.len(), 2);
     assert_ne!(hits[0].key.source, hits[1].key.source);
     assert_eq!(hits[0].key.id, hits[1].key.id);
@@ -67,7 +67,7 @@ fn union_merges_features_without_overwriting_content_or_metadata() {
         bucket(RetrievalMethod::Vector, vec![vector]),
         bucket(RetrievalMethod::Keyword, vec![lexical]),
     ];
-    let hits = fuse(CharacterId::Mita, &buckets, config(FusionMode::Union, 4)).unwrap();
+    let hits = fuse(CharacterId::Crazy, &buckets, config(FusionMode::Union, 4)).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].score, 2.0);
     assert_eq!(hits[0].evidence.len(), 2);
@@ -100,7 +100,7 @@ fn intersect_requires_distinct_methods_and_optionally_vector() {
         require_vector: true,
     };
     assert_eq!(
-        ids(&fuse(CharacterId::Mita, &buckets, config(mode, 5)).unwrap()),
+        ids(&fuse(CharacterId::Crazy, &buckets, config(mode, 5)).unwrap()),
         ["1"]
     );
     let mode = FusionMode::Intersect {
@@ -108,7 +108,7 @@ fn intersect_requires_distinct_methods_and_optionally_vector() {
         require_vector: false,
     };
     assert_eq!(
-        fuse(CharacterId::Mita, &buckets, config(mode, 5))
+        fuse(CharacterId::Crazy, &buckets, config(mode, 5))
             .unwrap()
             .len(),
         2
@@ -130,13 +130,18 @@ fn two_stage_never_admits_lexical_only_hits_or_silently_falls_back() {
             ],
         ),
     ];
-    let hits = fuse(CharacterId::Mita, &buckets, config(FusionMode::TwoStage, 5)).unwrap();
+    let hits = fuse(
+        CharacterId::Crazy,
+        &buckets,
+        config(FusionMode::TwoStage, 5),
+    )
+    .unwrap();
     assert_eq!(ids(&hits), ["1"]);
     assert_eq!(hits[0].evidence.len(), 2);
     let empty_vector = [bucket(RetrievalMethod::Vector, vec![]), buckets[1].clone()];
     assert!(
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &empty_vector,
             config(FusionMode::TwoStage, 5)
         )
@@ -145,7 +150,7 @@ fn two_stage_never_admits_lexical_only_hits_or_silently_falls_back() {
     );
     assert!(
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &empty_vector,
             config(FusionMode::Union, 5)
         )
@@ -180,7 +185,7 @@ fn rrf_deterministically_reranks_with_method_evidence() {
     ];
     let expected = ["2", "3", "1"];
     let hits = fuse(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         &buckets,
         config(FusionMode::Rrf { k: 60 }, 3),
     )
@@ -188,7 +193,7 @@ fn rrf_deterministically_reranks_with_method_evidence() {
     assert_eq!(ids(&hits), expected);
     let reversed = buckets.into_iter().rev().collect::<Vec<_>>();
     let repeated = fuse(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         &reversed,
         config(FusionMode::Rrf { k: 60 }, 3),
     )
@@ -208,20 +213,20 @@ fn available_graph_quota_keeps_existing_graph_hit_only() {
     )];
     let mut cfg = config(FusionMode::Union, 2);
     cfg.minimum_graph = 1;
-    let result = fuse(CharacterId::Mita, &buckets, cfg).unwrap();
+    let result = fuse(CharacterId::Crazy, &buckets, cfg).unwrap();
     assert_eq!(ids(&result), ["1", "3"]);
     assert_eq!(result.len(), 2);
     cfg.minimum_graph = 2;
-    assert_eq!(fuse(CharacterId::Mita, &buckets, cfg).unwrap().len(), 2);
+    assert_eq!(fuse(CharacterId::Crazy, &buckets, cfg).unwrap().len(), 2);
 }
 
 #[test]
 fn rejects_cross_character_duplicates_invalid_scores_and_conflicting_snapshots() {
     let mut bad = hit(RetrievalSource::Memory, "1", "one");
-    bad.key.character = CharacterId::KindMita;
+    bad.key.character = CharacterId::Kind;
     assert!(matches!(
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[bucket(RetrievalMethod::Vector, vec![bad])],
             config(FusionMode::Union, 2)
         ),
@@ -231,7 +236,7 @@ fn rejects_cross_character_duplicates_invalid_scores_and_conflicting_snapshots()
     bad.raw_score = Some(f64::NAN);
     assert!(
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[bucket(RetrievalMethod::Vector, vec![bad])],
             config(FusionMode::Union, 2)
         )
@@ -247,7 +252,7 @@ fn rejects_cross_character_duplicates_invalid_scores_and_conflicting_snapshots()
             vec![hit(RetrievalSource::Memory, "1", "new")],
         ),
     ];
-    assert!(fuse(CharacterId::Mita, &buckets, config(FusionMode::Union, 2)).is_err());
+    assert!(fuse(CharacterId::Crazy, &buckets, config(FusionMode::Union, 2)).is_err());
     let duplicate = bucket(
         RetrievalMethod::Vector,
         vec![
@@ -257,7 +262,7 @@ fn rejects_cross_character_duplicates_invalid_scores_and_conflicting_snapshots()
     );
     assert!(
         fuse(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             &[duplicate],
             config(FusionMode::Union, 2)
         )
@@ -267,11 +272,11 @@ fn rejects_cross_character_duplicates_invalid_scores_and_conflicting_snapshots()
 
 #[test]
 fn validates_limits_and_rrf_parameters_without_side_effects() {
-    assert!(fuse(CharacterId::Mita, &[], config(FusionMode::Union, 0)).is_err());
-    assert!(fuse(CharacterId::Mita, &[], config(FusionMode::Rrf { k: 0 }, 1)).is_err());
+    assert!(fuse(CharacterId::Crazy, &[], config(FusionMode::Union, 0)).is_err());
+    assert!(fuse(CharacterId::Crazy, &[], config(FusionMode::Rrf { k: 0 }, 1)).is_err());
     let mut cfg = config(FusionMode::Union, 1);
     cfg.minimum_graph = 2;
-    assert!(fuse(CharacterId::Mita, &[], cfg).is_err());
+    assert!(fuse(CharacterId::Crazy, &[], cfg).is_err());
     cfg = config(
         FusionMode::Intersect {
             min_methods: 0,
@@ -279,5 +284,5 @@ fn validates_limits_and_rrf_parameters_without_side_effects() {
         },
         2,
     );
-    assert!(fuse(CharacterId::Mita, &[], cfg).is_err());
+    assert!(fuse(CharacterId::Crazy, &[], cfg).is_err());
 }

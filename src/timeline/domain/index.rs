@@ -68,7 +68,9 @@ impl WorldIndex {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
-            let change = knowledge_change(fact, *observer).expect("fact observer has knowledge");
+            let Some(change) = knowledge_change(fact, *observer) else {
+                continue;
+            };
             let known = self.known.entry(*observer).or_default();
             if change.reset {
                 known.clear();
@@ -130,7 +132,8 @@ impl<'a> AppendIndex<'a> {
     ) -> Result<(), TimelineError> {
         if !matches!(
             draft.kind,
-            EventKind::CharacterMemoryChanged
+            EventKind::GameStateCaptured
+                | EventKind::CharacterMemoryChanged
                 | EventKind::CharacterStateChanged
                 | EventKind::CharacterWorkingStateReplaced
                 | EventKind::ReminderScheduled
@@ -146,6 +149,10 @@ impl<'a> AppendIndex<'a> {
         }
         let character = effect_character(draft)?;
         match draft.kind {
+            EventKind::GameStateCaptured => {
+                let state: crate::games::GameSlot = payload(draft, "game_state")?;
+                state.validate().map_err(TimelineError::Invalid)?;
+            }
             EventKind::CharacterStateChanged => {
                 if !payload::<CharacterBehavior>(draft, "state")?.is_valid() {
                     return Err(TimelineError::Invalid("invalid character behavior"));
@@ -249,7 +256,9 @@ impl<'a> AppendIndex<'a> {
             self.external_ids.insert(external.clone());
         }
         for observer in &fact.draft.observers {
-            let effect = knowledge_change(fact, *observer).expect("fact observer has knowledge");
+            let Some(effect) = knowledge_change(fact, *observer) else {
+                continue;
+            };
             let change = self.knowledge.entry(*observer).or_default();
             if effect.reset {
                 change.reset = true;

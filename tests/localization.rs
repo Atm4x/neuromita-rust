@@ -68,7 +68,10 @@ fn every_current_declaration_has_a_non_source_english_translation() {
     let sources = extract::extract_sources(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))).unwrap();
     assert!(sources.len() >= 40);
     for (id, source) in sources {
-        if source.contains('{') || matches!(source.as_str(), "Unity" | "NEW") {
+        if source.contains('{')
+            || !source.chars().any(char::is_alphabetic)
+            || matches!(source.as_str(), "Unity" | "NEW")
+        {
             continue;
         }
         let translated = localizer

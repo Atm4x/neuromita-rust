@@ -28,6 +28,178 @@ use uuid::Uuid;
 
 static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test]
+async fn explicit_prompt_set_requires_a_catalog_before_provider_invocation() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    app.presenter()
+        .settings
+        .characters
+        .for_character(CharacterId::Crazy)
+        .prompt_set
+        .set(Some("Default".into()))
+        .unwrap();
+    let request = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "Test prompt selection".into())
+        .unwrap();
+    let result = timeout(Duration::from_secs(2), request.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result.state,
+        RequestState::Finished(RequestOutcome::InternalError(_))
+    ));
+    assert!(
+        server.calls.try_recv().is_err(),
+        "a missing catalog must not fall back to the built-in prompt"
+    );
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn factory_preset_is_saved_selected_generated_and_reloaded_through_presenters() {
+    use neuromita::generation::{
+        JsonPresetRepository, PresetCatalog, PresetCatalogError, PresetCredentials,
+    };
+    use neuromita::presentation::PresetsPresenter;
+    struct Credentials;
+    impl PresetCredentials for Credentials {
+        fn get(&self, key: &str) -> Result<String, PresetCatalogError> {
+            if key == "FIXTURE_GEMINI_KEY" {
+                Ok("test-key".into())
+            } else {
+                Err(PresetCatalogError::MissingCredential(key.into()))
+            }
+        }
+    }
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let directory = std::env::temp_dir().join(format!("factory-sandbox-{}", Uuid::new_v4()));
+    let setup = || {
+        let mut config = ApplicationConfig::persistent_unconfigured(
+            ResponseGenerator::new([
+                Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+            ])
+            .unwrap(),
+            limits(),
+            "127.0.0.1:0".parse().unwrap(),
+            &directory,
+        )
+        .unwrap();
+        config.presets = PresetCatalog::open(
+            Default::default(),
+            Arc::new(JsonPresetRepository::new(directory.join("presets.json"))),
+            Arc::new(Credentials),
+        )
+        .unwrap();
+        config
+    };
+    let app = ApplicationLifecycle::start(setup()).await.unwrap();
+    let (id, _) = app.presenter().presets.create_unconfigured().unwrap();
+    assert!(app.presenter().presets.require_configured(id).is_err());
+    let mut template = PresetsPresenter::template("gemini").unwrap();
+    template.endpoint = server.endpoint.clone();
+    assert!(
+        template
+            .configure("fixture".into(), "".into(), "FIXTURE_GEMINI_KEY".into())
+            .is_err()
+    );
+    assert!(PresetsPresenter::template("unknown").is_err());
+    let record = template
+        .configure(
+            "factory fixture".into(),
+            "test-model".into(),
+            "FIXTURE_GEMINI_KEY".into(),
+        )
+        .unwrap();
+    app.presenter().presets.update(id, record).unwrap();
+    app.presenter().settings.presets.active.set(id).unwrap();
+    let request = app
+        .presenter()
+        .conversation
+        .reply(CharacterId::Crazy, "factory path".into())
+        .unwrap();
+    let call = server.next().await;
+    assert_eq!(call.body["generationConfig"]["maxOutputTokens"], 3000);
+    call.respond.send(Reply::Text("factory response")).unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    app.shutdown().await.unwrap();
+    let stored = std::fs::read_to_string(directory.join("presets.json")).unwrap();
+    assert!(stored.contains("FIXTURE_GEMINI_KEY"));
+    assert!(!stored.contains("test-key"));
+    let reopened = ApplicationLifecycle::start(setup()).await.unwrap();
+    assert_eq!(reopened.presenter().settings.presets.active.get(), id);
+    assert!(
+        reopened
+            .presenter()
+            .conversation
+            .snapshot(CharacterId::Crazy)
+            .await
+            .unwrap()
+            .model
+            .is_ok()
+    );
+    reopened.shutdown().await.unwrap();
+    server.shutdown().await;
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn every_builtin_character_has_an_owner_and_independent_context() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(app.presenter().conversation.characters().len(), 9);
+    for id in CharacterId::ALL {
+        let view = app
+            .character(id)
+            .unwrap()
+            .get_context(app.at())
+            .await
+            .unwrap();
+        assert_eq!(view.character_id, id);
+        assert_eq!(view.state.accepted_replies, 0);
+        assert_eq!(
+            app.presenter()
+                .settings
+                .characters
+                .for_character(id)
+                .reply
+                .get(),
+            neuromita::settings::PresetSelection::Active
+        );
+    }
+    app.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_queue() {
     use neuromita::{settings::Volume, timeline::domain::MessageRole};
@@ -48,7 +220,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     assert_eq!(sandbox.characters(), &CharacterId::ALL);
     assert!(
         sandbox
-            .snapshot(CharacterId::Mita)
+            .snapshot(CharacterId::Crazy)
             .await
             .unwrap()
             .messages
@@ -56,11 +228,11 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     );
 
     let first = sandbox
-        .reply(CharacterId::Mita, "sandbox input".into())
+        .reply(CharacterId::Crazy, "sandbox input".into())
         .unwrap();
     let call = server.next().await;
     let queued = sandbox
-        .reply(CharacterId::Mita, "cancel before generation".into())
+        .reply(CharacterId::Crazy, "cancel before generation".into())
         .unwrap();
     shown(&app.presenter().chat, queued.id(), false).await;
     assert_eq!(
@@ -71,7 +243,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
         finished(&queued).await.state,
         RequestState::Cancelled
     ));
-    let before = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    let before = sandbox.snapshot(CharacterId::Crazy).await.unwrap();
     assert!(
         before
             .messages
@@ -81,7 +253,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     assert_eq!(before.messages.len(), 2);
     assert!(
         sandbox
-            .snapshot(CharacterId::KindMita)
+            .snapshot(CharacterId::Kind)
             .await
             .unwrap()
             .messages
@@ -96,7 +268,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     shown(&app.presenter().chat, first.id(), true).await;
-    let after = sandbox.snapshot(CharacterId::Mita).await.unwrap();
+    let after = sandbox.snapshot(CharacterId::Crazy).await.unwrap();
     assert_eq!(
         after
             .messages
@@ -125,7 +297,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     settings.changed().await.unwrap();
     assert_eq!(
         sandbox
-            .snapshot(CharacterId::Mita)
+            .snapshot(CharacterId::Crazy)
             .await
             .unwrap()
             .settings
@@ -137,9 +309,9 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     );
 
     let external = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         ChatApi::publish_message(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             UserInput::new("external input".into()).unwrap(),
         )
         .unwrap(),
@@ -150,7 +322,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
     shown(&app.presenter().chat, external.id(), false).await;
     assert!(
         sandbox
-            .snapshot(CharacterId::KindMita)
+            .snapshot(CharacterId::Kind)
             .await
             .unwrap()
             .requests
@@ -162,7 +334,7 @@ async fn sandbox_reads_canonical_history_observes_external_requests_and_cancels_
         .send(Reply::Text("external accepted answer"))
         .unwrap();
     finished(&external).await;
-    let kind = sandbox.snapshot(CharacterId::KindMita).await.unwrap();
+    let kind = sandbox.snapshot(CharacterId::Kind).await.unwrap();
     assert!(
         kind.messages
             .iter()
@@ -404,9 +576,9 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     );
     let app = ApplicationLifecycle::start(config).await.unwrap();
     let presenter = &app.presenter().chat;
-    assert!(presenter.reply(CharacterId::Mita, " ".into()).is_err());
+    assert!(presenter.reply(CharacterId::Crazy, " ".into()).is_err());
 
-    let first = presenter.reply(CharacterId::Mita, "first".into()).unwrap();
+    let first = presenter.reply(CharacterId::Crazy, "first".into()).unwrap();
     let first_call = server.next().await;
     assert_eq!(
         first_call.path,
@@ -430,13 +602,13 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     );
 
     let queued = presenter
-        .reply(CharacterId::Mita, "never starts".into())
+        .reply(CharacterId::Crazy, "never starts".into())
         .unwrap();
     let running_cancel = presenter
-        .reply(CharacterId::Mita, "cancel during generation".into())
+        .reply(CharacterId::Crazy, "cancel during generation".into())
         .unwrap();
     assert!(matches!(
-        presenter.reply(CharacterId::Mita, "queue overflow".into()),
+        presenter.reply(CharacterId::Crazy, "queue overflow".into()),
         Err(neuromita::presentation::PresenterError::Submit(
             SubmitError::QueueFull
         ))
@@ -447,7 +619,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         RequestState::Cancelled
     ));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -457,9 +629,9 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     );
 
     let external = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             UserInput::new("external client".into()).unwrap(),
         )
         .unwrap(),
@@ -526,7 +698,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         .respond
         .send(Reply::Text("must not be accepted"));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -536,7 +708,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     );
 
     let failed = presenter
-        .reply(CharacterId::Mita, "HTTP failure".into())
+        .reply(CharacterId::Crazy, "HTTP failure".into())
         .unwrap();
     server
         .next()
@@ -550,7 +722,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     ));
 
     let panicked = presenter
-        .reply(CharacterId::Mita, "panic provider".into())
+        .reply(CharacterId::Crazy, "panic provider".into())
         .unwrap();
     assert!(matches!(
         finished(&panicked).await.state,
@@ -558,7 +730,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     ));
 
     let next = presenter
-        .reply(CharacterId::Mita, "after failure".into())
+        .reply(CharacterId::Crazy, "after failure".into())
         .unwrap();
     let next_call = server.next().await;
     assert!(!next_call.body.to_string().contains("must not be accepted"));
@@ -571,7 +743,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     ));
     shown(presenter, next.id(), true).await;
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -599,11 +771,11 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
     }));
 
     let interrupted = presenter
-        .reply(CharacterId::Mita, "stop application".into())
+        .reply(CharacterId::Crazy, "stop application".into())
         .unwrap();
     let stopped_call = server.next().await;
     let pending = presenter
-        .reply(CharacterId::Mita, "stop pending".into())
+        .reply(CharacterId::Crazy, "stop pending".into())
         .unwrap();
     app.shutdown().await.unwrap();
     assert!(matches!(
@@ -637,7 +809,7 @@ async fn accepted_structured_segments_keep_emotions_and_order_in_canonical_timel
     let first = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Hi".into())
+        .reply(CharacterId::Crazy, "Hi".into())
         .unwrap();
     let incoming = server.next().await;
     assert!(incoming.body["generationConfig"]["responseSchema"]["properties"]
@@ -656,7 +828,7 @@ async fn accepted_structured_segments_keep_emotions_and_order_in_canonical_timel
     assert_eq!(accepted.segments[1].emotions, ["curious"]);
 
     let context = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -675,7 +847,7 @@ async fn accepted_structured_segments_keep_emotions_and_order_in_canonical_timel
     let second = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Again".into())
+        .reply(CharacterId::Crazy, "Again".into())
         .unwrap();
     let followup = server.next().await;
     assert!(followup.body.to_string().contains("Hello\\nHow are you?"));
@@ -704,7 +876,7 @@ async fn structured_state_deltas_apply_only_with_accepted_reply() {
     let handle = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "How do you feel?".into())
+        .reply(CharacterId::Crazy, "How do you feel?".into())
         .unwrap();
     let incoming = server.next().await;
     assert!(
@@ -721,7 +893,7 @@ async fn structured_state_deltas_apply_only_with_accepted_reply() {
     ));
     assert_eq!(app.at().through, 3); // input + message + state change in one guarded commit
     let state = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .state()
         .await
@@ -731,7 +903,7 @@ async fn structured_state_deltas_apply_only_with_accepted_reply() {
     assert_eq!(state.boredom, 8.0);
     assert_eq!(state.stress, 5.0);
     let state_other = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .state()
         .await
@@ -758,7 +930,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     let first = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "First".into())
+        .reply(CharacterId::Crazy, "First".into())
         .unwrap();
     let call = server.next().await;
     assert!(
@@ -776,7 +948,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     assert_eq!(accepted.state_after.attitude, 62.0);
     assert_eq!(app.at().through, 4); // User message + reply + two effects in one commit
     let state = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -786,7 +958,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     assert_eq!(state.view.messages().len(), 2);
     assert!(state.view.world_events().is_empty());
     assert!(
-        app.character(CharacterId::KindMita)
+        app.character(CharacterId::Kind)
             .unwrap()
             .get_context(app.at())
             .await
@@ -798,7 +970,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     let second = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Continue".into())
+        .reply(CharacterId::Crazy, "Continue".into())
         .unwrap();
     let call = server.next().await;
     assert!(call.body.to_string().contains("[WORKING STATE]"));
@@ -809,7 +981,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(app.at())
             .await
@@ -822,7 +994,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     let third = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Clear".into())
+        .reply(CharacterId::Crazy, "Clear".into())
         .unwrap();
     server
         .next()
@@ -837,7 +1009,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     assert!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(app.at())
             .await
@@ -849,7 +1021,7 @@ async fn working_state_is_atomic_private_and_available_only_to_its_character() {
     let fourth = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "After clear".into())
+        .reply(CharacterId::Crazy, "After clear".into())
         .unwrap();
     let call = server.next().await;
     assert!(!call.body.to_string().contains("[WORKING STATE]"));
@@ -882,7 +1054,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let add = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Remember this".into())
+        .reply(CharacterId::Crazy, "Remember this".into())
         .unwrap();
     let call = server.next().await;
     assert!(
@@ -900,7 +1072,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     assert_eq!(app.at().through, 4); // user + message + two independent memory facts
     let original_anchor = app.at();
     let mem = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -912,7 +1084,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
             .any(|item| item.content.contains("tea") && item.priority == MemoryPriority::High)
     );
     assert!(
-        app.character(CharacterId::KindMita)
+        app.character(CharacterId::Kind)
             .unwrap()
             .get_context(app.at())
             .await
@@ -934,7 +1106,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let second = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Consolidate".into())
+        .reply(CharacterId::Crazy, "Consolidate".into())
         .unwrap();
     let call = server.next().await;
     assert!(call.body.to_string().contains("[LONG-TERM MEMORY]"));
@@ -952,7 +1124,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let now = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -964,7 +1136,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let retained_after_merge = app
         .presenter()
         .characters
-        .memories(CharacterId::Mita)
+        .memories(CharacterId::Crazy)
         .await
         .unwrap();
     assert_eq!(retained_after_merge.records().len(), 2);
@@ -982,7 +1154,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let invalid = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Bad memory command".into())
+        .reply(CharacterId::Crazy, "Bad memory command".into())
         .unwrap();
     let call = server.next().await;
     let bad = serde_json::json!({
@@ -1000,7 +1172,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     ));
     assert_eq!(app.at().through, at_before_bad.through + 1); // only the incoming player message
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(app.at())
             .await
@@ -1009,7 +1181,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
         now
     );
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(original_anchor)
             .await
@@ -1021,7 +1193,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let delete = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Forget tea".into())
+        .reply(CharacterId::Crazy, "Forget tea".into())
         .unwrap();
     let call = server.next().await;
     let delete_body =
@@ -1035,7 +1207,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     assert!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(app.at())
             .await
@@ -1046,7 +1218,7 @@ async fn typed_memories_are_atomic_and_visible_in_followup_context() {
     let retained_after_delete = app
         .presenter()
         .characters
-        .memories(CharacterId::Mita)
+        .memories(CharacterId::Crazy)
         .await
         .unwrap();
     assert_eq!(
@@ -1082,7 +1254,7 @@ async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
     let first = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Save memories".into())
+        .reply(CharacterId::Crazy, "Save memories".into())
         .unwrap();
     let call = server.next().await;
     let mut facts: Vec<String> = (0..15)
@@ -1102,7 +1274,7 @@ async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let all = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -1118,7 +1290,7 @@ async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
     let second = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Tell me about jasmine tea".into())
+        .reply(CharacterId::Crazy, "Tell me about jasmine tea".into())
         .unwrap();
     let call = server.next().await;
     let prompt = call.body.to_string();
@@ -1151,7 +1323,7 @@ async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
     let third = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Remember jasmine tea again".into())
+        .reply(CharacterId::Crazy, "Remember jasmine tea again".into())
         .unwrap();
     let call = server.next().await;
     call.respond.send(Reply::Structured(
@@ -1164,7 +1336,7 @@ async fn memory_retrieval_is_bounded_and_duplicate_add_keeps_stable_identity() {
     };
     assert_eq!(applied.effects.len(), 1);
     let after = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -1195,7 +1367,7 @@ async fn invalid_working_state_is_rejected_before_acceptance() {
     let handle = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Try invalid".into())
+        .reply(CharacterId::Crazy, "Try invalid".into())
         .unwrap();
     server.next().await.respond.send(Reply::Structured(
         r#"{"segments":[{"text":"Unsafe"}],"working_state":{"open_loops":["1","2","3","4","5","6","7"]}}"#
@@ -1206,7 +1378,7 @@ async fn invalid_working_state_is_rejected_before_acceptance() {
     ));
     assert_eq!(app.at().through, 1);
     assert!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(app.at())
             .await
@@ -1235,7 +1407,7 @@ async fn unsupported_structured_effect_fails_without_committing_or_synthesizing(
     let handle = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "act now".into())
+        .reply(CharacterId::Crazy, "act now".into())
         .unwrap();
     let call = server.next().await;
     call.respond
@@ -1249,7 +1421,7 @@ async fn unsupported_structured_effect_fails_without_committing_or_synthesizing(
         RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
     ));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -1282,7 +1454,7 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
     let pending = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "pinned".into())
+        .reply(CharacterId::Crazy, "pinned".into())
         .unwrap();
     let active = server.next().await;
     let selected = app.timeline_selection();
@@ -1295,7 +1467,7 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
         RequestState::Cancelled
     ));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -1311,7 +1483,7 @@ async fn a_generation_pinned_to_a_reselected_branch_cannot_commit() {
     let fresh = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "new selection".into())
+        .reply(CharacterId::Crazy, "new selection".into())
         .unwrap();
     let next = server.next().await;
     drop(active);
@@ -1340,9 +1512,9 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     .await
     .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("first message".into()).unwrap(),
         )
         .unwrap(),
@@ -1351,22 +1523,22 @@ async fn queued_reaction_uses_newer_known_player_message_at_dispatch() {
     .unwrap();
     let first_call = server.next().await;
     let cause = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .observe(UserInput::new("door opened".into()).unwrap())
         .await
         .unwrap();
     let reaction = ChatApi::react(ReactRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         cause,
         Arc::clone(UserInput::new("React to the door".into()).unwrap().text()),
         RequestSource::Presenter,
     ))
     .unwrap();
     let question = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Why did you open the door?".into()).unwrap(),
         )
         .unwrap(),
@@ -1443,9 +1615,9 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     .await
     .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("active request".into()).unwrap(),
         )
         .unwrap(),
@@ -1454,9 +1626,9 @@ async fn queued_input_survives_selection_change_but_stale_generation_does_not_st
     .unwrap();
     let blocked = server.next().await;
     let waiting = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("queued and already spoken".into()).unwrap(),
         )
         .unwrap(),
@@ -1507,11 +1679,11 @@ async fn independent_player_message_is_visible_without_scheduling_generation() {
     let input = UserInput::new("Message without an LLM request".into()).unwrap();
     let event_id = input.event_id();
     assert_eq!(
-        ChatApi::publish_message(CharacterId::Mita, input).unwrap(),
+        ChatApi::publish_message(CharacterId::Crazy, input).unwrap(),
         event_id
     );
     ChatApi::publish_message(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         UserInput::new("Only KindMita can hear this".into()).unwrap(),
     )
     .unwrap();
@@ -1524,9 +1696,9 @@ async fn independent_player_message_is_visible_without_scheduling_generation() {
     );
 
     let reply = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("New question".into()).unwrap(),
         )
         .unwrap(),
@@ -1569,9 +1741,9 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     .unwrap();
 
     let mita = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Question before reset".into()).unwrap(),
         )
         .unwrap(),
@@ -1580,9 +1752,9 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     .unwrap();
     let mita_call = server.next().await;
     let kind = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             UserInput::new("KindMita stays active".into()).unwrap(),
         )
         .unwrap(),
@@ -1594,7 +1766,7 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     let selected = app.timeline_selection();
     let reset_id = neuromita::timeline::EventId::new();
     assert_eq!(
-        app.reset_character_context(selected, CharacterId::Mita, reset_id),
+        app.reset_character_context(selected, CharacterId::Crazy, reset_id),
         Ok(reset_id)
     );
     assert!(matches!(
@@ -1604,13 +1776,13 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     assert!(matches!(kind.snapshot().state, RequestState::Processing(_)));
     assert_eq!(app.at().through, 3);
     assert_eq!(
-        app.reset_character_context(selected, CharacterId::Mita, reset_id),
+        app.reset_character_context(selected, CharacterId::Crazy, reset_id),
         Ok(reset_id)
     );
     assert_eq!(app.at().through, 3);
 
     let mita_view = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -1636,9 +1808,9 @@ async fn character_reset_cancels_only_its_running_generation_and_keeps_input_fac
     }));
 
     let next = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("After reset".into()).unwrap(),
         )
         .unwrap(),
@@ -1676,9 +1848,9 @@ async fn stale_reset_is_rejected_without_cancelling_current_request() {
     app.select_timeline_branch(selected.branch_id, selected)
         .unwrap();
     let reply = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Valid after reselection".into()).unwrap(),
         )
         .unwrap(),
@@ -1690,7 +1862,7 @@ async fn stale_reset_is_rejected_without_cancelling_current_request() {
     assert!(
         app.reset_character_context(
             selected,
-            CharacterId::Mita,
+            CharacterId::Crazy,
             neuromita::timeline::EventId::new()
         )
         .is_err()
@@ -1734,7 +1906,7 @@ async fn cancelling_voice_discards_memory_state_and_working_state_before_the_nex
     let request = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "first turn".into())
+        .reply(CharacterId::Crazy, "first turn".into())
         .unwrap();
     server.next().await.respond.send(Reply::Structured(r#"{"segments":[{"text":"unaccepted reply"}],"attitude_change":2.0,"memory_add":["high|hidden-unaccepted-secret"],"working_state":{"focus":"discard this focus"}}"#)).unwrap();
     let release = timeout(Duration::from_secs(5), voices.recv())
@@ -1742,7 +1914,7 @@ async fn cancelling_voice_discards_memory_state_and_working_state_before_the_nex
         .unwrap()
         .unwrap();
     let before = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -1772,7 +1944,7 @@ async fn cancelling_voice_discards_memory_state_and_working_state_before_the_nex
     let next = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "next turn".into())
+        .reply(CharacterId::Crazy, "next turn".into())
         .unwrap();
     let call = server.next().await;
     let prompt = call.body.to_string();
@@ -1787,7 +1959,7 @@ async fn cancelling_voice_discards_memory_state_and_working_state_before_the_nex
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let after = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -1852,9 +2024,9 @@ async fn reset_during_voice_discards_the_unaccepted_response() {
         .set(neuromita::settings::Volume::new(80).unwrap())
         .unwrap();
     let reply = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Question requiring voice".into()).unwrap(),
         )
         .unwrap(),
@@ -1871,7 +2043,7 @@ async fn reset_during_voice_discards_the_unaccepted_response() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -1881,7 +2053,7 @@ async fn reset_during_voice_discards_the_unaccepted_response() {
     );
     let reset_id = neuromita::timeline::EventId::new();
     assert_eq!(
-        app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset_id),
+        app.reset_character_context(app.timeline_selection(), CharacterId::Crazy, reset_id),
         Ok(reset_id)
     );
     assert!(matches!(
@@ -1889,7 +2061,7 @@ async fn reset_during_voice_discards_the_unaccepted_response() {
         RequestState::Cancelled
     ));
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -1924,9 +2096,9 @@ async fn shutdown_during_voice_discards_the_unaccepted_reply() {
         .set(true)
         .unwrap();
     let reply = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("Voice must not hold the commit open".into()).unwrap(),
         )
         .unwrap(),
@@ -1971,15 +2143,15 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     .unwrap();
 
     let cause = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .observe(UserInput::new("Known door opened".into()).unwrap())
         .await
         .unwrap();
     let first = ChatApi::reply(ReplyRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             UserInput::new("First blocking request".into()).unwrap(),
         )
         .unwrap(),
@@ -1988,14 +2160,14 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     .unwrap();
     let blocked = server.next().await;
     let reaction = ChatApi::react(ReactRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         cause,
         Arc::clone(UserInput::new("React to door".into()).unwrap().text()),
         RequestSource::Presenter,
     ))
     .unwrap();
     let reset = neuromita::timeline::EventId::new();
-    app.reset_character_context(app.timeline_selection(), CharacterId::Mita, reset)
+    app.reset_character_context(app.timeline_selection(), CharacterId::Crazy, reset)
         .unwrap();
     assert!(matches!(
         finished(&first).await.state,
@@ -2008,7 +2180,7 @@ async fn reset_cancels_queued_reaction_admitted_before_reset() {
     assert!(server.calls.try_recv().is_err());
     assert_eq!(app.at().through, 3);
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .state()
             .await
@@ -2037,23 +2209,23 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
     .unwrap();
 
     ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("Private knowledge before reset".into()).unwrap(),
     )
     .unwrap();
     let old = app.at();
     app.reset_character_context(
         app.timeline_selection(),
-        CharacterId::Mita,
+        CharacterId::Crazy,
         neuromita::timeline::EventId::new(),
     )
     .unwrap();
 
     let stale = ChatApi::reply(
         ReplyRequest::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             neuromita::api::ChatApi::publish_message(
-                CharacterId::Mita,
+                CharacterId::Crazy,
                 UserInput::new("Try old context".into()).unwrap(),
             )
             .unwrap(),
@@ -2068,7 +2240,7 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
     ));
     assert!(server.calls.try_recv().is_err());
     assert_eq!(
-        app.character(CharacterId::Mita)
+        app.character(CharacterId::Crazy)
             .unwrap()
             .get_context(old)
             .await
@@ -2080,9 +2252,9 @@ async fn historical_reply_cannot_restore_knowledge_across_a_character_reset() {
     );
 
     let independent = ChatApi::reply(ReplyRequest::new(
-        CharacterId::KindMita,
+        CharacterId::Kind,
         neuromita::api::ChatApi::publish_message(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             UserInput::new("Your own earlier view".into()).unwrap(),
         )
         .unwrap(),
@@ -2129,23 +2301,23 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     .await
     .unwrap();
 
-    let mut audience = ConversationAudience::private_to(CharacterId::Mita);
-    audience.seen_by.insert(CharacterId::KindMita);
+    let mut audience = ConversationAudience::private_to(CharacterId::Crazy);
+    audience.seen_by.insert(CharacterId::Kind);
     audience.targets.extend([
         ConversationSpeaker::Player,
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
     audience.participants.extend([
         ConversationSpeaker::Player,
-        ConversationSpeaker::Character(CharacterId::Mita),
-        ConversationSpeaker::Character(CharacterId::KindMita),
+        ConversationSpeaker::Character(CharacterId::Crazy),
+        ConversationSpeaker::Character(CharacterId::Kind),
     ]);
 
-    let mut shared_input = ConversationAudience::player_to(CharacterId::Mita);
-    shared_input.seen_by.insert(CharacterId::KindMita);
+    let mut shared_input = ConversationAudience::player_to(CharacterId::Crazy);
+    shared_input.seen_by.insert(CharacterId::Kind);
     shared_input
         .participants
-        .insert(ConversationSpeaker::Character(CharacterId::KindMita));
+        .insert(ConversationSpeaker::Character(CharacterId::Kind));
 
     let mut incoming = ConversationMessage::new(
         "shared-player-input",
@@ -2159,7 +2331,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         .unwrap();
     let reply = ChatApi::reply(
         ReplyRequest::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             message_id,
             RequestSource::Client(Uuid::new_v4()),
         )
@@ -2173,13 +2345,13 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let mita = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     let kind = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -2189,41 +2361,41 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert_eq!(source.len(), 2);
     assert_eq!(listener.len(), 2);
     assert_eq!(listener[0]["speaker"], "player");
-    assert_eq!(listener[0]["targets"], json!(["mita"]));
+    assert_eq!(listener[0]["targets"], json!(["Crazy"]));
     assert_eq!(
         listener[0]["timeline_event_id"],
         source[0]["timeline_event_id"]
     );
     assert_eq!(source[1]["role"], "assistant");
     assert_eq!(listener[1]["role"], "user");
-    assert_eq!(listener[1]["speaker"], "mita");
+    assert_eq!(listener[1]["speaker"], "Crazy");
     assert_eq!(
         source[1]["timeline_event_id"],
         listener[1]["timeline_event_id"]
     );
-    assert_eq!(source[1]["targets"], json!(["player", "kind-mita"]));
+    assert_eq!(source[1]["targets"], json!(["player", "Kind"]));
     assert_eq!(
         listener[1]["participants"],
-        json!(["player", "mita", "kind-mita"])
+        json!(["player", "Crazy", "Kind"])
     );
     assert_eq!(
         listener[1]["content"],
         json!([{"text":"Hello, Kind Mita!"}])
     );
 
-    let mut private = ConversationAudience::private_to(CharacterId::KindMita);
+    let mut private = ConversationAudience::private_to(CharacterId::Kind);
     private
         .targets
-        .insert(ConversationSpeaker::Character(CharacterId::Mita));
+        .insert(ConversationSpeaker::Character(CharacterId::Crazy));
     private.participants.extend([
-        ConversationSpeaker::Character(CharacterId::KindMita),
-        ConversationSpeaker::Character(CharacterId::Mita),
+        ConversationSpeaker::Character(CharacterId::Kind),
+        ConversationSpeaker::Character(CharacterId::Crazy),
     ]);
     let private_reply = ChatApi::reply(
         ReplyRequest::new(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             neuromita::api::ChatApi::publish_message(
-                CharacterId::KindMita,
+                CharacterId::Kind,
                 UserInput::new("A private reply".into()).unwrap(),
             )
             .unwrap(),
@@ -2239,13 +2411,13 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let mita_now = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     let kind_now = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -2254,13 +2426,13 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert_eq!(kind_now.view.count(), 4);
     assert_eq!(
         kind_now.view.provider_messages()[3]["targets"],
-        json!(["mita"])
+        json!(["Crazy"])
     );
     assert_eq!(kind_now.view.provider_messages()[3]["role"], "assistant");
 
     let react = ChatApi::react(
         ReactRequest::new(
-            CharacterId::KindMita,
+            CharacterId::Kind,
             neuromita::timeline::EventId(
                 Uuid::parse_str(source[1]["timeline_event_id"].as_str().unwrap()).unwrap(),
             ),
@@ -2277,24 +2449,24 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let now_mita = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     let now_kind = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     assert_eq!(now_mita.view.count(), 3);
     assert_eq!(now_kind.view.count(), 5);
-    assert_eq!(now_mita.view.provider_messages()[2]["speaker"], "kind-mita");
+    assert_eq!(now_mita.view.provider_messages()[2]["speaker"], "Kind");
     assert_eq!(now_kind.view.provider_messages()[4]["role"], "assistant");
     let initiate = ChatApi::initiate(
         neuromita::request::InitiateRequest::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             Arc::clone(
                 UserInput::new("Say something to both".into())
                     .unwrap()
@@ -2314,13 +2486,13 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         RequestState::Finished(RequestOutcome::Success(_))
     ));
     let mita_final = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
         .unwrap();
     let kind_final = app
-        .character(CharacterId::KindMita)
+        .character(CharacterId::Kind)
         .unwrap()
         .get_context(app.at())
         .await
@@ -2330,7 +2502,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
     assert_eq!(mita_final.view.provider_messages()[3]["role"], "assistant");
     assert_eq!(kind_final.view.provider_messages()[5]["role"], "user");
 
-    let missing_speaker = ConversationAudience::private_to(CharacterId::KindMita);
+    let missing_speaker = ConversationAudience::private_to(CharacterId::Kind);
     let previous_head = app.at().through;
     let mut message = ConversationMessage::new(
         "player-unseen-by-mita",
@@ -2344,7 +2516,7 @@ async fn generated_character_messages_use_shared_conversation_audience() {
         .unwrap();
     assert!(matches!(
         ChatApi::reply(ReplyRequest::new(
-            CharacterId::Mita,
+            CharacterId::Crazy,
             message_id,
             RequestSource::Client(Uuid::new_v4())
         )),
@@ -2393,14 +2565,14 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
     let first = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "one".into())
+        .reply(CharacterId::Crazy, "one".into())
         .unwrap();
     let first_call = server.next().await;
     assert!(first_call.path.contains("models/alpha:generateContent"));
     let waiting = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "two".into())
+        .reply(CharacterId::Crazy, "two".into())
         .unwrap();
 
     SettingsApi::edit::<PresetSettings>(|settings| {
@@ -2408,7 +2580,7 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
     })
     .unwrap();
     SettingsApi::edit::<CharactersSettings>(|settings| {
-        settings.mita.presets.react = PresetSelection::Specific(PresetId(0));
+        settings.crazy.presets.react = PresetSelection::Specific(PresetId(0));
     })
     .unwrap();
 
@@ -2429,12 +2601,12 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
     ));
 
     let event = ChatApi::publish_message(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         UserInput::new("react to this".into()).unwrap(),
     )
     .unwrap();
     let reaction = ChatApi::react(ReactRequest::new(
-        CharacterId::Mita,
+        CharacterId::Crazy,
         event,
         "react",
         RequestSource::Presenter,
@@ -2449,13 +2621,13 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
     ));
 
     SettingsApi::edit::<CharactersSettings>(|settings| {
-        settings.mita.presets.reply = PresetSelection::Specific(PresetId(999));
+        settings.crazy.presets.reply = PresetSelection::Specific(PresetId(999));
     })
     .unwrap();
     let missing = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "missing".into())
+        .reply(CharacterId::Crazy, "missing".into())
         .unwrap();
     assert!(matches!(
         finished(&missing).await.state,
@@ -2494,9 +2666,11 @@ async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
     let make = |model: &str| PresetRecord {
         name: model.into(),
         definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            options: Default::default(),
+            transforms: Vec::new(),
             endpoint: "http://127.0.0.1:8800/v1beta/".into(),
             model: model.into(),
-            credential_env: "EXAMPLE_GEMINI_KEY".into(),
+            credential: "EXAMPLE_GEMINI_KEY".into(),
             temperature: 0.7,
             max_output_tokens: 128,
             timeout_ms: 2000,
@@ -2533,9 +2707,11 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     let record = |model: &str| PresetRecord {
         name: model.to_owned(),
         definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+            options: Default::default(),
+            transforms: Vec::new(),
             endpoint: "http://127.0.0.1:8100/v1beta/".to_owned(),
             model: model.to_owned(),
-            credential_env: "EXAMPLE_GEMINI_KEY".to_owned(),
+            credential: "EXAMPLE_GEMINI_KEY".into(),
             temperature: 0.7,
             max_output_tokens: 256,
             timeout_ms: 5000,
@@ -2559,7 +2735,7 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     let request = app
         .presenter()
         .chat
-        .reply(CharacterId::Mita, "Remember tea".into())
+        .reply(CharacterId::Crazy, "Remember tea".into())
         .unwrap();
     server.next().await.respond.send(Reply::Structured(r#"{"segments":[{"text":"Remembered tea"}],"attitude_change":1.0,"memory_add":["high|Player likes green tea"]}"#)).unwrap();
     assert!(matches!(
@@ -2586,7 +2762,7 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     app.presenter()
         .settings
         .characters
-        .mita
+        .for_character(CharacterId::Crazy)
         .reply
         .set(PresetSelection::Specific(id))
         .unwrap();
@@ -2602,7 +2778,7 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     let app = ApplicationLifecycle::start(setup()).await.unwrap();
     assert_eq!(app.at().branch_id, original_branch);
     let restored = app
-        .character(CharacterId::Mita)
+        .character(CharacterId::Crazy)
         .unwrap()
         .get_context(app.at())
         .await
@@ -2615,7 +2791,12 @@ async fn persistent_bootstrap_and_preset_presenter_survive_restart() {
     assert_eq!(app.presenter().presets.list()[0].1.name, "second-model");
     assert_eq!(app.presenter().settings.presets.active.get(), id);
     assert_eq!(
-        app.presenter().settings.characters.mita.reply.get(),
+        app.presenter()
+            .settings
+            .characters
+            .for_character(CharacterId::Crazy)
+            .reply
+            .get(),
         PresetSelection::Specific(id)
     );
     app.presenter().presets.delete(id).unwrap();
@@ -2655,7 +2836,7 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
     let view = app
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     assert!(view.messages.is_empty());
@@ -2670,9 +2851,11 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
         .create(PresetRecord {
             name: "Explicit".into(),
             definition: PresetDefinition::Gemini(GeminiPresetDefinition {
+                options: Default::default(),
+                transforms: Vec::new(),
                 endpoint: "http://127.0.0.1:1/v1beta/".into(),
                 model: "explicit-model".into(),
-                credential_env: "NEUROMITA_MISSING_FIXTURE_CREDENTIAL_42".into(),
+                credential: "NEUROMITA_MISSING_FIXTURE_CREDENTIAL_42".into(),
                 temperature: 0.7,
                 max_output_tokens: 100,
                 timeout_ms: 1000,
@@ -2684,7 +2867,7 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
     app.presenter()
         .settings
         .characters
-        .kind_mita
+        .for_character(CharacterId::Kind)
         .reply
         .set(PresetSelection::Specific(id))
         .unwrap();
@@ -2697,7 +2880,7 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
     let view = app
         .presenter()
         .conversation
-        .snapshot(CharacterId::Mita)
+        .snapshot(CharacterId::Crazy)
         .await
         .unwrap();
     assert!(matches!(
@@ -2717,13 +2900,18 @@ async fn unconfigured_core_administers_settings_and_reloads_without_fallback() {
     let app = ApplicationLifecycle::start(setup()).await.unwrap();
     assert_eq!(app.presenter().settings.voice.volume.get().get(), 37);
     assert_eq!(
-        app.presenter().settings.characters.kind_mita.reply.get(),
+        app.presenter()
+            .settings
+            .characters
+            .for_character(CharacterId::Kind)
+            .reply
+            .get(),
         PresetSelection::Specific(id)
     );
     app.presenter().presets.delete(id).unwrap();
     assert_eq!(app.presenter().settings.presets.active.get(), id);
     assert!(
-        matches!(app.presenter().conversation.snapshot(CharacterId::Mita).await.unwrap().model, Err(PresetCatalogError::NotFound(value)) if value == id)
+        matches!(app.presenter().conversation.snapshot(CharacterId::Crazy).await.unwrap().model, Err(PresetCatalogError::NotFound(value)) if value == id)
     );
     app.shutdown().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -2749,23 +2937,20 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
     .unwrap();
     let api = app.presenter();
     api.characters
-        .observe(CharacterId::Mita, UserInput::new("first".into()).unwrap())
+        .observe(CharacterId::Crazy, UserInput::new("first".into()).unwrap())
         .await
         .unwrap();
     api.characters
-        .observe(
-            CharacterId::KindMita,
-            UserInput::new("private".into()).unwrap(),
-        )
+        .observe(CharacterId::Kind, UserInput::new("private".into()).unwrap())
         .await
         .unwrap();
     let stale = api
         .conversation
-        .preview_change(CharacterId::Mita, ConversationChange::ClearMessages)
+        .preview_change(CharacterId::Crazy, ConversationChange::ClearMessages)
         .await
         .unwrap();
     api.characters
-        .observe(CharacterId::Mita, UserInput::new("second".into()).unwrap())
+        .observe(CharacterId::Crazy, UserInput::new("second".into()).unwrap())
         .await
         .unwrap();
     assert!(matches!(
@@ -2774,14 +2959,14 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
     ));
     let preview = api
         .conversation
-        .preview_change(CharacterId::Mita, ConversationChange::ClearMessages)
+        .preview_change(CharacterId::Crazy, ConversationChange::ClearMessages)
         .await
         .unwrap();
     assert_eq!(preview.message_count(), 2);
     api.conversation.apply_change(preview).unwrap();
     assert!(
         api.conversation
-            .snapshot(CharacterId::Mita)
+            .snapshot(CharacterId::Crazy)
             .await
             .unwrap()
             .messages
@@ -2789,7 +2974,7 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
     );
     assert_eq!(
         api.conversation
-            .snapshot(CharacterId::KindMita)
+            .snapshot(CharacterId::Kind)
             .await
             .unwrap()
             .messages
@@ -2798,7 +2983,7 @@ async fn conversation_clear_preview_is_guarded_and_does_not_clear_other_characte
     );
     let reset = api
         .conversation
-        .preview_change(CharacterId::Mita, ConversationChange::ResetContext)
+        .preview_change(CharacterId::Crazy, ConversationChange::ResetContext)
         .await
         .unwrap();
     api.conversation.apply_change(reset).unwrap();
