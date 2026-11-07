@@ -5,11 +5,11 @@
 //! On a new session: NEUROMITA_TG_CODE and optionally NEUROMITA_TG_2FA.
 //! Usage: telegram-voice-smoke <sidecar.py> <text> <speaker> <output.wav>
 //! Optional: NEUROMITA_PYTHON and NEUROMITA_FFMPEG.
-use std::{env, path::Path, sync::Arc, time::Duration};
 use neuromita::{
     telegram_sidecar::TelethonSession,
     telegram_voice::{FfmpegTelegramDecoder, TelegramConfig, TelegramVoiceService},
 };
+use std::{env, path::Path, sync::Arc, time::Duration};
 
 fn required(key: &str) -> Result<String, String> {
     env::var(key).map_err(|_| format!("missing required variable {key}"))
@@ -27,21 +27,32 @@ async fn run() -> Result<(), String> {
     let ffmpeg = env::var("NEUROMITA_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
     let session = TelethonSession::spawn(Path::new(&python), Path::new(&sidecar))
         .map_err(|error| error.to_string())?;
-    let id = required("NEUROMITA_TG_API_ID")?.parse::<u32>()
+    let id = required("NEUROMITA_TG_API_ID")?
+        .parse::<u32>()
         .map_err(|_| "invalid NEUROMITA_TG_API_ID")?;
-    let authorized = session.connect(
-        id,
-        &required("NEUROMITA_TG_API_HASH")?,
-        &required("NEUROMITA_TG_PHONE")?,
-        Path::new(&required("NEUROMITA_TG_SESSION")?),
-    ).await.map_err(|error| error.to_string())?;
+    let authorized = session
+        .connect(
+            id,
+            &required("NEUROMITA_TG_API_HASH")?,
+            &required("NEUROMITA_TG_PHONE")?,
+            Path::new(&required("NEUROMITA_TG_SESSION")?),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     if !authorized {
-        session.request_code().await.map_err(|error| error.to_string())?;
+        session
+            .request_code()
+            .await
+            .map_err(|error| error.to_string())?;
         let code = required("NEUROMITA_TG_CODE")?;
-        let needs_password = session.sign_in_code(&code).await
+        let needs_password = session
+            .sign_in_code(&code)
+            .await
             .map_err(|error| error.to_string())?;
         if needs_password {
-            session.sign_in_password(&required("NEUROMITA_TG_2FA")?).await
+            session
+                .sign_in_password(&required("NEUROMITA_TG_2FA")?)
+                .await
                 .map_err(|error| error.to_string())?;
         }
     }
@@ -49,19 +60,25 @@ async fn run() -> Result<(), String> {
         session.clone(),
         Arc::new(FfmpegTelegramDecoder::new(ffmpeg)),
         TelegramConfig {
-            peer: env::var("NEUROMITA_TG_BOT")
-                .unwrap_or_else(|_| "@silero_voice_bot".into()),
+            peer: env::var("NEUROMITA_TG_BOT").unwrap_or_else(|_| "@silero_voice_bot".into()),
             wait: Duration::from_secs(60),
             interval: Duration::from_secs(2),
             poll: Duration::from_millis(330),
             max_media_bytes: 32 * 1024 * 1024,
         },
-    ).map_err(|error| error.to_string())?;
-    let audio = service.speak(&text, &speaker).await
+    )
+    .map_err(|error| error.to_string())?;
+    let audio = service
+        .speak(&text, &speaker)
+        .await
         .map_err(|error| error.to_string())?;
-    tokio::fs::write(output, &audio.bytes).await
+    tokio::fs::write(output, &audio.bytes)
+        .await
         .map_err(|error| error.to_string())?;
-    session.disconnect().await.map_err(|error| error.to_string())?;
+    session
+        .disconnect()
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 #[tokio::main]
