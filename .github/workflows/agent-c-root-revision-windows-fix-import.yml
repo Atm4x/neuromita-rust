@@ -1,0 +1,52 @@
+name: Agent C C3.3 Windows canonical inspection fix and fail-fast native tests
+on:
+  push:
+    branches:
+      - bridge/import-agent-c-root-revision-windows-fix-20261107
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/import-agent-c-root-revision-windows-fix-20261107
+          fetch-depth: 0
+      - name: Verify exact hotfix and fast forward C3.3 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=beff2daba0c2bd49d1e68486fe898975bbdcad21
+          HEAD=8e53b036826eaafd01f648ca9525e0c71229c2be
+          TARGET=codex/ai-platform-hub-c3-root-revision-inspection-20261107
+          base64 -d .github/agent-c-bundles/c3-windows-path-fix.bundle.b64 >/tmp/c3-winpath.bundle
+          echo '09f5335bbf0857570f89457b3cafcac73ec4ded3ada23ca0201c25642581b253  /tmp/c3-winpath.bundle' | sha256sum -c -
+          git bundle verify /tmp/c3-winpath.bundle
+          git fetch --no-tags /tmp/c3-winpath.bundle "refs/heads/$TARGET:refs/heads/agent-c-candidate"
+          test "$(git rev-parse agent-c-candidate)" = "$HEAD"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git fsck --full
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$BASE"
+          git push origin "refs/heads/agent-c-candidate:refs/heads/$TARGET"
+          test "$(git ls-remote --heads origin "refs/heads/$TARGET" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c3-root-revision-inspection-20261107
+      - name: Native Windows Rust 1.98.1 fail-fast removal regressions
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::removal::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib ai_runtime::revision_lease::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup run 1.98.1 cargo test --locked --offline --lib settings::instance_lease::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
