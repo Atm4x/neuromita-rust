@@ -183,11 +183,11 @@ impl Interpreter {
     fn file(&mut self, name: &str, parent: Option<&Path>) -> Result<String, PromptError> {
         let path = self.resolve(name, parent)?;
         let content = self.read(&path)?;
-        let result = (|| match path.extension().and_then(|ext| ext.to_str()) {
+        let result = match path.extension().and_then(|ext| ext.to_str()) {
             Some("txt") => self.expand(&content, path.parent().unwrap(), true),
             Some("script") | Some("system") => self.script(&content, &path),
             _ => Err(PromptError::Dsl(format!("unsupported prompt file: {name}"))),
-        })();
+        };
         self.recursion.pop();
         result
     }
