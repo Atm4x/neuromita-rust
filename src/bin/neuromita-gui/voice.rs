@@ -444,8 +444,6 @@ pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
     window.global::<VoiceUi>().set_runtime_status(text.into());
 }
 
-
-
 pub fn render_remote(window: &AppWindow, config: &RemoteVoiceConfig) {
     let ui = window.global::<VoiceUi>();
     let names = config
