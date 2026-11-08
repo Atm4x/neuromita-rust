@@ -751,11 +751,23 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     window.set_character_prompt_sets(ModelRc::new(VecModel::from(prompt_selections)));
     // Preserve a dirty or in-flight draft across unrelated settings refreshes.
     // Initial selection and clean drafts always come from the same Core snapshot.
-    let selected = window.get_selected_character();
-    if window.get_character_draft_id() != selected
-        || (!window.get_character_draft_dirty()
-            && !window.get_character_profile_pending()
-            && window.get_character_draft_revision() != settings.revision.to_string())
+    let mut selected = window.get_selected_character();
+    if window.get_character_draft_id() != selected {
+        if window.get_character_draft_id() >= 0
+            && (window.get_character_draft_dirty() || window.get_character_profile_pending())
+        {
+            // Navigation from another GUI page must not silently drop a pending draft.
+            selected = window.get_character_draft_id();
+            window.set_selected_character(selected);
+            window.set_character_profile_error(
+                "Save or discard this character's changes before changing selection".into(),
+            );
+        } else {
+            window.invoke_character_load(selected);
+        }
+    } else if !window.get_character_draft_dirty()
+        && !window.get_character_profile_pending()
+        && window.get_character_draft_revision() != settings.revision.to_string()
     {
         window.invoke_character_load(selected);
     }
