@@ -1,0 +1,669 @@
+From 352b051313aaf195c8c1ee54c6aaf9fee0a6fd1e Mon Sep 17 00:00:00 2001
+From: OpenAI Codex <codex@openai.com>
+Date: Sun, 8 Nov 2026 13:35:54 +0000
+Subject: [PATCH] feat(ai): declare typed plugin build stages and fail closed
+ without executor
+
+---
+ .../ai-build-stage-contract-c4-20261108.md    |  25 ++
+ python/neuromita_ai_sdk/__init__.py           |  11 +
+ python/neuromita_voice/plans.py               |  15 +-
+ python/tests/test_build_stages.py             |  53 +++++
+ src/ai_runtime/assets.rs                      |   3 +
+ src/ai_runtime/assets/catalog.rs              |   1 +
+ src/ai_runtime/assets/generation.rs           |   1 +
+ src/ai_runtime/install.rs                     | 223 ++++++++++++++++++
+ src/ai_runtime/install_review.rs              |  27 +++
+ src/ai_runtime/installed_speech.rs            |   1 +
+ src/ai_runtime/mod.rs                         |   2 +
+ src/ai_runtime/production.rs                  |   5 +
+ src/bin/neuromita-gui/runtime.rs              |   4 +
+ 13 files changed, 368 insertions(+), 3 deletions(-)
+ create mode 100644 docs/03-runtime/ai-build-stage-contract-c4-20261108.md
+ create mode 100644 python/tests/test_build_stages.py
+
+diff --git a/docs/03-runtime/ai-build-stage-contract-c4-20261108.md b/docs/03-runtime/ai-build-stage-contract-c4-20261108.md
+new file mode 100644
+index 00000000..b3967fab
+--- /dev/null
++++ b/docs/03-runtime/ai-build-stage-contract-c4-20261108.md
+@@ -0,0 +1,25 @@
++# C4: declarative build-stage contract (Fish Speech / Triton)
++
++Status: **metadata and strict admission guard only**. This is not a Triton compiler, not a compiled kernel receipt, and not a working weight installation flow. The production installer refuses plans with nonempty `build_stages` before starting backend/overlay publication; `PluginInstallHandler` separately refuses any direct install of such a plan. Existing overlay-only builtin remote API installs remain permitted and unchanged.
++
++## Authority and wire contract
++
++`neuromita_ai_sdk.BuildStage` is declared by each Python plugin through `InstallPlan.build_stages`. Rust deserializes the same `PluginInstallPlan` field with typed, strict `BuildStageKind` and `BuildPlatform`. Old plans omit it and get `[]` through `serde(default)`. No new SDK version, crate, storage schema, SQL table, event bus, or UI-owned installation state is introduced.
++
++A stage specifies a unique safe ID, a method (`python_wheel`, `source_build`, `runtime_jit`), one backend already declared by the same plan, target platform, and an optional package requirement. A wheel stage **must** refer to an existing declared requirement and that requirement must be valid. Other stages cannot smuggle arbitrary pip/shell arguments in this field. Invalid kinds, unknown keys, duplicate IDs, unlisted backends, or mismatched requirements fail before any overlay installation.
++
++Stages are included in the install-plan review SHA-256 fingerprint. `InstallPlanReview` exposes their presence to UI and rejects automatic `overlay_only` eligibility when stages are present. The UI displays the count and the statement that stage execution is unsupported; it does not claim compiled readiness.
++
++## Fish Speech CUDA policy (source-based)
++
++`neuromita_voice.plans` now selects platform-appropriate metadata based on the plugin's **validated settings** and selected backend. CPU Fish Speech has no Triton stages. On Windows, Fish Speech with CUDA declares `triton-windows<3.4` as an install requirement **and** a separate `python_wheel` stage, followed by a `runtime_jit` stage. On Linux with CUDA, it declares a `runtime_jit` stage but does not erroneously install `triton-windows`. This does **not** pin a Linux Triton wheel: compatibility with PyTorch/CUDA and exact OS/driver versions must be resolved from an approved backend lock, not guessed here. The JIT stage records expected runtime compilation but does not perform it.
++
++## Next execution gates
++
++1. Resolve concrete backend, locked packages, target platform and Python minor; compare against actual hardware and driver.
++2. Resolve and pin wheel source, exact version and SHA-256 (or signed trusted build recipe/inputs and toolchain for source builds), and stage changes in the portable AIData location only.
++3. Execute in a supervised process with timeouts, bounded logs, cancellation, operation ID, and atomic verified receipts; never execute arbitrary instructions supplied by an untrusted community plugin.
++4. For runtime JIT, run a real GPU smoke kernel with the selected model/backend and record an evidence-bound result. Package presence alone is not `ModelReady`.
++5. Expose approved preflight, granular operation updates, restart/recovery and final verification through one existing Core-owned presenter. Do not add another modal for each compiler step.
++
++Tests: `PYTHONPATH=python python3 -m unittest python.tests.test_build_stages -v`; Rust `ai_runtime::install::tests` and `ai_runtime::install_review::tests`. Live Python SDK test verifies that the real builtin Fish plugin emits the typed stage; this does not require a GPU and is **not** a kernel compilation test.
+diff --git a/python/neuromita_ai_sdk/__init__.py b/python/neuromita_ai_sdk/__init__.py
+index 712b7a1e..31b5e713 100644
+--- a/python/neuromita_ai_sdk/__init__.py
++++ b/python/neuromita_ai_sdk/__init__.py
+@@ -33,6 +33,15 @@ class AssetHook:
+     source_plugin_id: str
+ 
+ 
++@dataclass(frozen=True)
++class BuildStage:
++    id: str
++    kind: str
++    backend: str
++    platform: str
++    requirement: str | None = None
++
++
+ @dataclass(frozen=True)
+ class InstallPlan:
+     packages: tuple[PackageRequirement, ...] = ()
+@@ -44,6 +53,7 @@ class InstallPlan:
+     supported_python_minors: tuple[str, ...] = ()
+     actions: tuple[InstallerAction, ...] = ()
+     asset_hooks: tuple[AssetHook, ...] = ()
++    build_stages: tuple[BuildStage, ...] = ()
+ 
+     def to_wire(self) -> dict[str, Any]:
+         return {
+@@ -56,6 +66,7 @@ class InstallPlan:
+             "supported_python_minors": list(self.supported_python_minors),
+             "actions": [vars(action) for action in self.actions],
+             "asset_hooks": [vars(hook) for hook in self.asset_hooks],
++            "build_stages": [vars(stage) for stage in self.build_stages],
+         }
+ 
+ 
+diff --git a/python/neuromita_voice/plans.py b/python/neuromita_voice/plans.py
+index 27a4b8c6..284967d9 100644
+--- a/python/neuromita_voice/plans.py
++++ b/python/neuromita_voice/plans.py
+@@ -4,9 +4,10 @@ from __future__ import annotations
+ 
+ import importlib.metadata
+ import os
++import sys
+ from pathlib import Path
+ 
+-from neuromita_ai_sdk import AssetRequirement, InstallPlan, InstallerAction, validate_settings
++from neuromita_ai_sdk import AssetRequirement, BuildStage, InstallPlan, InstallerAction, validate_settings
+ 
+ SILERO_TTS_MODELS = {
+     "ru": ("v5_ru", "silero/v5_ru.pt", "https://models.silero.ai/models/tts/ru/v5_ru.pt", "7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4"),
+@@ -121,7 +122,7 @@ def requirements(plugin_id: str, selected_settings: dict | None = None) -> tuple
+         req += ["pyphen"] if cross else ["ruaccent"]
+     elif engine == "fish":
+         req += ["fish-speech-lib"]
+-        if mode == "cuda":
++        if options["device"].startswith("cuda:") and sys.platform == "win32":
+             req += ["triton-windows<3.4"]
+     elif engine == "omni":
+         req += ["omnivoice==0.2.1", "transformers==5.3.0"]
+@@ -132,10 +133,18 @@ def requirements(plugin_id: str, selected_settings: dict | None = None) -> tuple
+ 
+ def plan(plugin_id: str, selected_settings: dict | None = None) -> InstallPlan:
+     actions = (InstallerAction("fish_project_root", "create_empty_marker", "fish_speech_lib/.project-root"),) if family(plugin_id) == "fish" else ()
++    supported = supported_backends(plugin_id, selected_settings)
++    stages = ()
++    if family(plugin_id) == "fish" and supported == ("torch-cuda",):
++        platform = "windows" if sys.platform == "win32" else "linux" if sys.platform.startswith("linux") else "macos"
++        stages = (BuildStage("fish_triton_jit", "runtime_jit", "torch-cuda", platform),)
++        if platform == "windows":
++            stages = (BuildStage("fish_triton_wheel", "python_wheel", "torch-cuda", "windows", "triton-windows<3.4"),) + stages
+     return InstallPlan(assets=asset_requirements(plugin_id, selected_settings),
+-                       supported_backends=supported_backends(plugin_id, selected_settings),
++                       supported_backends=supported,
+                        required_backends=("torch-cpu",) if family(plugin_id) == "silero" and backend(plugin_id) == "onnx" else (),
+                        requirements=requirements(plugin_id, selected_settings),
++                       build_stages=stages,
+                        supported_python_minors=("3.11", "3.12"), actions=actions)
+ 
+ 
+diff --git a/python/tests/test_build_stages.py b/python/tests/test_build_stages.py
+new file mode 100644
+index 00000000..cd419e5e
+--- /dev/null
++++ b/python/tests/test_build_stages.py
+@@ -0,0 +1,53 @@
++import sys
++import unittest
++from unittest.mock import patch
++
++from neuromita_ai_sdk import BuildStage, InstallPlan
++from neuromita_voice import plans
++
++
++class BuildStageContractTests(unittest.TestCase):
++    def test_fish_cuda_linux_has_jit_but_no_windows_distribution(self):
++        with patch.object(sys, "platform", "linux"):
++            plan = plans.plan("fish_speech_compiled")
++        self.assertEqual([entry.id for entry in plan.build_stages], ["fish_triton_jit"])
++        self.assertEqual(plan.build_stages[0].kind, "runtime_jit")
++        self.assertNotIn("triton-windows<3.4", plan.requirements)
++        self.assertEqual(plan.to_wire()["build_stages"][0]["platform"], "linux")
++
++    def test_fish_cuda_windows_declares_wheel_and_jit_separately(self):
++        with patch.object(sys, "platform", "win32"):
++            plan = plans.plan("fish_speech_compiled")
++        self.assertEqual(
++            [(stage.id, stage.kind, stage.platform) for stage in plan.build_stages],
++            [
++                ("fish_triton_wheel", "python_wheel", "windows"),
++                ("fish_triton_jit", "runtime_jit", "windows"),
++            ],
++        )
++        self.assertEqual(plan.build_stages[0].requirement, "triton-windows<3.4")
++        self.assertIn("triton-windows<3.4", plan.requirements)
++
++    def test_fish_standard_cuda_selection_has_same_windows_toolchain_requirements(self):
++        with patch.object(sys, "platform", "win32"):
++            plan = plans.plan("fish_speech", {"device": "cuda:0"})
++        self.assertEqual(plan.supported_backends, ("torch-cuda",))
++        self.assertEqual([stage.kind for stage in plan.build_stages], ["python_wheel", "runtime_jit"])
++        self.assertIn("triton-windows<3.4", plan.requirements)
++
++    def test_cpu_and_other_backends_have_no_triton_build_stage(self):
++        for plugin_id in ("fish_speech", "f5_tts_en", "edge_tts_rvc_onnx"):
++            with self.subTest(plugin=plugin_id):
++                self.assertEqual(plans.plan(plugin_id).build_stages, ())
++
++    def test_wire_is_declarative_and_does_not_create_build_artifacts(self):
++        stage = BuildStage("fixture", "source_build", "torch-cuda", "linux")
++        wire = InstallPlan(build_stages=(stage,)).to_wire()
++        self.assertEqual(wire["build_stages"], [{
++            "id": "fixture", "kind": "source_build", "backend": "torch-cuda",
++            "platform": "linux", "requirement": None,
++        }])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/src/ai_runtime/assets.rs b/src/ai_runtime/assets.rs
+index 38ee5f77..e8e34244 100644
+--- a/src/ai_runtime/assets.rs
++++ b/src/ai_runtime/assets.rs
+@@ -441,6 +441,7 @@ mod tests {
+             timeout: Duration::from_secs(5),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             assets: vec![ModelAssetRequirement {
+                 role: "rvc".into(),
+@@ -514,6 +515,7 @@ mod tests {
+             timeout: Duration::from_secs(5),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             packages: vec![],
+             requirements: vec![],
+@@ -529,6 +531,7 @@ mod tests {
+         tokio::fs::write(&input, b"huge payload").await.unwrap();
+         let sha = hash_file(&input, 1024).await.unwrap();
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             assets: vec![ModelAssetRequirement {
+                 role: "wav".into(),
+diff --git a/src/ai_runtime/assets/catalog.rs b/src/ai_runtime/assets/catalog.rs
+index 37802880..17e9f3a6 100644
+--- a/src/ai_runtime/assets/catalog.rs
++++ b/src/ai_runtime/assets/catalog.rs
+@@ -218,6 +218,7 @@ mod tests {
+     }
+     fn plan() -> PluginInstallPlan {
+         PluginInstallPlan {
++            build_stages: vec![],
+             packages: vec![],
+             requirements: vec![],
+             assets: vec![ModelAssetRequirement {
+diff --git a/src/ai_runtime/assets/generation.rs b/src/ai_runtime/assets/generation.rs
+index ab99954b..939fd7b9 100644
+--- a/src/ai_runtime/assets/generation.rs
++++ b/src/ai_runtime/assets/generation.rs
+@@ -618,6 +618,7 @@ mod tests {
+ 
+     fn plan(role: &str, path: &str, hooks: bool) -> PluginInstallPlan {
+         PluginInstallPlan {
++            build_stages: vec![],
+             packages: Vec::<LockedPackage>::new(),
+             requirements: vec![],
+             assets: vec![ModelAssetRequirement {
+diff --git a/src/ai_runtime/install.rs b/src/ai_runtime/install.rs
+index 21d1398f..330bae0f 100644
+--- a/src/ai_runtime/install.rs
++++ b/src/ai_runtime/install.rs
+@@ -38,6 +38,35 @@ pub struct PluginInstallPlan {
+     pub actions: Vec<InstallerAction>,
+     #[serde(default)]
+     pub asset_hooks: Vec<AssetHook>,
++    #[serde(default)]
++    pub build_stages: Vec<BuildStage>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++pub struct BuildStage {
++    pub id: String,
++    pub kind: BuildStageKind,
++    pub backend: String,
++    pub platform: BuildPlatform,
++    #[serde(default)]
++    pub requirement: Option<String>,
++}
++
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum BuildStageKind {
++    PythonWheel,
++    SourceBuild,
++    RuntimeJit,
++}
++
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum BuildPlatform {
++    Windows,
++    Linux,
++    Macos,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+@@ -225,6 +254,53 @@ impl PluginInstallPlan {
+         {
+             return Err(PluginInstallError::Invalid("invalid asset hooks".into()));
+         }
++        if self.build_stages.len() > 16
++            || self
++                .build_stages
++                .iter()
++                .map(|stage| &stage.id)
++                .collect::<HashSet<_>>()
++                .len()
++                != self.build_stages.len()
++        {
++            return Err(PluginInstallError::Invalid(
++                "too many or duplicate build stages".into(),
++            ));
++        }
++        for stage in &self.build_stages {
++            if !valid_segment(&stage.id)
++                || !self.backend.as_deref().is_some_and(|b| b == stage.backend)
++                    && !self.supported_backends.contains(&stage.backend)
++                    && !self.required_backends.contains(&stage.backend)
++            {
++                return Err(PluginInstallError::Invalid(
++                    "build stage must identify a declared backend".into(),
++                ));
++            }
++            match stage.kind {
++                BuildStageKind::PythonWheel => {
++                    let Some(requirement) = stage.requirement.as_deref() else {
++                        return Err(PluginInstallError::Invalid(
++                            "wheel build stage must declare a package requirement".into(),
++                        ));
++                    };
++                    super::resolver::validate_requirement(requirement)
++                        .map_err(|error| PluginInstallError::Invalid(error.to_string()))?;
++                    if !self.requirements.iter().any(|entry| entry == requirement) {
++                        return Err(PluginInstallError::Invalid(
++                            "wheel stage must refer to an existing install requirement".into(),
++                        ));
++                    }
++                }
++                BuildStageKind::SourceBuild | BuildStageKind::RuntimeJit => {
++                    if stage.requirement.is_some() {
++                        return Err(PluginInstallError::Invalid(
++                            "non-wheel stage cannot specify a package requirement".into(),
++                        ));
++                    }
++                }
++            }
++        }
+         if self.assets.len() > 512 {
+             return Err(PluginInstallError::Invalid("too many assets".into()));
+         }
+@@ -300,6 +376,11 @@ impl PluginInstallHandler {
+             backend_packages,
+         } = request;
+         plan.validate(python_version)?;
++        if !plan.build_stages.is_empty() {
++            return Err(PluginInstallError::Invalid(
++                "build stages require a verified executor; refusing to publish an incomplete install".into(),
++            ));
++        }
+         if !valid_segment(plugin_id) || !valid_segment(revision) {
+             return Err(PluginInstallError::Invalid(
+                 "unsafe plugin id or revision".into(),
+@@ -522,6 +603,7 @@ mod tests {
+     #[test]
+     fn rejects_path_traversal_and_duplicate_assets() {
+         let mut plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             packages: vec![],
+             requirements: vec![],
+@@ -555,6 +637,7 @@ mod tests {
+         let mut present = asset("rvc_weights", "rvc/voice.pth", true);
+         present.sha256 = Some(hash_file(&plugin.join("rvc/voice.pth")).await.unwrap());
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             packages: vec![],
+             requirements: vec![],
+@@ -594,6 +677,7 @@ mod tests {
+             .inspect_assets(
+                 "mock_tts",
+                 &PluginInstallPlan {
++                    build_stages: vec![],
+                     asset_hooks: vec![],
+                     assets: vec![present],
+                     packages: vec![],
+@@ -693,6 +777,7 @@ exit 3
+             assets_directory: root.join("models"),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             backend: Some("torch-cpu".into()),
+             supported_backends: vec![],
+@@ -759,6 +844,143 @@ exit 3
+         tokio::fs::remove_dir_all(root).await.unwrap();
+     }
+ 
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn builtin_fish_cuda_exposes_build_stages_through_real_python_sdk() {
++        use std::time::Duration;
++
++        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
++        let host = crate::ai_runtime::PythonHostConfig {
++            python_executable: std::env::var("NEUROMITA_TEST_PYTHON")
++                .unwrap_or_else(|_| "python3".into())
++                .into(),
++            sdk_root: source.clone(),
++            plugins_directory: source.join("plugins/builtin"),
++            models_directory: None,
++            request_timeout: Duration::from_secs(10),
++        };
++        let plan = crate::ai_runtime::fetch_install_plan(&host, "fish_speech_compiled")
++            .await
++            .unwrap();
++        plan.validate("3.12.10").unwrap();
++        assert_eq!(plan.supported_backends, ["torch-cuda"]);
++        assert!(plan.build_stages.iter().any(|stage| {
++            stage.kind == BuildStageKind::RuntimeJit && stage.backend == "torch-cuda"
++        }));
++        assert!(
++            !plan
++                .requirements
++                .iter()
++                .any(|entry| entry.starts_with("triton-windows"))
++        );
++    }
++
++    #[test]
++    fn build_stage_contract_is_typed_and_fails_closed_on_invalid_plans() {
++        let mut plan = PluginInstallPlan {
++            build_stages: vec![],
++            packages: vec![],
++            requirements: vec!["triton-windows<3.4".into()],
++            assets: vec![],
++            backend: Some("torch-cuda".into()),
++            supported_backends: vec![],
++            required_backends: vec![],
++            supported_python_minors: vec![],
++            actions: vec![],
++            asset_hooks: vec![],
++        };
++        let jit = BuildStage {
++            id: "triton_jit".into(),
++            kind: BuildStageKind::RuntimeJit,
++            backend: "torch-cuda".into(),
++            platform: BuildPlatform::Windows,
++            requirement: None,
++        };
++        let wheel = BuildStage {
++            id: "triton_wheel".into(),
++            kind: BuildStageKind::PythonWheel,
++            backend: "torch-cuda".into(),
++            platform: BuildPlatform::Windows,
++            requirement: Some("triton-windows<3.4".into()),
++        };
++        plan.build_stages = vec![wheel.clone(), jit.clone()];
++        plan.validate("3.12.10").unwrap();
++        let wire = serde_json::to_value(&plan).unwrap();
++        assert_eq!(wire["build_stages"][0]["kind"], "python_wheel");
++        assert_eq!(wire["build_stages"][1]["kind"], "runtime_jit");
++        assert_eq!(
++            serde_json::from_value::<PluginInstallPlan>(wire).unwrap(),
++            plan
++        );
++
++        plan.build_stages.push(jit.clone());
++        assert!(plan.validate("3.12.10").is_err());
++        plan.build_stages = vec![BuildStage {
++            backend: "remote-api".into(),
++            ..jit.clone()
++        }];
++        assert!(plan.validate("3.12.10").is_err());
++        plan.build_stages = vec![BuildStage {
++            requirement: Some("triton<3.4".into()),
++            ..wheel.clone()
++        }];
++        assert!(plan.validate("3.12.10").is_err());
++        plan.build_stages = vec![BuildStage {
++            requirement: Some("malformed ; command".into()),
++            ..wheel
++        }];
++        assert!(plan.validate("3.12.10").is_err());
++        plan.build_stages = vec![BuildStage {
++            requirement: Some("triton<3.4".into()),
++            ..jit
++        }];
++        assert!(plan.validate("3.12.10").is_err());
++    }
++
++    #[tokio::test]
++    async fn build_stage_blocks_overlay_publication_before_any_writer() {
++        let root = std::env::temp_dir().join(format!("c4-build-reject-{}", Uuid::new_v4()));
++        let handler = PluginInstallHandler {
++            resolver: DependencyResolver {
++                uv_executable: root.join("uv"),
++                python_executable: root.join("python"),
++                cache_directory: root.join("cache"),
++                timeout: std::time::Duration::from_secs(3),
++            },
++            overlays: OverlayInstaller {
++                uv_executable: root.join("uv"),
++                python_executable: root.join("python"),
++                overlays_directory: root.join("overlays"),
++                cache_directory: root.join("cache"),
++                timeout: std::time::Duration::from_secs(3),
++            },
++            assets_directory: root.join("models"),
++        };
++        let plan = PluginInstallPlan {
++            build_stages: vec![BuildStage {
++                id: "compile_kernel".into(),
++                kind: BuildStageKind::RuntimeJit,
++                backend: "torch-cuda".into(),
++                platform: BuildPlatform::Linux,
++                requirement: None,
++            }],
++            packages: vec![],
++            requirements: vec![],
++            assets: vec![],
++            backend: Some("torch-cuda".into()),
++            supported_backends: vec![],
++            required_backends: vec![],
++            supported_python_minors: vec![],
++            actions: vec![],
++            asset_hooks: vec![],
++        };
++        let result = handler
++            .install("fish", "v1", "3.12.10", Some("torch-cuda"), &plan, &[])
++            .await;
++        assert!(matches!(result, Err(PluginInstallError::Invalid(_))));
++        assert!(!root.exists());
++    }
++
+     #[cfg(unix)]
+     #[tokio::test]
+     async fn refuses_symlinked_assets() {
+@@ -785,6 +1007,7 @@ exit 3
+             assets_directory: root.clone(),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             packages: vec![],
+             requirements: vec![],
+diff --git a/src/ai_runtime/install_review.rs b/src/ai_runtime/install_review.rs
+index 92df2fbb..fcd448ac 100644
+--- a/src/ai_runtime/install_review.rs
++++ b/src/ai_runtime/install_review.rs
+@@ -295,6 +295,7 @@ pub struct InstallPlanReview {
+     pub optional_assets: Vec<String>,
+     pub actions: Vec<String>,
+     pub asset_hooks: Vec<String>,
++    pub build_stages: Vec<String>,
+ }
+ 
+ impl InstallPlanReview {
+@@ -309,6 +310,7 @@ impl InstallPlanReview {
+             && self.optional_assets.is_empty()
+             && self.actions.is_empty()
+             && self.asset_hooks.is_empty()
++            && self.build_stages.is_empty()
+     }
+ 
+     pub fn new(
+@@ -393,6 +395,11 @@ impl InstallPlanReview {
+                 .iter()
+                 .map(|hook| hook.id.clone())
+                 .collect(),
++            build_stages: plan
++                .build_stages
++                .iter()
++                .map(|stage| format!("{} ({:?}, {:?})", stage.id, stage.kind, stage.platform))
++                .collect(),
+         })
+     }
+ }
+@@ -416,6 +423,7 @@ mod tests {
+ 
+     fn plan() -> PluginInstallPlan {
+         PluginInstallPlan {
++            build_stages: vec![],
+             backend: Some("onnx-cpu".into()),
+             assets: vec![ModelAssetRequirement {
+                 role: "weights".into(),
+@@ -539,6 +547,25 @@ class InstallContract:
+         std::fs::remove_dir_all(root).unwrap();
+     }
+ 
++    #[test]
++    fn build_stages_are_reviewed_but_not_automatically_approved() {
++        let mut with_jit = plan();
++        with_jit.backend = Some("remote-api".into());
++        with_jit.assets.clear();
++        with_jit.build_stages = vec![super::super::install::BuildStage {
++            id: "needs_compilation".into(),
++            kind: super::super::install::BuildStageKind::RuntimeJit,
++            backend: "remote-api".into(),
++            platform: super::super::install::BuildPlatform::Linux,
++            requirement: None,
++        }];
++        let review = InstallPlanReview::new(identity(), &json!({}), &with_jit).unwrap();
++        assert_eq!(review.build_stages.len(), 1);
++        assert!(!review.eligible_overlay_install());
++        let mut gate = InstallApprovalGate::default();
++        assert!(!gate.offer(1, review));
++    }
++
+     #[test]
+     fn explicit_install_gate_is_one_use_and_scoped_to_model() {
+         let mut simple = plan();
+diff --git a/src/ai_runtime/installed_speech.rs b/src/ai_runtime/installed_speech.rs
+index 991ec7e1..d7a19381 100644
+--- a/src/ai_runtime/installed_speech.rs
++++ b/src/ai_runtime/installed_speech.rs
+@@ -451,6 +451,7 @@ mod tests {
+ 
+     fn plan(kinds: &[&str], extra: &[&str]) -> PluginInstallPlan {
+         PluginInstallPlan {
++            build_stages: vec![],
+             packages: vec![],
+             requirements: vec![],
+             assets: vec![],
+diff --git a/src/ai_runtime/mod.rs b/src/ai_runtime/mod.rs
+index 43a9ea26..f4b0cb2c 100644
+--- a/src/ai_runtime/mod.rs
++++ b/src/ai_runtime/mod.rs
+@@ -1874,6 +1874,7 @@ class Plugin:
+             timeout: Duration::from_secs(3),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             assets: vec![ModelAssetRequirement {
+                 role: "model".into(),
+@@ -2476,6 +2477,7 @@ class Plugin:
+             timeout: Duration::from_secs(3),
+         };
+         let plan = PluginInstallPlan {
++            build_stages: vec![],
+             asset_hooks: vec![],
+             packages: vec![],
+             requirements: vec![],
+diff --git a/src/ai_runtime/production.rs b/src/ai_runtime/production.rs
+index 4eededaa..bcb673de 100644
+--- a/src/ai_runtime/production.rs
++++ b/src/ai_runtime/production.rs
+@@ -350,6 +350,11 @@ impl AiProductionInstaller {
+                 fetch_install_plan_for(&host, &selection.plugin_id, selection.settings.clone())
+                     .await?;
+             plan.validate(&self.bootstrap.python_version)?;
++            if !plan.build_stages.is_empty() {
++                return Err(AiProductionError::Invalid(
++                    "build stages have no verified execution pipeline".into(),
++                ));
++            }
+             let mut backend_layers = Vec::new();
+             let mut dependencies = Vec::new();
+             if plan.backend.is_none() && plan.supported_backends.is_empty() {
+diff --git a/src/bin/neuromita-gui/runtime.rs b/src/bin/neuromita-gui/runtime.rs
+index ed6cf8d2..77dab782 100644
+--- a/src/bin/neuromita-gui/runtime.rs
++++ b/src/bin/neuromita-gui/runtime.rs
+@@ -364,6 +364,10 @@ fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
+             review.actions.len(),
+             review.asset_hooks.len()
+         ),
++        format!(
++            "Build-stage: {} (без автоматического исполнения)",
++            review.build_stages.len()
++        ),
+         format!("Отпечаток плана: {}", &review.fingerprint[..16]),
+         "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
+     ];
+-- 
+2.47.3
+
