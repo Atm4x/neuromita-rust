@@ -10,6 +10,7 @@ use neuromita::{
         ChatApi, GraphMaintenanceApi, HistoricalRecallApi, HistorySearchApi, KnowledgeCacheApi,
         MemoryTransferApi, PortableTransferApi, VariableTransferApi,
     },
+    app::ApplicationLifecycle,
     character::CharacterId,
     games::{
         GameApi, GameReceipt,
@@ -34,6 +35,8 @@ use neuromita::{
 };
 use tokio::sync::mpsc;
 
+mod ai_worker;
+
 pub struct Options {
     pub model: String,
     character: CharacterId,
@@ -54,7 +57,7 @@ impl Options {
         while let Some(argument) = args.next() {
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /ai worker status, /ai worker restart Embedding|Reranker|Tts|Asr EXPECTED_GENERATION_UUID, /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -344,10 +347,11 @@ fn dataset_status(dataset: Option<&neuromita::finetune::FineTuneCollector>) -> S
 }
 
 pub async fn run(
-    presenter: &ChatPresenter,
+    app: &ApplicationLifecycle,
     options: Options,
     dataset: Option<&neuromita::finetune::FineTuneCollector>,
 ) -> io::Result<()> {
+    let presenter: &ChatPresenter = &app.presenter().chat;
     let mut character = options.character;
     let mut updates = presenter.observe();
     let mut printed: HashMap<RequestId, u64> = HashMap::new();
@@ -426,6 +430,11 @@ pub async fn run(
                             match CharacterId::parse(value) {
                                 Some(id) => { character = id; pending_graph = None; pending_memory_import = None; pending_variable_import = None; pending_portable_import = None; println!("Character: {id}"); }
                                 None => eprintln!("Unknown character"),
+                            }
+                        } else if slash_command(&line, "/ai worker") {
+                            match ai_worker::run(app, &line).await {
+                                Ok(output) => println!("{output}"),
+                                Err(error) => eprintln!("AI worker: {error}"),
                             }
                         } else if let Some(value) = line.strip_prefix("/cancel ") {
                             match uuid::Uuid::parse_str(value) {
