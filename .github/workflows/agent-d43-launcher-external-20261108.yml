@@ -1,0 +1,71 @@
+name: Agent D43 exact launcher external process commit and native Windows tests
+on:
+  push:
+    branches: [codex/bridge-agent-d43-launcher-observed-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D43 source patch and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=5aca1be732d0e12279b10c4e2d974e9105833480
+          HEAD=7e339281cec2e3987c2571e44e493d1b14aaa210
+          TREE=cb9d67da011036423767d3c3bea0510853cd4958
+          BRANCH=codex/launcher-observed-game-20261108
+          cat .git-bridge/d43.0{0..3} >/tmp/d43.patch.xz.b64
+          test "$(wc -c </tmp/d43.patch.xz.b64)" -eq 6920
+          base64 -d /tmp/d43.patch.xz.b64 >/tmp/d43.patch.xz
+          echo '1fe840e40bef49b88c173e9302a1ebf7caac74ea7a234b96ff91d47630717a6f  /tmp/d43.patch.xz' | sha256sum -c
+          xz -d -c /tmp/d43.patch.xz >/tmp/d43.patch
+          echo '9c0dab7e1334cf40aaee5b2222c98c152e064ff584492f422c1068e18c0f2a8b  /tmp/d43.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/agent-d42-wiki-deep-links-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d43.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/launcher-observed-game-20261108
+          fetch-depth: 0
+      - name: Verify exact D43 SHA and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7e339281cec2e3987c2571e44e493d1b14aaa210
+          test "$(git rev-parse HEAD^{tree})" = cb9d67da011036423767d3c3bea0510853cd4958
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native Windows owned and external game process E2E
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test launcher -- --test-threads=2
+          cargo test --locked --offline --lib launcher::controller::tests -- --test-threads=2
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
