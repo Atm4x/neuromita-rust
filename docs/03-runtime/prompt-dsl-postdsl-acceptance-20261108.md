@@ -83,6 +83,8 @@ URLs differently would change behavior without Python parity evidence.
 The following new source-level tests were authored:
 
 - `prompts::tests::python_keyword_casing_and_local_updates_match_active_dsl`;
+- `prompts::tests::local_variables_are_script_scoped_and_reset_on_each_render`;
+- `prompts::tests::a_b_a_character_switch_keeps_snapshots_and_defaults_isolated`;
 - `prompts::post_dsl::tests::preview_replay_and_invalid_custom_fields_never_mutate_input_state`;
 - `presentation::characters::debug_display_tests::debug_display_redacts_credentials_but_not_character_secrets`.
 
