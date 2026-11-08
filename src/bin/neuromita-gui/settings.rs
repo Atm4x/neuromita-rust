@@ -9,7 +9,7 @@ use neuromita::{
     character::CharacterId,
     generation::{PresetConnectionEdit, PresetGenerationEdit, PresetId, PresetRecord},
     presentation::{GuiPresenter, PresetSlot, PresetsPresenter, PresetsView},
-    settings::{PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
+    settings::{CharacterSettings, OperationPresets, PersistenceState, PresetSelection, SettingsArea, SettingsSnapshot},
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::{rc::Rc, sync::Arc};
@@ -43,6 +43,41 @@ pub struct AdministrationSnapshot {
 
 pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
     match command {
+        Command::SaveCharacterProfile(character, revision, edited) => {
+            if let Some(name) = edited.prompt_set.as_deref() {
+                api.prompts
+                    .as_ref()
+                    .ok_or("Prompt catalog is not configured")?
+                    .resolve_set(character, Some(name))
+                    .map_err(|error| error.to_string())?;
+            }
+            for selection in [edited.presets.reply, edited.presets.react, edited.presets.initiate] {
+                if let PresetSelection::Specific(id) = selection {
+                    api.presets.require(id).map_err(|error| error.to_string())?;
+                }
+            }
+            let expected = api
+                .settings
+                .characters
+                .profile(character)
+                .map_err(|error| error.to_string())?;
+            if expected.revision() != revision {
+                return Err(format!("Character profile changed: expected revision {revision}, current {}", expected.revision()));
+            }
+            api.settings
+                .characters
+                .save_profile(&expected, edited)
+                .map_err(|error| error.to_string())?;
+        }
+        Command::RetryCharacterProfileSave(_character) => {
+            if !matches!(
+                api.settings.snapshot().map_err(|error| error.to_string())?.persistence,
+                PersistenceState::Failed { .. }
+            ) {
+                return Err("There is no failed settings write to retry".into());
+            }
+            api.settings.request_save().map_err(|error| error.to_string())?;
+        }
         Command::SelectPromptSet(character, name) => {
             let catalog = api
                 .prompts
