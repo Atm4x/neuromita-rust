@@ -6,7 +6,7 @@ use crate::{
     character::CharacterId,
     generation::ToolSettings,
     settings::{
-        AppSettings, AsrPreferences, CharactersSettings, GuideLevel, InterfaceSettings,
+        AppSettings, AsrPreferences, CharactersSettings, GuideLevel, InterfaceSettings, Language,
         OnboardingSettings, OperationPresets, PresetId, PresetSelection, PresetSettings,
         SettingsArea, SettingsError, SettingsOwner, SettingsSnapshot, SettingsTransfer,
         SpeechSettings, StructuredDisplayMode, TtsPreferences, VoiceSettings, Volume,
@@ -230,6 +230,7 @@ pub struct OnboardingSettingsPresenter {
 
 pub struct InterfaceSettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub language: BoundProperty<Language>,
     pub hide_private: BoundProperty<bool>,
     pub structured_display: BoundProperty<StructuredDisplayMode>,
 }
@@ -298,6 +299,15 @@ impl SettingsPresenter {
             },
             interface: InterfaceSettingsPresenter {
                 owner: Arc::clone(&owner),
+                language: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.language.clone(),
+                    |owner, language| {
+                        owner
+                            .edit::<InterfaceSettings>(|settings| settings.language = language)
+                            .map(|_| ())
+                    },
+                ),
                 hide_private: BoundProperty::new(
                     Arc::clone(&owner),
                     |settings| settings.interface.hide_private,
@@ -608,6 +618,52 @@ mod tests {
         assert_eq!(owner.snapshot_all().unwrap().revision, before);
         stop.cancel();
         task.await.unwrap().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guide_language_persists_through_settings_owner_and_restart() {
+        use crate::{lifecycle::Lifecycle, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-guide-language-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        initial.onboarding.guide_completed = false;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut observed = presenter.interface.language.observe();
+        assert_eq!(observed.next().await.unwrap(), Language::Russian);
+        let revision = owner.snapshot_all().unwrap().revision;
+        presenter.interface.language.set(Language::English).unwrap();
+        assert_eq!(observed.next().await.unwrap(), Language::English);
+        assert_eq!(owner.snapshot_all().unwrap().revision, revision + 1);
+        owner.flush().await.unwrap();
+        let stored = JsonSettingsRepository::new(directory.join("settings.json"));
+        use crate::settings::SettingsRepository;
+        assert_eq!(
+            stored.load().unwrap().settings.interface.language,
+            Language::English
+        );
+        presenter.interface.language.set(Language::English).unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, revision + 1);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            stored.load().unwrap().settings.interface.language,
+            Language::English
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 

@@ -75,6 +75,7 @@ pub enum Command {
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
     SetGuideLevel(GuideLevel),
     SetGuidePage(u8),
+    SetGuideLanguage(neuromita::settings::Language),
     CompleteGuide,
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
@@ -447,7 +448,7 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuidePage(_))) => {
+                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuidePage(_) | Command::SetGuideLanguage(_))) => {
                     let result = super::settings::execute(administration, command);
                     let result = match result {
                         Ok(()) => neuromita::settings::SettingsApi::flush().await

@@ -200,6 +200,12 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .guide_page
             .set(page)
             .map_err(|e| e.to_string())?,
+        Command::SetGuideLanguage(language) => api
+            .settings
+            .interface
+            .language
+            .set(language)
+            .map_err(|e| e.to_string())?,
         Command::SetToolOption(option, enabled) => {
             let mut settings = api.settings.tools.state.get();
             match option {

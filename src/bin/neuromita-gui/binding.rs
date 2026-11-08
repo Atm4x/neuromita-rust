@@ -310,15 +310,43 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         }
     });
     let language_window = window.as_weak();
+    let language_runtime = desktop.clone();
+    let language_dispatch = dispatch.clone();
     window.on_onboarding_language_selected(move |code| {
-        if let Some(window) = language_window.upgrade() {
-            if window.get_onboarding_language() != code {
-                reset_guide_image_view(&window);
+        let Some(window) = language_window.upgrade() else {
+            return;
+        };
+        let language = match code.as_str() {
+            "ru" => neuromita::settings::Language::Russian,
+            "en" => neuromita::settings::Language::English,
+            _ => {
+                window.set_notice("Unsupported Guide language".into());
+                return;
             }
-            window.set_onboarding_language(code.clone());
-            window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
-            update_guide(&window, window.get_onboarding_guide_page());
+        };
+        if !window.get_onboarding_required() {
+            let runtime = language_runtime.borrow();
+            let Some(runtime) = runtime.as_ref() else {
+                window.set_notice("Guide language cannot be saved until Core starts".into());
+                return;
+            };
+            if let Err(error) = runtime
+                .commands
+                .try_send(super::runtime::Command::SetGuideLanguage(language))
+            {
+                window.set_notice(format!("Failed to queue Guide language: {error}").into());
+                return;
+            }
+            if let Ok(locale) = LocaleId::new(&code) {
+                language_dispatch(ShellCommand::SelectLanguage(locale));
+            }
         }
+        if window.get_onboarding_language() != code {
+            reset_guide_image_view(&window);
+        }
+        window.set_onboarding_language(code.clone());
+        window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
+        update_guide(&window, window.get_onboarding_guide_page());
     });
     let accept_window = window.as_weak();
     let accept_directory = options.data_directory.clone();
