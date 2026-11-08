@@ -386,7 +386,10 @@ mod tests {
             prepared.context.variables.get("Love"),
             Some(&serde_json::json!(8))
         );
-        assert_eq!(prepared.prompt.as_ref().unwrap().stable.as_ref(), &[Arc::from("8")]);
+        assert_eq!(
+            prepared.prompt.as_ref().unwrap().stable.as_ref(),
+            &[Arc::from("8")]
+        );
         let mut response = crate::generation::StructuredResponse::spoken("Hello");
         response.custom_fields = Some(serde_json::Map::from_iter([(
             "love_change".into(),
