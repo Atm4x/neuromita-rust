@@ -218,14 +218,22 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let Some(window) = guide_window.upgrade() else {
             return;
         };
-        update_guide(&window, index);
-        if let Some(runtime) = guide_runtime.borrow().as_ref() {
-            let page = window.get_onboarding_guide_page() as u8;
-            if let Err(error) = runtime
-                .commands
-                .try_send(super::runtime::Command::SetGuidePage(page))
-            {
-                window.set_notice(format!("Failed to save Guide position: {error}").into());
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide position cannot be saved until Core starts".into());
+            return;
+        };
+        let level = neuromita::onboarding::guide::GuideLevel::from_index(
+            window.get_onboarding_guide_level(),
+        );
+        let page = index.clamp(0, (neuromita::onboarding::guide::count(level) - 1) as i32) as u8;
+        match runtime
+            .commands
+            .try_send(super::runtime::Command::SetGuidePage(page))
+        {
+            Ok(()) => update_guide(&window, i32::from(page)),
+            Err(error) => {
+                window.set_notice(format!("Failed to queue Guide position: {error}").into())
             }
         }
     });
@@ -408,18 +416,21 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub(super) fn sync_guide_level(window: &AppWindow, next: neuromita::onboarding::guide::GuideLevel) {
-    use neuromita::onboarding::guide::{self, GuideLevel};
+pub(super) fn sync_guide_position(
+    window: &AppWindow,
+    level: neuromita::onboarding::guide::GuideLevel,
+    page: u8,
+) {
+    use neuromita::onboarding::guide;
 
-    let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
-    if previous == next {
-        return;
+    if window.get_onboarding_guide_level() != level.index() {
+        window.set_onboarding_guide_level(level.index());
+        reset_guide_image_view(window);
     }
-    let destination =
-        guide::remap_index(previous, window.get_onboarding_guide_page() as usize, next);
-    window.set_onboarding_guide_level(next.index());
-    reset_guide_image_view(window);
-    update_guide(window, destination as i32);
+    let page = i32::from(page).min((guide::count(level) - 1) as i32);
+    if window.get_onboarding_guide_page() != page {
+        update_guide(window, page);
+    }
 }
 
 fn reset_guide_image_view(window: &AppWindow) {

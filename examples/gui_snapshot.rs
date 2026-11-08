@@ -240,6 +240,36 @@ fn main() -> Result<(), Box<dyn Error>> {
         settings.set_preset_parameters(slint::ModelRc::new(slint::VecModel::from(parameters)));
         settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
     }
+    if mode.starts_with("onboarding-") {
+        let language = if mode.ends_with("-en") { "en" } else { "ru" };
+        window.global::<view::I18n>().set_locale(language.into());
+        window.set_onboarding_language(language.into());
+        window.set_onboarding_eula_text(neuromita::onboarding::eula_text(language).into());
+        if mode.starts_with("onboarding-eula") {
+            window.set_onboarding_required(true);
+        } else {
+            use neuromita::onboarding::guide::{self, GuideLevel};
+            let level = GuideLevel::Full;
+            let index = 8;
+            let page = guide::page(level, index).ok_or("missing Guide screenshot fixture page")?;
+            window.set_onboarding_guide_level(level.index());
+            window.set_onboarding_guide_page(index as i32);
+            window.set_onboarding_guide_count(guide::count(level) as i32);
+            window.set_onboarding_guide_title(page.title(language).into());
+            window.set_onboarding_guide_description(page.description(language).into());
+            window.set_onboarding_guide_description_rich(slint::StyledText::from_markdown(
+                &page.description_markdown(language),
+            )?);
+            window.set_onboarding_guide_image(page.image_key.into());
+            window.set_onboarding_guide_wiki_target(page.wiki_target.unwrap_or_default().into());
+            let crop = page.image_crop();
+            window.set_onboarding_guide_crop_left(crop.left);
+            window.set_onboarding_guide_crop_top(crop.top);
+            window.set_onboarding_guide_crop_right(crop.right);
+            window.set_onboarding_guide_crop_bottom(crop.bottom);
+            window.set_onboarding_guide_visible(true);
+        }
+    }
     window.show()?;
     window.window().set_size(slint::PhysicalSize::new(
         1560,

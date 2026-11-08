@@ -249,9 +249,10 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             super::settings::render_character_debug(window, character, &fields, error.as_deref());
         }
         Update::Administration(snapshot) => {
-            super::binding::sync_guide_level(
+            super::binding::sync_guide_position(
                 window,
                 snapshot.settings.values.onboarding.guide_level,
+                snapshot.settings.values.onboarding.guide_page,
             );
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);
@@ -265,6 +266,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .set_settings_error(error.into());
         }
         Update::AdminSaved => super::settings::saved(window, None),
+        Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
         Update::GuideCompleted => window.set_onboarding_guide_visible(false),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {

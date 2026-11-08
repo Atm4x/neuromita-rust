@@ -263,7 +263,15 @@ impl SettingsPresenter {
                     |settings| settings.onboarding.guide_level,
                     |owner, level| {
                         owner
-                            .edit::<OnboardingSettings>(|settings| settings.guide_level = level)
+                            .edit::<OnboardingSettings>(|settings| {
+                                let page = crate::onboarding::guide::remap_index(
+                                    settings.guide_level,
+                                    usize::from(settings.guide_page),
+                                    level,
+                                );
+                                settings.guide_level = level;
+                                settings.guide_page = page as u8;
+                            })
                             .map(|_| ())
                     },
                 ),
@@ -541,6 +549,65 @@ mod tests {
         stop.cancel();
         task.await.unwrap().unwrap();
         assert_eq!(onboarding::startup_state(&directory).unwrap(), completed);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guide_level_switch_remaps_page_in_one_revision_and_survives_restart() {
+        use crate::{lifecycle::Lifecycle, onboarding, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory = std::env::temp_dir().join(format!(
+            "neuromita-guide-level-switch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(12).unwrap();
+        owner.flush().await.unwrap();
+        let before = owner.snapshot_all().unwrap().revision;
+
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Basic)
+            .unwrap();
+        let snapshot = owner.snapshot_all().unwrap();
+        assert_eq!(snapshot.revision, before + 1);
+        assert_eq!(snapshot.values.onboarding.guide_level, GuideLevel::Basic);
+        assert_eq!(snapshot.values.onboarding.guide_page, 2);
+        owner.flush().await.unwrap();
+        let resumed = onboarding::startup_state(&directory).unwrap();
+        assert!(resumed.requires_guide);
+        assert_eq!(resumed.guide_level, GuideLevel::Basic);
+        assert_eq!(resumed.guide_page, 2);
+
+        let before = snapshot.revision;
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Basic)
+            .unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, before);
+        stop.cancel();
+        task.await.unwrap().unwrap();
         std::fs::remove_dir_all(directory).unwrap();
     }
 
