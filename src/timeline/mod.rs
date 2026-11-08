@@ -590,13 +590,20 @@ impl SessionTimeline {
         if admission.request != request {
             return Err(domain::TimelineError::Conflict);
         }
+        let world = self.store.world(child)?;
+        let abandoned = domain::abandoned_regenerate(&world, request.0)?;
         let outcome =
             match self
                 .store
                 .accepted_reply_at(child, admission.character, request.0, None)?
             {
-                None => RegenerateRecoveryOutcome::DispatchUnknown,
+                None => abandoned.map_or(RegenerateRecoveryOutcome::DispatchUnknown, |fact| {
+                    RegenerateRecoveryOutcome::Abandoned(fact.draft.id)
+                }),
                 Some(accepted) => {
+                    if abandoned.is_some() {
+                        return Err(domain::TimelineError::Conflict);
+                    }
                     if accepted.branch_id != child
                         || accepted.sequence <= info.fork_sequence + 1
                         || accepted.draft.links.len() != 1
@@ -631,6 +638,51 @@ impl SessionTimeline {
             selection,
             outcome,
         })
+    }
+
+    /// Terminally suppress late acceptance in this Timeline world. This does
+    /// not cancel any already-dispatched external provider invocation.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn abandon_regenerate(
+        &mut self,
+        child: BranchId,
+        request: RequestId,
+        expected: TimelineSelection,
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if child != self.branch || expected.branch_id != child {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let admission =
+            self.regenerate_admission_receipt(child)?
+                .ok_or(domain::TimelineError::Invalid(
+                    "branch has no durable regenerate admission",
+                ))?;
+        if admission.request != request {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let world = self.store.world(child)?;
+        if let Some(fact) = domain::abandoned_regenerate(&world, request.0)? {
+            return Ok(fact.draft.id);
+        }
+        let mut draft = EventDraft::new(EventKind::RegenerateAbandoned);
+        let id = draft.id;
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.0.to_string()));
+        self.store.append_guarded(
+            child,
+            self.store.branch(child)?.head_sequence,
+            &format!("regenerate-abandon:{}", request.0),
+            json!({"request_id": request.0.to_string()}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(id)
     }
 
     fn validate_regenerate_source(

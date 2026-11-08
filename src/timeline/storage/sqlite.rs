@@ -860,6 +860,16 @@ impl SqliteTimelineRepository {
             if info.head_sequence != expected_head {
                 return Err(TimelineError::ConcurrentWrite);
             }
+            if drafts.iter().any(|draft| {
+                draft.kind == EventKind::RegenerateAbandoned
+                    || (draft.kind == EventKind::CharacterMessage
+                        && draft.payload.contains_key("request_id"))
+            }) {
+                let existing = read_page(&connection, branch, 0, None, i64::MAX as usize, None)?;
+                crate::timeline::domain::validate_regenerate_transition(
+                    branch, &existing, &drafts,
+                )?;
+            }
             let world = IndexedWorld::new(&connection, branch)?;
             let facts = TimelineStore::validate_batch(info, expected_head, &drafts, &world)?;
             let receipt = Receipt::new(command, drafts, facts.clone());
@@ -1367,6 +1377,52 @@ mod tests {
                 .world(branch)
                 .unwrap(),
             facts
+        );
+    }
+
+    #[test]
+    fn abandoned_regenerate_sql_failure_rolls_back_receipt_and_revision() {
+        use crate::timeline::{SessionTimeline, TimelineConfig};
+        let db = TestDb::new();
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: db.0.clone(),
+            session,
+            root,
+        })
+        .unwrap();
+        let (_, child, request) =
+            crate::timeline::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+        let selected = timeline.selection();
+        let connection = Connection::open(&db.0).unwrap();
+        let previous_revision = revision(&connection).unwrap();
+        connection.exec("CREATE TRIGGER deny_b64_abandon BEFORE INSERT ON timeline_events WHEN NEW.branch_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'b64 injected abort'); END").unwrap();
+        assert!(matches!(
+            timeline.abandon_regenerate(child, request, selected),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 2);
+        assert_eq!(revision(&connection).unwrap(), previous_revision);
+        assert!(
+            crate::timeline::domain::abandoned_regenerate(
+                &timeline.store.world(child).unwrap(),
+                request.0
+            )
+            .unwrap()
+            .is_none()
+        );
+        connection.exec("DROP TRIGGER deny_b64_abandon").unwrap();
+        let accepted = timeline
+            .abandon_regenerate(child, request, selected)
+            .unwrap();
+        assert_eq!(revision(&connection).unwrap(), previous_revision + 1);
+        assert_eq!(
+            timeline
+                .reconcile_regenerate(child, request)
+                .unwrap()
+                .outcome,
+            crate::timeline::RegenerateRecoveryOutcome::Abandoned(accepted)
         );
     }
 

@@ -39,6 +39,7 @@ pub struct RegenerateConfigurationReference {
 pub enum RegenerateRecoveryOutcome {
     DispatchUnknown,
     AcceptedReply(EventId),
+    Abandoned(EventId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

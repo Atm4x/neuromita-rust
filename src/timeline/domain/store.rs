@@ -334,6 +334,7 @@ impl TimelineStore {
             } else {
                 Vec::new()
             };
+            let mut replay = prefix.clone();
             let mut index = WorldIndex::from_facts(&prefix)?;
             let mut head = branch.info.fork_sequence;
             if branch.info.parent.is_some() {
@@ -342,6 +343,7 @@ impl TimelineStore {
                     .first()
                     .ok_or(TimelineError::Invalid("missing fork marker"))?;
                 index.extend(std::slice::from_ref(marker))?;
+                replay.push(marker.clone());
                 head += 1;
             }
             let mut receipts = branch.receipts.values().collect::<Vec<_>>();
@@ -355,6 +357,7 @@ impl TimelineStore {
             for receipt in receipts {
                 let mut state = branch.info;
                 state.head_sequence = head;
+                super::validate_regenerate_transition(branch.info.id, &replay, &receipt.drafts)?;
                 let expected = Self::validate_batch(state, head, &receipt.drafts, &index)?;
                 if expected != receipt.result {
                     return Err(TimelineError::Invalid(
@@ -362,6 +365,7 @@ impl TimelineStore {
                     ));
                 }
                 index.extend(&expected)?;
+                replay.extend(expected.iter().cloned());
                 head += expected.len() as u64;
             }
             if head != branch.info.head_sequence {
@@ -589,6 +593,14 @@ impl TimelineStore {
         }
         if expected_head != branch.info.head_sequence {
             return Err(TimelineError::ConcurrentWrite);
+        }
+        if drafts.iter().any(|draft| {
+            draft.kind == EventKind::RegenerateAbandoned
+                || (draft.kind == EventKind::CharacterMessage
+                    && draft.payload.contains_key("request_id"))
+        }) {
+            let world = self.world(branch_id)?;
+            super::validate_regenerate_transition(branch_id, &world, &drafts)?;
         }
         if !self.indexes.contains_key(&branch_id) {
             let world = self.world(branch_id)?;

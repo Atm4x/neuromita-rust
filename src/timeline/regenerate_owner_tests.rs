@@ -311,7 +311,7 @@ fn duplicate_durable_request_id_rejected_before_second_fork_mutates_owner() {
     );
 }
 
-fn admitted_recovery_source(
+pub(crate) fn admitted_recovery_source(
     timeline: &mut SessionTimeline,
 ) -> (RegenerateSource, BranchId, RequestId) {
     let source = accepted_source(timeline, CharacterId::Crazy);
@@ -406,12 +406,18 @@ fn reconcile_accepted_reply_checks_causal_identity_and_multiple_replies() {
         relation: CausalRelation::ReplyTo,
         event_id: source.original_input,
     });
-    timeline
-        .publish_conversation_message(timeline.selection(), duplicate)
-        .unwrap();
+    let before = timeline.store.world(child).unwrap();
     assert_eq!(
-        timeline.reconcile_regenerate(child, request),
+        timeline.publish_conversation_message(timeline.selection(), duplicate),
         Err(domain::TimelineError::Conflict)
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+    assert_eq!(
+        timeline
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::AcceptedReply(message)
     );
 }
 
@@ -426,14 +432,20 @@ fn reconcile_rejects_request_id_with_wrong_causal_reply() {
         [source.character],
     );
     forged.request_id = Some(request);
-    timeline
-        .publish_conversation_message(timeline.selection(), forged)
-        .unwrap();
+    let before = timeline.store.world(child).unwrap();
     assert_eq!(
-        timeline.reconcile_regenerate(child, request),
+        timeline.publish_conversation_message(timeline.selection(), forged),
         Err(domain::TimelineError::Invalid(
-            "regenerate acceptance has invalid causal source"
+            "regenerate acceptance violates durable admission"
         ))
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+    assert_eq!(
+        timeline
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
     );
 }
 
@@ -643,4 +655,413 @@ fn sqlite_competing_reply_writers_accept_one_durable_regenerate_result() {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
+}
+
+#[test]
+fn abandoned_regenerate_is_terminal_idempotent_and_late_result_cannot_commit() {
+    let mut timeline = SessionTimeline::new();
+    let (source, child, request) = admitted_recovery_source(&mut timeline);
+    let selection = timeline.selection();
+    let pinned = timeline
+        .capture_turn(
+            source.character,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    let abandoned = timeline
+        .abandon_regenerate(child, request, selection)
+        .unwrap();
+    assert_eq!(
+        timeline.abandon_regenerate(child, request, selection),
+        Ok(abandoned)
+    );
+    let before = timeline.store.world(child).unwrap();
+    assert_eq!(
+        timeline
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::Abandoned(abandoned)
+    );
+    assert_eq!(
+        timeline.append_reply(GeneratedReply {
+            request,
+            intent: TurnIntent::Reply(source.original_input),
+            turn: pinned,
+            expected_revision: 0,
+            content: json!("late callback"),
+            audience: ConversationAudience::private_to(source.character),
+            effects: Vec::new(),
+        }),
+        Err(domain::TimelineError::Conflict)
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+    assert_eq!(
+        timeline.abandon_regenerate(child, RequestId::new(), selection),
+        Err(domain::TimelineError::Conflict)
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+}
+
+#[test]
+fn accepted_regenerate_cannot_be_abandoned_or_forged() {
+    let mut timeline = SessionTimeline::new();
+    let (source, child, request) = admitted_recovery_source(&mut timeline);
+    let selection = timeline.selection();
+    let pinned = timeline
+        .capture_turn(
+            source.character,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    let accepted = timeline
+        .append_reply(GeneratedReply {
+            request,
+            intent: TurnIntent::Reply(source.original_input),
+            turn: pinned,
+            expected_revision: 0,
+            content: json!("accepted"),
+            audience: ConversationAudience::private_to(source.character),
+            effects: Vec::new(),
+        })
+        .unwrap();
+    let before = timeline.store.world(child).unwrap();
+    assert_eq!(
+        timeline.abandon_regenerate(child, request, selection),
+        Err(domain::TimelineError::Conflict)
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+    assert_eq!(
+        timeline
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+
+    let mut forged = EventDraft::new(EventKind::RegenerateAbandoned);
+    forged
+        .payload
+        .insert("request_id".into(), json!(RequestId::new().0.to_string()));
+    assert!(timeline.append_test_fact("forged-abandon", forged).is_err());
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+}
+
+#[test]
+fn abandoned_regenerate_requires_selected_child_and_correct_generation() {
+    let mut timeline = SessionTimeline::new();
+    let (_, child, request) = admitted_recovery_source(&mut timeline);
+    let selected = timeline.selection();
+    let parent = timeline.store.branch(child).unwrap().parent.unwrap();
+    let moved = timeline.select_branch(parent, selected).unwrap();
+    let before = timeline.store.world(child).unwrap();
+    assert_eq!(
+        timeline.abandon_regenerate(child, request, selected),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    assert_eq!(
+        timeline.abandon_regenerate(child, request, moved),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    assert_eq!(timeline.store.world(child).unwrap(), before);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_abandoned_regenerate_reopens_and_rejects_late_result() {
+    let db = std::env::temp_dir().join(format!("b64-reopen-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (source, child, request) = admitted_recovery_source(&mut timeline);
+    let abandoned = timeline
+        .abandon_regenerate(child, request, timeline.selection())
+        .unwrap();
+    drop(timeline);
+    let mut reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::Abandoned(abandoned)
+    );
+    let turn = reopened
+        .capture_turn(
+            source.character,
+            Some(source.original_input),
+            reopened.anchor(),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.append_reply(GeneratedReply {
+            request,
+            intent: TurnIntent::Reply(source.original_input),
+            turn,
+            expected_revision: 0,
+            content: json!("late"),
+            audience: ConversationAudience::private_to(source.character),
+            effects: Vec::new(),
+        }),
+        Err(domain::TimelineError::Conflict)
+    );
+    assert_eq!(reopened.store.branch(child).unwrap().head_sequence, 3);
+    let original = reopened.selection();
+    let back = reopened.select_branch(root, original).unwrap();
+    let forward = reopened.select_branch(child, back).unwrap();
+    assert!(forward.generation > original.generation);
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::Abandoned(abandoned)
+    );
+    assert_eq!(
+        reopened.abandon_regenerate(child, request, original),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_abandonment_and_acceptance_race_can_commit_only_one() {
+    let db = std::env::temp_dir().join(format!("b64-race-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut initial = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (source, child, request) = admitted_recovery_source(&mut initial);
+    drop(initial);
+    let gate = Arc::new(std::sync::Barrier::new(3));
+    let results = std::thread::scope(|scope| {
+        let a = gate.clone();
+        let b = gate.clone();
+        let db1 = db.clone();
+        let db2 = db.clone();
+        let abandon = scope.spawn(move || {
+            let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: db1,
+                session,
+                root,
+            })
+            .unwrap();
+            let selection = owner.selection();
+            a.wait();
+            owner
+                .abandon_regenerate(child, request, selection)
+                .map(|id| (true, id))
+        });
+        let accept = scope.spawn(move || {
+            let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: db2,
+                session,
+                root,
+            })
+            .unwrap();
+            let turn = owner
+                .capture_turn(
+                    source.character,
+                    Some(source.original_input),
+                    owner.anchor(),
+                )
+                .unwrap();
+            b.wait();
+            owner
+                .append_reply(GeneratedReply {
+                    request,
+                    intent: TurnIntent::Reply(source.original_input),
+                    turn,
+                    expected_revision: 0,
+                    content: json!("racing accepted answer"),
+                    audience: ConversationAudience::private_to(source.character),
+                    effects: Vec::new(),
+                })
+                .map(|id| (false, id))
+        });
+        gate.wait();
+        (abandon.join().unwrap(), accept.join().unwrap())
+    });
+    assert_eq!(
+        results.0.is_ok() as u8 + results.1.is_ok() as u8,
+        1,
+        "{results:?}"
+    );
+    let winner = results.0.or(results.1).unwrap();
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        if winner.0 {
+            RegenerateRecoveryOutcome::Abandoned(winner.1)
+        } else {
+            RegenerateRecoveryOutcome::AcceptedReply(winner.1)
+        }
+    );
+    assert_eq!(reopened.store.branch(child).unwrap().head_sequence, 3);
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn abandoned_regenerate_archive_roundtrip_rejects_forged_request() {
+    use crate::timeline::storage::{SqliteTimelineRepository, archive, assets::TimelineAssetStore};
+    let db = std::env::temp_dir().join(format!("b64-archive-{}.db", uuid::Uuid::new_v4()));
+    let binary_root = std::env::temp_dir().join(format!("b64-assets-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&binary_root, 1024 * 1024).unwrap();
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (_, child, request) = admitted_recovery_source(&mut timeline);
+    let abandoned = timeline
+        .abandon_regenerate(child, request, timeline.selection())
+        .unwrap();
+    drop(timeline);
+    let source = SqliteTimelineRepository::open(&db).unwrap();
+    let bytes = archive::export_sqlite(&source, session, &assets).unwrap();
+    let mut restored = TimelineStore::new();
+    archive::import_memory(&mut restored, &bytes, &assets).unwrap();
+    assert_eq!(
+        domain::abandoned_regenerate(&restored.world(child).unwrap(), request.0)
+            .unwrap()
+            .unwrap()
+            .draft
+            .id,
+        abandoned
+    );
+    assert!(
+        restored
+            .world(child)
+            .unwrap()
+            .iter()
+            .any(|fact| fact.draft.id == abandoned && fact.draft.observers.is_empty())
+    );
+    let mut forged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let branch = forged["branches"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["info"]["id"] == json!(child))
+        .unwrap();
+    let foreign = RequestId::new().0.to_string();
+    let fact = branch["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|fact| fact["draft"]["kind"] == "RegenerateAbandoned")
+        .unwrap();
+    fact["draft"]["payload"]["request_id"] = json!(foreign);
+    let receipt = branch["receipts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|item| item["operation_key"] == format!("regenerate-abandon:{}", request.0))
+        .unwrap();
+    receipt["drafts"][0]["payload"]["request_id"] = json!(foreign);
+    receipt["result"][0]["draft"]["payload"]["request_id"] = json!(foreign);
+    let mut rejected = TimelineStore::new();
+    assert!(
+        archive::import_memory(
+            &mut rejected,
+            &serde_json::to_vec(&forged).unwrap(),
+            &assets
+        )
+        .is_err()
+    );
+    assert!(rejected.persisted_branches().is_empty());
+    drop(source);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+    std::fs::remove_dir_all(binary_root).unwrap();
+}
+
+#[test]
+fn descendant_branch_inherits_terminal_fence_without_blocking_new_requests() {
+    let mut timeline = SessionTimeline::new();
+    let (source, child, request) = admitted_recovery_source(&mut timeline);
+    let selected = timeline.selection();
+    timeline
+        .abandon_regenerate(child, request, selected)
+        .unwrap();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    timeline
+        .append_test_fact("b64-checkpoint", checkpoint)
+        .unwrap();
+    let head = timeline.anchor().through;
+    let grandchild = BranchId::new();
+    timeline
+        .fork_and_select_checkpoint(checkpoint_id, grandchild, selected, head)
+        .unwrap();
+    let before = timeline.store.world(grandchild).unwrap();
+    let mut late = ConversationMessage::new(
+        "late",
+        ConversationSpeaker::Character(source.character),
+        json!("late inherited"),
+        [source.character],
+    );
+    late.request_id = Some(request);
+    late.reply_to = Some(source.original_input);
+    late.links.push(CausalLink {
+        relation: CausalRelation::ReplyTo,
+        event_id: source.original_input,
+    });
+    assert_eq!(
+        timeline.publish_conversation_message(timeline.selection(), late),
+        Err(domain::TimelineError::Invalid(
+            "regenerate acceptance violates durable admission"
+        ))
+    );
+    assert_eq!(timeline.store.world(grandchild).unwrap(), before);
+    let mut independent = ConversationMessage::new(
+        "next",
+        ConversationSpeaker::Character(source.character),
+        json!("unrelated"),
+        [source.character],
+    );
+    independent.request_id = Some(RequestId::new());
+    timeline
+        .publish_conversation_message(timeline.selection(), independent)
+        .unwrap();
+    assert_eq!(
+        timeline.store.branch(grandchild).unwrap().head_sequence,
+        head + 2
+    );
 }

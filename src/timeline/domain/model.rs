@@ -76,6 +76,7 @@ pub enum EventKind {
     CharacterContextReset,
     Checkpoint,
     BranchCreated,
+    RegenerateAbandoned,
 }
 
 impl EventKind {
