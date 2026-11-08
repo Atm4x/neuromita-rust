@@ -1,0 +1,68 @@
+name: Agent D41 exact Wiki startup fix import and native Windows build
+on:
+  push:
+    branches: [codex/bridge-agent-d41-wiki-startup-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact Wiki fix and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=ed3841da85f9b0efdb2d008e25d7501ed4a6a033
+          HEAD=23934195ba8116d0e492103774bb5fce88dce0bf
+          TREE=8db419302da58a982c3f6982b9b63c87764d1132
+          BRANCH=codex/onboarding-wiki-startup-20261108
+          base64 -d .git-bridge/d41.patch.xz.b64 >/tmp/d41.patch.xz
+          echo '271461e965b6b0f59326a0f6f0832f3f4401306c9c5280155d25e3d00444fa0d  /tmp/d41.patch.xz' | sha256sum -c
+          xz -d -c /tmp/d41.patch.xz >/tmp/d41.patch
+          echo 'c9f7ef9d4f869529e2b23088d04fe40a5c5269f60ad4f5bb66f1957da5851005  /tmp/d41.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/onboarding-guide-reopen-resume-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d41.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-wiki-startup-20261108
+          fetch-depth: 0
+      - name: Verify pinned D41 head and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 23934195ba8116d0e492103774bb5fce88dce0bf
+          test "$(git rev-parse HEAD^{tree})" = 8db419302da58a982c3f6982b9b63c87764d1132
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows Wiki formatting and Slint GUI regression
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
+          cargo test --locked --offline --lib onboarding::wiki::tests -- --test-threads=2
