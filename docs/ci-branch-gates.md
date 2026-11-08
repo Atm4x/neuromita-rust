@@ -77,6 +77,18 @@ For an agent that uses the GitHub API rather than a local Git client:
 A `create` event checks the workflow at branch creation; adding it on a
 later push won't retroactively trigger the gate.
 
+## Rust versions and GUI dependencies
+
+- `ci/format/` and `ci/core/` use Rust **1.89.0** to test the core
+  against its declared `rust-version`.
+- `ci/full/` uses Rust **1.92.0**, because the vendored
+  Slint **1.18.1** GUI backend declares a 1.92 minimum.
+- The Ubuntu GUI gate installs `libfontconfig1-dev` as well as audio,
+  Wayland, X11, OpenGL and input-device development libraries. Both the
+  toolchain minimum and Fontconfig requirement were discovered through
+  actual failed full-mode runs; the core gate passed independently.
+- A successful core run does **not** imply that the GUI target builds.
+
 ## Quota and security controls
 
 - `on: create` and `workflow_dispatch` only: no `on: push`,
