@@ -1,0 +1,35 @@
+name: Import exact Agent C native controller commit
+on:
+  push:
+    branches: [bridge/agent-c-native-controller-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-controller-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-controller-20261109
+          fetch-depth: 0
+      - name: Validate exact Git commit and publish non-force
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-controller.part0{0,1,2} | base64 -d >/tmp/native-controller.bundle.xz
+          test "$(sha256sum /tmp/native-controller.bundle.xz | cut -d' ' -f1)" = "1605593f7615b2e56e58e48ede8c6b1b5b6a99ea458d9bfa3380c851a2f63504"
+          xz -dc /tmp/native-controller.bundle.xz >/tmp/native-controller.bundle
+          test "$(sha256sum /tmp/native-controller.bundle | cut -d' ' -f1)" = "136552e64cb16aaf00a25df0e2174178dbe7b5b2e17787c3ffd14496f314c993"
+          git fetch origin refs/heads/codex/ai-native-package-registration-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "8911c75d9d907aac710a0659f27baf001c52e8f5"
+          git fetch origin refs/heads/codex/ai-native-model-controller-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "8911c75d9d907aac710a0659f27baf001c52e8f5"
+          git bundle verify /tmp/native-controller.bundle
+          git fetch /tmp/native-controller.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "5b172efe5c4c771a92b24260c261d9c0d1c4c56d"
+          git checkout --detach "5b172efe5c4c771a92b24260c261d9c0d1c4c56d"
+          test "$(git rev-parse HEAD^{tree})" = "440be848646cf20f6e56c990bb17930edc2f1976"
+          test "$(git rev-list --parents -n1 HEAD)" = "5b172efe5c4c771a92b24260c261d9c0d1c4c56d 8911c75d9d907aac710a0659f27baf001c52e8f5"
+          git diff --check "8911c75d9d907aac710a0659f27baf001c52e8f5" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-model-controller-20261109
