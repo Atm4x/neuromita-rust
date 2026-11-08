@@ -1,0 +1,29 @@
+name: Agent D47 exact D46 patch export
+on:
+  push:
+    branches: [bridge/agent-d47-fetch-d46-source-20261109]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d46-verified-native-download-20261108
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Export D46-only source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "fb57f60948cf774cae41e9cfe276b14a31eeb4d8"
+          test "$(git rev-parse HEAD^)" = "3a365f63979ee1bdb924a072116d5e97e07282d3"
+          git format-patch -1 HEAD --stdout >/tmp/agent-d46-only.patch
+          sha256sum /tmp/agent-d46-only.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d46-only-patch
+          path: /tmp/agent-d46-only.patch
+          retention-days: 1
