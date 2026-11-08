@@ -247,9 +247,9 @@ jobs:
           if summary:
               with open(summary, "a", encoding="utf-8") as file:
                   file.write(
-                      f"### {context}: {state}\\n\\n"
-                      f"- Source commit: \\x60{shas[-1]}\\x60\\n"
-                      f"- First failed stage: \\x60{detail}\\x60\\n"
-                      f"- [Complete job log]({run_url})\\n"
+                      f"### {context}: {state}\n\n"
+                      f"- Source commit: `{shas[-1]}`\n"
+                      f"- First failed stage: `{detail}`\n"
+                      f"- [Complete job log]({run_url})\n"
                   )
           PY
