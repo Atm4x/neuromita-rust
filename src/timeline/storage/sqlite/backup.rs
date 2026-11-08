@@ -12,6 +12,14 @@ pub struct VerifiedTimelineBackup {
     pub source_fingerprint: String,
 }
 
+/// Verification receipt for restoring a complete Timeline SQLite file into a new location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedTimelineRestore {
+    pub revision: u64,
+    pub canonical_events: usize,
+    pub backup_fingerprint: String,
+}
+
 struct StagedBackup(std::path::PathBuf);
 
 impl Drop for StagedBackup {
@@ -61,8 +69,44 @@ impl SqliteTimelineRepository {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<VerifiedTimelineBackup, TimelineError> {
-        let source = source.as_ref();
-        let destination = destination.as_ref();
+        Self::publish_verified_snapshot(source.as_ref(), destination.as_ref(), None)
+    }
+
+    /// Restore a previously verified Timeline backup into a new, non-existing SQLite path.
+    /// The expected fingerprint comes from the backup receipt and is checked before and
+    /// after snapshot creation. This cannot overwrite or switch an active application DB.
+    pub fn restore_verified_backup_into_new_database(
+        backup: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+        expected_fingerprint: &str,
+    ) -> Result<VerifiedTimelineRestore, TimelineError> {
+        if expected_fingerprint.len() != 64
+            || !expected_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(TimelineError::Invalid(
+                "invalid Timeline backup fingerprint",
+            ));
+        }
+        let normalized_fingerprint = expected_fingerprint.to_ascii_lowercase();
+        let receipt = Self::publish_verified_snapshot(
+            backup.as_ref(),
+            destination.as_ref(),
+            Some(&normalized_fingerprint),
+        )?;
+        Ok(VerifiedTimelineRestore {
+            revision: receipt.revision,
+            canonical_events: receipt.canonical_events,
+            backup_fingerprint: receipt.source_fingerprint,
+        })
+    }
+
+    fn publish_verified_snapshot(
+        source: &Path,
+        destination: &Path,
+        expected_fingerprint: Option<&str>,
+    ) -> Result<VerifiedTimelineBackup, TimelineError> {
         if !source.is_absolute() || !source.is_file() {
             return Err(storage(
                 "backup source must be an existing absolute SQLite file",
@@ -83,6 +127,9 @@ impl SqliteTimelineRepository {
         let source_preview = Self::inspect_derived_indexes(source)?;
         if source_preview.requires_repair() {
             return Err(storage("source derived indexes need repair before backup"));
+        }
+        if expected_fingerprint.is_some_and(|expected| expected != source_preview.confirmation) {
+            return Err(TimelineError::ConcurrentWrite);
         }
         let read_only = Connection::open_read_only(source)?;
         verify_sqlite_integrity(&read_only)?;
