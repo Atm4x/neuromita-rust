@@ -24,6 +24,8 @@ mod legacy;
 #[cfg(test)]
 mod memory_maintenance_tests;
 mod memory_operations;
+#[cfg(test)]
+mod regenerate_owner_tests;
 // Administrative purge is not reachable from generation or runtime until an authorized UI exists.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod memory_purge;
@@ -51,6 +53,16 @@ use domain::{
     AppendGuard, AppliedEffect, BranchId, CausalLink, CausalRelation, CharacterMemories,
     CharacterWorkingState, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
+
+/// Canonical proof supplied by the read-only Regenerate preview. The owner must
+/// revalidate every field against its selected Timeline before forking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegenerateSource {
+    pub character: CharacterId,
+    pub accepted_message: EventId,
+    pub accepted_request: RequestId,
+    pub original_input: EventId,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AcceptedReplyEvents {
@@ -461,6 +473,107 @@ impl SessionTimeline {
             expected,
             expected_parent_head,
         )
+    }
+
+    /// Owner-local receipt validation and the selected historical fork form one
+    /// guarded operation. No queue reservation, request admission or accepted
+    /// Regenerate is implied; callers must not expose this as a chat action.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_and_select_regenerate_source(
+        &mut self,
+        source: RegenerateSource,
+        child: BranchId,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<TimelineSelection, domain::TimelineError> {
+        self.validate_regenerate_source(source, expected, expected_parent_head)?;
+        self.fork_and_select_player_input(
+            source.original_input,
+            source.character,
+            child,
+            expected,
+            expected_parent_head,
+        )
+    }
+
+    fn validate_regenerate_source(
+        &self,
+        source: RegenerateSource,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<(), domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if self.branch != expected.branch_id
+            || self.store.branch(self.branch)?.head_sequence != expected_parent_head
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let facts = self.store.world(self.branch)?;
+        let visible =
+            MitaView::from_facts(self.branch, expected_parent_head, source.character, &facts);
+        let messages = visible.messages();
+        let latest = messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == domain::MessageRole::Assistant
+                    && message.speaker.as_deref() == Some(source.character.as_str())
+            })
+            .ok_or(domain::TimelineError::Invalid("no visible accepted reply"))?;
+        if latest.event_id != source.accepted_message
+            || latest.request_id != Some(source.accepted_request)
+        {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate source is not the latest accepted reply",
+            ));
+        }
+        let receipt = self
+            .store
+            .accepted_reply_at(
+                self.branch,
+                source.character,
+                source.accepted_request.0,
+                Some(expected_parent_head),
+            )?
+            .filter(|fact| fact.draft.id == source.accepted_message)
+            .ok_or(domain::TimelineError::Invalid(
+                "regenerate request has no canonical acceptance receipt",
+            ))?;
+        let mut replies = receipt
+            .draft
+            .links
+            .iter()
+            .filter(|link| link.relation == CausalRelation::ReplyTo);
+        if replies.next().map(|link| link.event_id) != Some(source.original_input)
+            || replies.next().is_some()
+            || receipt
+                .draft
+                .payload
+                .get("reply_to")
+                .and_then(serde_json::Value::as_str)
+                != Some(source.original_input.0.to_string().as_str())
+        {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate receipt does not refer to original player input",
+            ));
+        }
+        let input = self.store.event(self.branch, source.original_input)?;
+        if input.draft.kind != EventKind::PlayerMessage
+            || input.draft.actor.as_deref() != Some("player")
+            || !input.draft.observers.contains(&source.character)
+            || input.sequence >= receipt.sequence
+            || !messages.iter().any(|message| {
+                message.event_id == source.original_input
+                    && message.role == domain::MessageRole::User
+                    && message.speaker.as_deref() == Some("player")
+                    && message.sequence < receipt.sequence
+            })
+        {
+            return Err(domain::TimelineError::Invalid(
+                "original player input is not visible and causally prior",
+            ));
+        }
+        Ok(())
     }
 
     fn fork_and_select_anchor(
