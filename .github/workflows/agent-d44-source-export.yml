@@ -1,0 +1,34 @@
+name: Agent D44 local source export
+on:
+  push:
+    branches:
+      - codex/agent-d44-local-source-export-20261108
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact published D43 source, shallow
+        uses: actions/checkout@v4
+        with:
+          ref: codex/launcher-observed-game-20261108
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check pinned product SHA and archive working copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "7e339281cec2e3987c2571e44e493d1b14aaa210"
+          test "$(git rev-parse HEAD^{tree})" = "cb9d67da011036423767d3c3bea0510853cd4958"
+          tar -czf /tmp/agent-d44-source.tar.gz --exclude=target --exclude='.git/logs' .
+          sha256sum /tmp/agent-d44-source.tar.gz
+          du -h /tmp/agent-d44-source.tar.gz
+      - name: Export source for offline local work
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-d44-source
+          path: /tmp/agent-d44-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
