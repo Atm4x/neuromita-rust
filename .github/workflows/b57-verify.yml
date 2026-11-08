@@ -15,6 +15,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Verify pinned source parent
         run: |
           test "$(git rev-parse HEAD^)" = "fb3fce40a733244bca5c2be77d2df9f8278b348a"
