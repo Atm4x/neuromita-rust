@@ -1,0 +1,70 @@
+name: Agent D35 deterministic duplicate factory IDs fast-forward and native test
+on:
+  push:
+    branches: [codex/bridge-agent-d35-duplicate-fix-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact duplicate fix and fast-forward D35 PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=22577fa7681d002053f0587cb61ddbd8c0f8110b
+          HEAD=874d2c7ee60f8ae34de431757419196915fecdb0
+          TREE=171cb3b1ecc7ad216a768800804827e8d722b775
+          BRANCH=codex/python-schema-readonly-audit-20261108
+          base64 -d .git-bridge/d35-duplicate.patch.br.b64 > /tmp/d35-fix.patch.br
+          echo '97debc1989909eafc6ba9783e476dd7d6ee2d8c97a5e53c4c452896a657d0f66  /tmp/d35-fix.patch.br' | sha256sum --check
+          if ! command -v brotli >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq brotli
+          fi
+          brotli -d /tmp/d35-fix.patch.br -o /tmp/d35-fix.patch
+          git fetch --no-tags origin "refs/heads/$BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d35-fix.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "$HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/python-schema-readonly-audit-20261108
+          fetch-depth: 0
+      - name: Pin final D35 SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 874d2c7ee60f8ae34de431757419196915fecdb0
+          test "$(git rev-parse HEAD^{tree})" = 171cb3b1ecc7ad216a768800804827e8d722b775
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Verify native duplicate factory and staging
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_schema_source_audit -- --test-threads=8
+          cargo test --locked --offline --test python_preset_staging -- --test-threads=8
+          cargo check --locked --offline --all-targets
