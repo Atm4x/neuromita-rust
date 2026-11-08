@@ -129,7 +129,7 @@ export component AppWindow inherits Window {
                 open-memory(id) => { SettingsUi.section = 2; SettingsUi.selected-character = id; MemoryUi.open = true; MemoryUi.select(id); root.navigate(PageId.settings); }
             }
             if root.page == PageId.settings: SettingsPage {
-                width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
+                width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting; active-character: root.chat-character;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.navigate(PageId.wiki); }
                 guide => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
