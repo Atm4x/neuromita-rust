@@ -1,0 +1,50 @@
+name: Agent A Cycle56 exact Git bundle import
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle56-import-20261109
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish original two commits
+        shell: bash
+        env:
+          BASE: 2e6091b87788a87754679883e4417668480d9693
+          INTERMEDIATE: f9967c316c0dc3085511352a2cab971740f75605
+          INTERMEDIATE_TREE: d43adbf1e82c7f5b3d90d21bdc0abc48400b8622
+          ORIGINAL: e2d471e643af1986aa839f899454b8ff88d89e24
+          TREE: c90a290b83eb5dccc07cb5126939058b9347b1ec
+          BUNDLE_SHA256: 3241cdbde12f0b6d26ac87a62b06705240b7dc0597b7444cf14a04c8ac5e55ed
+          DEST: codex/knowledge-d5-recovery-inventory-readonly-20261109
+        run: |
+          set -euo pipefail
+          base64 --decode bridge-data/cycle56.bundle.b64 > cycle56-outgoing.bundle
+          echo "$BUNDLE_SHA256  cycle56-outgoing.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify cycle56-outgoing.bundle
+          git fetch cycle56-outgoing.bundle refs/heads/agent-a-cycle56-local:refs/heads/cycle56-candidate
+          test "$(git rev-parse refs/heads/cycle56-candidate)" = "$ORIGINAL"
+          test "$(git rev-parse "$ORIGINAL^{tree}")" = "$TREE"
+          test "$(git rev-parse "$INTERMEDIATE^{tree}")" = "$INTERMEDIATE_TREE"
+          test "$(git show -s --format=%P "$INTERMEDIATE")" = "$BASE"
+          test "$(git show -s --format=%P "$ORIGINAL")" = "$INTERMEDIATE"
+          git merge-base --is-ancestor "$BASE" "$ORIGINAL"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$DEST")"
+          git push origin "$ORIGINAL:refs/heads/$DEST"
+          echo "head=$ORIGINAL" > cycle56-verified.txt
+          echo "parent=$INTERMEDIATE" >> cycle56-verified.txt
+          echo "base=$BASE" >> cycle56-verified.txt
+          echo "tree=$TREE" >> cycle56-verified.txt
+          echo "bundle_sha256=$BUNDLE_SHA256" >> cycle56-verified.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle56-import-receipt
+          path: cycle56-verified.txt
+          retention-days: 1
