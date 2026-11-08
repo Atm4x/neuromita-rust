@@ -816,7 +816,7 @@ mod tests {
         let replay = program.apply(source.clone(), &character_state).unwrap();
         assert_eq!(preview.variables, replay.variables);
         assert_eq!(preview.response.full_text(), replay.response.full_text());
-        assert_eq!(preview.variables["Love"], Value::from(9.0));
+        assert_eq!(preview.variables["Love"].as_i64(), Some(9));
         assert_eq!(character_state["Love"], Value::from(7));
 
         let mut invalid = source;
