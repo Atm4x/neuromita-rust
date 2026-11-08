@@ -6,7 +6,7 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
-import { HubModel } from "ai-hub/components.slint";
+import { HubModel, HubModelIdentity } from "ai-hub/components.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -70,6 +70,7 @@ export component AppWindow inherits Window {
     in property <string> ai-hub-loaded-tts-id: "";
     in property <string> ai-hub-loaded-asr-id: "";
     callback ai-hub-refresh();
+    callback ai-hub-find-selection-index(HubModelIdentity) -> int;
     in property <string> chat-attitude: "—";
     in property <string> chat-boredom: "—";
     in property <string> chat-stress: "—";
@@ -116,6 +117,7 @@ export component AppWindow inherits Window {
                 loaded-tts-id: root.ai-hub-loaded-tts-id;
                 loaded-asr-id: root.ai-hub-loaded-asr-id;
                 refresh-requested => { root.ai-hub-refresh(); }
+                find-selection-index(identity) => { root.ai-hub-find-selection-index(identity) }
             }
             if !root.ai-hub-open && root.page == PageId.home: HomePage {
                 width: parent.width; height: parent.height;

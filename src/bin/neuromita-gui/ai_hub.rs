@@ -4,7 +4,7 @@ use neuromita::{
     ai_runtime::{runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory},
     presentation::ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
 };
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
 
 use super::{
@@ -13,6 +13,19 @@ use super::{
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
+    let weak = window.as_weak();
+    window.on_ai_hub_find_selection_index(move |identity| {
+        weak.upgrade().map_or(-1, |window| {
+            let entries = window.get_ai_hub_entries();
+            let mut matches = entries.iter().enumerate().filter(|(_, entry)| {
+                entry.category == identity.category && entry.id == identity.id
+            });
+            match (matches.next(), matches.next()) {
+                (Some((index, _)), None) => i32::try_from(index).unwrap_or(-1),
+                _ => -1,
+            }
+        })
+    });
     let weak = window.as_weak();
     window.on_ai_hub_refresh(move || {
         if let Some(window) = weak.upgrade()

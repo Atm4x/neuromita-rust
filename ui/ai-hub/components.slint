@@ -1,6 +1,11 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
 
+export struct HubModelIdentity {
+    category: string,
+    id: string,
+}
+
 export struct HubModel {
     id: string,
     category: string,
@@ -145,7 +150,7 @@ export component HubModelCard inherits Rectangle {
                 caption: root.entry.state == "ready" ? "Установлено"
                     : root.entry.state == "package-assets" || root.entry.state == "package-only"
                         || root.entry.state == "assets-only" || root.entry.state == "discovered" ? "Нет операции"
-                    : root.entry.state == "incompatible" ? "Недоступно" : "Установить";
+                    : root.entry.state == "incompatible" ? "Недоступно" : "Нет операции";
                 primary: root.entry.state != "ready";
                 enabled: false;
             }

@@ -1,6 +1,6 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
-import { HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { HubModelIdentity, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component AiHubPage inherits Rectangle {
@@ -11,11 +11,13 @@ export component AiHubPage inherits Rectangle {
     private property <string> search-text: "";
     private property <int> category-slot: root.category == "tts" ? 0 : root.category == "asr" ? 1 : root.category == "core" ? 2 : root.category == "rag" ? 3 : 4;
     private property <int> category-total: root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
-    private property <string> selected-id: "";
-    private property <bool> settings-open: false;
+    out property <HubModelIdentity> selected-key;
+    out property <bool> selection-missing: false;
+    private property <bool> selection-changed: false;
+    out property <bool> settings-open: false;
     private property <bool> confirm-discard: false;
     private property <string> pending-category: "";
-    private property <bool> dirty: false;
+    out property <bool> dirty: false;
     private property <string> field-one: "";
     private property <string> field-two: "";
     private property <HubModel> selected-model;
@@ -26,6 +28,7 @@ export component AiHubPage inherits Rectangle {
     in property <string> loaded-tts-id: "";
     in property <string> loaded-asr-id: "";
     callback refresh-requested();
+    callback find-selection-index(HubModelIdentity) -> int;
     pure function matches(item: HubModel) -> bool {
         return (item.category == root.category
                 || (root.category == "core" && item.category == "backend")
@@ -36,10 +39,40 @@ export component AiHubPage inherits Rectangle {
                 || item.description.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.description.to-lowercase()
                 || item.backend.to-lowercase().replace-all(root.search-text.to-lowercase(), "") != item.backend.to-lowercase());
     }
+    function reconcile-selected() {
+        if !root.settings-open || root.selected-key.id == "" { return; }
+        let index = root.find-selection-index(root.selected-key);
+        if index < 0 {
+            root.selection-missing = true;
+            if root.dirty {
+                root.confirm-discard = true;
+            } else {
+                root.settings-open = false;
+                root.selected-key = { category: "", id: "" };
+            }
+            return;
+        }
+        root.selection-missing = false;
+        let fresh = root.entries[index];
+        if root.dirty {
+            root.selection-changed = fresh != root.selected-model;
+        } else {
+            root.field-one = root.entries[index].setting-one-value;
+            root.field-two = root.entries[index].setting-two-value;
+            root.selected-model = fresh;
+            root.selection-changed = false;
+        }
+    }
+    changed entries => { root.reconcile-selected(); }
     function open-details(index: int) {
         if index >= 0 && index < root.entries.length {
             root.selected-model = root.entries[index];
-            root.selected-id = root.selected-model.id;
+            root.selected-key = {
+                category: root.selected-model.category,
+                id: root.selected-model.id,
+            };
+            root.selection-missing = false;
+            root.selection-changed = false;
             root.field-one = root.selected-model.setting-one-value;
             root.field-two = root.selected-model.setting-two-value;
             root.dirty = false;
@@ -51,12 +84,15 @@ export component AiHubPage inherits Rectangle {
     function close-details() {
         root.pending-category = "";
         if root.dirty { root.confirm-discard = true; }
-        else { root.settings-open = false; }
+        else { root.settings-open = false; root.selected-key = { category: "", id: "" }; }
     }
     function discard-and-leave() {
         root.confirm-discard = false;
         root.dirty = false;
         root.settings-open = false;
+        root.selected-key = { category: "", id: "" };
+        root.selection-missing = false;
+        root.selection-changed = false;
         if root.pending-category != "" { root.category = root.pending-category; }
         root.pending-category = "";
     }
@@ -398,6 +434,27 @@ export component AiHubPage inherits Rectangle {
                             VerticalLayout { padding: 12px; spacing: 6px;
                                 Label { text: "Расположение на диске (типовой каталог)"; color: Theme.muted; font-size: 10px; }
                                 Label { text: root.selected-model.location; font-size: 12px; font-weight: 600; }
+                            }
+                        }
+                        if root.selection-missing || root.selection-changed: Rectangle {
+                            height: 54px;
+                            border-radius: 9px;
+                            border-width: 1px;
+                            border-color: Theme.warning.with-alpha(0.4);
+                            background: Theme.warning.with-alpha(0.08);
+                            VerticalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                alignment: center;
+                                Label {
+                                    text: root.selection-missing
+                                        ? "Модель отсутствует в обновлённом каталоге"
+                                        : "Модель изменилась после открытия формы";
+                                    color: Theme.warning; font-size: 12px; font-weight: 700;
+                                }
+                                Label {
+                                    text: "Черновик сохранён только в окне. Запись в Core заблокирована.";
+                                    color: Theme.muted; font-size: 11px;
+                                }
                             }
                         }
                         Label { text: "ПАРАМЕТРЫ"; color: Theme.accent-hover; font-size: 11px; font-weight: 750; }

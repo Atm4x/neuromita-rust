@@ -1,12 +1,14 @@
 //! Read-only speech catalog projection shared by GUI adapters and executable tests.
 
+use std::collections::HashMap;
+
 use crate::ai_runtime::{
     AiService,
     runtime_status::{RuntimePhase, RuntimeSnapshot},
     speech_catalog::{SpeechInventory, SpeechModelOption},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpeechHubCategory {
     Tts,
     Asr,
@@ -81,28 +83,52 @@ pub struct SpeechHubCatalog {
 impl SpeechHubCatalog {
     pub fn from_inventory(inventory: &SpeechInventory) -> Self {
         let mut entries = Vec::with_capacity(inventory.tts.len() + inventory.asr.len());
-        entries.extend(
-            inventory
-                .tts
-                .iter()
-                .map(|option| entry(SpeechHubCategory::Tts, option)),
-        );
-        entries.extend(
-            inventory
-                .asr
-                .iter()
-                .map(|option| entry(SpeechHubCategory::Asr, option)),
-        );
+        let mut identity_occurrences = HashMap::new();
+        for (category, options) in [
+            (SpeechHubCategory::Tts, &inventory.tts),
+            (SpeechHubCategory::Asr, &inventory.asr),
+        ] {
+            for option in options {
+                *identity_occurrences
+                    .entry((category, option.id.as_str()))
+                    .or_insert(0usize) += 1;
+            }
+        }
+        let mut rejected_duplicates = 0usize;
+        for (category, options) in [
+            (SpeechHubCategory::Tts, &inventory.tts),
+            (SpeechHubCategory::Asr, &inventory.asr),
+        ] {
+            for option in options {
+                if identity_occurrences[&(category, option.id.as_str())] == 1 {
+                    entries.push(entry(category, option));
+                } else {
+                    rejected_duplicates += 1;
+                }
+            }
+        }
         Self {
-            entries,
             category_counts: [
-                i32::try_from(inventory.tts.len()).unwrap_or(i32::MAX),
-                i32::try_from(inventory.asr.len()).unwrap_or(i32::MAX),
+                i32::try_from(
+                    entries
+                        .iter()
+                        .filter(|e| e.category == SpeechHubCategory::Tts)
+                        .count(),
+                )
+                .unwrap_or(i32::MAX),
+                i32::try_from(
+                    entries
+                        .iter()
+                        .filter(|e| e.category == SpeechHubCategory::Asr)
+                        .count(),
+                )
+                .unwrap_or(i32::MAX),
                 0,
                 0,
                 0,
             ],
-            discovery_error_count: inventory.errors.len(),
+            entries,
+            discovery_error_count: inventory.errors.len().saturating_add(rejected_duplicates),
         }
     }
 }
@@ -139,6 +165,21 @@ mod tests {
                 vec![]
             },
         }
+    }
+
+    #[test]
+    fn duplicate_identity_is_not_ambiguous_for_details_or_category_counts() {
+        let inventory = SpeechInventory {
+            tts: vec![option("shared", false, false), option("shared", true, true)],
+            asr: vec![option("shared", false, true), option("asr", false, false)],
+            errors: vec!["corrupted plugin".into()],
+        };
+        let projected = SpeechHubCatalog::from_inventory(&inventory);
+        assert_eq!(projected.category_counts, [0, 2, 0, 0, 0]);
+        assert_eq!(projected.discovery_error_count, 3);
+        assert_eq!(projected.entries.len(), 2);
+        assert_eq!(projected.entries[0].category, SpeechHubCategory::Asr);
+        assert_eq!(projected.entries[1].id, "asr");
     }
 
     #[test]
