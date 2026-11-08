@@ -6,9 +6,9 @@ use crate::{
     character::CharacterId,
     settings::{
         AppSettings, AsrPreferences, CharacterSettings, CharactersSettings, InterfaceSettings,
-        OperationPresets,
-        PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
-        SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences, VoiceSettings, Volume,
+        OperationPresets, PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError,
+        SettingsOwner, SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences,
+        VoiceSettings, Volume,
     },
 };
 
@@ -243,7 +243,10 @@ impl CharactersSettingsPresenter {
     }
 
     /// Capture an editable per-character profile from the canonical settings snapshot.
-    pub fn profile(&self, character: CharacterId) -> Result<CharacterProfileSnapshot, SettingsError> {
+    pub fn profile(
+        &self,
+        character: CharacterId,
+    ) -> Result<CharacterProfileSnapshot, SettingsError> {
         let snapshot = self.owner.snapshot::<CharactersSettings>()?;
         Ok(CharacterProfileSnapshot {
             character,
@@ -271,7 +274,9 @@ impl CharactersSettingsPresenter {
         }
         let mut values = snapshot.value;
         *values.for_character_mut(expected.character) = edited;
-        let saved = self.owner.replace::<CharactersSettings>(expected.revision, values)?;
+        let saved = self
+            .owner
+            .replace::<CharactersSettings>(expected.revision, values)?;
         Ok(CharacterProfileSnapshot {
             character: expected.character,
             revision: saved.revision,
@@ -497,7 +502,11 @@ mod tests {
         assert_eq!(accepted.character(), CharacterId::Crazy);
         assert_eq!(accepted.settings(), &edited);
         assert_eq!(
-            presenter.characters.profile(CharacterId::Kind).unwrap().settings(),
+            presenter
+                .characters
+                .profile(CharacterId::Kind)
+                .unwrap()
+                .settings(),
             &CharacterSettings::default()
         );
 
@@ -515,7 +524,11 @@ mod tests {
             Err(SettingsError::Validation(_))
         ));
         assert_eq!(
-            presenter.characters.profile(CharacterId::Crazy).unwrap().settings(),
+            presenter
+                .characters
+                .profile(CharacterId::Crazy)
+                .unwrap()
+                .settings(),
             &edited
         );
 
@@ -533,11 +546,19 @@ mod tests {
         .unwrap();
         let restored = SettingsPresenter::new(restored.owner());
         assert_eq!(
-            restored.characters.profile(CharacterId::Crazy).unwrap().settings(),
+            restored
+                .characters
+                .profile(CharacterId::Crazy)
+                .unwrap()
+                .settings(),
             &edited
         );
         assert_eq!(
-            restored.characters.profile(CharacterId::Kind).unwrap().settings(),
+            restored
+                .characters
+                .profile(CharacterId::Kind)
+                .unwrap()
+                .settings(),
             &CharacterSettings::default()
         );
     }
