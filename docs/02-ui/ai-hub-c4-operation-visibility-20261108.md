@@ -21,7 +21,8 @@ caused the visible operation status to disappear.
   It is **not** cleared when `SpeechInventory` replaces the catalog or
   `HubInstallPreview` is invalidated. The one-line, non-modal notification
   appears only while an operation has been reported; finished operations can
-  be dismissed by the user.
+  be dismissed by the user. The dismissal key is held by `AppWindow`,
+  preserving that choice when the AI Hub page is unmounted and reopened.
 - An `Update::Stopped` during an observed active operation changes the visible
   status to **unknown**, not successful or failed. The last Core result is
   not persisted: this is session-only UI visibility, **not** an install journal,

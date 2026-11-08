@@ -26,7 +26,7 @@ export component AiHubPage inherits Rectangle {
     in-out property <int> review-token: 0;
     in property <HubInstallPreview> install-preview;
     in property <HubInstallOperation> install-operation;
-    private property <string> dismissed-operation-id: "";
+    in-out property <string> dismissed-operation-id: "";
     private property <bool> review-requested: false;
     private property <bool> confirm-install: false;
     private property <bool> install-submitted: false;
