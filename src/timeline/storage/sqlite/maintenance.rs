@@ -7,6 +7,7 @@ use crate::timeline::domain::TimelineError;
 
 const MAX_PREVIEW_EVENTS: usize = 100_000;
 const MAX_PREVIEW_INDEX_ROWS: usize = 500_000;
+const MAX_PREVIEW_SCHEMA_OBJECTS: usize = 10_000;
 const TABLES: [(&str, &str); 4] = [
     (
         "timeline_fact_keys",
@@ -94,7 +95,11 @@ impl SqliteTimelineRepository {
                 connection.exec(SCHEMA)?;
                 rebuild_in_transaction(&connection)?;
             }
-            preview_in_transaction(&connection)
+            let after = preview_in_transaction(&connection)?;
+            if after.requires_repair() {
+                return Err(storage("derived-index repair did not converge"));
+            }
+            Ok(after)
         })();
         match result {
             Ok(after) => {
@@ -205,6 +210,18 @@ fn preview_in_transaction(connection: &Connection) -> Result<DerivedIndexPreview
     ] {
         fingerprint_rows.push((label, true, connection.query(sql, &[])?));
     }
+    let schema_objects = connection.query(
+        "SELECT type,name,tbl_name,ifnull(sql,'') FROM sqlite_master
+         WHERE name GLOB 'timeline_*' OR tbl_name GLOB 'timeline_*'
+         ORDER BY type,name,tbl_name",
+        &[],
+    )?;
+    if schema_objects.len() > MAX_PREVIEW_SCHEMA_OBJECTS {
+        return Err(TimelineError::Invalid(
+            "derived-index preview schema object limit exceeded",
+        ));
+    }
+    fingerprint_rows.push(("schema_objects", true, schema_objects));
     let mut drift = Vec::new();
     for (table, sql) in TABLES {
         let exists = !connection
