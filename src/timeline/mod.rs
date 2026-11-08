@@ -561,10 +561,22 @@ impl SessionTimeline {
         &self,
         branch: BranchId,
     ) -> Result<Option<RegenerateAdmissionReceipt>, domain::TimelineError> {
-        let facts = self.store.world(branch)?;
-        let marker = facts
-            .iter()
-            .find(|fact| fact.branch_id == branch && fact.draft.kind == EventKind::BranchCreated)
+        let info = self.store.branch(branch)?;
+        if info.parent.is_none() {
+            return Ok(None);
+        }
+        let marker = self
+            .store
+            .read(
+                branch,
+                info.fork_sequence,
+                Some(info.fork_sequence + 1),
+                1,
+                None,
+            )?
+            .into_iter()
+            .next()
+            .filter(|fact| fact.branch_id == branch && fact.draft.kind == EventKind::BranchCreated)
             .ok_or(domain::TimelineError::NotFound)?;
         RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)
     }

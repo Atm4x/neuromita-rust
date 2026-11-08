@@ -632,3 +632,49 @@ async fn provider_dispatch_fence_persists_before_external_call_and_denies_duplic
     drop(owner);
     assert!(fence.before_provider(id, admission).is_err());
 }
+
+#[tokio::test]
+async fn normal_root_request_never_requires_a_regenerate_dispatch_marker() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let owner = fixture.timeline.lock().unwrap();
+    let initial = owner.anchor();
+    let admission = owner
+        .admission(CharacterId::Crazy, owner.selection())
+        .unwrap();
+    drop(owner);
+    let fence = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    fence.before_provider(RequestId::new(), admission).unwrap();
+    let owner = fixture.timeline.lock().unwrap();
+    assert_eq!(owner.anchor(), initial);
+}
+
+#[tokio::test]
+async fn unrelated_request_on_regenerate_child_does_not_consume_dispatch_permit() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let admitted = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let owner = fixture.timeline.lock().unwrap();
+    let admission = owner
+        .admission(CharacterId::Crazy, owner.selection())
+        .unwrap();
+    drop(owner);
+    let fence = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    fence.before_provider(RequestId::new(), admission).unwrap();
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_regenerate(child, admitted.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    ));
+}
