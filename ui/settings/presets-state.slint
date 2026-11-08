@@ -25,6 +25,7 @@ export global SettingsUi {
     callback section-visibility(int, bool);
     callback set-hide-private(bool);
     in-out property <int> section;
+    in-out property <bool> models-rag-open: false;
     in-out property <[PresetItem]> settings-presets;
     in-out property <[PresetTemplateItem]> preset-templates;
     in-out property <[PresetParameterItem]> preset-parameters;

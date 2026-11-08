@@ -38,3 +38,11 @@
 ## Следующие проверки
 
 `ru` headings/anchor, mixed Cyrillic/English, same heading repeated, link to `app:settings`, path traversal inside/outside wiki root, missing translated doc and on-the-fly language change. Нужны offscreen Qt tests; нынешний обзор выполнен статически.
+
+## Rust D42 — ограниченный переход Wiki → Settings
+
+Текущий Slint Wiki явно распознаёт маршруты `app:home`, `app:sandbox`, `app:settings` и следующие существующие вкладки Settings: `api`, `characters`, `voice`, `language`, `microphone`, `models`, `screen`. Ссылка `app:settings/models?section=RAG` открывает вкладку моделей и разворачивает RAG-панель через существующее UI-состояние. Маршруты сопоставляются **строго**, без декодирования пользовательского URL или произвольного выбора вкладки по индексу.
+
+`app:logs` и `app:settings/data_collection` пока не ведут в действующие экраны: обработчик возвращает `UnsupportedDeepLink` с уведомлением вместо открытия неработающей заглушки. Неизвестные подразделы, дополнительные query и path traversal также отклоняются. Относительный `../../RAG_Guide.md` остаётся за пределами встроенного набора Wiki. Встроенные RU/EN Markdown не изменяются.
+
+Это восстановление переходов по ссылкам в текущем Slint, **не** доказательство полного паритета Python Wiki: якоря Markdown и прокрутка к произвольному heading по-прежнему не поддерживаются; а локализация/клавиатурный фокус требуют отдельного GUI E2E.

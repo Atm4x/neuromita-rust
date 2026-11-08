@@ -12,7 +12,7 @@ use super::{
     },
     view::{
         AppWindow, ComponentCard, GuideContentsEntry, GuideFocusTarget, GuideSectionEntry, I18n,
-        LauncherMenuAction, LocaleOption, PageId, ReleaseItem,
+        LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
     },
     voice::VoicePreviewMode,
 };
@@ -221,6 +221,15 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             Ok(WikiLink::AppHome) => window.invoke_navigate(PageId::Home),
             Ok(WikiLink::AppSandbox) => window.invoke_navigate(PageId::Sandbox),
             Ok(WikiLink::AppSettings) => window.invoke_navigate(PageId::Settings),
+            Ok(WikiLink::AppSettingsSection(target)) => {
+                let (section, open_rag) = wiki_settings_section(target);
+                let settings = window.global::<SettingsUi>();
+                settings.set_section(section);
+                if open_rag {
+                    settings.set_models_rag_open(true);
+                }
+                window.invoke_navigate(PageId::Settings);
+            }
             Ok(WikiLink::External(link)) => window.invoke_external_link(link.into()),
             Err(error) => {
                 window.set_notice(format!("Wiki link unsupported: {error:?}").into());
@@ -765,6 +774,20 @@ fn launcher_action(action: LauncherMenuAction) -> LauncherAction {
         LauncherMenuAction::UpdateSettings => LauncherAction::UpdateSettings,
     }
 }
+fn wiki_settings_section(target: neuromita::onboarding::wiki::WikiSettingsSection) -> (i32, bool) {
+    use neuromita::onboarding::wiki::WikiSettingsSection;
+    match target {
+        WikiSettingsSection::Api => (1, false),
+        WikiSettingsSection::Characters => (2, false),
+        WikiSettingsSection::Voice => (3, false),
+        WikiSettingsSection::Language => (4, false),
+        WikiSettingsSection::Microphone => (5, false),
+        WikiSettingsSection::Models => (8, false),
+        WikiSettingsSection::ModelsRag => (8, true),
+        WikiSettingsSection::Screen => (9, false),
+    }
+}
+
 fn from_view(page: PageId) -> Page {
     match page {
         PageId::Home => Page::Home,

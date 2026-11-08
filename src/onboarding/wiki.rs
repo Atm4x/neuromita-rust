@@ -86,7 +86,20 @@ pub enum WikiLink<'a> {
     AppHome,
     AppSandbox,
     AppSettings,
+    AppSettingsSection(WikiSettingsSection),
     External(&'a str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WikiSettingsSection {
+    Api,
+    Characters,
+    Voice,
+    Language,
+    Microphone,
+    Models,
+    ModelsRag,
+    Screen,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +117,32 @@ pub fn resolve_link(link: &str) -> Result<WikiLink<'_>, WikiLinkError> {
         "app:home" => return Ok(WikiLink::AppHome),
         "app:sandbox" => return Ok(WikiLink::AppSandbox),
         "app:settings" => return Ok(WikiLink::AppSettings),
+        "app:settings/api" => return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Api)),
+        "app:settings/characters" => {
+            return Ok(WikiLink::AppSettingsSection(
+                WikiSettingsSection::Characters,
+            ));
+        }
+        "app:settings/voice" => {
+            return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Voice));
+        }
+        "app:settings/language" => {
+            return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Language));
+        }
+        "app:settings/microphone" => {
+            return Ok(WikiLink::AppSettingsSection(
+                WikiSettingsSection::Microphone,
+            ));
+        }
+        "app:settings/models" => {
+            return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Models));
+        }
+        "app:settings/models?section=RAG" => {
+            return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::ModelsRag));
+        }
+        "app:settings/screen" => {
+            return Ok(WikiLink::AppSettingsSection(WikiSettingsSection::Screen));
+        }
         _ => {}
     }
     if link.starts_with("app:") {
@@ -181,18 +220,80 @@ mod tests {
     }
 
     #[test]
+    fn bundled_app_links_never_silently_open_unrelated_pages() {
+        let mut supported = std::collections::BTreeSet::new();
+        let mut unsupported = std::collections::BTreeSet::new();
+        for article in ARTICLES {
+            for locale in ["ru", "en"] {
+                for tail in article.markdown(locale).split("](").skip(1) {
+                    let Some(link) = tail.split_once(')').map(|(link, _)| link) else {
+                        continue;
+                    };
+                    if !link.starts_with("app:") {
+                        continue;
+                    }
+                    match resolve_link(link) {
+                        Ok(WikiLink::AppSettingsSection(_))
+                        | Ok(WikiLink::AppSettings)
+                        | Ok(WikiLink::AppHome)
+                        | Ok(WikiLink::AppSandbox) => {
+                            supported.insert(link);
+                        }
+                        Err(WikiLinkError::UnsupportedDeepLink)
+                            if matches!(link, "app:logs" | "app:settings/data_collection") =>
+                        {
+                            unsupported.insert(link);
+                        }
+                        result => panic!("unexpected bundled Wiki destination {link}: {result:?}"),
+                    }
+                }
+            }
+        }
+        assert_eq!(supported.len(), 11);
+        assert_eq!(unsupported.len(), 2);
+        assert!(supported.contains("app:settings/models?section=RAG"));
+    }
+
+    #[test]
     fn app_links_have_explicit_destinations() {
         assert_eq!(resolve_link("app:settings"), Ok(WikiLink::AppSettings));
         assert_eq!(resolve_link("app:home"), Ok(WikiLink::AppHome));
         assert_eq!(resolve_link("app:sandbox"), Ok(WikiLink::AppSandbox));
-        assert_eq!(
-            resolve_link("app:settings/api"),
-            Err(WikiLinkError::UnsupportedDeepLink)
-        );
-        assert_eq!(
-            resolve_link("app:logs"),
-            Err(WikiLinkError::UnsupportedDeepLink)
-        );
+        for (link, section) in [
+            ("app:settings/api", WikiSettingsSection::Api),
+            ("app:settings/characters", WikiSettingsSection::Characters),
+            ("app:settings/voice", WikiSettingsSection::Voice),
+            ("app:settings/language", WikiSettingsSection::Language),
+            ("app:settings/microphone", WikiSettingsSection::Microphone),
+            ("app:settings/models", WikiSettingsSection::Models),
+            (
+                "app:settings/models?section=RAG",
+                WikiSettingsSection::ModelsRag,
+            ),
+            ("app:settings/screen", WikiSettingsSection::Screen),
+        ] {
+            assert_eq!(
+                resolve_link(link),
+                Ok(WikiLink::AppSettingsSection(section))
+            );
+        }
+        for link in [
+            "app:logs",
+            "app:settings/data_collection",
+            "app:settings/models?section=Unknown",
+            "app:settings/models?section=rag",
+            "app:settings/api?section=RAG",
+            "app:settings/api/extra",
+            "app:settings/api#unknown",
+            "app:settings/%2e%2e",
+            "app:settings/../api",
+        ] {
+            assert_eq!(
+                resolve_link(link),
+                Err(WikiLinkError::UnsupportedDeepLink),
+                "{link}"
+            );
+        }
         assert_eq!(
             resolve_link("https://github.com/"),
             Ok(WikiLink::External("https://github.com/"))
