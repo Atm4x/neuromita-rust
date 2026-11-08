@@ -1870,5 +1870,37 @@
   "settings.ai-engine.maintenance-unavailable": {
     "source": "Обслуживание недоступно",
     "translation": "Maintenance is unavailable"
+  },
+  "launcher.actions.check-updates": {
+    "source": "Проверить обновления Rust-приложения",
+    "translation": "Check Rust app updates"
+  },
+  "updater.native.busy": {
+    "source": "Проверка обновлений Rust-приложения уже выполняется.",
+    "translation": "A Rust app update check is already running."
+  },
+  "updater.native.checking": {
+    "source": "Проверяем обновления Rust-приложения…",
+    "translation": "Checking for Rust app updates…"
+  },
+  "updater.native.no-release": {
+    "source": "Для Rust-приложения пока нет опубликованных стабильных релизов. Установлена версия {current}.",
+    "translation": "No stable Rust app releases are published yet. Installed version: {current}."
+  },
+  "updater.native.current": {
+    "source": "Версия Rust-приложения {current} не старее последнего опубликованного релиза {latest}.",
+    "translation": "Installed Rust app version {current} is not older than the latest published release {latest}."
+  },
+  "updater.native.available": {
+    "source": "Доступна версия Rust-приложения {latest} (установлена {current}), проверяемый пакет {asset}. Установка пока не подключена.",
+    "translation": "Rust app version {latest} is available (installed: {current}); verified package: {asset}. Installation is not wired yet."
+  },
+  "updater.native.no-asset": {
+    "source": "Найден релиз Rust-приложения {latest} (установлена {current}), но отсутствует исполняемый файл {executable}.",
+    "translation": "Rust app release {latest} exists (installed: {current}) but does not contain executable {executable}."
+  },
+  "updater.native.error": {
+    "source": "Не удалось проверить обновления Rust-приложения: {error}",
+    "translation": "Cannot check Rust app updates: {error}"
   }
 }

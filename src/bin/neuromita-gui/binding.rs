@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc};
+use std::{cell::RefCell, error::Error, path::PathBuf, process::Command, rc::Rc, time::Duration};
 
 use neuromita::localization::{
     FallbackPolicy, LocaleId, LocalizationError, LocalizedText, Localizer, i18n,
@@ -7,6 +7,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use super::{
     launcher_ui::{LauncherUi, load_config},
+    native_updates::NativeUpdates,
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
@@ -82,6 +83,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         )?,
         window.as_weak(),
     )?));
+    let native_updates = Rc::new(RefCell::new(NativeUpdates::new()));
     let presenter = Rc::new(RefCell::new(ShellPresenter::new(
         HomePreview::runtime(),
         options.locale,
@@ -438,11 +440,27 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let notice = launcher_for_play.borrow_mut().toggle_play();
         handler(ShellCommand::LauncherFeedback(notice));
     });
+    let native_update_timer = slint::Timer::default();
+    let updates_for_poll = native_updates.clone();
+    let updates_dispatch = dispatch.clone();
+    native_update_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(200),
+        move || {
+            if let Some(feedback) = updates_for_poll.borrow_mut().poll() {
+                updates_dispatch(ShellCommand::LauncherFeedback(feedback));
+            }
+        },
+    );
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
+    let updates_for_action = native_updates.clone();
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
+            LauncherAction::CheckUpdates => handler(ShellCommand::LauncherFeedback(
+                updates_for_action.borrow_mut().start(),
+            )),
             LauncherAction::OpenUnityFolder => {
                 let notice = launcher_for_action.borrow().open_location();
                 handler(ShellCommand::LauncherFeedback(notice));

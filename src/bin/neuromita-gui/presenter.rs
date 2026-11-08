@@ -53,7 +53,10 @@ pub enum LauncherAction {
 impl LauncherAction {
     fn label(&self) -> LocalizedText {
         match self {
-            Self::CheckUpdates => i18n("launcher.actions.check-updates", "Проверить обновления"),
+            Self::CheckUpdates => i18n(
+                "launcher.actions.check-updates",
+                "Проверить обновления Rust-приложения",
+            ),
             Self::InstallUnity => i18n("launcher.actions.install", "Установить / обновить Unity"),
             Self::VerifyUnity => i18n("launcher.actions.verify", "Проверить файлы Unity"),
             Self::OpenUnityFolder => i18n("launcher.actions.open-folder", "Открыть папку Unity"),

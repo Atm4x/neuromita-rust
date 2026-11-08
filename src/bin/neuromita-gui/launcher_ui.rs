@@ -19,7 +19,9 @@ impl LauncherUi {
                 window.set_unity_installed(update.installed);
                 window.set_game_running(matches!(update.state, OwnedProcessState::Running { .. }));
                 window.set_game_running_external(update.external_running);
-                window.set_notice(update.error.unwrap_or_default().into());
+                if let Some(error) = update.error {
+                    window.set_notice(error.into());
+                }
             });
         })?;
         Ok(Self { controller })
