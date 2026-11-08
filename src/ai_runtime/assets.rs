@@ -13,18 +13,19 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
-use uuid::Uuid;
 
 use super::{
     install::{ModelAssetRequirement, PluginInstallPlan},
     layer::valid_segment,
+    revision_lease::RevisionLease,
 };
 
 const RECEIPT: &str = ".neuromita-assets.json";
-
 pub mod catalog;
 mod generation;
+mod staging;
 pub use generation::{ModelGenerationError, ModelGenerationRequest};
+use staging::AssetStage;
 
 #[derive(Debug, Clone)]
 pub enum AssetSource {
@@ -430,9 +431,32 @@ impl ModelAssetStore {
             .parent()
             .ok_or_else(|| ModelAssetError::Invalid("missing parent".into()))?;
         tokio::fs::create_dir_all(parent).await?;
-        let staging = parent.join(format!(".staging-{}", Uuid::new_v4()));
-        tokio::fs::create_dir(&staging).await?;
-        let outcome = async {
+        reject_symlinks(parent).await?;
+        let _revision = timeout(self.timeout, async {
+            loop {
+                match RevisionLease::exclusive(&destination) {
+                    Ok(lease) => return Ok(lease),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => return Err(ModelAssetError::Io(error)),
+                }
+            }
+        })
+        .await
+        .map_err(|_| ModelAssetError::Timeout)??;
+        if self.checked_existing(&destination, &receipt).await? {
+            return Ok(destination);
+        }
+        let scan_parent = parent.to_path_buf();
+        tokio::task::spawn_blocking(move || AssetStage::recover(&scan_parent))
+            .await
+            .map_err(|error| {
+                ModelAssetError::Invalid(format!("staging recovery task failed: {error}"))
+            })??;
+        let mut stage = AssetStage::new(parent)?;
+        let staging = stage.path.clone();
+        async {
             for (source, asset) in retained {
                 let output = staging.join(&asset.relative_path);
                 tokio::fs::create_dir_all(
@@ -458,13 +482,10 @@ impl ModelAssetStore {
                 return Err(ModelAssetError::Conflict);
             }
             tokio::fs::rename(&staging, &destination).await?;
+            stage.published();
             Ok(destination)
         }
-        .await;
-        if outcome.is_err() {
-            let _ = tokio::fs::remove_dir_all(&staging).await;
-        }
-        outcome
+        .await
     }
 
     fn validate_asset(
@@ -495,6 +516,7 @@ impl ModelAssetStore {
 mod tests {
     use super::*;
     use crate::ai_runtime::install::PluginInstallPlan;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn stages_verified_revision_and_rejects_corrupt_or_wrong_hash() {
