@@ -102,8 +102,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             template_id: "gemini".into(),
             temperature_enabled: true,
             tokens_enabled: true,
-            stream: if unconfigured { false } else { definition.options.stream },
-            max_retries: if unconfigured { "2".into() } else { definition.options.max_retries.to_string().into() },
+            stream: if unconfigured {
+                false
+            } else {
+                definition.options.stream
+            },
+            max_retries: if unconfigured {
+                "2".into()
+            } else {
+                definition.options.max_retries.to_string().into()
+            },
             id: id.0.to_string().into(),
             name: name.into(),
             model: if unconfigured {
