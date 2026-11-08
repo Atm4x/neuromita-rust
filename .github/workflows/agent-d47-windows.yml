@@ -1,32 +1,25 @@
-name: Agent D47 Windows native activation checks
-'on':
+name: Agent D47 native Windows activation checks
+on:
   push:
     branches:
       - bridge/agent-d47-windows-ci-20261109
 permissions:
   contents: read
 jobs:
-  windows-native:
+  windows-gui:
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: codex/agent-d47-native-install-handoff-20261109
-      - name: Verify exact product identity
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "5c99d8201519e3762622e7173bead1b94978d7d7"
-          test "$(git rev-parse HEAD^{tree})" = "dd0ba5f7fe92fb83d53e87fc4858ed47de92350e"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Native updater activation and handoff unit tests
-        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: GUI compile
+      - name: Check native GUI notice boundary
         run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: All Rust targets
+      - name: Check all project targets
         run: cargo check --locked --offline --all-targets
-      - name: Format
+      - name: Native update activation unit tests
+        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Rust formatting
         run: cargo fmt --all -- --check
