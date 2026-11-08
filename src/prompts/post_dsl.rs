@@ -382,12 +382,14 @@ impl PostDslProgram {
                                 rule,
                                 needle,
                                 BTreeMap::new(),
-                                &mut vars,
-                                &mut locals,
-                                &mut declared,
-                                &mut updates,
-                                &mut logs,
-                                &mut remaining_matches,
+                                RuleRunContext {
+                                    vars: &mut vars,
+                                    locals: &mut locals,
+                                    declared: &mut declared,
+                                    updates: &mut updates,
+                                    logs: &mut logs,
+                                    remaining_matches: &mut remaining_matches,
+                                },
                             )?;
                             output.push_str(&replacement);
                             remaining = &remaining[pos + needle.len()..];
@@ -417,12 +419,14 @@ impl PostDslProgram {
                                 rule,
                                 m.as_str(),
                                 captured,
-                                &mut vars,
-                                &mut locals,
-                                &mut declared,
-                                &mut updates,
-                                &mut logs,
-                                &mut remaining_matches,
+                                RuleRunContext {
+                                    vars: &mut vars,
+                                    locals: &mut locals,
+                                    declared: &mut declared,
+                                    updates: &mut updates,
+                                    logs: &mut logs,
+                                    remaining_matches: &mut remaining_matches,
+                                },
                             )?);
                             last = m.end();
                         }
@@ -458,12 +462,14 @@ impl PostDslProgram {
                             rule,
                             "",
                             BTreeMap::from([(name.clone(), value.clone())]),
-                            &mut vars,
-                            &mut locals,
-                            &mut declared,
-                            &mut updates,
-                            &mut logs,
-                            &mut remaining_matches,
+                            RuleRunContext {
+                                vars: &mut vars,
+                                locals: &mut locals,
+                                declared: &mut declared,
+                                updates: &mut updates,
+                                logs: &mut logs,
+                                remaining_matches: &mut remaining_matches,
+                            },
                         )?;
                 }
             }
@@ -479,17 +485,31 @@ impl PostDslProgram {
     }
 }
 
+// Non-owning state for one PostDSL match; all updates remain in the
+// existing per-request state and are returned only after full evaluation.
+struct RuleRunContext<'a> {
+    vars: &'a mut BTreeMap<String, Value>,
+    locals: &'a mut BTreeMap<String, Value>,
+    declared: &'a mut BTreeSet<String>,
+    updates: &'a mut BTreeMap<String, Value>,
+    logs: &'a mut Vec<String>,
+    remaining_matches: &'a mut usize,
+}
+
 fn run(
     rule: &Rule,
     original: &str,
     captured: BTreeMap<String, Value>,
-    vars: &mut BTreeMap<String, Value>,
-    locals: &mut BTreeMap<String, Value>,
-    declared: &mut BTreeSet<String>,
-    updates: &mut BTreeMap<String, Value>,
-    logs: &mut Vec<String>,
-    remaining_matches: &mut usize,
+    state: RuleRunContext<'_>,
 ) -> Result<String, PromptError> {
+    let RuleRunContext {
+        vars,
+        locals,
+        declared,
+        updates,
+        logs,
+        remaining_matches,
+    } = state;
     if *remaining_matches == 0 {
         return Err(error("post-DSL match budget exceeded"));
     }
