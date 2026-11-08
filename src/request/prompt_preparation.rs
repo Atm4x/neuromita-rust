@@ -41,7 +41,10 @@ impl PromptPreparation {
     /// the character's Timeline owner, and renders the provider-neutral prompt.
     /// The catalog never mutates a character or stores canonical memory.
     // The request-admission tuple must remain explicit at this owner boundary.
-    #[expect(clippy::too_many_arguments, reason = "keep typed request admission explicit")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keep typed request admission explicit"
+    )]
     pub(crate) async fn prepare(
         &self,
         character: &CharacterHandle,
