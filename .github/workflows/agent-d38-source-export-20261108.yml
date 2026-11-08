@@ -1,0 +1,35 @@
+name: Agent D38 pinned source bundle export
+on:
+  push:
+    branches: [codex/bridge-agent-d38-source-export-20261108]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact D37 Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD=5d54ca4aa8431e92bbc255f0146ff73016730d53
+          TREE=29998b7be9b914edac7ebca38a20d742b2de206b
+          REF=codex/onboarding-resumable-guide-20261108
+          git fetch --no-tags origin "refs/heads/$REF:refs/remotes/origin/$REF"
+          test "$(git rev-parse "refs/remotes/origin/$REF")" = "$HEAD"
+          test "$(git rev-parse "$HEAD^{tree}")" = "$TREE"
+          mkdir -p transfer
+          git bundle create transfer/agent-d38-source.bundle "refs/remotes/origin/$REF"
+          git bundle verify transfer/agent-d38-source.bundle
+          sha256sum transfer/agent-d38-source.bundle > transfer/agent-d38-source.bundle.sha256
+          printf 'HEAD=%s\nTREE=%s\nREF=%s\n' "$HEAD" "$TREE" "$REF" > transfer/manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d38-pinned-source
+          path: transfer/
+          retention-days: 1
