@@ -1,0 +1,509 @@
+From 9a4a62f6a750d62b03dae83b57d1273f28b33828 Mon Sep 17 00:00:00 2001
+From: OpenAI Codex <codex@openai.com>
+Date: Sun, 8 Nov 2026 14:14:02 +0000
+Subject: [PATCH] feat(ai): install approved offline wheel build stages through
+ immutable Core layers
+
+---
+ .../ai-wheel-stage-executor-c4-20261108.md    |  11 +
+ src/ai_runtime/build_stage.rs                 | 331 ++++++++++++++++++
+ src/ai_runtime/layer.rs                       |  79 ++++-
+ src/ai_runtime/mod.rs                         |   1 +
+ 4 files changed, 420 insertions(+), 2 deletions(-)
+ create mode 100644 docs/03-runtime/ai-wheel-stage-executor-c4-20261108.md
+ create mode 100644 src/ai_runtime/build_stage.rs
+
+diff --git a/docs/03-runtime/ai-wheel-stage-executor-c4-20261108.md b/docs/03-runtime/ai-wheel-stage-executor-c4-20261108.md
+new file mode 100644
+index 00000000..7c70b861
+--- /dev/null
++++ b/docs/03-runtime/ai-wheel-stage-executor-c4-20261108.md
+@@ -0,0 +1,11 @@
++# C4: verified offline Python wheel stage executor
++
++This is a **limited real executor**, not a full Triton/source-build/runtime-JIT pipeline and not end-to-end TTS/ASR readiness.
++
++`ai_runtime::build_stage::WheelStageInstaller` accepts an explicit `ApprovedWheelStage` with an exact package and version, plugin/source revision, backend, Python patch version, install-plan fingerprint, wheel path and SHA-256, and SHA-256 fingerprints for the selected `uv` and Python executables. It only admits an OS-matching `python_wheel` stage with `package==exact_version`. Dynamic selectors such as `triton-windows<3.4` are rejected until an approved exact-version wheel is selected. `source_build` and `runtime_jit` never pass the wheel executor gate.
++
++The wheel must be present at `AIData/cache/wheels/<sha256>/<filename>.whl`; the executor does not download or select packages. The existing Core `LayerInstaller` performs an offline `uv pip install --no-index --no-deps` in a private `.staging-<uuid>` directory, verifies installed wheel distribution metadata, then publishes an immutable receipt to `AIData/build-stages/<plugin>/<revision>/<stage-id>` under the existing revision lease. Wheel contents are SHA-256 checked both before uv and before publication; platform, package identity and tool fingerprints are validated before creating the layer. Repeating the exact request reuses the installed layer. Source and target symlink chains inside AIData are rejected.
++
++The pinned-plan SHA-256 is an input to this low-level primitive, **not** evidence that the GUI already enforced approval. The production `AiProductionInstaller` still refuses all nonempty `build_stages`. Integration must bind the lock to the Core-owned reviewed install plan/approval, validate the wheel against a trusted source, publish dependency layer selection and receipt atomically, then run a real model-specific GPU or inference smoke for `runtime_jit`. A successful wheel installation alone must never mark a worker/model/inference ready.
++
++The Linux integration test creates an actual minimal wheel and runs the actual uv executable when `NEUROMITA_C4_TEST_UV` and `NEUROMITA_C4_TEST_PYTHON` are set. It verifies immutable publication, idempotency, and rejection after corrupting the source wheel; it does not exercise Triton or CUDA. No new crates, Cargo.lock changes, GUI dialogs, Python Legacy modifications, or persisted storage schema migrations.
+diff --git a/src/ai_runtime/build_stage.rs b/src/ai_runtime/build_stage.rs
+new file mode 100644
+index 00000000..66872d7d
+--- /dev/null
++++ b/src/ai_runtime/build_stage.rs
+@@ -0,0 +1,331 @@
++use serde::{Deserialize, Serialize};
++use std::{
++    path::{Path, PathBuf},
++    time::Duration,
++};
++
++use super::{
++    install::{BuildPlatform, BuildStage, BuildStageKind},
++    layer::{LayerError, LayerInstaller, sha256_file, valid_segment, validate_lock},
++    overlay::LockedPackage,
++};
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++pub struct ApprovedWheelStage {
++    pub plugin_id: String,
++    pub plugin_revision: String,
++    pub python_version: String,
++    pub build_stage: BuildStage,
++    pub package: LockedPackage,
++    pub wheel_file: String,
++    pub wheel_sha256: String,
++    pub install_plan_sha256: String,
++    pub uv_sha256: String,
++    pub python_sha256: String,
++}
++
++#[derive(Clone)]
++pub struct WheelStageInstaller {
++    pub uv_executable: PathBuf,
++    pub python_executable: PathBuf,
++    pub data_directory: PathBuf,
++    pub timeout: Duration,
++}
++
++fn valid_sha256(value: &str) -> bool {
++    value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
++}
++
++fn valid_wheel_file(value: &str) -> bool {
++    value.ends_with(".whl")
++        && !value.contains("..")
++        && value
++            .bytes()
++            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
++}
++
++fn host_platform() -> BuildPlatform {
++    if cfg!(target_os = "windows") {
++        BuildPlatform::Windows
++    } else if cfg!(target_os = "macos") {
++        BuildPlatform::Macos
++    } else {
++        BuildPlatform::Linux
++    }
++}
++
++fn reject_symlink_chain(path: &Path, root: &Path) -> Result<(), LayerError> {
++    let relative = path
++        .strip_prefix(root)
++        .map_err(|_| LayerError::Invalid("build input escapes AIData".into()))?;
++    let mut current = root.to_owned();
++    if current.is_symlink() {
++        return Err(LayerError::Invalid(
++            "AIData root must not be symlinked".into(),
++        ));
++    }
++    for component in relative.components() {
++        current.push(component);
++        if current.is_symlink() {
++            return Err(LayerError::Invalid(
++                "build stage path contains symlink".into(),
++            ));
++        }
++    }
++    Ok(())
++}
++
++impl ApprovedWheelStage {
++    pub fn validate(&self) -> Result<(), LayerError> {
++        if !valid_segment(&self.plugin_id)
++            || !valid_segment(&self.plugin_revision)
++            || !valid_segment(&self.build_stage.id)
++            || self.build_stage.kind != BuildStageKind::PythonWheel
++            || self.build_stage.platform != host_platform()
++            || !matches!(
++                self.build_stage.backend.as_str(),
++                "torch-cpu"
++                    | "torch-cuda"
++                    | "onnx-cpu"
++                    | "onnx-cuda"
++                    | "onnx-directml"
++                    | "ctranslate2-cpu"
++                    | "ctranslate2-cuda"
++                    | "remote-api"
++            )
++            || self.build_stage.requirement.as_deref()
++                != Some(format!("{}=={}", self.package.name, self.package.version).as_str())
++            || !valid_wheel_file(&self.wheel_file)
++            || !valid_sha256(&self.wheel_sha256)
++            || !valid_sha256(&self.install_plan_sha256)
++            || !valid_sha256(&self.uv_sha256)
++            || !valid_sha256(&self.python_sha256)
++        {
++            return Err(LayerError::Invalid(
++                "wheel stage requires exact approved platform, package and SHA-256 pins".into(),
++            ));
++        }
++        validate_lock(std::slice::from_ref(&self.package), &self.python_version)?;
++        let wheel_prefix = format!(
++            "{}-{}-",
++            self.package.name.to_ascii_lowercase().replace('-', "_"),
++            self.package.version
++        );
++        if !self
++            .wheel_file
++            .to_ascii_lowercase()
++            .starts_with(&wheel_prefix)
++        {
++            return Err(LayerError::Invalid(
++                "wheel identity differs from approval".into(),
++            ));
++        }
++        Ok(())
++    }
++}
++
++impl WheelStageInstaller {
++    pub fn destination(&self, approved: &ApprovedWheelStage) -> Result<PathBuf, LayerError> {
++        approved.validate()?;
++        if !self.data_directory.is_absolute() || self.timeout.is_zero() {
++            return Err(LayerError::Invalid(
++                "portable AIData and bounded timeout required".into(),
++            ));
++        }
++        Ok(self
++            .data_directory
++            .join("build-stages")
++            .join(&approved.plugin_id)
++            .join(&approved.plugin_revision)
++            .join(&approved.build_stage.id))
++    }
++
++    pub async fn install(&self, approved: &ApprovedWheelStage) -> Result<PathBuf, LayerError> {
++        let destination = self.destination(approved)?;
++        let wheel = self
++            .data_directory
++            .join("cache")
++            .join("wheels")
++            .join(&approved.wheel_sha256)
++            .join(&approved.wheel_file);
++        reject_symlink_chain(&wheel, &self.data_directory)?;
++        reject_symlink_chain(&destination, &self.data_directory)?;
++        if !sha256_file(&wheel)?.eq_ignore_ascii_case(&approved.wheel_sha256)
++            || !sha256_file(&self.uv_executable)?.eq_ignore_ascii_case(&approved.uv_sha256)
++            || !sha256_file(&self.python_executable)?.eq_ignore_ascii_case(&approved.python_sha256)
++        {
++            return Err(LayerError::Invalid(
++                "wheel or toolchain checksum mismatch".into(),
++            ));
++        }
++        let output = tokio::time::timeout(
++            Duration::from_secs(10),
++            tokio::process::Command::new(&self.python_executable)
++                .arg("--version")
++                .kill_on_drop(true)
++                .output(),
++        )
++        .await
++        .map_err(|_| LayerError::Timeout)??;
++        let version = String::from_utf8_lossy(&output.stdout);
++        if !output.status.success()
++            || version.trim() != format!("Python {}", approved.python_version)
++        {
++            return Err(LayerError::Invalid(
++                "managed Python does not match approved version".into(),
++            ));
++        }
++        let cache_directory = self.data_directory.join("cache/uv");
++        LayerInstaller {
++            uv_executable: &self.uv_executable,
++            python_executable: &self.python_executable,
++            cache_directory: &cache_directory,
++            timeout: self.timeout,
++        }
++        .publish_local_wheel(
++            &destination,
++            ".neuromita-build-stage.json",
++            approved,
++            &approved.package,
++            &wheel,
++            &approved.wheel_sha256,
++        )
++        .await
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn approved() -> ApprovedWheelStage {
++        ApprovedWheelStage {
++            plugin_id: "test_plugin".into(),
++            plugin_revision: "rev1".into(),
++            python_version: "3.13.5".into(),
++            build_stage: BuildStage {
++                id: "verified_wheel".into(),
++                kind: BuildStageKind::PythonWheel,
++                backend: "torch-cuda".into(),
++                platform: host_platform(),
++                requirement: Some("sample_pkg==1.2.3".into()),
++            },
++            package: LockedPackage {
++                name: "sample_pkg".into(),
++                version: "1.2.3".into(),
++            },
++            wheel_file: "sample_pkg-1.2.3-py3-none-any.whl".into(),
++            wheel_sha256: "a".repeat(64),
++            install_plan_sha256: "b".repeat(64),
++            uv_sha256: "c".repeat(64),
++            python_sha256: "d".repeat(64),
++        }
++    }
++
++    #[test]
++    fn exact_pins_required_and_jit_never_passes_for_wheel_executor() {
++        let mut stage = approved();
++        assert!(stage.validate().is_ok());
++        stage.build_stage.kind = BuildStageKind::RuntimeJit;
++        assert!(stage.validate().is_err());
++        stage = approved();
++        stage.build_stage.requirement = Some("sample_pkg>=1.2".into());
++        assert!(stage.validate().is_err());
++        stage = approved();
++        stage.wheel_file = "../sample_pkg-1.2.3-py3-none-any.whl".into();
++        assert!(stage.validate().is_err());
++        stage = approved();
++        stage.build_stage.platform = match host_platform() {
++            BuildPlatform::Windows => BuildPlatform::Linux,
++            _ => BuildPlatform::Windows,
++        };
++        assert!(stage.validate().is_err());
++        stage = approved();
++        stage.python_sha256 = "xyz".into();
++        assert!(stage.validate().is_err());
++    }
++
++    #[test]
++    fn wheel_inputs_are_confined_to_portable_data() {
++        let root = std::env::temp_dir().join(format!("nm-wheel-stage-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&root).unwrap();
++        let executor = WheelStageInstaller {
++            uv_executable: root.join("uv"),
++            python_executable: root.join("python"),
++            data_directory: root.clone(),
++            timeout: Duration::from_secs(10),
++        };
++        let dest = executor.destination(&approved()).unwrap();
++        assert!(dest.starts_with(root.join("build-stages")));
++        #[cfg(unix)]
++        {
++            std::os::unix::fs::symlink("/tmp", root.join("build-stages")).unwrap();
++            assert!(reject_symlink_chain(&dest, &root).is_err());
++        }
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
++    #[tokio::test]
++    async fn actual_offline_wheel_publish_is_atomic_idempotent_and_checksum_bound() {
++        let (Ok(uv), Ok(python)) = (
++            std::env::var("NEUROMITA_C4_TEST_UV"),
++            std::env::var("NEUROMITA_C4_TEST_PYTHON"),
++        ) else {
++            return;
++        };
++        let root =
++            std::env::temp_dir().join(format!("nm-wheel-stage-real-{}", uuid::Uuid::new_v4()));
++        std::fs::create_dir_all(&root).unwrap();
++        let wheel_name = "sample_pkg-1.2.3-py3-none-any.whl";
++        let wheel = root.join(wheel_name);
++        let script = r#"
++import sys
++from zipfile import ZipFile
++path = sys.argv[1]
++dist = 'sample_pkg-1.2.3.dist-info/'
++with ZipFile(path, 'w') as z:
++    z.writestr('sample_pkg/__init__.py', 'VALUE = 42\n')
++    z.writestr(dist + 'METADATA', 'Metadata-Version: 2.1\nName: sample-pkg\nVersion: 1.2.3\n')
++    z.writestr(dist + 'WHEEL', 'Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
++    z.writestr(dist + 'RECORD', '')
++"#;
++        let output = std::process::Command::new(&python)
++            .args(["-c", script, wheel.to_str().unwrap()])
++            .output()
++            .unwrap();
++        assert!(output.status.success(), "{:?}", output.stderr);
++
++        let mut stage = approved();
++        stage.wheel_sha256 = sha256_file(&wheel).unwrap();
++        stage.uv_sha256 = sha256_file(Path::new(&uv)).unwrap();
++        stage.python_sha256 = sha256_file(Path::new(&python)).unwrap();
++        let version = std::process::Command::new(&python)
++            .arg("--version")
++            .output()
++            .unwrap();
++        stage.python_version = String::from_utf8(version.stdout)
++            .unwrap()
++            .trim()
++            .strip_prefix("Python ")
++            .unwrap()
++            .to_owned();
++        let wheel_cache = root.join("cache/wheels").join(&stage.wheel_sha256);
++        std::fs::create_dir_all(&wheel_cache).unwrap();
++        std::fs::rename(&wheel, wheel_cache.join(wheel_name)).unwrap();
++        let installer = WheelStageInstaller {
++            uv_executable: uv.into(),
++            python_executable: python.into(),
++            data_directory: root.clone(),
++            timeout: Duration::from_secs(30),
++        };
++        let path = installer.install(&stage).await.unwrap();
++        assert!(path.join("sample_pkg/__init__.py").is_file());
++        assert!(path.join(".neuromita-build-stage.json").is_file());
++        assert_eq!(installer.install(&stage).await.unwrap(), path);
++        std::fs::write(wheel_cache.join(wheel_name), b"corrupt").unwrap();
++        assert!(installer.install(&stage).await.is_err());
++        assert!(path.join("sample_pkg/__init__.py").exists());
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
+diff --git a/src/ai_runtime/layer.rs b/src/ai_runtime/layer.rs
+index f3c1df1e..b3d0f94e 100644
+--- a/src/ai_runtime/layer.rs
++++ b/src/ai_runtime/layer.rs
+@@ -2,11 +2,13 @@
+ 
+ use std::{
+     fs::{File, OpenOptions},
++    io::Read,
+     path::{Path, PathBuf},
+     process::Stdio,
+     time::Duration,
+ };
+ 
++use ring::digest::{Context, SHA256};
+ use serde::{Serialize, de::DeserializeOwned};
+ use thiserror::Error;
+ use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
+@@ -38,6 +40,30 @@ pub enum LayerError {
+     Corrupted(String),
+ }
+ 
++pub(super) fn sha256_file(path: &Path) -> Result<String, LayerError> {
++    let mut file = File::open(path)?;
++    if !file.metadata()?.is_file() {
++        return Err(LayerError::Invalid(
++            "build input must be a regular file".into(),
++        ));
++    }
++    let mut digest = Context::new(&SHA256);
++    let mut buffer = [0; 64 * 1024];
++    loop {
++        let count = file.read(&mut buffer)?;
++        if count == 0 {
++            break;
++        }
++        digest.update(&buffer[..count]);
++    }
++    Ok(digest
++        .finish()
++        .as_ref()
++        .iter()
++        .map(|byte| format!("{byte:02x}"))
++        .collect())
++}
++
+ const STAGING_LOCK_SUFFIX: &str = ".lock";
+ 
+ fn staging_lock_path(path: &Path) -> PathBuf {
+@@ -500,8 +526,46 @@ impl LayerInstaller<'_> {
+         plan: &T,
+         packages: &[LockedPackage],
+         actions: &[InstallerAction],
++    ) -> Result<PathBuf, LayerError> {
++        self.publish_with_wheels(destination, marker, plan, packages, actions, None)
++            .await
++    }
++
++    pub(super) async fn publish_local_wheel<T: Serialize + DeserializeOwned + PartialEq>(
++        &self,
++        destination: &Path,
++        marker: &str,
++        plan: &T,
++        package: &LockedPackage,
++        wheel: &Path,
++        expected_sha256: &str,
++    ) -> Result<PathBuf, LayerError> {
++        self.publish_with_wheels(
++            destination,
++            marker,
++            plan,
++            std::slice::from_ref(package),
++            &[],
++            Some((wheel, expected_sha256)),
++        )
++        .await
++    }
++
++    async fn publish_with_wheels<T: Serialize + DeserializeOwned + PartialEq>(
++        &self,
++        destination: &Path,
++        marker: &str,
++        plan: &T,
++        packages: &[LockedPackage],
++        actions: &[InstallerAction],
++        wheel: Option<(&Path, &str)>,
+     ) -> Result<PathBuf, LayerError> {
+         self.verify_paths(destination)?;
++        if let Some((path, expected)) = wheel
++            && !sha256_file(path)?.eq_ignore_ascii_case(expected)
++        {
++            return Err(LayerError::Invalid("source wheel checksum mismatch".into()));
++        }
+         if self
+             .installed(destination, marker, plan, packages, actions)
+             .await?
+@@ -542,8 +606,12 @@ impl LayerInstaller<'_> {
+                 .env_remove("VIRTUAL_ENV")
+                 .stdin(cleanup.child_stdin()?)
+                 .kill_on_drop(true);
+-                for package in packages {
+-                    cmd.arg(format!("{}=={}", package.name, package.version));
++                if let Some((source, _)) = wheel {
++                    cmd.arg("--no-index").arg(source);
++                } else {
++                    for package in packages {
++                        cmd.arg(format!("{}=={}", package.name, package.version));
++                    }
+                 }
+                 #[cfg(not(windows))]
+                 let outcome = timeout(self.timeout, cmd.output()).await;
+@@ -586,6 +654,13 @@ impl LayerInstaller<'_> {
+                             .collect(),
+                     ));
+                 }
++                if let Some((path, expected)) = wheel
++                    && !sha256_file(path)?.eq_ignore_ascii_case(expected)
++                {
++                    return Err(LayerError::Invalid(
++                        "source wheel changed during installation".into(),
++                    ));
++                }
+             }
+             distribution::inspect(&staging, packages).map_err(LayerError::Corrupted)?;
+             for action in actions {
+diff --git a/src/ai_runtime/mod.rs b/src/ai_runtime/mod.rs
+index f4b0cb2c..5be74329 100644
+--- a/src/ai_runtime/mod.rs
++++ b/src/ai_runtime/mod.rs
+@@ -7,6 +7,7 @@ pub mod application;
+ pub mod assets;
+ pub mod backend;
+ pub mod bootstrap;
++pub mod build_stage;
+ pub mod composition;
+ pub mod constraints;
+ mod distribution;
+-- 
+2.47.3
+
