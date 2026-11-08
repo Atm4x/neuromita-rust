@@ -1,0 +1,68 @@
+name: Agent D34 exact commit import + native Windows crash E2E
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d34-windows-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D34 history and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=2261bd8caf42a0ffd658fbbc44c50eaaf999e8af
+          HEAD=288133405aa54cde9a1853a26afa0c694f05abac
+          TREE=c1d0aa180862903dbd5a65d402ba4ece78db0803
+          BRANCH=codex/settings-native-windows-recovery-20261108
+          base64 -d .git-bridge/d34-original.patch.xz.b64 > /tmp/d34.patch.xz
+          echo '78f251c368a13e8e466bf14bdca56238589b100443fce2f3c36c50a7348f255d  /tmp/d34.patch.xz' | sha256sum --check
+          xz -d --stdout /tmp/d34.patch.xz > /tmp/d34.patch
+          git fetch --no-tags origin refs/heads/codex/python-presets-semantic-loss-guards-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d34.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git fsck --full
+          git diff --check "$BASE" "$HEAD"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-e2e:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/settings-native-windows-recovery-20261108
+          fetch-depth: 0
+      - name: Verify pinned D34 candidate on Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 288133405aa54cde9a1853a26afa0c694f05abac
+          test "$(git rev-parse HEAD^{tree})" = c1d0aa180862903dbd5a65d402ba4ece78db0803
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Real subprocess abort/recover and Windows exclusive-handle E2E
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib settings::preset_activation::tests -- --test-threads=1
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=1
+          cargo check --locked --offline --all-targets
