@@ -2073,3 +2073,161 @@ async fn semantic_intersect_admits_rag_only_keyword_match_without_admitting_unma
     ));
     app.shutdown().await.unwrap();
 }
+
+struct TransientEmbeddingTimeout {
+    space: neuromita::knowledge::embedding::EmbeddingSpace,
+    query_calls: std::sync::atomic::AtomicUsize,
+    document_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl TransientEmbeddingTimeout {
+    fn new() -> Self {
+        Self {
+            space: neuromita::knowledge::embedding::EmbeddingSpace::new(
+                "fixture",
+                "transient-timeout",
+                "v1",
+                2,
+            )
+            .unwrap(),
+            query_calls: std::sync::atomic::AtomicUsize::new(0),
+            document_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl neuromita::knowledge::embedding::EmbeddingProvider for TransientEmbeddingTimeout {
+    fn space(&self) -> &neuromita::knowledge::embedding::EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(
+        &self,
+        purpose: neuromita::knowledge::embedding::EmbeddingPurpose,
+        _: String,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        neuromita::knowledge::embedding::Embedding,
+    > {
+        use neuromita::knowledge::embedding::{Embedding, EmbeddingError, EmbeddingPurpose};
+        Box::pin(async move {
+            if purpose == EmbeddingPurpose::Query
+                && self
+                    .query_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+            {
+                return Err(EmbeddingError::Transport("worker timed out".into()));
+            }
+            Embedding::new(vec![1.0, 0.0], &self.space)
+        })
+    }
+
+    fn embed_documents(
+        &self,
+        texts: Vec<String>,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        Vec<neuromita::knowledge::embedding::Embedding>,
+    > {
+        use neuromita::knowledge::embedding::Embedding;
+        Box::pin(async move {
+            self.document_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            texts
+                .into_iter()
+                .map(|_| Embedding::new(vec![1.0, 0.0], &self.space))
+                .collect()
+        })
+    }
+}
+
+#[tokio::test]
+async fn semantic_generation_transient_embedding_timeout_is_terminal_then_retry_succeeds() {
+    use neuromita::knowledge::semantic_memory::SemanticMemoryRetriever;
+    use std::sync::atomic::Ordering;
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let embedding = Arc::new(TransientEmbeddingTimeout::new());
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(Arc::new(
+        SemanticMemoryRetriever::new(embedding.clone(), 16).unwrap(),
+    ));
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Old orchid archive".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Current conversation tail".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Vector,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+
+    let first = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let finished = timeout(Duration::from_secs(5), first.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            &finished.state,
+            RequestState::Finished(RequestOutcome::TextGenerationFailed(error))
+                if error.to_string().contains("timed out")
+        ),
+        "{:?}",
+        finished.state
+    );
+    assert!(
+        calls.try_recv().is_err(),
+        "failed retrieval invoked the LLM"
+    );
+    assert_eq!(embedding.query_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(embedding.document_calls.load(Ordering::SeqCst), 0);
+
+    let retry = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    assert!(
+        call.input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains(&archived.0.to_string()),
+        "retry did not retrieve the original archived source"
+    );
+    call.reply.send("Recovered".into()).unwrap();
+    let success = timeout(Duration::from_secs(5), retry.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        success.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(embedding.query_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(embedding.document_calls.load(Ordering::SeqCst), 1);
+    assert!(calls.try_recv().is_err());
+    app.shutdown().await.unwrap();
+}
