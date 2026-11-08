@@ -1,0 +1,285 @@
+From 7541a84c36af4f9c947e7da3c57e985ea7a13d16 Mon Sep 17 00:00:00 2001
+From: Agent D <agent-d@local.invalid>
+Date: Sun, 8 Nov 2026 13:02:58 +0000
+Subject: [PATCH] fix(onboarding): persist guide navigation and atomic level
+ page remap (D38)
+
+---
+ ...st-run-onboarding-implementation-status.md |  6 ++
+ examples/gui_snapshot.rs                      | 30 ++++++++
+ src/bin/neuromita-gui/binding.rs              | 47 ++++++++-----
+ src/bin/neuromita-gui/runtime.rs              | 15 +++-
+ src/bin/neuromita-gui/sandbox.rs              |  4 +-
+ src/presentation/settings.rs                  | 69 ++++++++++++++++++-
+ 6 files changed, 150 insertions(+), 21 deletions(-)
+
+diff --git a/docs/02-ui/first-run-onboarding-implementation-status.md b/docs/02-ui/first-run-onboarding-implementation-status.md
+index c003820b..b0fcacbe 100644
+--- a/docs/02-ui/first-run-onboarding-implementation-status.md
++++ b/docs/02-ui/first-run-onboarding-implementation-status.md
+@@ -7,3 +7,9 @@ The Guide has Basic (3), Advanced (5), and Full (13) pages, bundled screenshots,
+ The RU/EN EULA text came without edits from read-only Python reference `src/localization/eula_texts.py` at `5f3d061f523d9abefa6a264bb2953048a935fa65`; that historical compatibility reference does not constitute new legal approval. The GUI only supports accepting RU/EN; unsupported EULA locale selection is rejected. CLI/headless Rust runtime has no EULA startup gate.
+ 
+ Tests cover clean install and EULA persistence, offline restart, interrupted guide page restoration, completing without losing settings, old accepted profiles and invalid JSON. This is not yet native Windows keyboard-only/accessibility approval or a complete screenshot-based Python/PyQt visual parity check. Issue #41 remains open until those user-facing gates are verified.
++
++## Guide navigation durability and visual smoke (D38)
++
++Navigation to another Guide page and changing Guide level are executed through the same Settings Owner as completion. The running GUI now explicitly awaits `SettingsApi::flush()` for each navigation command before reporting that the change was saved; a persistence failure displays a visible Guide notice instead of a settings-only error behind the modal. The presenter changes Guide level and remaps the current page to the closest visible page **in one settings revision**, not as two separately persisted updates. Subsequent Core snapshots synchronize both level and page with the GUI. If the runtime is not available or its command queue is closed, navigation does not advance optimistically as though it were saved.
++
++The `gui_snapshot` example supports `onboarding-eula-ru`, `onboarding-eula-en`, `onboarding-guide-ru`, and `onboarding-guide-en` visual fixtures. These use real bundled Slint components and source-derived EULA/Guide text, but are **rendering smoke only**: the example does not start the desktop Core or prove live input/keyboard accessibility. A hard process crash before a successful flush acknowledgement still cannot guarantee that an already-visible optimistic page is durable; filesystem crash consistency and actual Windows GUI interaction require separate acceptance. The full Python/PyQt visual-parity gate remains open.
+diff --git a/examples/gui_snapshot.rs b/examples/gui_snapshot.rs
+index 9c41b30d..36ce9e94 100644
+--- a/examples/gui_snapshot.rs
++++ b/examples/gui_snapshot.rs
+@@ -240,6 +240,36 @@ fn main() -> Result<(), Box<dyn Error>> {
+         settings.set_preset_parameters(slint::ModelRc::new(slint::VecModel::from(parameters)));
+         settings.set_preset_tab(if mode == "api-generation" { 1 } else { 0 });
+     }
++    if mode.starts_with("onboarding-") {
++        let language = if mode.ends_with("-en") { "en" } else { "ru" };
++        window.global::<view::I18n>().set_locale(language.into());
++        window.set_onboarding_language(language.into());
++        window.set_onboarding_eula_text(neuromita::onboarding::eula_text(language).into());
++        if mode.starts_with("onboarding-eula") {
++            window.set_onboarding_required(true);
++        } else {
++            use neuromita::onboarding::guide::{self, GuideLevel};
++            let level = GuideLevel::Full;
++            let index = 8;
++            let page = guide::page(level, index).ok_or("missing Guide screenshot fixture page")?;
++            window.set_onboarding_guide_level(level.index());
++            window.set_onboarding_guide_page(index as i32);
++            window.set_onboarding_guide_count(guide::count(level) as i32);
++            window.set_onboarding_guide_title(page.title(language).into());
++            window.set_onboarding_guide_description(page.description(language).into());
++            window.set_onboarding_guide_description_rich(slint::StyledText::from_markdown(
++                &page.description_markdown(language),
++            )?);
++            window.set_onboarding_guide_image(page.image_key.into());
++            window.set_onboarding_guide_wiki_target(page.wiki_target.unwrap_or_default().into());
++            let crop = page.image_crop();
++            window.set_onboarding_guide_crop_left(crop.left);
++            window.set_onboarding_guide_crop_top(crop.top);
++            window.set_onboarding_guide_crop_right(crop.right);
++            window.set_onboarding_guide_crop_bottom(crop.bottom);
++            window.set_onboarding_guide_visible(true);
++        }
++    }
+     window.show()?;
+     window.window().set_size(slint::PhysicalSize::new(
+         1560,
+diff --git a/src/bin/neuromita-gui/binding.rs b/src/bin/neuromita-gui/binding.rs
+index 12b11622..c821b6a8 100644
+--- a/src/bin/neuromita-gui/binding.rs
++++ b/src/bin/neuromita-gui/binding.rs
+@@ -218,14 +218,22 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
+         let Some(window) = guide_window.upgrade() else {
+             return;
+         };
+-        update_guide(&window, index);
+-        if let Some(runtime) = guide_runtime.borrow().as_ref() {
+-            let page = window.get_onboarding_guide_page() as u8;
+-            if let Err(error) = runtime
+-                .commands
+-                .try_send(super::runtime::Command::SetGuidePage(page))
+-            {
+-                window.set_notice(format!("Failed to save Guide position: {error}").into());
++        let runtime = guide_runtime.borrow();
++        let Some(runtime) = runtime.as_ref() else {
++            window.set_notice("Guide position cannot be saved until Core starts".into());
++            return;
++        };
++        let level = neuromita::onboarding::guide::GuideLevel::from_index(
++            window.get_onboarding_guide_level(),
++        );
++        let page = index.clamp(0, (neuromita::onboarding::guide::count(level) - 1) as i32) as u8;
++        match runtime
++            .commands
++            .try_send(super::runtime::Command::SetGuidePage(page))
++        {
++            Ok(()) => update_guide(&window, i32::from(page)),
++            Err(error) => {
++                window.set_notice(format!("Failed to queue Guide position: {error}").into())
+             }
+         }
+     });
+@@ -408,18 +416,21 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
+     Ok(())
+ }
+ 
+-pub(super) fn sync_guide_level(window: &AppWindow, next: neuromita::onboarding::guide::GuideLevel) {
+-    use neuromita::onboarding::guide::{self, GuideLevel};
++pub(super) fn sync_guide_position(
++    window: &AppWindow,
++    level: neuromita::onboarding::guide::GuideLevel,
++    page: u8,
++) {
++    use neuromita::onboarding::guide;
+ 
+-    let previous = GuideLevel::from_index(window.get_onboarding_guide_level());
+-    if previous == next {
+-        return;
++    if window.get_onboarding_guide_level() != level.index() {
++        window.set_onboarding_guide_level(level.index());
++        reset_guide_image_view(window);
++    }
++    let page = i32::from(page).min((guide::count(level) - 1) as i32);
++    if window.get_onboarding_guide_page() != page {
++        update_guide(window, page);
+     }
+-    let destination =
+-        guide::remap_index(previous, window.get_onboarding_guide_page() as usize, next);
+-    window.set_onboarding_guide_level(next.index());
+-    reset_guide_image_view(window);
+-    update_guide(window, destination as i32);
+ }
+ 
+ fn reset_guide_image_view(window: &AppWindow) {
+diff --git a/src/bin/neuromita-gui/runtime.rs b/src/bin/neuromita-gui/runtime.rs
+index 9becb3fe..cfe04fda 100644
+--- a/src/bin/neuromita-gui/runtime.rs
++++ b/src/bin/neuromita-gui/runtime.rs
+@@ -117,6 +117,7 @@ pub enum Update {
+     },
+     PresetCreated(PresetId, PresetRecord),
+     AdminSaved,
++    GuideError(String),
+     GuideCompleted,
+     PresetSaved(PresetId),
+     AdminError(String),
+@@ -446,7 +447,19 @@ async fn observe(
+                         Err(error) => publish(Update::AdminError(error)),
+                     }
+                 },
+-                Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetGuideLevel(_) | Command::SetGuidePage(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
++                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuidePage(_))) => {
++                    let result = super::settings::execute(administration, command);
++                    let result = match result {
++                        Ok(()) => neuromita::settings::SettingsApi::flush().await
++                            .map_err(|error| error.to_string()),
++                        Err(error) => Err(error),
++                    };
++                    match result {
++                        Ok(()) => publish(Update::AdminSaved),
++                        Err(error) => publish(Update::GuideError(error)),
++                    }
++                },
++                Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                     match super::settings::execute(administration, command) {
+                         Ok(()) => publish(Update::AdminSaved),
+                         Err(error) => publish(Update::AdminError(error)),
+diff --git a/src/bin/neuromita-gui/sandbox.rs b/src/bin/neuromita-gui/sandbox.rs
+index ca268126..9162d042 100644
+--- a/src/bin/neuromita-gui/sandbox.rs
++++ b/src/bin/neuromita-gui/sandbox.rs
+@@ -249,9 +249,10 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
+             super::settings::render_character_debug(window, character, &fields, error.as_deref());
+         }
+         Update::Administration(snapshot) => {
+-            super::binding::sync_guide_level(
++            super::binding::sync_guide_position(
+                 window,
+                 snapshot.settings.values.onboarding.guide_level,
++                snapshot.settings.values.onboarding.guide_page,
+             );
+             super::settings::render(window, &snapshot);
+             super::voice::render(window, &snapshot.settings.values.speech.tts);
+@@ -265,6 +266,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
+                 .set_settings_error(error.into());
+         }
+         Update::AdminSaved => super::settings::saved(window, None),
++        Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
+         Update::GuideCompleted => window.set_onboarding_guide_visible(false),
+         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
+         Update::Stopped => {
+diff --git a/src/presentation/settings.rs b/src/presentation/settings.rs
+index 7ad57ab8..514860c4 100644
+--- a/src/presentation/settings.rs
++++ b/src/presentation/settings.rs
+@@ -263,7 +263,15 @@ impl SettingsPresenter {
+                     |settings| settings.onboarding.guide_level,
+                     |owner, level| {
+                         owner
+-                            .edit::<OnboardingSettings>(|settings| settings.guide_level = level)
++                            .edit::<OnboardingSettings>(|settings| {
++                                let page = crate::onboarding::guide::remap_index(
++                                    settings.guide_level,
++                                    usize::from(settings.guide_page),
++                                    level,
++                                );
++                                settings.guide_level = level;
++                                settings.guide_page = page as u8;
++                            })
+                             .map(|_| ())
+                     },
+                 ),
+@@ -544,6 +552,65 @@ mod tests {
+         std::fs::remove_dir_all(directory).unwrap();
+     }
+ 
++    #[tokio::test]
++    async fn guide_level_switch_remaps_page_in_one_revision_and_survives_restart() {
++        use crate::{lifecycle::Lifecycle, onboarding, settings::JsonSettingsRepository};
++        use tokio_util::sync::CancellationToken;
++
++        let directory = std::env::temp_dir().join(format!(
++            "neuromita-guide-level-switch-{}",
++            uuid::Uuid::new_v4()
++        ));
++        std::fs::create_dir_all(&directory).unwrap();
++        let mut initial = AppSettings::initial_profile();
++        initial.onboarding.eula_accepted = true;
++        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
++            source: SettingsSource::initial(initial),
++            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
++        })
++        .await
++        .unwrap();
++        let owner = lifecycle.owner();
++        let stop = CancellationToken::new();
++        let cancelled = stop.clone();
++        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
++        let presenter = SettingsPresenter::new(Arc::clone(&owner));
++        presenter
++            .onboarding
++            .guide_level
++            .set(GuideLevel::Full)
++            .unwrap();
++        presenter.onboarding.guide_page.set(12).unwrap();
++        owner.flush().await.unwrap();
++        let before = owner.snapshot_all().unwrap().revision;
++
++        presenter
++            .onboarding
++            .guide_level
++            .set(GuideLevel::Basic)
++            .unwrap();
++        let snapshot = owner.snapshot_all().unwrap();
++        assert_eq!(snapshot.revision, before + 1);
++        assert_eq!(snapshot.values.onboarding.guide_level, GuideLevel::Basic);
++        assert_eq!(snapshot.values.onboarding.guide_page, 2);
++        owner.flush().await.unwrap();
++        let resumed = onboarding::startup_state(&directory).unwrap();
++        assert!(resumed.requires_guide);
++        assert_eq!(resumed.guide_level, GuideLevel::Basic);
++        assert_eq!(resumed.guide_page, 2);
++
++        let before = snapshot.revision;
++        presenter
++            .onboarding
++            .guide_level
++            .set(GuideLevel::Basic)
++            .unwrap();
++        assert_eq!(owner.snapshot_all().unwrap().revision, before);
++        stop.cancel();
++        task.await.unwrap().unwrap();
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++
+     #[tokio::test]
+     async fn tts_asr_preferences_round_trip_through_settings_owner() {
+         let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+-- 
+2.47.3
+
+
