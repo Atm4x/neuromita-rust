@@ -1,0 +1,35 @@
+name: Bridge exact C3 production operation read model
+on:
+  push:
+    branches: [bridge/c3-operation-readmodel-20261108]
+    paths: [.github/workflows/bridge-c3-operation-readmodel-20261108.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c3-operation-readmodel-20261108
+          fetch-depth: 0
+      - name: Verify imported Git commit and non-force publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/c3-operation-readmodel.part0{0,1,2,3,4,5} | base64 -d > /tmp/c3-readmodel.bundle.xz
+          test "$(sha256sum /tmp/c3-readmodel.bundle.xz | cut -d' ' -f1)" = "84be887943a67758e182a0189ee8dfeae4b302b301d35da71e5e7de8aefac20f"
+          xz -d -c /tmp/c3-readmodel.bundle.xz > /tmp/c3-readmodel.bundle
+          test "$(sha256sum /tmp/c3-readmodel.bundle | cut -d' ' -f1)" = "1d7ee87e8321c03d8c4ccba3ab8e7528d202b026075f56a2e906bac40294c79a"
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-uv-asset-crash-recovery-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "c1f1421e9ca45f2b7a3240d7cccc724187af8749"
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "c1f1421e9ca45f2b7a3240d7cccc724187af8749"
+          git bundle verify /tmp/c3-readmodel.bundle
+          git fetch /tmp/c3-readmodel.bundle refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "7e12464181355c79179afd61f26d2d1839a6508e"
+          git checkout --detach "7e12464181355c79179afd61f26d2d1839a6508e"
+          test "$(git rev-parse HEAD^{tree})" = "a5730429b3a0111d15a6580eef27701f9e4766be"
+          test "$(git rev-list --parents -n1 HEAD)" = "7e12464181355c79179afd61f26d2d1839a6508e c1f1421e9ca45f2b7a3240d7cccc724187af8749"
+          git diff --check "c1f1421e9ca45f2b7a3240d7cccc724187af8749" HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108
