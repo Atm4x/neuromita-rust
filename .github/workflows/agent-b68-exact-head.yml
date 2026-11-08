@@ -1,0 +1,50 @@
+name: Agent B68 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b68-verify-20261108
+jobs:
+  exact-b68:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f51a33a90c9e50637652b9faa1b0eaba7e586517
+          fetch-depth: 2
+      - name: Verify exact B68 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "f51a33a90c9e50637652b9faa1b0eaba7e586517"
+          test "$(git rev-parse HEAD^{tree})" = "8c710171445076e4d37ea77c35114e3884511ed2"
+          test "$(git rev-parse HEAD^)" = "ce95f1fc77b154e5d79f6727f0c8d8e3d11a35b5"
+      - name: Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused backend reconciliation tests
+        run: |
+          cargo test --locked --offline --lib app::regenerate_admission_tests -- --test-threads=2
+          cargo test --locked --offline --lib regenerate -- --test-threads=2
+      - name: Concurrency regression x10
+        shell: bash
+        run: |
+          for i in $(seq 1 10); do
+            cargo test --locked --offline --lib handle_cancel_vs_independent_sqlite_acceptance_has_one_durable_winner -- --test-threads=2 >/dev/null
+          done
+      - name: Full filtered library
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All-targets and formatting
+        shell: bash
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
