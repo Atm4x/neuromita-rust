@@ -44,7 +44,10 @@ export component AiHubOperationDialog inherits Rectangle {
     callback open-settings-requested(string, int, string);
 
     pure function localized(id: string, ru: string, en: string) -> string {
-        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+        if I18n.locale == "en" { return en; }
+        let translated = I18n.i18n(id, ru);
+        // Missing catalog keys must never leak lookup diagnostics into the GUI.
+        return translated == ("[unknown localization ID: " + id + "]") ? ru : translated;
     }
     pure function title-for(kind: AiHubDecisionKind) -> string {
         if kind == AiHubDecisionKind.uninstall {

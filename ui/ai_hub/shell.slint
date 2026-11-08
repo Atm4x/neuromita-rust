@@ -48,7 +48,10 @@ export component AiHubShell inherits Rectangle {
     // The source translation catalog can lag a new UI key. Provide exact EN
     // fallbacks while retaining the existing runtime I18n path for RU/overrides.
     pure function localized(id: string, ru: string, en: string) -> string {
-        return I18n.locale == "en" ? en : I18n.i18n(id, ru);
+        if I18n.locale == "en" { return en; }
+        let translated = I18n.i18n(id, ru);
+        // Missing catalog keys must never leak lookup diagnostics into the GUI.
+        return translated == ("[unknown localization ID: " + id + "]") ? ru : translated;
     }
 
     // Category keys from Python constants.py, not a model/component catalog.
