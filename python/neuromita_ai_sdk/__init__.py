@@ -34,6 +34,15 @@ class AssetHook:
 
 
 @dataclass(frozen=True)
+class BuildStage:
+    id: str
+    kind: str
+    backend: str
+    platform: str
+    requirement: str | None = None
+
+
+@dataclass(frozen=True)
 class InstallPlan:
     packages: tuple[PackageRequirement, ...] = ()
     assets: tuple[AssetRequirement, ...] = ()
@@ -44,6 +53,7 @@ class InstallPlan:
     supported_python_minors: tuple[str, ...] = ()
     actions: tuple[InstallerAction, ...] = ()
     asset_hooks: tuple[AssetHook, ...] = ()
+    build_stages: tuple[BuildStage, ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -56,6 +66,7 @@ class InstallPlan:
             "supported_python_minors": list(self.supported_python_minors),
             "actions": [vars(action) for action in self.actions],
             "asset_hooks": [vars(hook) for hook in self.asset_hooks],
+            "build_stages": [vars(stage) for stage in self.build_stages],
         }
 
 

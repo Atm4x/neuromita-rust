@@ -441,6 +441,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "rvc".into(),
@@ -514,6 +515,7 @@ mod tests {
             timeout: Duration::from_secs(5),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],
@@ -529,6 +531,7 @@ mod tests {
         tokio::fs::write(&input, b"huge payload").await.unwrap();
         let sha = hash_file(&input, 1024).await.unwrap();
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "wav".into(),

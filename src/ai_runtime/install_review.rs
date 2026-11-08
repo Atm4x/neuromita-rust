@@ -295,6 +295,7 @@ pub struct InstallPlanReview {
     pub optional_assets: Vec<String>,
     pub actions: Vec<String>,
     pub asset_hooks: Vec<String>,
+    pub build_stages: Vec<String>,
 }
 
 impl InstallPlanReview {
@@ -309,6 +310,7 @@ impl InstallPlanReview {
             && self.optional_assets.is_empty()
             && self.actions.is_empty()
             && self.asset_hooks.is_empty()
+            && self.build_stages.is_empty()
     }
 
     pub fn new(
@@ -393,6 +395,11 @@ impl InstallPlanReview {
                 .iter()
                 .map(|hook| hook.id.clone())
                 .collect(),
+            build_stages: plan
+                .build_stages
+                .iter()
+                .map(|stage| format!("{} ({:?}, {:?})", stage.id, stage.kind, stage.platform))
+                .collect(),
         })
     }
 }
@@ -416,6 +423,7 @@ mod tests {
 
     fn plan() -> PluginInstallPlan {
         PluginInstallPlan {
+            build_stages: vec![],
             backend: Some("onnx-cpu".into()),
             assets: vec![ModelAssetRequirement {
                 role: "weights".into(),
@@ -537,6 +545,25 @@ class InstallContract:
         assert!(!root.join("AIData/backends").exists());
         assert!(!root.join("AIData/models").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_stages_are_reviewed_but_not_automatically_approved() {
+        let mut with_jit = plan();
+        with_jit.backend = Some("remote-api".into());
+        with_jit.assets.clear();
+        with_jit.build_stages = vec![super::super::install::BuildStage {
+            id: "needs_compilation".into(),
+            kind: super::super::install::BuildStageKind::RuntimeJit,
+            backend: "remote-api".into(),
+            platform: super::super::install::BuildPlatform::Linux,
+            requirement: None,
+        }];
+        let review = InstallPlanReview::new(identity(), &json!({}), &with_jit).unwrap();
+        assert_eq!(review.build_stages.len(), 1);
+        assert!(!review.eligible_overlay_install());
+        let mut gate = InstallApprovalGate::default();
+        assert!(!gate.offer(1, review));
     }
 
     #[test]

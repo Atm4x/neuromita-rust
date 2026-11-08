@@ -618,6 +618,7 @@ mod tests {
 
     fn plan(role: &str, path: &str, hooks: bool) -> PluginInstallPlan {
         PluginInstallPlan {
+            build_stages: vec![],
             packages: Vec::<LockedPackage>::new(),
             requirements: vec![],
             assets: vec![ModelAssetRequirement {

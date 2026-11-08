@@ -451,6 +451,7 @@ mod tests {
 
     fn plan(kinds: &[&str], extra: &[&str]) -> PluginInstallPlan {
         PluginInstallPlan {
+            build_stages: vec![],
             packages: vec![],
             requirements: vec![],
             assets: vec![],

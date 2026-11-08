@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib.metadata
 import os
+import sys
 from pathlib import Path
 
-from neuromita_ai_sdk import AssetRequirement, InstallPlan, InstallerAction, validate_settings
+from neuromita_ai_sdk import AssetRequirement, BuildStage, InstallPlan, InstallerAction, validate_settings
 
 SILERO_TTS_MODELS = {
     "ru": ("v5_ru", "silero/v5_ru.pt", "https://models.silero.ai/models/tts/ru/v5_ru.pt", "7ba04d42340fe0398042eed2e0d12d62e23096d626b1b9feff4dcb1309197ab4"),
@@ -121,7 +122,7 @@ def requirements(plugin_id: str, selected_settings: dict | None = None) -> tuple
         req += ["pyphen"] if cross else ["ruaccent"]
     elif engine == "fish":
         req += ["fish-speech-lib"]
-        if mode == "cuda":
+        if options["device"].startswith("cuda:") and sys.platform == "win32":
             req += ["triton-windows<3.4"]
     elif engine == "omni":
         req += ["omnivoice==0.2.1", "transformers==5.3.0"]
@@ -132,10 +133,18 @@ def requirements(plugin_id: str, selected_settings: dict | None = None) -> tuple
 
 def plan(plugin_id: str, selected_settings: dict | None = None) -> InstallPlan:
     actions = (InstallerAction("fish_project_root", "create_empty_marker", "fish_speech_lib/.project-root"),) if family(plugin_id) == "fish" else ()
+    supported = supported_backends(plugin_id, selected_settings)
+    stages = ()
+    if family(plugin_id) == "fish" and supported == ("torch-cuda",):
+        platform = "windows" if sys.platform == "win32" else "linux" if sys.platform.startswith("linux") else "macos"
+        stages = (BuildStage("fish_triton_jit", "runtime_jit", "torch-cuda", platform),)
+        if platform == "windows":
+            stages = (BuildStage("fish_triton_wheel", "python_wheel", "torch-cuda", "windows", "triton-windows<3.4"),) + stages
     return InstallPlan(assets=asset_requirements(plugin_id, selected_settings),
-                       supported_backends=supported_backends(plugin_id, selected_settings),
+                       supported_backends=supported,
                        required_backends=("torch-cpu",) if family(plugin_id) == "silero" and backend(plugin_id) == "onnx" else (),
                        requirements=requirements(plugin_id, selected_settings),
+                       build_stages=stages,
                        supported_python_minors=("3.11", "3.12"), actions=actions)
 
 

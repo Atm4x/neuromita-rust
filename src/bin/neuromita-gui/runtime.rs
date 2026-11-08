@@ -364,6 +364,10 @@ fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
             review.actions.len(),
             review.asset_hooks.len()
         ),
+        format!(
+            "Build-stage: {} (без автоматического исполнения)",
+            review.build_stages.len()
+        ),
         format!("Отпечаток плана: {}", &review.fingerprint[..16]),
         "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
     ];

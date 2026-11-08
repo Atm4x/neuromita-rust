@@ -1874,6 +1874,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             assets: vec![ModelAssetRequirement {
                 role: "model".into(),
@@ -2476,6 +2477,7 @@ class Plugin:
             timeout: Duration::from_secs(3),
         };
         let plan = PluginInstallPlan {
+            build_stages: vec![],
             asset_hooks: vec![],
             packages: vec![],
             requirements: vec![],

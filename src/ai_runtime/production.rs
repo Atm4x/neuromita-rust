@@ -350,6 +350,11 @@ impl AiProductionInstaller {
                 fetch_install_plan_for(&host, &selection.plugin_id, selection.settings.clone())
                     .await?;
             plan.validate(&self.bootstrap.python_version)?;
+            if !plan.build_stages.is_empty() {
+                return Err(AiProductionError::Invalid(
+                    "build stages have no verified execution pipeline".into(),
+                ));
+            }
             let mut backend_layers = Vec::new();
             let mut dependencies = Vec::new();
             if plan.backend.is_none() && plan.supported_backends.is_empty() {
