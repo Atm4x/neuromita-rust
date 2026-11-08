@@ -1,0 +1,33 @@
+name: agent-a-cycle44-source-export
+on:
+  push:
+    branches: [bridge/agent-a-cycle44-export]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact original PR302 delta from PR276
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin f55e96cea5db2976308612e598b0841b2622e9f8
+          git fetch origin 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186
+          git branch agent-a-cycle44-pr302 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186
+          test "$(git rev-parse agent-a-cycle44-pr302)" = "1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186"
+          git merge-base --is-ancestor f55e96cea5db2976308612e598b0841b2622e9f8 agent-a-cycle44-pr302
+          git bundle create cycle44-pr302-delta.bundle refs/heads/agent-a-cycle44-pr302 '^f55e96cea5db2976308612e598b0841b2622e9f8'
+          git bundle verify cycle44-pr302-delta.bundle
+          sha256sum cycle44-pr302-delta.bundle > cycle44-pr302-delta.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle44-pr302-source
+          path: |
+            cycle44-pr302-delta.bundle
+            cycle44-pr302-delta.bundle.sha256
+          retention-days: 2
