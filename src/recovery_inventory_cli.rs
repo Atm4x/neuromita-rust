@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn rejects_ambiguous_arguments() {
-        let args = |parts: &[&str]| parts.iter().map(OsString::from).collect();
+        let args = |parts: &[&str]| parts.iter().map(OsString::from).collect::<Vec<OsString>>();
         assert_eq!(parse(args(&["--help"])), Ok(Action::Help));
         assert!(parse(args(&["inspect", "--root", "relative"])).is_err());
         assert!(parse(args(&["inspect", "--root", "/tmp", "--manifest", "/tmp/x"])).is_err());
