@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS timeline_branches(
 );
 CREATE UNIQUE INDEX IF NOT EXISTS timeline_session_roots
     ON timeline_branches(session_id) WHERE parent_id IS NULL;
+CREATE INDEX IF NOT EXISTS timeline_session_child_branches
+    ON timeline_branches(session_id,branch_id) WHERE parent_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_events(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -915,6 +917,35 @@ impl TimelineRepository for SqliteTimelineRepository {
     }
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError> {
         branch_info(&self.connection()?, id)
+    }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT b.branch_id,e.fact_json FROM timeline_branches b JOIN timeline_events e ON e.branch_id=b.branch_id AND e.sequence=b.fork_sequence+1 WHERE b.session_id=? AND b.parent_id IS NOT NULL ORDER BY b.branch_id",
+                &[&session.0.to_string()],
+            )?;
+            let mut result = Vec::new();
+            for row in rows {
+                let branch = BranchId(parse_uuid(&row[0])?);
+                let marker: TimelineFact = decode(&row[1])?;
+                if marker.branch_id != branch || marker.draft.kind != EventKind::BranchCreated {
+                    return Err(TimelineError::Invalid("invalid fork marker"));
+                }
+                if let Some(receipt) = RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    && receipt.character == character
+                {
+                    result.push(branch);
+                }
+            }
+            Ok(result)
+        })
+    }
+    fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {
+        self.read_snapshot(revision).map(Some)
     }
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
         let connection = self.connection()?;

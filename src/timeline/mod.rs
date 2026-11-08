@@ -27,6 +27,8 @@ mod memory_operations;
 #[cfg(test)]
 mod regenerate_dispatch_tests;
 #[cfg(test)]
+mod regenerate_enumeration_tests;
+#[cfg(test)]
 mod regenerate_owner_tests;
 mod regenerate_receipt;
 #[doc(hidden)]
@@ -579,6 +581,71 @@ impl SessionTimeline {
             .filter(|fact| fact.branch_id == branch && fact.draft.kind == EventKind::BranchCreated)
             .ok_or(domain::TimelineError::NotFound)?;
         RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)
+    }
+
+    /// Discover all admitted Regenerates for this session and character.
+    /// Discovery is indexed by child-branch marker; each outcome is read-only
+    /// and a concurrent persistent writer invalidates the entire enumeration.
+    /// An unknown outcome is never permission to invoke a provider again.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enumerate_regenerate_admissions(
+        &self,
+        character: CharacterId,
+    ) -> Result<Vec<RegenerateRecoverySnapshot>, domain::TimelineError> {
+        let revision = self.store.enumeration_revision()?;
+        #[cfg(feature = "sqlite-system")]
+        let persisted_selection = self
+            .selection_repository
+            .as_ref()
+            .map(|repository| repository.selection())
+            .transpose()?;
+        let session = self.store.branch(self.branch)?.session_id;
+        let candidates = self
+            .store
+            .regenerate_admission_branches(session, character)?;
+        let mut result = Vec::with_capacity(candidates.len());
+        let mut requests = std::collections::HashSet::new();
+        for child in candidates {
+            let info = self.store.branch(child)?;
+            if info.session_id != session {
+                return Err(domain::TimelineError::Conflict);
+            }
+            let receipt =
+                self.regenerate_admission_receipt(child)?
+                    .ok_or(domain::TimelineError::Invalid(
+                        "missing regenerate admission marker",
+                    ))?;
+            if receipt.character != character || info.parent != Some(receipt.parent_branch) {
+                return Err(domain::TimelineError::Invalid(
+                    "regenerate admission recipient or parent mismatch",
+                ));
+            }
+            receipt.validate(
+                self.store.as_ref(),
+                receipt.parent_branch,
+                child,
+                receipt.original_input,
+                character,
+            )?;
+            if !requests.insert(receipt.request) {
+                return Err(domain::TimelineError::Conflict);
+            }
+            result.push(self.reconcile_regenerate(child, receipt.request)?);
+        }
+        if self.store.enumeration_revision()? != revision {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        #[cfg(feature = "sqlite-system")]
+        if self
+            .selection_repository
+            .as_ref()
+            .map(|repository| repository.selection())
+            .transpose()?
+            != persisted_selection
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(result)
     }
 
     /// Inspect one admitted historical fork after an uncertain shutdown.

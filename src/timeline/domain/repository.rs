@@ -18,6 +18,18 @@ pub trait TimelineRepository {
     ) -> Result<BranchInfo, TimelineError>;
     fn branch(&self, id: BranchId) -> Result<BranchInfo, TimelineError>;
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError>;
+    /// Discover only fork markers for one session and recipient. Does not
+    /// enumerate unrelated events or grant execution/replay permission.
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError>;
+    /// A monotonic fence for consistent cross-owner read-only enumeration.
+    /// Transient stores have no independent writer.
+    fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {
+        Ok(None)
+    }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError>;
     /// Reconcile an uncertain request after restart using committed source facts.
     /// None means no accepted reply in this branch prefix, not that the request
@@ -231,6 +243,30 @@ impl TimelineRepository for TimelineStore {
     }
     fn world(&self, id: BranchId) -> Result<Vec<TimelineFact>, TimelineError> {
         TimelineStore::world(self, id)
+    }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        let mut result = Vec::new();
+        for branch in self.persisted_branches() {
+            if branch.info.session_id != session || branch.info.parent.is_none() {
+                continue;
+            }
+            let marker = branch.events.first().ok_or(TimelineError::NotFound)?;
+            if marker.draft.kind != super::EventKind::BranchCreated {
+                return Err(TimelineError::Invalid("invalid fork marker"));
+            }
+            if let Some(receipt) =
+                crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                && receipt.character == character
+            {
+                result.push(branch.info.id);
+            }
+        }
+        result.sort_by_key(|branch| branch.0);
+        Ok(result)
     }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
         TimelineStore::event(self, branch, id)

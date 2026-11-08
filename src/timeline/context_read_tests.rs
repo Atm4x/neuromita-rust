@@ -26,6 +26,13 @@ impl TimelineRepository for Counted {
         self.reads.fetch_add(1, Ordering::Relaxed);
         TimelineStore::world(&self.inner, id)
     }
+    fn regenerate_admission_branches(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        self.inner.regenerate_admission_branches(session, character)
+    }
     fn event(&self, branch: BranchId, id: EventId) -> Result<TimelineFact, TimelineError> {
         TimelineStore::event(&self.inner, branch, id)
     }
