@@ -235,8 +235,6 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let weak = window.as_weak();
     let send = dispatch.clone();
-    let weak = window.as_weak();
-    let send = dispatch.clone();
     ui.on_api_profile_save(move || {
         if let Some(window) = weak.upgrade() {
             match current_preset(&window.global::<VoiceUi>()) {
@@ -304,6 +302,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             super::runtime::RemoteVoiceAction::Cancel,
         ))
     });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
     ui.on_refresh_models(move || {
         if weak.upgrade().is_some() {
             send(Command::RefreshSpeechInventory);
