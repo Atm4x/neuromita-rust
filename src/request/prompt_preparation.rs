@@ -347,6 +347,12 @@ mod tests {
         fs::write(set.join("config.json"), r#"{"variables":{"Love":0}}"#).unwrap();
         fs::write(set.join("main_template.txt"), "[<init.script>]").unwrap();
         fs::write(set.join("init.script"), "SET Love = 8\nRETURN str(Love)\n").unwrap();
+        fs::create_dir_all(set.join("PostScripts")).unwrap();
+        fs::write(
+            set.join("PostScripts/main_rules.postscript"),
+            "RULE love\n MATCH FIELD \"love_change\"\n ACTIONS\n  SET Love = Love + love_change\n END_ACTIONS\nEND_RULE\n",
+        )
+        .unwrap();
         let timeline = Arc::new(Mutex::new(SessionTimeline::new()));
         let stop = CancellationToken::new();
         let (registry, tasks) = CharacterRegistry::spawn(Arc::clone(&timeline), stop.clone(), 8);
@@ -380,7 +386,19 @@ mod tests {
             prepared.context.variables.get("Love"),
             Some(&serde_json::json!(8))
         );
-        assert_eq!(prepared.prompt.unwrap().stable.as_ref(), &[Arc::from("8")]);
+        assert_eq!(prepared.prompt.as_ref().unwrap().stable.as_ref(), &[Arc::from("8")]);
+        let mut response = crate::generation::StructuredResponse::spoken("Hello");
+        response.custom_fields = Some(serde_json::Map::from_iter([(
+            "love_change".into(),
+            serde_json::json!(1),
+        )]));
+        let applied = prepared
+            .post_dsl
+            .as_ref()
+            .unwrap()
+            .apply(response, &prepared.context.variables)
+            .unwrap();
+        assert_eq!(applied.variables["Love"], serde_json::json!(9.0));
         assert_eq!(timeline.lock().unwrap().anchor(), initial_anchor);
         assert!(
             !character
