@@ -113,7 +113,7 @@ impl RegistryInner {
         let records = self.records.lock().expect("registry mutex poisoned");
         let mut errors: Vec<_> = records
             .values()
-            .filter(|record| record.snapshot().state.is_terminal())
+            .filter(|record| record.snapshot().is_resolved())
             .filter_map(|record| record.trace())
             .filter(|trace| scope.allows(trace.metadata.character_id, trace.metadata.source))
             .filter_map(|trace| trace.error_history_entry())
@@ -274,7 +274,7 @@ impl RequestRegistry {
             .subscribe();
         let active = records
             .values()
-            .filter(|record| !record.snapshot().state.is_terminal())
+            .filter(|record| !record.snapshot().is_resolved())
             .map(|record| record.handle())
             .collect();
         RequestDiscovery { active, accepted }
@@ -341,7 +341,7 @@ impl RequestRegistry {
             .lock()
             .expect("registry mutex poisoned")
             .values()
-            .filter(|record| !record.snapshot().state.is_terminal())
+            .filter(|record| !record.snapshot().is_resolved())
             .count()
     }
 }

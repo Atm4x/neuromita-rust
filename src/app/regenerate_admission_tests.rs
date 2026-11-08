@@ -782,7 +782,12 @@ async fn already_accepted_reply_wins_over_handle_cancellation() {
             .unwrap()
     };
     assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
-    assert!(!handle.record.cancellation.is_cancelled());
+    assert!(handle.record.cancellation.is_cancelled());
+    assert!(handle.snapshot().is_resolved());
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    assert_eq!(fixture.api.registry.active_count(), 0);
     let owner = fixture.timeline.lock().unwrap();
     assert_eq!(
         owner
@@ -1552,19 +1557,19 @@ async fn external_accepted_reply_overrides_late_provider_error_without_false_fai
     record.finish(crate::request::RequestOutcome::InternalError(
         Arc::<str>::from("provider failed after foreign acceptance").into(),
     ));
-    assert!(!handle.snapshot().state.is_terminal());
+    assert!(handle.snapshot().is_resolved());
     assert_eq!(record.externally_accepted(), Some(accepted));
-    assert_eq!(fixture.api.registry.active_count(), 1);
+    assert_eq!(fixture.api.registry.active_count(), 0);
     assert_eq!(count(), original_count);
-    for _ in 0..2 {
-        let status = fixture.api.reconcile_pending_terminals();
-        assert_eq!(status.len(), 1);
-        assert!(matches!(status[0].1,
-            Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
-        ));
-        assert_eq!(count(), original_count);
-        assert_eq!(record.externally_accepted(), Some(accepted));
-    }
+    assert!(fixture.api.reconcile_pending_terminals().is_empty());
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    record.finish(crate::request::RequestOutcome::InternalError(
+        Arc::<str>::from("late failure").into(),
+    ));
+    assert_eq!(count(), original_count);
+    assert_eq!(fixture.api.registry.active_count(), 0);
     drop((fixture, connection, record));
     let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
         database: db.clone(),
@@ -1610,11 +1615,14 @@ async fn foreign_accepted_reply_rejects_shutdown_cancel_without_removing_effects
     assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
     assert_eq!(handle.record.externally_accepted(), Some(accepted));
     fixture.api.close();
-    assert!(!handle.snapshot().state.is_terminal());
-    assert!(!handle.record.cancellation.is_cancelled());
+    assert!(handle.snapshot().is_resolved());
+    assert!(handle.record.cancellation.is_cancelled());
     assert_eq!(handle.record.externally_accepted(), Some(accepted));
-    assert!(fixture.api.registry.get(handle.id()).is_some());
-    assert_eq!(fixture.api.registry.active_count(), 1);
+    assert!(fixture.api.registry.get(handle.id()).is_none());
+    assert_eq!(fixture.api.registry.active_count(), 0);
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
     let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
         database: db.clone(),
         session,
@@ -1671,11 +1679,13 @@ async fn storage_failure_then_other_owner_acceptance_is_recognized_on_retry() {
         Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
     ));
     assert_eq!(record.externally_accepted(), Some(accepted));
-    assert!(!handle.snapshot().state.is_terminal());
+    assert!(handle.snapshot().is_resolved());
     connection.execute_batch("DROP TRIGGER b68_abort;").unwrap();
-    assert!(matches!(fixture.api.reconcile_pending_terminals()[0].1,
-        Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
-    ));
+    assert!(fixture.api.reconcile_pending_terminals().is_empty());
+    assert_eq!(fixture.api.registry.active_count(), 0);
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
     assert_eq!(
         fixture
             .timeline
@@ -1803,4 +1813,121 @@ async fn orphaned_external_acceptance_survives_aba_reopen_and_archive_without_du
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
     let _ = std::fs::remove_dir_all(assets_root);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn b69_observer_wakes_with_truthful_foreign_acceptance_and_retired_diagnostics() {
+    let db = std::env::temp_dir().join(format!("b69-observer-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let request = handle.id();
+    let mut observer = handle.observe();
+    assert!(matches!(
+        observer.next().await.unwrap().unwrap().state,
+        crate::request::RequestState::Pending
+    ));
+    let pending = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.wait().await }
+    });
+    let accepted = b68_external_acceptance(&db, session, root, fixture.source, request);
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    let observed = tokio::time::timeout(Duration::from_secs(1), observer.next())
+        .await
+        .unwrap();
+    assert!(
+        matches!(observed, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    assert!(observer.next().await.unwrap().is_none());
+    assert!(
+        matches!(tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap().unwrap(), Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    let snapshot = handle.snapshot();
+    assert!(snapshot.is_resolved());
+    assert!(!snapshot.state.is_terminal());
+    assert!(!snapshot.can_cancel());
+    assert!(
+        matches!(snapshot.durable_resolution, Some(crate::request::DurableRequestResolution::AcceptedElsewhere(event)) if event == accepted)
+    );
+    assert_eq!(fixture.api.registry.active_count(), 0);
+    assert!(fixture.api.registry.get(request).is_none());
+    let trace = fixture.api.registry.trace(request).unwrap();
+    assert!(trace.complete);
+    assert!(
+        matches!(trace.outcome, Some(crate::request::DiagnosticOutcome::AcceptedElsewhere { event_id }) if event_id == accepted.0)
+    );
+    assert!(trace.error_summary().is_none());
+    let recovered = fixture
+        .api
+        .inspect_orphaned_regenerate(child, request)
+        .unwrap();
+    assert_eq!(
+        recovered.outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    drop((fixture, trace, recovered));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[tokio::test]
+async fn b69_foreign_acceptance_before_start_cannot_run_queued_generation() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    let accepted = {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let turn = owner
+            .capture_turn(
+                fixture.source.character,
+                Some(fixture.source.original_input),
+                owner.anchor(),
+            )
+            .unwrap();
+        owner
+            .append_reply(crate::timeline::GeneratedReply {
+                request: handle.id(),
+                intent: TurnIntent::Reply(fixture.source.original_input),
+                turn,
+                expected_revision: 0,
+                content: json!("foreign acceptance before queue processing"),
+                audience: crate::timeline::conversation::ConversationAudience::private_to(
+                    fixture.source.character,
+                ),
+                effects: Vec::new(),
+            })
+            .unwrap()
+    };
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert!(record.try_start().is_none());
+    assert!(handle.snapshot().is_resolved());
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    assert_eq!(fixture.api.registry.active_count(), 0);
+    assert!(matches!(
+        handle.cancel(),
+        crate::request::CancelResult::AlreadyFinished
+    ));
 }

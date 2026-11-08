@@ -337,9 +337,20 @@ pub struct RequestSnapshot {
     pub state: RequestState,
     pub dataset: DatasetCapture,
     pub cancel_reason: Option<CancelReason>,
+    /// Durable acceptance by another Timeline owner. This is not an AcceptedResponse.
+    pub durable_resolution: Option<DurableRequestResolution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableRequestResolution {
+    AcceptedElsewhere(EventId),
 }
 
 impl RequestSnapshot {
+    pub fn is_resolved(&self) -> bool {
+        self.state.is_terminal() || self.durable_resolution.is_some()
+    }
+
     pub fn provisional_text(&self) -> Option<&str> {
         match &self.state {
             RequestState::Processing(
@@ -352,15 +363,16 @@ impl RequestSnapshot {
     }
 
     pub fn can_cancel(&self) -> bool {
-        matches!(
-            self.state,
-            RequestState::Pending
-                | RequestState::Processing(
-                    ProcessingStage::GeneratingText
-                        | ProcessingStage::TextReady { .. }
-                        | ProcessingStage::GeneratingVoice { .. }
-                )
-        )
+        self.durable_resolution.is_none()
+            && matches!(
+                self.state,
+                RequestState::Pending
+                    | RequestState::Processing(
+                        ProcessingStage::GeneratingText
+                            | ProcessingStage::TextReady { .. }
+                            | ProcessingStage::GeneratingVoice { .. }
+                    )
+            )
     }
 }
 
@@ -408,4 +420,6 @@ pub enum SubmitError {
 pub enum ObserveError {
     #[error("request observation closed before completion")]
     ClosedBeforeCompletion,
+    #[error("request reply was durably accepted by another Timeline owner at event {0:?}")]
+    DurablyAcceptedElsewhere(EventId),
 }

@@ -36,7 +36,6 @@ struct Execution {
 enum PendingTerminal {
     Failure(RequestOutcome),
     Cancelled,
-    AcceptedElsewhere(EventId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +80,7 @@ impl RequestHandle {
     pub async fn wait(&self) -> Result<Arc<RequestSnapshot>, ObserveError> {
         let mut observer = self.observe();
         while let Some(snapshot) = observer.next().await? {
-            if snapshot.state.is_terminal() {
+            if snapshot.is_resolved() {
                 return Ok(snapshot);
             }
         }
@@ -108,7 +107,12 @@ impl RequestObserver {
         }
         self.initial = false;
         let snapshot = Arc::clone(&self.updates.borrow_and_update());
-        self.finished = snapshot.state.is_terminal();
+        self.finished = snapshot.is_resolved();
+        if let Some(DurableRequestResolution::AcceptedElsewhere(event)) =
+            snapshot.durable_resolution
+        {
+            return Err(ObserveError::DurablyAcceptedElsewhere(event));
+        }
         Ok(Some(snapshot))
     }
 }
@@ -138,6 +142,7 @@ impl RequestRecord {
             tool_activity: None,
             dataset: DatasetCapture::default(),
             cancel_reason: None,
+            durable_resolution: None,
         });
         let (updates, _) = watch::channel(Arc::clone(&snapshot));
         let diagnostics_limits = registry
@@ -191,6 +196,7 @@ impl RequestRecord {
             tool_activity: None,
             dataset: inner.dataset.clone(),
             cancel_reason: inner.cancel_reason,
+            durable_resolution: inner.snapshot.durable_resolution,
         });
         inner.snapshot = Arc::clone(&snapshot);
         let phase = inner.phase;
@@ -235,7 +241,7 @@ impl RequestRecord {
 
     pub(crate) fn try_start(&self) -> Option<Box<dyn GenerationCommand>> {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if !matches!(inner.snapshot.state, RequestState::Pending) {
+        if inner.snapshot.is_resolved() || !matches!(inner.snapshot.state, RequestState::Pending) {
             return None;
         }
         let message = inner.message.take()?;
@@ -257,7 +263,7 @@ impl RequestRecord {
         if let Some(ingress) = &self.cancel_ingress {
             {
                 let inner = self.inner.lock().expect("request mutex poisoned");
-                if inner.snapshot.state.is_terminal() {
+                if inner.snapshot.is_resolved() {
                     return CancelResult::AlreadyFinished;
                 }
                 if inner.phase == EffectPhase::Applied {
@@ -272,7 +278,7 @@ impl RequestRecord {
                         | crate::timeline::domain::TimelineError::ConcurrentWrite
                 ) {
                     let mut inner = self.inner.lock().expect("request mutex poisoned");
-                    if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                    if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
                         inner.pending_terminal = Some(PendingTerminal::Cancelled);
                     }
                 }
@@ -284,7 +290,7 @@ impl RequestRecord {
             }
         }
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() {
+        if inner.snapshot.is_resolved() {
             return CancelResult::AlreadyFinished;
         }
         if self.cancel_ingress.is_none()
@@ -313,7 +319,7 @@ impl RequestRecord {
     pub(crate) fn begin_accepting(&self) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.phase != EffectPhase::Working
-            || inner.snapshot.state.is_terminal()
+            || inner.snapshot.is_resolved()
             || inner.pending_terminal.is_some()
             || self.cancellation.is_cancelled()
         {
@@ -355,18 +361,45 @@ impl RequestRecord {
         else {
             return None;
         };
-        let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if !inner.snapshot.state.is_terminal() {
-            inner.pending_terminal = Some(PendingTerminal::AcceptedElsewhere(event));
-        }
+        self.seal_external_acceptance(event);
         Some(event)
+    }
+
+    fn seal_external_acceptance(&self, event: EventId) {
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if inner.snapshot.is_resolved() || inner.phase == EffectPhase::Applied {
+            return;
+        }
+        inner.pending_terminal = None;
+        inner.phase = EffectPhase::Applied;
+        inner.message.take();
+        let snapshot = Arc::new(RequestSnapshot {
+            metadata: inner.snapshot.metadata.clone(),
+            revision: inner.snapshot.revision + 1,
+            state: inner.snapshot.state.clone(),
+            streamed_json: None,
+            streamed_text: None,
+            tool_activity: None,
+            cancel_reason: inner.cancel_reason,
+            dataset: inner.dataset.clone(),
+            durable_resolution: Some(DurableRequestResolution::AcceptedElsewhere(event)),
+        });
+        inner.snapshot = Arc::clone(&snapshot);
+        if let Some(trace) = &mut inner.trace {
+            trace.accepted_elsewhere(event, snapshot.revision);
+            trace.finished();
+        }
+        self.updates.send_replace(snapshot);
+        drop(inner);
+        self.cancellation.cancel();
+        self.retire();
     }
 
     #[cfg(test)]
     pub(crate) fn externally_accepted(&self) -> Option<EventId> {
         let inner = self.inner.lock().expect("request mutex poisoned");
-        match inner.pending_terminal {
-            Some(PendingTerminal::AcceptedElsewhere(event)) => Some(event),
+        match inner.snapshot.durable_resolution {
+            Some(DurableRequestResolution::AcceptedElsewhere(event)) => Some(event),
             _ => None,
         }
     }
@@ -385,17 +418,11 @@ impl RequestRecord {
             return Ok(None);
         };
         let request = self.snapshot().metadata.id;
-        if let PendingTerminal::AcceptedElsewhere(event) = pending {
-            return Ok(Some(RegenerateTerminalReconciliation::AcceptedElsewhere(
-                event,
-            )));
-        }
         match ingress.abandon_regenerate(request, self.admission) {
             Ok(()) => {
                 match pending {
                     PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
                     PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
-                    PendingTerminal::AcceptedElsewhere(_) => unreachable!(),
                 }
                 Ok(Some(RegenerateTerminalReconciliation::Abandoned))
             }
@@ -411,6 +438,9 @@ impl RequestRecord {
     }
 
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
+        if self.snapshot().is_resolved() {
+            return;
+        }
         if self
             .inner
             .lock()
@@ -431,7 +461,7 @@ impl RequestRecord {
             let request = self.snapshot().metadata.id;
             let should_abandon = {
                 let inner = self.inner.lock().expect("request mutex poisoned");
-                !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied
+                !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied
             };
             if !should_abandon {
                 if self
@@ -448,7 +478,7 @@ impl RequestRecord {
                     return;
                 }
                 let mut inner = self.inner.lock().expect("request mutex poisoned");
-                if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
                     inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
                 }
                 tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
@@ -460,7 +490,7 @@ impl RequestRecord {
 
     fn finish_volatile(&self, outcome: RequestOutcome) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal() {
+        if inner.snapshot.is_resolved() {
             return;
         }
         inner.pending_terminal = None;
@@ -496,7 +526,7 @@ impl RequestRecord {
     pub(crate) fn finish_cancelled(&self) {
         {
             let inner = self.inner.lock().expect("request mutex poisoned");
-            if inner.snapshot.state.is_terminal()
+            if inner.snapshot.is_resolved()
                 || inner.phase == EffectPhase::Applied
                 || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
             {
@@ -513,7 +543,7 @@ impl RequestRecord {
                     return;
                 }
                 let mut inner = self.inner.lock().expect("request mutex poisoned");
-                if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                if !inner.snapshot.is_resolved() && inner.phase != EffectPhase::Applied {
                     inner.pending_terminal = Some(PendingTerminal::Cancelled);
                 }
                 tracing::warn!(%request, %error, "regenerate cancellation remains pending durable reconciliation");
@@ -525,7 +555,7 @@ impl RequestRecord {
 
     fn finish_cancelled_volatile(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if inner.snapshot.state.is_terminal()
+        if inner.snapshot.is_resolved()
             || inner.phase == EffectPhase::Applied
             || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
         {
@@ -566,6 +596,7 @@ impl RequestRecord {
             tool_activity: inner.snapshot.tool_activity.clone(),
             cancel_reason: inner.cancel_reason,
             dataset: inner.dataset.clone(),
+            durable_resolution: inner.snapshot.durable_resolution,
         });
         inner.snapshot = Arc::clone(&snapshot);
         self.updates.send_replace(snapshot);
@@ -744,7 +775,7 @@ impl RequestRecord {
 
     pub(crate) fn tool_finished(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+        if self.cancellation.is_cancelled() || inner.snapshot.is_resolved() {
             return;
         }
         let mut snapshot = (*inner.snapshot).clone();
@@ -762,7 +793,7 @@ impl RequestRecord {
 
     pub(crate) fn stream_reset(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
-        if self.cancellation.is_cancelled() || inner.snapshot.state.is_terminal() {
+        if self.cancellation.is_cancelled() || inner.snapshot.is_resolved() {
             return;
         }
         let mut snapshot = (*inner.snapshot).clone();
