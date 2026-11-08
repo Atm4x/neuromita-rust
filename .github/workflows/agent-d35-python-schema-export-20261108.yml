@@ -1,0 +1,41 @@
+name: Agent D35 pinned Python model-schema reference export
+on:
+  push:
+    branches: [codex/bridge-agent-d35-python-schema-ref-20261108]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Atm4x/NeuroMita
+          ref: 5f3d061f523d9abefa6a264bb2953048a935fa65
+          fetch-depth: 1
+          path: python-reference
+          persist-credentials: false
+      - name: Bundle exact Python schema definitions and bundled fingerprints
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED=5f3d061f523d9abefa6a264bb2953048a935fa65
+          test "$(git -C python-reference rev-parse HEAD)" = "$EXPECTED"
+          git init -q -b source-snapshot selected
+          for p in src/model_settings/builtins.py src/model_settings/bundled_json_compat.py; do
+            test -f "python-reference/$p"
+            mkdir -p "selected/$(dirname "$p")"
+            cp "python-reference/$p" "selected/$p"
+          done
+          printf 'Original pinned source: %s\nSource-only: no user files or secrets.\n' "$EXPECTED" > selected/MANIFEST.txt
+          git -C selected add -A
+          git -C selected -c user.name='Agent D' -c user.email='agent-d@local.invalid' commit -qm 'Snapshot Python model-schema reference'
+          mkdir transfer
+          git -C selected bundle create ../transfer/agent-d35-schema-reference.bundle refs/heads/source-snapshot
+          git -C selected bundle verify ../transfer/agent-d35-schema-reference.bundle
+          sha256sum transfer/agent-d35-schema-reference.bundle > transfer/agent-d35-schema-reference.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d35-python-schema-source
+          path: transfer/
+          retention-days: 1
