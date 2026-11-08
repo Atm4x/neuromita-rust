@@ -1,0 +1,119 @@
+name: Agent D38 exact onboarding import and native Windows acceptance
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d38-import-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reproduce exact D38 commit and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=5d54ca4aa8431e92bbc255f0146ff73016730d53
+          HEAD=7541a84c36af4f9c947e7da3c57e985ea7a13d16
+          TREE=f73f19320eb4a7bf8ab65c7eba33c104b01066ed
+          BRANCH=codex/onboarding-guide-durable-navigation-20261108
+          echo 'cc2fefd65a3e9674d6d5e54e10a05412e09d17dd40625d1ab22c14f79a1a229a  .git-bridge/agent-d38-original.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/onboarding-resumable-guide-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date "$GITHUB_WORKSPACE/.git-bridge/agent-d38-original.patch"
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-durable-navigation-20261108
+          fetch-depth: 0
+      - name: Pin D38 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7541a84c36af4f9c947e7da3c57e985ea7a13d16
+          test "$(git rev-parse HEAD^{tree})" = f73f19320eb4a7bf8ab65c7eba33c104b01066ed
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native onboarding, restart and Slint GUI compile
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib presentation::settings::tests -- --test-threads=2
+          cargo test --locked --offline --lib onboarding::tests -- --test-threads=2
+          cargo test --locked --offline --test onboarding_consent -- --test-threads=2
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
+  linux-screenshots:
+    needs: import
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-durable-navigation-20261108
+          fetch-depth: 0
+      - name: Pin D38 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7541a84c36af4f9c947e7da3c57e985ea7a13d16
+          test "$(git rev-parse HEAD^{tree})" = f73f19320eb4a7bf8ab65c7eba33c104b01066ed
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Build real Slint snapshot fixture
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev xvfb libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev lld
+          cargo build --locked --offline --features gui --example gui_snapshot -j 2
+      - name: Render real EULA and Full Guide Slint frames
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WGPU_BACKEND: 'gl'
+          SLINT_BACKEND: 'winit-femtovg'
+        run: |
+          set -euo pipefail
+          mkdir -p screenshots
+          for mode in onboarding-eula-ru onboarding-eula-en onboarding-guide-ru onboarding-guide-en; do
+            xvfb-run -a -s "-screen 0 1920x1200x24" ./target/debug/examples/gui_snapshot "screenshots/$mode.ppm" "$mode"
+          done
+          ls -lh screenshots/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: d38-sl​int-onboarding-frames
+          path: screenshots/
+          if-no-files-found: ignore
+          retention-days: 1
