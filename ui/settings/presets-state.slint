@@ -3,7 +3,7 @@ export struct CharacterDebugItem { label: string, value: string }
 
 export struct CharacterPresets { reply: string, react: string, initiate: string, split: bool }
 
-export struct PresetItem { key-error: string, output-token-wire-key: string, template-id: string, id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string, configured: bool, temperature-enabled: bool, tokens-enabled: bool }
+export struct PresetItem { key-error: string, output-token-wire-key: string, template-id: string, id: string, name: string, model: string, provider: string, endpoint: string, key-env: string, temperature: string, tokens: string, timeout: string, configured: bool, temperature-enabled: bool, tokens-enabled: bool, stream: bool, max-retries: string }
 export struct PresetTemplateItem { id: string, name: string, icon: string, format: string, endpoint: string, documentation: string, pricing: string, badge-kind: string, available: bool }
 export struct PresetParameterItem { id: string, wire-key: string, title: string, title-key: string, description: string, description-key: string, editable: bool, sent: bool }
 export global SettingsUi {
@@ -54,12 +54,15 @@ export global SettingsUi {
     in-out property <string> preset-baseline-temperature;
     in-out property <string> preset-baseline-tokens;
     in-out property <string> preset-baseline-timeout;
+    in-out property <bool> preset-baseline-stream;
+    in-out property <string> preset-baseline-max-retries;
     out property <bool> preset-dirty: preset-edit-id != "" && (
         preset-name != preset-baseline-name || preset-model != preset-baseline-model ||
         preset-endpoint != preset-baseline-endpoint || preset-key-env != preset-baseline-key-env ||
         preset-temperature-enabled != preset-baseline-temperature-enabled || preset-tokens-enabled != preset-baseline-tokens-enabled ||
         preset-template-id != preset-baseline-template || preset-temperature != preset-baseline-temperature ||
-        preset-tokens != preset-baseline-tokens || preset-timeout != preset-baseline-timeout
+        preset-tokens != preset-baseline-tokens || preset-timeout != preset-baseline-timeout ||
+        preset-stream != preset-baseline-stream || preset-max-retries != preset-baseline-max-retries
     );
     in-out property <string> preset-name;
     in-out property <string> preset-model;
@@ -77,6 +80,8 @@ export global SettingsUi {
     in-out property <string> preset-temperature;
     in-out property <string> preset-tokens;
     in-out property <string> preset-timeout;
+    in-out property <bool> preset-stream;
+    in-out property <string> preset-max-retries: "2";
     public pure function matches-preset(item: PresetItem, query: string) -> bool {
         return query == "" || item.name.to-lowercase().replace-all(query.to-lowercase(), "") != item.name.to-lowercase() || item.model.to-lowercase().replace-all(query.to-lowercase(), "") != item.model.to-lowercase();
     }
