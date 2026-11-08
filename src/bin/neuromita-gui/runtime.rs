@@ -550,7 +550,14 @@ async fn observe(
             },
             result = releases.changed() => { result.map_err(|_| "Release observation closed")?; },
             result = connections.changed() => { result.map_err(|_| "Connection observation closed")?; },
-            result = requests.changed() => { result.map_err(|_| "Request observation closed")?; },
+            result = requests.changed() => {
+                result.map_err(|_| "Request observation closed")?;
+                match presenter.snapshot(character).await {
+                    Ok(snapshot) => publish(Update::Snapshot(Box::new(snapshot))),
+                    Err(error) => publish(Update::Error(error.to_string())),
+                }
+                refresh_views = false;
+            },
             result = settings.changed() => { result.map_err(|_| "Settings observation closed")?; },
             result = presets.changed() => { result.map_err(|_| "Preset observation closed")?; },
             result = selection.changed() => { result.map_err(|_| "Timeline observation closed")?; },
