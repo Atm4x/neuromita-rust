@@ -293,16 +293,11 @@ impl ModelAssetStore {
             .collect())
     }
 
-    /// Sources must be explicitly supplied by the caller; plugin metadata cannot authorize downloads.
-    pub async fn publish(
+    fn planned_sources<'a>(
         &self,
-        plugin_id: &str,
-        revision: &str,
         plan: &PluginInstallPlan,
-        sources: &[AssetInput],
-    ) -> Result<PathBuf, ModelAssetError> {
-        let destination = self.revision_path(plugin_id, revision)?;
-        reject_symlinks(&destination).await?;
+        sources: &'a [AssetInput],
+    ) -> Result<Vec<(&'a AssetInput, VerifiedAsset)>, ModelAssetError> {
         if sources.len() > 512 || plan.assets.len() > 512 {
             return Err(ModelAssetError::Invalid("too many assets".into()));
         }
@@ -350,6 +345,79 @@ impl ModelAssetStore {
                 "source not present in install plan".into(),
             ));
         }
+        Ok(retained)
+    }
+
+    /// Validate an entire pinned source selection before any backend or overlay is
+    /// published. No network requests and no filesystem writes are made here.
+    /// Publication verifies hashes again so preflight is not a trust boundary.
+    pub async fn preflight_sources(
+        &self,
+        plugin_id: &str,
+        revision: &str,
+        plan: &PluginInstallPlan,
+        sources: &[AssetInput],
+    ) -> Result<(), ModelAssetError> {
+        let destination = self.revision_path(plugin_id, revision)?;
+        reject_symlinks(&destination).await?;
+        let retained = self.planned_sources(plan, sources)?;
+        let receipt = AssetReceipt {
+            plugin_id: plugin_id.into(),
+            revision: revision.into(),
+            assets: retained.iter().map(|(_, data)| data.clone()).collect(),
+        };
+        if self.checked_existing(&destination, &receipt).await? {
+            return Ok(());
+        }
+        for (source, _) in retained {
+            match &source.source {
+                AssetSource::LocalFile(path) => {
+                    reject_symlinks(path).await?;
+                    let metadata = tokio::fs::symlink_metadata(path).await?;
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        return Err(ModelAssetError::Invalid(
+                            "local asset source must be a regular file".into(),
+                        ));
+                    }
+                    if !hash_file(path, self.max_asset_bytes)
+                        .await?
+                        .eq_ignore_ascii_case(&source.sha256)
+                    {
+                        return Err(ModelAssetError::Checksum(source.relative_path.clone()));
+                    }
+                }
+                AssetSource::Https(url) => {
+                    let parsed = reqwest::Url::parse(url).map_err(|_| {
+                        ModelAssetError::Invalid("invalid HTTPS asset source URL".into())
+                    })?;
+                    if parsed.scheme() != "https"
+                        || parsed.host_str().is_none()
+                        || !parsed.username().is_empty()
+                        || parsed.password().is_some()
+                        || parsed.fragment().is_some()
+                        || url.len() > 2048
+                    {
+                        return Err(ModelAssetError::Invalid(
+                            "HTTPS source must not contain credentials or fragments".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sources must be explicitly supplied by the caller; plugin metadata cannot authorize downloads.
+    pub async fn publish(
+        &self,
+        plugin_id: &str,
+        revision: &str,
+        plan: &PluginInstallPlan,
+        sources: &[AssetInput],
+    ) -> Result<PathBuf, ModelAssetError> {
+        let destination = self.revision_path(plugin_id, revision)?;
+        reject_symlinks(&destination).await?;
+        let retained = self.planned_sources(plan, sources)?;
         let receipt = AssetReceipt {
             plugin_id: plugin_id.into(),
             revision: revision.into(),

@@ -112,6 +112,12 @@ pub enum AiProductionError {
     Activation(#[from] AiApplicationError),
 }
 
+struct PreflightedModel<'a> {
+    selected: &'a SelectedModel,
+    plan: PluginInstallPlan,
+    assets: ModelAssets,
+}
+
 struct AbortOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortOnDrop {
@@ -284,6 +290,132 @@ impl AiProductionInstaller {
         Ok(())
     }
 
+    async fn preflight_model<'a>(
+        &self,
+        selection: &'a SelectedModel,
+        plan: PluginInstallPlan,
+        store: &ModelAssetStore,
+    ) -> Result<PreflightedModel<'a>, AiProductionError> {
+        if !plan.build_stages.is_empty() {
+            return Err(AiProductionError::Invalid(
+                "build stages have no verified execution pipeline".into(),
+            ));
+        }
+        if plan.backend.is_none() && plan.supported_backends.is_empty() {
+            return Err(AiProductionError::Invalid(format!(
+                "plugin {} does not declare a required compute or remote backend",
+                selection.plugin_id
+            )));
+        }
+        selection.backend.validate()?;
+        for backend in &selection.extra_backends {
+            backend.validate()?;
+        }
+        let backend_id = backend_name(selection.backend.kind);
+        let selected_extra: HashSet<_> = selection
+            .extra_backends
+            .iter()
+            .map(|entry| backend_name(entry.kind))
+            .collect();
+        let required_extra: HashSet<_> =
+            plan.required_backends.iter().map(String::as_str).collect();
+        if selected_extra != required_extra {
+            return Err(AiProductionError::Invalid(format!(
+                "plugin {} requires supplemental backends: {}",
+                selection.plugin_id,
+                plan.required_backends.join(", ")
+            )));
+        }
+        if plan
+            .backend
+            .as_deref()
+            .is_some_and(|kind| kind != backend_id)
+            || !plan.supported_backends.is_empty()
+                && !plan
+                    .supported_backends
+                    .iter()
+                    .any(|kind| kind == backend_id)
+        {
+            return Err(AiProductionError::Invalid(format!(
+                "plugin {} does not support selected backend {backend_id}",
+                selection.plugin_id
+            )));
+        }
+        if plan
+            .actions
+            .iter()
+            .any(|action| !selection.approved_actions.contains(&action.id))
+        {
+            return Err(AiProductionError::Invalid(format!(
+                "plugin {} has unapproved installation actions",
+                selection.plugin_id
+            )));
+        }
+        if matches!(selection.assets, ModelAssets::None)
+            && plan.assets.iter().any(|asset| asset.required)
+        {
+            return Err(AiProductionError::Unready(format!(
+                "{} requires an explicitly selected model asset revision",
+                selection.plugin_id
+            )));
+        }
+        let assets =
+            match &selection.assets {
+                ModelAssets::Installed { revision } => {
+                    store
+                        .verified_revision(&selection.plugin_id, revision)
+                        .await?;
+                    selection.assets.clone()
+                }
+                ModelAssets::Catalog { revision, manifest } => {
+                    let sources = super::assets::catalog::ModelSourceCatalog::load(manifest)
+                        .await
+                        .map_err(|error| AiProductionError::Invalid(error.to_string()))?
+                        .resolve(&selection.plugin_id, revision, &plan)
+                        .map_err(|error| AiProductionError::Invalid(error.to_string()))?;
+                    store
+                        .preflight_sources(&selection.plugin_id, revision, &plan, &sources)
+                        .await?;
+                    ModelAssets::Sources {
+                        revision: revision.clone(),
+                        inputs: sources,
+                    }
+                }
+                ModelAssets::Generated {
+                    hook_id,
+                    source_plugin_id,
+                    approved_hook_id,
+                    ..
+                } => {
+                    if approved_hook_id.as_deref() != Some(hook_id.as_str()) {
+                        return Err(AiProductionError::Generated(
+                            ModelGenerationError::NotApproved,
+                        ));
+                    }
+                    if !plan.asset_hooks.iter().any(|hook| {
+                        &hook.id == hook_id && &hook.source_plugin_id == source_plugin_id
+                    }) {
+                        return Err(AiProductionError::Generated(ModelGenerationError::Invalid(
+                            "undeclared asset hook or mismatched source plugin".into(),
+                        )));
+                    }
+                    selection.assets.clone()
+                }
+                ModelAssets::Sources { revision, inputs } => {
+                    store
+                        .preflight_sources(&selection.plugin_id, revision, &plan, inputs)
+                        .await?;
+                    selection.assets.clone()
+                }
+                _ => selection.assets.clone(),
+            };
+        Ok(PreflightedModel {
+            selected: selection,
+            plan,
+            assets,
+        })
+    }
+
     /// Prepare selected Python models without starting any inference worker.
     /// A failure never activates a partially installed set of services.
     pub async fn prepare(
@@ -343,57 +475,26 @@ impl AiProductionInstaller {
             models_directory: Some(store.root.clone()),
             request_timeout: self.timeout,
         };
-        let mut layers = Vec::with_capacity(selections.len());
-        let mut activation = Vec::with_capacity(selections.len());
+        let mut preflighted = Vec::with_capacity(selections.len());
         for selection in selections {
             let plan =
                 fetch_install_plan_for(&host, &selection.plugin_id, selection.settings.clone())
                     .await?;
             plan.validate(&self.bootstrap.python_version)?;
-            if !plan.build_stages.is_empty() {
-                return Err(AiProductionError::Invalid(
-                    "build stages have no verified execution pipeline".into(),
-                ));
-            }
+            preflighted.push(self.preflight_model(selection, plan, &store).await?);
+        }
+        let mut layers = Vec::with_capacity(selections.len());
+        let mut activation = Vec::with_capacity(selections.len());
+        for preflighted_model in preflighted {
+            let PreflightedModel {
+                selected: selection,
+                plan,
+                assets,
+            } = preflighted_model;
             let mut backend_layers = Vec::new();
             let mut dependencies = Vec::new();
-            if plan.backend.is_none() && plan.supported_backends.is_empty() {
-                return Err(AiProductionError::Invalid(format!(
-                    "plugin {} does not declare a required compute or remote backend",
-                    selection.plugin_id
-                )));
-            }
             let backend = &selection.backend;
             let backend_id = backend_name(backend.kind);
-            let selected_extra: HashSet<_> = selection
-                .extra_backends
-                .iter()
-                .map(|entry| backend_name(entry.kind))
-                .collect();
-            let required_extra: HashSet<_> =
-                plan.required_backends.iter().map(String::as_str).collect();
-            if selected_extra != required_extra {
-                return Err(AiProductionError::Invalid(format!(
-                    "plugin {} requires supplemental backends: {}",
-                    selection.plugin_id,
-                    plan.required_backends.join(", ")
-                )));
-            }
-            if plan
-                .backend
-                .as_deref()
-                .is_some_and(|kind| kind != backend_id)
-                || !plan.supported_backends.is_empty()
-                    && !plan
-                        .supported_backends
-                        .iter()
-                        .any(|kind| kind == backend_id)
-            {
-                return Err(AiProductionError::Invalid(format!(
-                    "plugin {} does not support selected backend {backend_id}",
-                    selection.plugin_id
-                )));
-            }
             let task_backend_installer = backends.clone();
             let task_backend = backend.clone();
             let task =
@@ -442,7 +543,7 @@ impl AiProductionInstaller {
             let task_installer = installer.clone();
             let task_host = host.clone();
             let task_plugin = selection.plugin_id.clone();
-            let task_assets = selection.assets.clone();
+            let task_assets = assets;
             let task_python = self.bootstrap.python_version.clone();
             let task = tokio::spawn(async move {
                 AssetPreparation {
