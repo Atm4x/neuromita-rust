@@ -1,0 +1,33 @@
+name: Export exact C4 PR305 single source bundle
+on:
+  push:
+    branches: [bridge/c4-pr305-exact-20261108]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c4-operation-status-20261108
+          fetch-depth: 0
+          persist-credentials: false
+      - name: One self-contained branch bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=41faa98630bde388c0fb79112414482f53bc3702
+          test "$(git rev-parse HEAD)" = "$expected"
+          git update-ref refs/heads/c4-pinned "$expected"
+          mkdir -p /tmp/c4-pinned
+          git bundle create /tmp/c4-pinned/c4-pr305.bundle refs/heads/c4-pinned
+          git bundle verify /tmp/c4-pinned/c4-pr305.bundle
+          (cd /tmp/c4-pinned && sha256sum c4-pr305.bundle > c4-pr305.bundle.sha256)
+          printf 'head=%s\ntree=%s\n' "$expected" "$(git rev-parse 'HEAD^{tree}')" > /tmp/c4-pinned/source.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c4-pr305-self-contained
+          path: /tmp/c4-pinned/
+          compression-level: 0
+          retention-days: 1
