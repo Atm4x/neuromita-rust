@@ -1,0 +1,58 @@
+name: Agent B55 verified PyQt-like Chat composer and session provenance
+on:
+  push:
+    branches: [bridge/agent-b55-pyqt-composer-20261108]
+    paths: [bridge/agent-b55.patch.xz.b64]
+permissions:
+  contents: write
+jobs:
+  publish-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: SHA-check B55 source and publish exact linear tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=1cb2bf172cc3bfac4ef09dbf84d00a68956b69af
+          tree=f3405f84bcd53753008a650996d4a1ecbe1be886
+          branch=codex/timeline-b55-pyqt-composer-mic-20261108
+          base64 -d bridge/agent-b55.patch.xz.b64 >/tmp/b55.patch.xz
+          echo "6e63fa996718f090646276d54381ef0178e297080b12d06e4af02d586ef6acb8  /tmp/b55.patch.xz" | sha256sum -c -
+          xz -t /tmp/b55.patch.xz
+          xz -dc /tmp/b55.patch.xz >/tmp/b55.patch
+          git switch --detach "$base"
+          test "$(git rev-parse HEAD)" = "$base"
+          git apply --check /tmp/b55.patch
+          git apply --index /tmp/b55.patch
+          test "$(git write-tree)" = "$tree"
+          git -c user.name="Agent B" -c user.email="agent-b@neuro-mita.local" commit -m "feat(chat): PyQt-like stop composer, live microphone and session-scoped ASR"
+          git merge-base --is-ancestor "$base" HEAD
+          git ls-remote --exit-code origin "refs/heads/$branch" && { echo "B55 target exists; no overwrite"; exit 1; } || test "$?" = 2
+          git push origin "HEAD:refs/heads/$branch"
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$(git rev-parse HEAD)"
+          echo "PUBLISHED_HEAD=$(git rev-parse HEAD)"
+          echo "VERIFIED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Install Linux GUI prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Execute Slint Chat controls and character-reselection regression
+        run: cargo test --locked --offline --features gui --bin neuromita-gui chat_composer_cancel_and_microphone_actions_follow_selection_and_speech_state -- --test-threads=1
+      - name: Execute source-scoped ASR transcript regression
+        run: cargo test --locked --offline --features gui --bin neuromita-gui speech_sink_only_delivers_transcripts -- --test-threads=1
+      - name: Validate Rust formatting
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
