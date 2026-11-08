@@ -204,3 +204,23 @@ reviewed separately before claiming full backup/restore parity.
 The Python `UPDATE_CONTOUR` setting is likewise an explicitly skipped
 application-updater preference until the Rust updater owns an equivalent
 setting. Do not reinterpret it as a Python Core updater instruction.
+
+## D34 — native Windows subprocess interruption acceptance
+
+The test-only crash injection now runs on both Unix and Windows. Each child
+writes an exact checkpoint acknowledgement immediately before `abort()`, so a
+failed process launch or ordinary test panic cannot be mistaken for an
+interrupted journal transaction. The parent validates that acknowledgement,
+observes the stopped child, then checks recovery and idempotence after every
+two-document and three-document installation boundary, including a second
+abort during rollback. Unix additionally requires the actual `SIGABRT` signal.
+
+A Windows-only test holds an exclusive operating-system handle to the existing
+`settings.json` and verifies that offline three-document activation refuses to
+write any target or create a transaction journal. After that handle closes,
+activation can complete against the unchanged original settings bytes.
+
+These tests exercise real process termination and Windows sharing rules, but
+do not certify system power-loss durability, arbitrary foreign writers,
+Windows ACL inheritance, or user-facing GUI confirmation. The offline
+stopped-application requirement remains mandatory.

@@ -423,3 +423,30 @@ fn staged_preference_review_binds_all_source_bytes_even_without_unmapped_keys() 
         assert!(!active.join("presets.json").exists());
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_exclusive_settings_handle_rejects_apply_without_a_partial_transaction() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = Temp::new();
+    let (review, active, original) = fixture(&root, br#"{"LAST_API_PRESET_ID":18}"#);
+    let locked_settings = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(active.join("settings.json"))
+        .unwrap();
+
+    assert!(PresetActivation::apply_with_preferences(&review, &active).is_err());
+    assert!(!active.join(".preset-activation-journal").exists());
+    assert!(!active.join("presets.json").exists());
+    assert!(!active.join("preset-credentials.json").exists());
+    drop(locked_settings);
+
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), original);
+    PresetActivation::apply_with_preferences(&review, &active).unwrap();
+    assert_eq!(
+        PresetActivation::recover(&active).unwrap(),
+        PresetRecovery::NoJournal
+    );
+}

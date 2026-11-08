@@ -708,6 +708,9 @@ fn finish_journal(active: &Path, journal: &Path) -> Result<(), PresetActivationE
 #[cfg(test)]
 fn crash_test_checkpoint(point: &str) {
     if std::env::var("NEUROMITA_PRESET_TEST_ABORT_AT").as_deref() == Ok(point) {
+        if let Some(path) = std::env::var_os("NEUROMITA_PRESET_TEST_ABORT_PROOF") {
+            fs::write(path, point.as_bytes()).expect("record crash checkpoint before abort");
+        }
         std::process::abort();
     }
 }
@@ -1016,7 +1019,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn crash_fixture(
         root: &Root,
     ) -> (
@@ -1050,7 +1053,7 @@ mod tests {
         (review, active, old, next)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn three_file_crash_fixture(
         root: &Root,
     ) -> (
@@ -1094,7 +1097,7 @@ mod tests {
         (review, active, old, next)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn real_three_file_crashes_recover_every_boundary() {
         for marker in [
@@ -1106,19 +1109,7 @@ mod tests {
         ] {
             let root = Root::new();
             let (review, active, old, next) = three_file_crash_fixture(&root);
-            use std::os::unix::process::ExitStatusExt;
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("--exact")
-                .arg("settings::preset_activation::tests::abort_child_runner")
-                .env("NEUROMITA_PRESET_TEST_ABORT_AT", marker)
-                .env("NEUROMITA_TEST_THREE_FILES", "1")
-                .env("NEUROMITA_TEST_REVIEW", &review)
-                .env("NEUROMITA_TEST_ACTIVE", &active)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert_eq!(status.signal(), Some(6), "{marker}: {status}");
+            abort_process_at(marker, &review, &active, true);
             assert!(matches!(
                 PresetActivation::ensure_ready(&active),
                 Err(PresetActivationError::RecoveryRequired)
@@ -1199,7 +1190,7 @@ mod tests {
         assert!(journal.is_dir());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn abort_child_runner() {
         let Ok(marker) = std::env::var("NEUROMITA_PRESET_TEST_ABORT_AT") else {
@@ -1220,34 +1211,48 @@ mod tests {
         panic!("crash injection point {marker} was not reached");
     }
 
-    #[cfg(unix)]
-    fn abort_process_at(marker: &str, review: &Path, active: &Path) {
-        use std::os::unix::process::ExitStatusExt;
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+    #[cfg(any(unix, windows))]
+    fn abort_process_at(marker: &str, review: &Path, active: &Path, with_settings: bool) {
+        let proof = active.join(format!(".test-abort-{marker}.proof"));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .arg("--exact")
             .arg("settings::preset_activation::tests::abort_child_runner")
             .arg("--nocapture")
             .env("NEUROMITA_PRESET_TEST_ABORT_AT", marker)
+            .env("NEUROMITA_PRESET_TEST_ABORT_PROOF", &proof)
             .env("NEUROMITA_TEST_REVIEW", review)
             .env("NEUROMITA_TEST_ACTIVE", active)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap();
+            .stderr(std::process::Stdio::null());
+        if with_settings {
+            command.env("NEUROMITA_TEST_THREE_FILES", "1");
+        }
+        let status = command.status().unwrap();
         assert_eq!(
-            status.signal(),
-            Some(6),
-            "{marker}: child did not abort at checkpoint: {status}"
+            fs::read(&proof).unwrap_or_default(),
+            marker.as_bytes(),
+            "{marker}: child did not reach the requested checkpoint"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(6), "{marker}: {status}");
+        }
+        #[cfg(windows)]
+        {
+            assert!(!status.success(), "{marker}: child did not abort: {status}");
+            assert_ne!(status.code(), Some(101), "{marker}: child panicked");
+        }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn actual_subprocess_crashes_recover_both_files_at_every_commit_boundary() {
         for marker in ["prepared", "installed-0", "installed-1", "committed"] {
             let root = Root::new();
             let (review, active, old, next) = crash_fixture(&root);
-            abort_process_at(marker, &review, &active);
+            abort_process_at(marker, &review, &active, false);
             assert!(matches!(
                 PresetActivation::ensure_ready(&active),
                 Err(PresetActivationError::RecoveryRequired)
@@ -1275,13 +1280,13 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn recovery_is_idempotent_after_a_second_real_process_crash() {
         let root = Root::new();
         let (review, active, old, _) = crash_fixture(&root);
-        abort_process_at("installed-0", &review, &active);
-        abort_process_at("recovered-0", &review, &active);
+        abort_process_at("installed-0", &review, &active, false);
+        abort_process_at("recovered-0", &review, &active, false);
         assert!(matches!(
             PresetActivation::ensure_ready(&active),
             Err(PresetActivationError::RecoveryRequired)
