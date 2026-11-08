@@ -1,0 +1,33 @@
+name: Bridge exact C3 uv and asset crash recovery
+on:
+  push:
+    branches: [bridge/c3-uv-asset-crash-recovery-20261108]
+    paths: [.github/workflows/bridge-c3-uv-assets-20261108.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c3-uv-asset-crash-recovery-20261108
+          fetch-depth: 0
+      - name: Verify exact incremental Git bundle and non-force publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/c3-uv-asset-recovery.part0{1,2,3,4} | base64 -d >/tmp/c3-uv-assets.bundle
+          test "$(sha256sum /tmp/c3-uv-assets.bundle | cut -d' ' -f1)" = "970b183290403a9604d62c4e76d4c4cea5cb8ca3fe3d95afa930dba9d5b9f8c3"
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-source-pin-kill-recovery-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "5699c0e75eec393fb5b5d27c7d83b2980e00e23d"
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-uv-asset-crash-recovery-20261108:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "5699c0e75eec393fb5b5d27c7d83b2980e00e23d"
+          git bundle verify /tmp/c3-uv-assets.bundle
+          git fetch /tmp/c3-uv-assets.bundle refs/heads/work
+          test "$(git rev-parse FETCH_HEAD)" = "c1f1421e9ca45f2b7a3240d7cccc724187af8749"
+          git checkout --detach "c1f1421e9ca45f2b7a3240d7cccc724187af8749"
+          test "$(git rev-parse HEAD^{tree})" = "2d7e66e18096f4b44a0702dc9da1e48e2483327c"
+          test "$(git rev-list --parents -n1 HEAD)" = "c1f1421e9ca45f2b7a3240d7cccc724187af8749 5699c0e75eec393fb5b5d27c7d83b2980e00e23d"
+          git diff --check "5699c0e75eec393fb5b5d27c7d83b2980e00e23d" HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c3-uv-asset-crash-recovery-20261108
