@@ -660,7 +660,12 @@ mod tests {
         .unwrap();
         let catalog = PromptCatalog::new(&root);
         let rendered = catalog
-            .render(CharacterId::Crazy, None, BTreeMap::new(), "main_template.txt")
+            .render(
+                CharacterId::Crazy,
+                None,
+                BTreeMap::new(),
+                "main_template.txt",
+            )
             .unwrap();
         assert_eq!(rendered.context, vec!["5".to_owned()]);
 
@@ -672,7 +677,12 @@ mod tests {
         )
         .unwrap();
         let error = catalog
-            .render(CharacterId::Crazy, None, BTreeMap::new(), "main_template.txt")
+            .render(
+                CharacterId::Crazy,
+                None,
+                BTreeMap::new(),
+                "main_template.txt",
+            )
             .unwrap_err();
         assert!(error.to_string().contains("ELSE must not have arguments"));
         fs::remove_dir_all(root).unwrap();
@@ -712,8 +722,11 @@ mod tests {
         let root = root();
         let kind = root.join("Kind/Default");
         fs::create_dir_all(kind.join("Main")).unwrap();
-        fs::write(kind.join("config.json"), r#"{"variables":{"player_name":"KindName"}}"#)
-            .unwrap();
+        fs::write(
+            kind.join("config.json"),
+            r#"{"variables":{"player_name":"KindName"}}"#,
+        )
+        .unwrap();
         fs::write(kind.join("main_template.txt"), "[<Main/identity.txt>]\n").unwrap();
         let kind_identity = kind.join("Main/identity.txt");
         fs::write(&kind_identity, "Kind [{player_name}]").unwrap();
@@ -721,21 +734,29 @@ mod tests {
         let a = catalog.capture(CharacterId::Crazy, None).unwrap().unwrap();
         let b = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
         assert_eq!(
-            a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
             vec!["Привет Игрок.".to_owned()]
         );
         assert_eq!(
-            b.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
+            b.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
             vec!["Kind KindName".to_owned()]
         );
         assert_eq!(
-            a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
             vec!["Привет Игрок.".to_owned()]
         );
 
         fs::write(&kind_identity, "Changed [{player_name}]").unwrap();
         assert_eq!(
-            b.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
+            b.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
             vec!["Kind KindName".to_owned()]
         );
         let newly_admitted = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
@@ -747,7 +768,9 @@ mod tests {
             vec!["Changed KindName".to_owned()]
         );
         assert_eq!(
-            a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
+            a.render(BTreeMap::new(), "main_template.txt")
+                .unwrap()
+                .stable,
             vec!["Привет Игрок.".to_owned()]
         );
         fs::remove_dir_all(root).unwrap();
