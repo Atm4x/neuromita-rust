@@ -275,3 +275,26 @@ fn symlink_schema_file_is_rejected() {
         Err(PythonSchemaAuditError::UnsafeEntry)
     ));
 }
+
+#[test]
+fn duplicate_factory_ids_across_two_files_are_blocked_like_python_loader() {
+    let root = TestRoot::new();
+    let source = root.schema_path();
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("a.json"), factory_bytes()).unwrap();
+    fs::write(source.join("b.json"), factory_bytes()).unwrap();
+    let review = PythonSchemaDirectoryReview::inspect(&source).unwrap();
+    assert_eq!(review.files.len(), 2);
+    assert_eq!(review.unrepresented_names(), ["b.json"]);
+    assert!(matches!(
+        review.require_representable(),
+        Err(PythonSchemaAuditError::Unrepresented(1))
+    ));
+    let dest = root.publish_path();
+    assert!(
+        stage()
+            .stage_new_directory_with_schemas(&dest, &review)
+            .is_err()
+    );
+    assert!(!dest.exists());
+}

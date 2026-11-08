@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -181,14 +182,34 @@ impl PythonSchemaDirectoryReview {
                     return Err(PythonSchemaAuditError::SourceChanged);
                 }
                 let kind = classify_schema(&bytes);
-                files.push(PythonSchemaFileReview {
-                    name,
-                    sha256: sha256_hex(&bytes),
-                    kind,
-                });
+                let id = if kind == PythonSchemaFileKind::BundledCopy {
+                    let body = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+                    parse_unique_json(body)
+                        .ok()
+                        .and_then(|json| json.get("id").and_then(Value::as_str).map(str::to_owned))
+                } else {
+                    None
+                };
+                files.push((
+                    PythonSchemaFileReview {
+                        name,
+                        sha256: sha256_hex(&bytes),
+                        kind,
+                    },
+                    id,
+                ));
             }
         }
-        files.sort_by(|a, b| a.name.cmp(&b.name));
+        files.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let mut factory_ids = BTreeSet::new();
+        for (file, id) in &mut files {
+            if file.kind == PythonSchemaFileKind::BundledCopy
+                && id.as_ref().is_none_or(|id| !factory_ids.insert(id.clone()))
+            {
+                file.kind = PythonSchemaFileKind::Unrepresented;
+            }
+        }
+        let files: Vec<_> = files.into_iter().map(|(review, _)| review).collect();
         let encoded = serde_json::to_vec(&(metadata.is_some(), &files))
             .map_err(|_| PythonSchemaAuditError::UnsafeEntry)?;
         Ok(Self {
