@@ -300,7 +300,8 @@ async fn start(
     let root = std::env::var_os("NEUROMITA_PROMPTS_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| directory.join("Prompts"));
-    let config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
+    config.remote_voice_store = Some(directory.join("remote_voice.json"));
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
