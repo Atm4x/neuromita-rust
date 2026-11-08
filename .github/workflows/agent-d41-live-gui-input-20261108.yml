@@ -11,13 +11,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/onboarding-guide-reopen-resume-20261108
+          ref: codex/onboarding-wiki-startup-20261108
           fetch-depth: 0
-      - name: Verify exact D40 product tree
+      - name: Verify exact D41 fixed GUI tree
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = ed3841da85f9b0efdb2d008e25d7501ed4a6a033
-          test "$(git rev-parse HEAD^{tree})" = caf1743cdfd671038130fd9b6dde62af41a9a9f1
+          test "$(git rev-parse HEAD)" = 23934195ba8116d0e492103774bb5fce88dce0bf
+          test "$(git rev-parse HEAD^{tree})" = 8db419302da58a982c3f6982b9b63c87764d1132
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
