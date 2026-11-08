@@ -1,0 +1,31 @@
+name: Bridge C4 GUI exhaustive error fix
+on:
+  push:
+    branches: [bridge/c4-reviewed-wheel-admission-20261108]
+    paths: [.github/workflows/bridge-c4-gui-error-fix.yml]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c4-reviewed-wheel-admission-20261108
+          fetch-depth: 0
+      - name: Verify and fast-forward second exact C4 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' 'IyB2MiBnaXQgYnVuZGxlCi0yNjVjYWVhMGI4MzQ4OWMyNmExMmEyMzQxZDEwNDExMGRkYTg0MzQyIGZlYXQoYWkpOiBhZG1pdCByZXZpZXdlZCBidWlsdGluIHdoZWVsIHN0YWdlcyB3aXRoIHBpbm5lZCBpbW11dGFibGUgc291cmNlcwo3MjNiMzQzOTE0N2EwYmZiMTQ1M2ZjZTFkOTU3OWIwZGY5N2U3NmFhIHJlZnMvaGVhZHMvd29yawoKUEFDSwAAAAIAAAAGkxB4nJ2LQU7DMBBF9z7FLEEI5Bk7roMQArFixRkm9g+xlMaV69Ien3AF3uZJT3q9ATTNADLCiImhEmYX4mEQ4TixTeJU4EIWa07asHWSMCSF2ik6H8ckQVlUnOfM1jPbnDV658XopS+10dcJ2/snfdSMG72kP73VvWl5SvX4SnwYPQ8SXaQHu2P2eiy94x+rmcvt7vtS7p9p0S2voFnL+pjWekam6wKs1PBTcCW0VtvZ/AIJ4U8L/wHGVUmzXGAz04/SZ+ve/n7gklnETHicW8i2kG1DP5PwqunHwmR6ky+UXimu3SC1O7rMYNbkRUz1ANlEDev/AYejd6xKHWWmILQSKhD0RCtWbPGieJy7yHWRa8I2EUf/8NyQ6ohrlRpblzVsDH6Uv3JT+cZT7SwA4oMPC6YIeJwzMQAChbzU0qL83MySRN300kwGz4mLevd/Oadu9+VK8ZR7E18m9O+qNzQwMDMxQVKYaWiRp1dUzFBQ9fHT/wsCscvf9zNNNp6cMqXiwUqo4uLU3MS8kszk+KTUvOSM3MSibJCGPwULYneuPVbIayvx973FtOjjbNqVAO9IOWzwArOfTxP6GBjEk8mpTMiT/ZmTbkwzeJwBIADf/8UExQSwlAEUxhZEOPVrWOHLT7sejmh99ofPtlyTqAGd720PevMNd9q3gh0vO7zF4TlhOd+0N13eFml4nFtyn+nFQ6YNiZMnKzizTO7vleQOz0hNzQnIzFOoUZi8YaIoH5jvWpGaXFqSmZ83eV2vcf38iw0X9l3YdGErkN56Ye+FvRe7L+xUKAcp1C0uSUxPVQAKbr2w5cK+i40Xmy42X9gPUqZwYceF3Rd2gOUULjZe2AM0Y7PChe0XNkCMuthxYQdQdQ9QT7+1wsVmkF6g3F6wVbsubFAA69hyYSvThd2TYw0UJ/dMUJkULT55QrHA5NwE0cnnk0Q3b5r8SRoAaGt3glor666JmcoPDG3XZ51jgEW/flpl' | base64 -d > /tmp/followup.bundle
+          test "$(sha256sum /tmp/followup.bundle | cut -d' ' -f1)" = '453a645294777efffc3754d9d41080c3a32115b302aedd6d2e6ac3daa64046c0'
+          git fetch origin refs/heads/codex/ai-platform-hub-c4-reviewed-wheel-admission-20261108:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = '265caea0b83489c26a12a2341d104110dda84342'
+          git bundle verify /tmp/followup.bundle
+          git fetch /tmp/followup.bundle refs/heads/work
+          test "$(git rev-parse FETCH_HEAD)" = '723b3439147a0bfb1453fce1d9579b0df97e76aa'
+          git checkout --detach '723b3439147a0bfb1453fce1d9579b0df97e76aa'
+          test "$(git rev-parse HEAD^{tree})" = 'bfeeede69eb1ea26f368752218b10c23a2e36d20'
+          git merge-base --is-ancestor '265caea0b83489c26a12a2341d104110dda84342' HEAD
+          git diff --check '265caea0b83489c26a12a2341d104110dda84342' HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c4-reviewed-wheel-admission-20261108
