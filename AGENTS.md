@@ -21,3 +21,22 @@ The Telegram, Local TTS and API Voice settings tabs are Slint *views*. They must
 ## ASR GUI parity
 
 ASR settings must follow the Python microphone_settings layout using nested responsive Slint layouts. Never use absolute coordinates for the ASR page or hardcode actual recognition models, devices, audio backends, microphone readings or persisted settings in GUI components. Runtime data must originate from a typed presenter read model; until the ASR runtime adapter exists, backend commands must remain disabled. The explicit `--asr-preview` mode in `src/bin/neuromita-gui/asr.rs` supplies non-persistent demonstration values only.
+
+## Fork-only deliberate Rust CI gates (ViNonerX)
+
+The fork's `main` defines `.github/workflows/rust-manual-budgeted.yml`.
+**Do not** run CI on every push, and **do not** make a gate branch until the
+revision is deliberately ready for that level of checking.
+
+Create a unique `ci/format/<task>-<attempt>`, `ci/core/<task>-<attempt>`,
+or `ci/full/<task>-<attempt>` branch from the ready code commit. Its first
+remote commit **must include** a copy of the fork-main CI workflow; create
+the remote branch only after committing this CI-only addition. The `create`
+event runs the appropriate 8/25/40-minute gate. A later push does not
+re-trigger it. Never merge a CI gate branch or its workflow-only commit
+into an upstream PR. Ordinary development branch names never allocate
+CI runners. Failed gates require a fix on the development branch and a
+new unique gate branch, not a force-push.
+
+Read `docs/ci-branch-gates.md` before requesting a gate, including when
+working through a GitHub connector without a local Rust toolchain.
