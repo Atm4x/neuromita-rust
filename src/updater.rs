@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub mod activation;
+pub mod check;
 pub mod handoff;
 
 use crate::portable::PortableDataRoot;

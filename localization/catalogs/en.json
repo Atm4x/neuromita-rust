@@ -55,6 +55,46 @@
     "source": "Не удалось запустить или остановить игру: {error}",
     "translation": "Failed to start or stop the game: {error}"
   },
+  "launcher.native-update.checking": {
+    "source": "Проверяется релиз Rust-приложения…",
+    "translation": "Checking the Rust application release…"
+  },
+  "launcher.native-update.busy": {
+    "source": "Проверка релиза Rust-приложения уже выполняется.",
+    "translation": "A Rust application release check is already running."
+  },
+  "launcher.native-update.failed": {
+    "source": "Не удалось проверить релиз Rust-приложения: {error}",
+    "translation": "Could not check the Rust application release: {error}"
+  },
+  "launcher.native-update.not-published": {
+    "source": "Нативный релиз Rust-приложения пока не опубликован. Установить обновление нельзя.",
+    "translation": "No native Rust application release has been published yet. There is no update to install."
+  },
+  "launcher.native-update.unsupported-platform": {
+    "source": "Для этой платформы проверяемые нативные обновления пока не поддерживаются.",
+    "translation": "Verified native releases are not supported for this platform yet."
+  },
+  "launcher.native-update.missing-asset": {
+    "source": "Релиз Rust-приложения {tag} найден, но в нём нет файла с SHA-256 издателя для этой платформы. Установка недоступна.",
+    "translation": "Rust application release {tag} exists, but has no executable with a publisher SHA-256 for this platform. Installation is unavailable."
+  },
+  "launcher.native-update.unknown-version": {
+    "source": "Релиз Rust-приложения {tag} найден, но его версию нельзя безопасно сравнить с установленной.",
+    "translation": "Rust application release {tag} exists, but its version cannot be compared safely with the installed version."
+  },
+  "launcher.native-update.current": {
+    "source": "Установленная версия Rust-приложения актуальна относительно релиза {tag}.",
+    "translation": "The installed Rust application version matches release {tag}."
+  },
+  "launcher.native-update.older-release": {
+    "source": "Опубликованный релиз Rust-приложения {tag} старее установленной версии.",
+    "translation": "Published Rust application release {tag} is older than the installed version."
+  },
+  "launcher.native-update.available": {
+    "source": "Релиз {tag} содержит файл {asset} с SHA-256 издателя. Файл не скачан и не проверен; автоматическая установка пока не подключена.",
+    "translation": "Release {tag} lists executable {asset} with a publisher SHA-256. The file has not been downloaded or verified; automatic installation is not connected yet."
+  },
   "launcher.releases.title": {
     "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
     "translation": "LATEST RELEASES"

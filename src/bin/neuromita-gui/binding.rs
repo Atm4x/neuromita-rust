@@ -10,6 +10,7 @@ use super::{
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
+    update_check::NativeUpdateChecker,
     view::{
         AppWindow, ComponentCard, GuideContentsEntry, GuideFocusTarget, GuideSectionEntry, I18n,
         LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
@@ -438,11 +439,28 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         let notice = launcher_for_play.borrow_mut().toggle_play();
         handler(ShellCommand::LauncherFeedback(notice));
     });
+    let update_checker = Rc::new(NativeUpdateChecker::new(&window));
+    let finished_checker = update_checker.clone();
+    let update_handler = dispatch.clone();
+    window.on_native_update_finished(move || {
+        if let Some(result) = finished_checker.take_result() {
+            update_handler(ShellCommand::LauncherFeedback(
+                super::update_check::finished_notice(result),
+            ));
+        }
+    });
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
+            LauncherAction::CheckUpdates => {
+                let notice = match update_checker.check() {
+                    Ok(()) => super::update_check::started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
             LauncherAction::OpenUnityFolder => {
                 let notice = launcher_for_action.borrow().open_location();
                 handler(ShellCommand::LauncherFeedback(notice));
