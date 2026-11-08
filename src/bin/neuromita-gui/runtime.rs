@@ -8,8 +8,8 @@ use neuromita::{
     },
     app::{ApplicationConfig, ApplicationLifecycle, RuntimeLimits},
     audio::{
-        device::{AudioPlayback, FfplayOutput},
         controller::{SpeechCaptureConfig, SpeechSessionSnapshot},
+        device::{AudioPlayback, FfplayOutput},
         input_catalog::AudioInputDevice,
         monitor::MonitorSnapshot,
         session::{SpeechConversation, SpeechFuture, SpeechSessionError},
@@ -357,10 +357,13 @@ async fn observe(
     publish: &impl Fn(Update),
 ) -> Result<(), String> {
     let administration = app.presenter();
-    let remote_store = RemoteVoiceStore { path: directory.join("remote_voice.json") };
+    let remote_store = RemoteVoiceStore {
+        path: directory.join("remote_voice.json"),
+    };
     let mut remote_config = remote_store.load().map_err(|error| error.to_string())?;
     publish(Update::RemoteVoices(remote_config.clone()));
-    let (preview_send, mut preview_results) = mpsc::unbounded_channel::<(u64, Result<(), String>)>();
+    let (preview_send, mut preview_results) =
+        mpsc::unbounded_channel::<(u64, Result<(), String>)>();
     let mut preview_cancel: Option<CancellationToken> = None;
     let mut preview_generation = 0_u64;
     let mut releases = administration.releases.observe();
