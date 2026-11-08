@@ -195,10 +195,10 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 .get_character_voice_ids()
                 .iter()
                 .collect::<Vec<SharedString>>();
-            if let Ok(row) = usize::try_from(character + 1) {
-                if let Some(entry) = voices.get_mut(row) {
-                    *entry = value.clone();
-                }
+            if let Ok(row) = usize::try_from(character + 1)
+                && let Some(entry) = voices.get_mut(row)
+            {
+                *entry = value.clone();
             }
             ui.set_character_voice_ids(ModelRc::new(VecModel::from(voices)));
             ui.set_voice_id(value);
@@ -440,27 +440,7 @@ pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
     window.global::<VoiceUi>().set_runtime_status(text.into());
 }
 
-#[cfg(test)]
-mod tests {
-    use super::VoicePreviewMode;
 
-    #[test]
-    fn preview_modes_are_explicit() {
-        assert_eq!(
-            VoicePreviewMode::parse("api").unwrap(),
-            VoicePreviewMode::Api
-        );
-        assert_eq!(
-            VoicePreviewMode::parse("local").unwrap(),
-            VoicePreviewMode::Local
-        );
-        assert_eq!(
-            VoicePreviewMode::parse("telegram").unwrap(),
-            VoicePreviewMode::Telegram
-        );
-        assert!(VoicePreviewMode::parse("other").is_err());
-    }
-}
 
 pub fn render_remote(window: &AppWindow, config: &RemoteVoiceConfig) {
     let ui = window.global::<VoiceUi>();
@@ -522,4 +502,26 @@ pub fn remote_status(window: &AppWindow, message: &str, busy: bool) {
     let ui = window.global::<VoiceUi>();
     ui.set_remote_status(message.into());
     ui.set_remote_preview_busy(busy);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VoicePreviewMode;
+
+    #[test]
+    fn preview_modes_are_explicit() {
+        assert_eq!(
+            VoicePreviewMode::parse("api").unwrap(),
+            VoicePreviewMode::Api
+        );
+        assert_eq!(
+            VoicePreviewMode::parse("local").unwrap(),
+            VoicePreviewMode::Local
+        );
+        assert_eq!(
+            VoicePreviewMode::parse("telegram").unwrap(),
+            VoicePreviewMode::Telegram
+        );
+        assert!(VoicePreviewMode::parse("other").is_err());
+    }
 }
