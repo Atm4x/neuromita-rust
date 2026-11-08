@@ -1,6 +1,11 @@
 //! Explicit application-owned activation of selected Python AI workers.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+use uuid::Uuid;
 
 use tokio::{process::Command, time::timeout};
 
@@ -44,6 +49,12 @@ pub enum AiApplicationError {
     Invalid(String),
     #[error("Python interpreter check failed: {0}")]
     Interpreter(String),
+    #[error("AI restart ticket does not belong to this running application")]
+    ForeignRestartTicket,
+    #[error(
+        "{0:?} belongs to a hardware-guarded worker; restart needs a newly verified hardware selection"
+    )]
+    HardwareRestartUnprepared(AiService),
     #[error(transparent)]
     Runtime(#[from] AiRuntimeError),
 }
@@ -58,8 +69,29 @@ pub enum AiSpeechBindingError {
     Unprepared(AiService),
 }
 
+/// A single-use-by-generation request bound to one running application instance.
+/// A completed restart invalidates every ticket from the previous generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiRestartTicket {
+    owner: Uuid,
+    service: AiService,
+    generation: Uuid,
+}
+
+impl AiRestartTicket {
+    pub fn service(&self) -> AiService {
+        self.service
+    }
+    pub fn generation(&self) -> Uuid {
+        self.generation
+    }
+}
+
 pub struct RunningAiApplication {
     supervisor: Arc<AiSupervisor>,
+    identity: Uuid,
+    prepared: HashMap<AiService, AiWorkerSelection>,
+    hardware_service: Option<AiService>,
     active: Vec<AiService>,
     selected: HashSet<AiService>,
     worker_services: std::collections::HashMap<AiService, Vec<AiService>>,
@@ -237,6 +269,8 @@ impl AiApplicationConfig {
             })
             .collect();
         let mut active = Vec::new();
+        let mut prepared = HashMap::new();
+        let hardware_service = hardware.map(|(config, _)| config.selection.service);
         if let Some((config, _)) = hardware {
             let worker = self
                 .workers
@@ -283,6 +317,7 @@ impl AiApplicationConfig {
                 return Err(error.into());
             }
             active.push(worker.service);
+            prepared.insert(worker.service, worker);
         }
         let _selection_guard = if let Some((config, store)) = hardware {
             match store.verify_current(config) {
@@ -299,6 +334,9 @@ impl AiApplicationConfig {
         };
         Ok(RunningAiApplication {
             supervisor,
+            identity: Uuid::new_v4(),
+            prepared,
+            hardware_service,
             active,
             selected,
             worker_services,
@@ -308,6 +346,58 @@ impl AiApplicationConfig {
 }
 
 impl RunningAiApplication {
+    fn restart_plan(&self, service: AiService) -> Result<&AiWorkerSelection, AiApplicationError> {
+        let plan = self
+            .prepared
+            .values()
+            .find(|plan| plan.composition.services().contains(&service))
+            .ok_or_else(|| AiApplicationError::Invalid(format!("{service:?} is not selected")))?;
+        if self
+            .hardware_service
+            .is_some_and(|protected| plan.composition.services().contains(&protected))
+        {
+            return Err(AiApplicationError::HardwareRestartUnprepared(service));
+        }
+        Ok(plan)
+    }
+
+    /// Take a one-generation restart ticket without changing the selected plan.
+    pub fn prepare_restart(
+        &self,
+        service: AiService,
+    ) -> Result<AiRestartTicket, AiApplicationError> {
+        self.restart_plan(service)?;
+        let generation = self
+            .status_snapshot()
+            .service(service)
+            .generation
+            .ok_or(AiRuntimeError::NotRunning)?;
+        Ok(AiRestartTicket {
+            owner: self.identity,
+            service,
+            generation,
+        })
+    }
+
+    /// Atomically replace the selected worker with the exact immutable activation
+    /// plan from application startup; stale or superseded plans fail closed.
+    /// In Shared topology this necessarily replaces the entire composed worker.
+    pub async fn restart(&self, ticket: AiRestartTicket) -> Result<Uuid, AiApplicationError> {
+        if ticket.owner != self.identity {
+            return Err(AiApplicationError::ForeignRestartTicket);
+        }
+        let plan = self.restart_plan(ticket.service)?;
+        Ok(self
+            .supervisor
+            .restart_prepared(
+                plan.service,
+                &plan.composition,
+                &plan.models,
+                ticket.generation,
+            )
+            .await?)
+    }
+
     pub fn observe_status(
         &self,
     ) -> tokio::sync::watch::Receiver<super::runtime_status::RuntimeSnapshot> {

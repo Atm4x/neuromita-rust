@@ -164,6 +164,7 @@ struct WorkerProcess {
     failed: bool,
     selections: HashMap<AiService, (String, Option<String>)>,
     runtime_profiles: HashMap<AiService, RuntimeProfile>,
+    prepared_models: Option<Vec<ModelActivation>>,
 }
 
 struct InFlightRequest<'a> {
@@ -262,6 +263,7 @@ impl WorkerProcess {
             failed: false,
             selections: HashMap::new(),
             runtime_profiles: HashMap::new(),
+            prepared_models: None,
         };
         let line = worker.read_frame().await?;
         let hello: Hello =
@@ -452,7 +454,7 @@ impl WorkerProcess {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelActivation {
     pub service: AiService,
@@ -468,6 +470,7 @@ struct Activation<'a> {
     models: &'a [ModelActivation],
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+    expected_generation: Option<Uuid>,
 }
 
 impl AiService {
@@ -734,6 +737,35 @@ impl AiSupervisor {
             .await
     }
 
+    /// Reinitialize the exact pinned worker plan only while its previous generation
+    /// and resolved selection still own this supervisor slot. The activation lock
+    /// makes validation and candidate publication one atomic replacement.
+    pub(crate) async fn restart_prepared(
+        &self,
+        service: AiService,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+        expected_generation: Uuid,
+    ) -> Result<Uuid, AiRuntimeError> {
+        if !composition.services().contains(&service)
+            || (self.topology == ProcessTopology::Split && composition.services() != [service])
+        {
+            return Err(AiRuntimeError::Protocol(
+                "invalid service composition".into(),
+            ));
+        }
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: None,
+            verify: None,
+            expected_generation: Some(expected_generation),
+        })
+        .await
+    }
+
     /// Prepare a candidate worker for an explicit device profile. The candidate
     /// must prove device execution and loaded-model readiness, and `verify` runs
     /// immediately before publication so a superseded selection cannot replace
@@ -760,6 +792,7 @@ impl AiSupervisor {
             models,
             profile: Some(profile),
             verify: Some(verify),
+            expected_generation: None,
         })
         .await
     }
@@ -827,6 +860,7 @@ impl AiSupervisor {
             models,
             profile: None,
             verify: None,
+            expected_generation: None,
         })
         .await
     }
@@ -839,6 +873,7 @@ impl AiSupervisor {
             models,
             profile,
             verify,
+            expected_generation,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -856,6 +891,24 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        if let Some(expected_generation) = expected_generation {
+            let existing = self
+                .workers
+                .lock()
+                .await
+                .get(&key)
+                .cloned()
+                .ok_or(AiRuntimeError::StaleGeneration)?;
+            let existing = existing.lock().await;
+            if existing.generation != expected_generation {
+                return Err(AiRuntimeError::StaleGeneration);
+            }
+            if existing.prepared_models.as_deref() != Some(models)
+                || !existing.runtime_profiles.is_empty()
+            {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+        }
         let mut runtime_profiles = HashMap::new();
         if let Some(profile) = profile {
             let previous = self.workers.lock().await.get(&key).cloned();
@@ -970,6 +1023,7 @@ impl AiSupervisor {
                 );
             }
             candidate.runtime_profiles = runtime_profiles;
+            candidate.prepared_models = Some(models.to_vec());
             Ok(())
         }
         .await;
@@ -1032,6 +1086,20 @@ impl AiSupervisor {
     }
 
     pub async fn call(
+        &self,
+        service: AiService,
+        operation: &str,
+        args: Value,
+    ) -> Result<Value, AiRuntimeError> {
+        if operation == "initialize" {
+            return Err(AiRuntimeError::Protocol(
+                "model initialization must use the typed supervisor operation".into(),
+            ));
+        }
+        self.call_worker(service, operation, args).await
+    }
+
+    async fn call_worker(
         &self,
         service: AiService,
         operation: &str,
@@ -1113,8 +1181,18 @@ impl AiSupervisor {
         plugin_id: &str,
         settings: Value,
     ) -> Result<Value, AiRuntimeError> {
+        let slot = self.activation_lock(self.topology.key(service)).await;
+        let _guard = slot.lock().await;
+        let current = self
+            .workers
+            .lock()
+            .await
+            .get(&self.topology.key(service))
+            .cloned()
+            .ok_or(AiRuntimeError::NotRunning)?;
+        current.lock().await.prepared_models = None;
         let result = self
-            .call(
+            .call_worker(
                 service,
                 "initialize",
                 json!({"plugin_id": plugin_id, "settings": settings}),
