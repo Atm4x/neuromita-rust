@@ -40,3 +40,11 @@ new unique gate branch, not a force-push.
 
 Read `docs/ci-branch-gates.md` before requesting a gate, including when
 working through a GitHub connector without a local Rust toolchain.
+
+On completion, inspect the scoped `ci/gate/<scope>` commit status on the
+original source SHA using GitHub `get_commit_combined_status`. Its
+`target_url` contains the numeric Actions run ID. Use GitHub
+`fetch_workflow_run_jobs` and `fetch_workflow_job_logs` to inspect any
+failure. The last step publishes this status even when compilation/tests
+fail; a YAML error before a runner starts is an exception. See
+`docs/ci-branch-gates.md`.
