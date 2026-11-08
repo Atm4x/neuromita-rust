@@ -1,0 +1,154 @@
+import { I18n } from "../i18n.slint";
+import { ActionSurface } from "../components/controls.slint";
+import { SettingsTheme } from "../settings/theme.slint";
+import { SettingsLabel } from "../settings/form-controls.slint";
+import { SettingsScrollView } from "../settings/scroll-view.slint";
+import { AiHubOperationStage, AiHubOperationSnapshot, AiHubOperationRow } from "operations.slint";
+
+// Read-only queue projection with explicit cancellation/log intents.
+// Caller owns popup visibility. Do not destroy completed tasks/errors just
+// because the queue became empty: retain them in the provided snapshot.
+export component AiHubQueuePopup inherits Rectangle {
+    in property <bool> open: false;
+    in property <bool> connected: false;
+    in property <bool> can-show-logs: false;
+    in property <[AiHubOperationSnapshot]> operations;
+
+    callback close-requested();
+    callback cancel-queued-requested(string, string, int, string);
+    callback cancel-running-requested(string, string, int, string);
+    callback view-logs-requested(string, string, int, string);
+
+    // AI Hub keys are not registered in the global locale catalog yet.
+    // Use the supplied reviewed copy instead of exposing missing-key diagnostics.
+    pure function localized(id: string, ru: string, en: string) -> string {
+        return I18n.locale == "en" ? en : ru;
+    }
+
+    visible: root.open;
+    background: #070612ce;
+    clip: true;
+    accessible-role: region;
+    changed open => {
+        if root.open { popup-focus.focus(); }
+    }
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { if root.open { root.close-requested(); } }
+    }
+    popup-focus := FocusScope {
+        enabled: root.open;
+        width: parent.width;
+        height: parent.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close-requested();
+                return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 12px;
+            alignment: center;
+            HorizontalLayout {
+                alignment: center;
+                Rectangle {
+                    width: min(740px, max(280px, parent.width - 24px));
+                    height: min(560px, max(230px, root.height - 24px));
+                    background: SettingsTheme.popup;
+                    border-color: SettingsTheme.selected-border;
+                    border-width: 1px;
+                    border-radius: 13px;
+                    clip: true;
+                    VerticalLayout {
+                        padding: 16px; spacing: 9px;
+                        HorizontalLayout {
+                            height: 34px; spacing: 10px;
+                            SettingsLabel {
+                                text: root.localized("ai-hub.queue.title", "Очередь AI Hub", "AI Hub queue");
+                                font-weight: 800; font-size: 18px;
+                                horizontal-stretch: 1;
+                            }
+                            ActionSurface {
+                                width: 106px; height: 33px;
+                                label: root.localized("common.close", "Закрыть", "Close");
+                                selected: true;
+                                SettingsLabel { text: parent.label; horizontal-alignment: center; }
+                                activated => { root.close-requested(); }
+                            }
+                        }
+                        SettingsLabel {
+                            text: root.localized("ai-hub.queue.note",
+                                "Отмена работающей задачи — запрос, а не подтверждение остановки. Завершение не означает готовность модели.",
+                                "Cancelling a running task only requests a stop. Completion does not imply model readiness.");
+                            color: SettingsTheme.muted;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                            height: 36px;
+                        }
+                        Rectangle { height: 1px; background: SettingsTheme.border; }
+                        if !root.connected: SettingsLabel {
+                            text: root.localized("ai-hub.queue.offline", "Очередь Core не подключена.", "Core queue is not connected.");
+                            color: SettingsTheme.muted; height: 24px;
+                        }
+                        queue-scroll := SettingsScrollView {
+                            vertical-stretch: 1;
+                            content-height: queue-content.preferred-height;
+                            queue-content := VerticalLayout {
+                                width: queue-scroll.visible-width;
+                                padding: 3px; spacing: 9px; alignment: start;
+                                SettingsLabel {
+                                    text: root.localized("ai-hub.queue.running", "Выполняются", "Running");
+                                    font-weight: 700; font-size: 12px; height: 23px;
+                                }
+                                for op in root.operations: AiHubOperationRow {
+                                    task: op; connected: root.connected;
+                                    logs-connected: root.can-show-logs;
+                                    showing: op.stage == AiHubOperationStage.running
+                                        || op.stage == AiHubOperationStage.cancelling;
+                                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                                }
+                                SettingsLabel {
+                                    text: root.localized("ai-hub.queue.pending", "Ожидают допуска / в очереди", "Pending admission / queued");
+                                    font-weight: 700; font-size: 12px; height: 23px;
+                                }
+                                for op in root.operations: AiHubOperationRow {
+                                    task: op; connected: root.connected;
+                                    logs-connected: root.can-show-logs;
+                                    showing: op.stage == AiHubOperationStage.requested
+                                        || op.stage == AiHubOperationStage.preparing
+                                        || op.stage == AiHubOperationStage.admitted
+                                        || op.stage == AiHubOperationStage.queued;
+                                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                                }
+                                SettingsLabel {
+                                    text: root.localized("ai-hub.queue.history", "Завершённые / ошибки", "Completed / errors");
+                                    font-weight: 700; font-size: 12px; height: 23px;
+                                }
+                                for op in root.operations: AiHubOperationRow {
+                                    task: op; connected: root.connected;
+                                    logs-connected: root.can-show-logs;
+                                    showing: op.stage == AiHubOperationStage.succeeded
+                                        || op.stage == AiHubOperationStage.failed
+                                        || op.stage == AiHubOperationStage.cancelled;
+                                    cancel-queued(id, component, rev, tok) => { root.cancel-queued-requested(id, component, rev, tok); }
+                                    cancel-running(id, component, rev, tok) => { root.cancel-running-requested(id, component, rev, tok); }
+                                    view-logs(id, component, rev, tok) => { root.view-logs-requested(id, component, rev, tok); }
+                                }
+                                if root.operations.length == 0: SettingsLabel {
+                                    text: root.localized("ai-hub.queue.empty", "Задач нет. История ошибок пока пуста.", "No tasks. No retained errors.");
+                                    color: SettingsTheme.muted; height: 24px;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

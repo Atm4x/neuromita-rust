@@ -1,0 +1,80 @@
+// AI Hub UI boundary v1. Pure Slint read models: Core/presenter owns the values.
+// No production fixtures, runtime caches, services or worker state live here.
+export enum AiHubTruth { unknown, no, yes }
+export enum AiHubLoadPhase { unavailable, idle, loading, checking, loaded, failed }
+export enum AiHubSavePhase { idle, saving, saved, failed }
+export enum AiHubOperationPhase { queued, running, cancelling, succeeded, failed }
+export enum AiHubSettingKind { text, boolean, integer, decimal, choice }
+
+export struct AiHubCatalogState {
+    available: bool,
+    phase: AiHubLoadPhase,
+    error: string,
+    revision: int,
+    token: string,
+}
+
+export struct AiHubComponent {
+    component-id: string,
+    category: string,
+    title: string,
+    description: string,
+    tags: [string],
+    backend: string,
+    compatibility: string,
+    supported: bool,
+    unsupported-reason: string,
+    discovered: AiHubTruth,
+    installed: AiHubTruth,
+    environment-ready: AiHubTruth,
+    worker-ready: AiHubTruth,
+    model-ready: AiHubTruth,
+    phase: AiHubLoadPhase,
+    error: string,
+    revision: int,
+    token: string,
+    can-install: bool,
+    can-uninstall: bool,
+    can-open-settings: bool,
+}
+
+export struct AiHubSettingOption { value: string, label: string }
+export struct AiHubSettingField {
+    key: string,
+    title: string,
+    description: string,
+    kind: AiHubSettingKind,
+    required: bool,
+    enabled: bool,
+    options: [AiHubSettingOption],
+}
+export struct AiHubSettingValue {
+    key: string,
+    value: string,
+    error: string,
+}
+export struct AiHubSettingsState {
+    component-id: string,
+    schema: [AiHubSettingField],
+    values: [AiHubSettingValue],
+    phase: AiHubLoadPhase,
+    dirty: bool,
+    save-phase: AiHubSavePhase,
+    error: string,
+    revision: int,
+    token: string,
+}
+
+export struct AiHubOperation {
+    operation-id: string,
+    component-id: string,
+    action: string,
+    phase: AiHubOperationPhase,
+    progress-known: bool,
+    progress: int,
+    detail: string,
+    error: string,
+    revision: int,
+    token: string,
+    can-cancel: bool,
+}

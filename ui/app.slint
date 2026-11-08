@@ -3,6 +3,10 @@ import { CharacterCatalog } from "characters/catalog.slint";
 import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
+import { AiHubShell } from "ai_hub/shell.slint";
+import { AiHubOperationSnapshot, AiHubOperationCapabilities } from "ai_hub/operations.slint";
+import { AiHubDecisionSnapshot } from "ai_hub/dialogs.slint";
+import { AiHubTruth, AiHubLoadPhase, AiHubSavePhase, AiHubOperationPhase, AiHubSettingKind, AiHubCatalogState, AiHubComponent, AiHubSettingOption, AiHubSettingField, AiHubSettingValue, AiHubSettingsState, AiHubOperation } from "ai_hub/contract.slint";
 import { Label, ActionSurface } from "components/controls.slint";
 import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
 import { GuideNavigator, GuideContentsEntry } from "components/guide-navigator.slint";
@@ -20,6 +24,7 @@ import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
 export { AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
+export { AiHubTruth, AiHubLoadPhase, AiHubSavePhase, AiHubOperationPhase, AiHubSettingKind, AiHubCatalogState, AiHubComponent, AiHubSettingOption, AiHubSettingField, AiHubSettingValue, AiHubSettingsState, AiHubOperation, AiHubOperationSnapshot, AiHubOperationCapabilities, AiHubDecisionSnapshot }
 
 export struct GuideSectionEntry { first: int, last: int, title: string }
 
@@ -32,6 +37,18 @@ export component AppWindow inherits Window {
     default-font-family: Theme.font-family;
     default-font-size: Theme.body-size;
     in property <PageId> page: home;
+    in-out property <bool> ai-hub-open: false;
+    in-out property <int> ai-hub-session-epoch: 0;
+    callback ai-hub-refresh-requested(int, string);
+    in property <bool> ai-hub-settings-connected: false;
+    in property <bool> ai-hub-operations-connected: false;
+    in property <[AiHubOperationSnapshot]> ai-hub-operation-snapshots;
+    in property <AiHubOperationCapabilities> ai-hub-operation-capabilities;
+    in property <AiHubDecisionSnapshot> ai-hub-decision;
+    in property <AiHubCatalogState> ai-hub-catalog;
+    in property <[AiHubComponent]> ai-hub-components;
+    in property <AiHubSettingsState> ai-hub-settings;
+    in property <[AiHubOperation]> ai-hub-operations;
     in property <string> version;
     in property <string> page-title;
     in-out property <bool> onboarding-required: false;
@@ -257,6 +274,34 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    // Modal GUI shell. The opaque backdrop intercepts interaction with other pages.
+    if root.ai-hub-open && !root.onboarding-required: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #080d19e8;
+        TouchArea { width: parent.width; height: parent.height; }
+        AiHubShell {
+            width: min(parent.width - 32px, 1100px);
+            height: min(parent.height - 32px, 760px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            catalog: root.ai-hub-catalog;
+            components: root.ai-hub-components;
+            settings: root.ai-hub-settings;
+            operations: root.ai-hub-operations;
+            session-token: "" + root.ai-hub-session-epoch;
+            settings-adapter-connected: root.ai-hub-settings-connected;
+            operation-adapter-connected: root.ai-hub-operations-connected;
+            operation-snapshots: root.ai-hub-operation-snapshots;
+            operation-capabilities: root.ai-hub-operation-capabilities;
+            operation-decision: root.ai-hub-decision;
+            refresh-requested(rev, token) => { root.ai-hub-refresh-requested(rev, token); }
+            // AiHubShell exclusively owns the local editor dirty guard.
+            // Its close-requested callback occurs only after Save/Discard or
+            // when there is no dirty draft; never recheck stale Core dirty.
+            close-requested => { root.ai-hub-open = false; }
         }
     }
 

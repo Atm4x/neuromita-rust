@@ -423,7 +423,101 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
     window.window().take_snapshot().unwrap();
     settings_render_and_bindings(&window);
     memory_render_and_contract(&window);
+    ai_hub_render_and_bindings(&window);
     window.hide().unwrap();
+}
+
+fn ai_hub_render_and_bindings(window: &AppWindow) {
+    use super::super::view::AiHubTruth;
+    use neuromita::ai_runtime::{
+        AiService,
+        runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
+        speech_catalog::{SpeechInventory, SpeechModelOption},
+    };
+
+    // This is a test-only Core fixture, never a production GUI catalog.
+    super::super::ai_engine::inventory(
+        window,
+        &SpeechInventory {
+            tts: vec![SpeechModelOption {
+                id: "sample_plugin".into(),
+                name: "Sample speech plugin".into(),
+                package_detected: true,
+                verified_assets: false,
+                installed_revisions: vec![],
+            }],
+            asr: vec![SpeechModelOption {
+                id: "asr_sample".into(),
+                name: "Sample speech recognition".into(),
+                package_detected: false,
+                verified_assets: false,
+                installed_revisions: vec![],
+            }],
+            errors: vec![],
+        },
+    );
+    assert_eq!(window.get_ai_hub_components().row_count(), 2);
+    assert_eq!(
+        window
+            .get_ai_hub_components()
+            .row_data(0)
+            .unwrap()
+            .installed,
+        AiHubTruth::Unknown
+    );
+
+    let mut snapshot = RuntimeSnapshot::default();
+    snapshot.services.insert(
+        AiService::Tts,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::ModelReady,
+            generation: Some(uuid::Uuid::new_v4()),
+            active_model: Some(LoadedModel {
+                plugin_id: "sample_plugin".into(),
+                asset_revision: None,
+            }),
+            pending_model: None,
+            last_error: None,
+        },
+    );
+    super::super::ai_engine::runtime_status(window, &snapshot);
+    let rows = window.get_ai_hub_components();
+    assert_eq!(rows.row_data(0).unwrap().worker_ready, AiHubTruth::Yes);
+    assert_eq!(rows.row_data(0).unwrap().model_ready, AiHubTruth::Yes);
+    assert_eq!(rows.row_data(1).unwrap().model_ready, AiHubTruth::Unknown);
+
+    window.set_onboarding_required(false);
+    window.set_ai_hub_open(true);
+    for (width, height, lang, filename) in [
+        (1180, 680, "ru", "aihub-ru-compact.ppm"),
+        (1560, 918, "ru", "aihub-ru-large.ppm"),
+        (1180, 680, "en", "aihub-en-compact.ppm"),
+        (1560, 918, "en", "aihub-en-large.ppm"),
+    ] {
+        window.global::<I18n>().set_locale(lang.into());
+        window
+            .window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        let image = window.window().take_snapshot().unwrap();
+        assert_eq!((image.width(), image.height()), (width, height));
+        assert!(
+            image
+                .as_bytes()
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] != pixel[1] || pixel[1] != pixel[2]),
+            "AI Hub snapshot must render colored interface contents"
+        );
+        if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
+            for rgba in image.as_bytes().chunks_exact(4) {
+                ppm.extend_from_slice(&rgba[..3]);
+            }
+            std::fs::write(directory.join(filename), ppm).unwrap();
+        }
+    }
+    window.set_ai_hub_open(false);
 }
 
 fn settings_render_and_bindings(window: &AppWindow) {
