@@ -401,7 +401,7 @@ mod tests {
             .unwrap()
             .apply(response, &prepared.context.variables)
             .unwrap();
-        assert_eq!(applied.variables["Love"], serde_json::json!(9.0));
+        assert_eq!(applied.variables["Love"], serde_json::json!(9));
         assert_eq!(timeline.lock().unwrap().anchor(), initial_anchor);
         assert!(
             !character
