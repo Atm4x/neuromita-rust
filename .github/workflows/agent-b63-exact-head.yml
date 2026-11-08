@@ -1,0 +1,47 @@
+name: Agent B63 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b63-verify-20261108
+jobs:
+  exact-b63:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 10ca3c5dcc251a88e94e6e58410457e4285c89f1
+          fetch-depth: 2
+      - name: Verify exact B63 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "10ca3c5dcc251a88e94e6e58410457e4285c89f1"
+          test "$(git rev-parse HEAD^{tree})" = "1348a5415222567fe31481cf089b471160a7de31"
+          test "$(git rev-parse HEAD^)" = "96970c8257bab2cd8b5a84e1ba29686f98a79b04"
+      - name: Install Rust 1.98.1 and native ALSA dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused B63 recovery and acceptance tests
+        shell: bash
+        run: |
+          cargo test --locked --offline --lib reconcile_ -- --test-threads=2
+          cargo test --locked --offline --lib generated_reply_ -- --test-threads=2
+          cargo test --locked --offline --lib sqlite_competing_reply_writers_accept_one_durable_regenerate_result -- --test-threads=2
+      - name: Full Rust library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets offline check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
