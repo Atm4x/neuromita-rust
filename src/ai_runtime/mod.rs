@@ -1819,6 +1819,7 @@ class Plugin:
                 Arc::from("Привет"),
                 VoiceOptions {
                     voice: "crazy".into(),
+                    character: None,
                     volume: crate::settings::Volume::new(50).unwrap(),
                 },
             )
@@ -1840,6 +1841,7 @@ class Plugin:
                     Arc::from("ignored"),
                     VoiceOptions {
                         voice: "crazy".into(),
+                    character: None,
                         volume: crate::settings::Volume::new(50).unwrap(),
                     }
                 )
@@ -2110,6 +2112,7 @@ class Plugin:
                 Arc::<str>::from("Тест"),
                 VoiceOptions {
                     voice: "default".into(),
+                    character: None,
                     volume: crate::settings::Volume::try_from(100).unwrap(),
                 },
             )
