@@ -1,0 +1,33 @@
+name: Export pinned C4 PR291 source
+on:
+  push:
+    branches: [bridge/c4-pr291-source-20261108]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c4-selection-fence-install-review-20261108
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source and build Git bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=372568445b9282993e5deb6026df0a055f13fd95
+          test "$(git rev-parse HEAD)" = "$expected"
+          git update-ref refs/heads/c4-pr291 "$expected"
+          mkdir -p /tmp/c4-pinned
+          git bundle create /tmp/c4-pinned/c4-pr291.bundle refs/heads/c4-pr291
+          git bundle verify /tmp/c4-pinned/c4-pr291.bundle
+          (cd /tmp/c4-pinned && sha256sum c4-pr291.bundle > c4-pr291.bundle.sha256)
+          printf "ref=refs/heads/c4-pr291\nsha=%s\n" "$expected" > /tmp/c4-pinned/manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c4-pr291-exact-source
+          path: /tmp/c4-pinned/
+          compression-level: 0
+          retention-days: 1
