@@ -23,6 +23,7 @@ mod layer;
 mod linux_worker_lifetime;
 pub mod live_speech;
 pub mod managed;
+pub mod native_model;
 pub mod overlay;
 pub mod production;
 pub mod removal;

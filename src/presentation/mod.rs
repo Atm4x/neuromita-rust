@@ -1,5 +1,6 @@
 pub mod ai_hub_catalog;
 pub mod ai_install_operation;
+pub mod native_model;
 pub use ai_install_operation::AiInstallOperationPresenter;
 mod audio_input;
 mod characters;
