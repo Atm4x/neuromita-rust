@@ -124,11 +124,11 @@ state, SQLite persistence).
 
 | Required check | Verified evidence |
 | --- | --- |
-| Rust 1.89 `cargo fmt --all -- --check` / `cargo check --locked --offline --all-targets` | Older #307 head `75b1a9e` **PASS** in fork core gate; [first new-head gate](https://github.com/ViNonerX/neuromita-rust/actions/runs/42481891389) found one new-test formatting error, fixed in `141edf45`; [new-head retry](https://github.com/ViNonerX/neuromita-rust/actions/runs/42481969206) launched |
-| Core Clippy `-D warnings`, library tests | Older #307 source head: **PASS**, 326/326 library tests. New-head result still pending. |
+| Rust 1.89 `cargo fmt --all -- --check` / `cargo check --locked --offline --all-targets` | [Latest core gate #42482578872](https://github.com/ViNonerX/neuromita-rust/actions/runs/42482578872) **PASS** on the staged-SET code (Rust 1.89, format/check) |
+| Core Clippy `-D warnings`, library tests | Latest staged-SET head: **PASS**, strict Clippy and **327/327** library tests. |
 | Rust 1.92 full-features GUI check/Clippy | Older #307 source head: **PASS** in fork gate [#42477521111](https://github.com/ViNonerX/neuromita-rust/actions/runs/42477521111); new staged-SET head not yet checked full |
 | Full all-target tests | [#42479564227](https://github.com/ViNonerX/neuromita-rust/actions/runs/42479564227) on old head **FAIL** due independent flaky `tests/contracts.rs::complete_minimal_contracts` 5-second timeout after deliberate voice panic; installer 9/9 passed in diagnostic rerun; this is not a green full-suite result |
-| New staged-SET → PostDSL test / full mock provider E2E | New source regression written; execution and complete E2E not yet verified |
+| New staged-SET → PostDSL test / full mock provider E2E | New source regression **PASS** in core gate; complete provider → accepted reply → persistence E2E not yet verified |
 | `git diff --check` | **NOT RUN** locally |
 
 Rust tools were unavailable in the agent's direct environment; the linked GitHub Actions runs are real compilation/test evidence. Keep source head and gate commit distinct and do not infer unrun checks.
