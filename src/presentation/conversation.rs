@@ -36,7 +36,9 @@ pub enum ConversationError {
     InvalidMessageEdit,
     #[error("failed input is no longer the last visible player message")]
     RetrySuperseded,
-    #[error("regenerate target is not the latest visible canonically accepted reply to a player event")]
+    #[error(
+        "regenerate target is not the latest visible canonically accepted reply to a player event"
+    )]
     RegenerateUnavailable,
     #[error(transparent)]
     Presenter(#[from] PresenterError),
@@ -363,7 +365,11 @@ impl ConversationPresenter {
         };
         let original_input = *original_input;
         let canonical_reply_to = original_input.0.to_string();
-        if receipt.draft.payload.get("reply_to").and_then(serde_json::Value::as_str)
+        if receipt
+            .draft
+            .payload
+            .get("reply_to")
+            .and_then(serde_json::Value::as_str)
             != Some(canonical_reply_to.as_str())
         {
             return Err(ConversationError::RegenerateUnavailable);

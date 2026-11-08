@@ -681,9 +681,7 @@ async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_at
 #[tokio::test]
 async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_foreign_targets() {
     use neuromita::{
-        presentation::ConversationError,
-        request::TimelineFence,
-        timeline::domain::EventKind,
+        presentation::ConversationError, request::TimelineFence, timeline::domain::EventKind,
     };
 
     let _serial = CORE_TEST_MUTEX.lock().await;
@@ -722,8 +720,7 @@ async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_
         .messages
         .iter()
         .find(|message| {
-            message.kind == EventKind::CharacterMessage
-                && message.request_id == Some(request.id())
+            message.kind == EventKind::CharacterMessage && message.request_id == Some(request.id())
         })
         .unwrap()
         .event_id;
@@ -750,7 +747,11 @@ async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_
     ));
     assert!(matches!(
         conversation
-            .preview_regenerate(CharacterId::Crazy, neuromita::timeline::EventId::new(), fence)
+            .preview_regenerate(
+                CharacterId::Crazy,
+                neuromita::timeline::EventId::new(),
+                fence
+            )
             .await,
         Err(ConversationError::RegenerateUnavailable)
     ));
@@ -786,6 +787,59 @@ async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_
         1
     );
     assert_eq!(after.messages.len(), before.messages.len() + 1);
+
+    let selected_again = app
+        .select_timeline_branch(after.selection.branch_id, after.selection)
+        .unwrap();
+    assert_ne!(selected_again.generation, after.selection.generation);
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, new_fence)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let reselection_fence = TimelineFence {
+        at: after.at,
+        selection: selected_again,
+    };
+    assert_eq!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, reselection_fence)
+            .await
+            .unwrap()
+            .original_input(),
+        user
+    );
+
+    let second = conversation
+        .reply(CharacterId::Crazy, "A newer accepted turn".into())
+        .unwrap();
+    server
+        .next()
+        .await
+        .respond
+        .send(Reply::Text("Newer accepted answer"))
+        .unwrap();
+    assert!(matches!(
+        finished(&second).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, second.id(), true).await;
+    let later = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    assert!(matches!(
+        conversation
+            .preview_regenerate(
+                CharacterId::Crazy,
+                accepted,
+                TimelineFence {
+                    at: later.at,
+                    selection: later.selection,
+                }
+            )
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
