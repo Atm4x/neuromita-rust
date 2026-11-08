@@ -2639,6 +2639,158 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
     server.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn profile_change_during_generation_preserves_request_character_and_next_preset() {
+    use std::collections::BTreeMap;
+    use neuromita::{
+        generation::PresetCatalog,
+        settings::{PresetId, PresetSelection},
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let named = |model: &str| {
+        GenerationPreset::new(ProviderTemplate::Gemini(
+            GeminiTemplate::new(
+                &server.endpoint,
+                model,
+                "test-key",
+                GenerationSettings::new(0.7, 512, Duration::from_secs(10)).unwrap(),
+            )
+            .unwrap(),
+        ))
+    };
+    let mut config = ApplicationConfig::minimal(
+        named("alpha"),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
+    config.presets = PresetCatalog::new(BTreeMap::from([
+        (PresetId(0), named("alpha")),
+        (PresetId(1), named("beta")),
+    ]));
+    let app = ApplicationLifecycle::start(config).await.unwrap();
+
+    // The original request has already entered generation with Crazy and alpha.
+    let original = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "crazy before edit".into())
+        .unwrap();
+    let blocked = server.next().await;
+    assert!(blocked.path.contains("models/alpha:generateContent"));
+
+    // The settings editor now changes only Crazy. It cannot re-target the
+    // accepted in-flight request, and Kind retains her own default settings.
+    let before = app
+        .presenter()
+        .settings
+        .characters
+        .profile(CharacterId::Crazy)
+        .unwrap();
+    let mut changed = before.settings().clone();
+    changed.presets.reply = PresetSelection::Specific(PresetId(1));
+    app.presenter()
+        .settings
+        .characters
+        .save_profile(&before, changed)
+        .unwrap();
+    assert_eq!(
+        app.presenter()
+            .settings
+            .characters
+            .profile(CharacterId::Kind)
+            .unwrap()
+            .settings()
+            .presets
+            .reply,
+        PresetSelection::Active
+    );
+
+    // As if the user selected Kind in chat while Crazy's provider is still
+    // busy: completing Crazy's late response must not contaminate Kind.
+    let kind = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Kind, "kind after switch".into())
+        .unwrap();
+    blocked.respond.send(Reply::Text("Crazy original")).unwrap();
+    assert!(matches!(
+        finished(&original).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    let kind_call = server.next().await;
+    assert!(kind_call.path.contains("models/alpha:generateContent"));
+    kind_call.respond.send(Reply::Text("Kind reply")).unwrap();
+    assert!(matches!(
+        finished(&kind).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        1
+    );
+    assert_eq!(
+        app.character(CharacterId::Kind)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        1
+    );
+
+    // Re-select Crazy: the *next* request gets beta, not the old in-flight one.
+    let resumed = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Crazy, "crazy after edit".into())
+        .unwrap();
+    let newer = server.next().await;
+    assert!(newer.path.contains("models/beta:generateContent"));
+    newer.respond.send(Reply::Text("Crazy new")).unwrap();
+    assert!(matches!(
+        finished(&resumed).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(
+        app.character(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        2
+    );
+    assert_eq!(
+        app.character(CharacterId::Kind)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        1
+    );
+    for request in [original.id(), kind.id(), resumed.id()] {
+        assert!(app.timeline().iter().any(|event| {
+            event.request_id == Some(request)
+                && matches!(event.content, EventContent::CharacterReply { .. })
+        }));
+    }
+
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn preset_api_exposes_separate_catalog_crud_without_touching_settings() {
     use neuromita::{
