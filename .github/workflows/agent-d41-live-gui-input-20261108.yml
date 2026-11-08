@@ -1,0 +1,164 @@
+name: Agent D41 actual GUI input E2E (Xvfb)
+on:
+  push:
+    branches: [codex/bridge-agent-d41-real-gui-e2e-20261108]
+permissions:
+  contents: read
+jobs:
+  live-gui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-reopen-resume-20261108
+          fetch-depth: 0
+      - name: Verify exact D40 product tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = ed3841da85f9b0efdb2d008e25d7501ed4a6a033
+          test "$(git rev-parse HEAD^{tree})" = caf1743cdfd671038130fd9b6dde62af41a9a9f1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install X11 real-interaction runner requirements
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0 xvfb xdotool imagemagick libgl1-mesa-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev lld
+      - name: Build actual NeuroMita GUI
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: cargo build --locked --offline --features gui --bin neuromita-gui -j 2
+      - name: Real EULA deny/accept and Guide navigation with X11 mouse input
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SLINT_BACKEND: 'winit-femtovg'
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-evidence
+          xvfb-run -a -s "-screen 0 1920x1080x24" bash -euo pipefail <<'SCRIPT'
+          ROOT="$RUNNER_TEMP/d41-gui-userdata"
+          export ROOT
+          mkdir -p "$ROOT"
+          APP="$GITHUB_WORKSPACE/target/debug/neuromita-gui"
+          mkdir -p "$GITHUB_WORKSPACE/e2e-evidence"
+          evidence="$GITHUB_WORKSPACE/e2e-evidence"
+          run=0
+          app_pid=0
+          window=0
+          capture() {
+            import -window root "$evidence/$1.png"
+          }
+          json_assert() {
+            python3 - "$1" "$2" <<'PY'
+          import json,os,sys
+          s=json.load(open(os.path.join(os.environ['ROOT'],"settings.json")))['settings']
+          actual=s
+          for part in sys.argv[1].split('.'): actual=actual[part]
+          expected=json.loads(sys.argv[2])
+          if actual!=expected:
+              raise SystemExit(f"{sys.argv[1]}: expected {expected!r}, got {actual!r}")
+          print("PASS",sys.argv[1],repr(actual))
+          PY
+          }
+          start() {
+            run=$((run+1))
+            echo "START instance $run"
+            "$APP" --data-dir "$ROOT" >"$evidence/app-$run.log" 2>&1 &
+            app_pid=$!
+            window=""
+            for i in $(seq 1 60); do
+              window=$(xdotool search --onlyvisible --name 'NeuroMita' 2>/dev/null | tail -1 || true)
+              [ -n "$window" ] && break
+              if ! kill -0 "$app_pid" 2>/dev/null; then cat "$evidence/app-$run.log"; exit 1; fi
+              sleep .5
+            done
+            [ -n "$window" ] || { cat "$evidence/app-$run.log"; echo 'GUI_WINDOW_NOT_FOUND'; exit 1; }
+            xdotool windowsize "$window" 1560 918
+            xdotool windowmove "$window" 0 0
+            xdotool windowactivate --sync "$window" || true
+            sleep 1
+            xdotool getwindowgeometry --shell "$window"
+          }
+          click() {
+            xdotool mousemove --sync "$1" "$2"
+            xdotool click --clearmodifiers 1
+            sleep 1
+          }
+          stop() {
+            if [ "$app_pid" -gt 0 ]; then
+              kill "$app_pid" 2>/dev/null || true
+              wait "$app_pid" 2>/dev/null || true
+              app_pid=0
+            fi
+            sleep 1
+          }
+          trap stop EXIT
+          start
+          capture "01-fresh-eula"
+          test ! -e "$ROOT/settings.json"
+          click 515 234
+          test ! -e "$ROOT/settings.json"
+          echo EULA_PRECONSENT_LANGUAGE_NO_WRITE_PASS
+          click 950 725
+          sleep 1
+          test ! -e "$ROOT/settings.json"
+          capture "02-rejected"
+          stop
+          echo EULA_REJECT_NO_WRITE_PASS
+          start
+          click 515 234
+          click 1120 725
+          for i in $(seq 1 30); do
+            [ -f "$ROOT/settings.json" ] && break
+            sleep .5
+          done
+          test -s "$ROOT/settings.json"
+          json_assert onboarding.eula_accepted true
+          json_assert onboarding.guide_completed false
+          json_assert interface.language '"english"'
+          capture "03-accepted-guide"
+          echo EULA_ACCEPT_REAL_CLICK_PASS
+          click 1042 744
+          sleep 1
+          json_assert onboarding.guide_page 1
+          click 1042 744
+          sleep 1
+          json_assert onboarding.guide_page 2
+          capture "04-page-three"
+          click 1150 744
+          sleep 1
+          json_assert onboarding.guide_page 2
+          stop
+          echo GUIDE_INTERRUPTION_PERSISTED_PASS
+          start
+          capture "05-resumed-page-three"
+          click 910 744
+          sleep 1
+          json_assert onboarding.guide_page 1
+          click 1042 744
+          sleep 1
+          json_assert onboarding.guide_page 2
+          click 1042 744
+          sleep 1
+          json_assert onboarding.guide_completed true
+          capture "06-finished"
+          stop
+          echo GUIDE_RESTART_AND_FINISH_PASS
+          start
+          capture "07-finished-restart"
+          json_assert onboarding.guide_completed true
+          stop
+          echo D41_REAL_GUI_INPUT_E2E_PASS
+          SCRIPT
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-d41-real-gui-e2e-evidence
+          path: e2e-evidence/
+          if-no-files-found: ignore
+          retention-days: 1
