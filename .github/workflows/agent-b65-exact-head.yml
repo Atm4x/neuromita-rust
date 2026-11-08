@@ -12,15 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 0879964bc236ec849d7626201968cf7b9174b72c
+          ref: dd659c214fc56c440b36b849c9dc9966525d3ac6
           fetch-depth: 2
       - name: Verify exact B65 source identity
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "0879964bc236ec849d7626201968cf7b9174b72c"
-          test "$(git rev-parse HEAD^{tree})" = "57e2c2d78d3a5d880bc19f99f4ea4aeba46979db"
-          test "$(git rev-parse HEAD^)" = "267f0788c66ffed181a229b2c6cef86899ef2970"
+          test "$(git rev-parse HEAD)" = "dd659c214fc56c440b36b849c9dc9966525d3ac6"
+          test "$(git rev-parse HEAD^{tree})" = "02e6286272a1f9616d88146bcb85792023b149e6"
+          test "$(git rev-parse HEAD^)" = "0879964bc236ec849d7626201968cf7b9174b72c"
       - name: Install Rust 1.98.1 and ALSA headers
         shell: bash
         run: |
