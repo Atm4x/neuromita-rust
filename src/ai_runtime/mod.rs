@@ -1841,7 +1841,7 @@ class Plugin:
                     Arc::from("ignored"),
                     VoiceOptions {
                         voice: "crazy".into(),
-                    character: None,
+                        character: None,
                         volume: crate::settings::Volume::new(50).unwrap(),
                     }
                 )
