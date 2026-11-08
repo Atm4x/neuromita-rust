@@ -60,11 +60,10 @@ export component AiHubOperationRow inherits Rectangle {
     callback cancel-running(string, string, int, string);
     callback view-logs(string, string, int, string);
 
+    // AI Hub keys are not registered in the global locale catalog yet.
+    // Use the supplied reviewed copy instead of exposing missing-key diagnostics.
     pure function localized(id: string, ru: string, en: string) -> string {
-        if I18n.locale == "en" { return en; }
-        let translated = I18n.i18n(id, ru);
-        // Missing catalog keys must never leak lookup diagnostics into the GUI.
-        return translated == ("[unknown localization ID: " + id + "]") ? ru : translated;
+        return I18n.locale == "en" ? en : ru;
     }
     pure function stage-label(stage: AiHubOperationStage) -> string {
         if stage == AiHubOperationStage.requested {
@@ -287,11 +286,10 @@ export component AiHubOperationsPanel inherits Rectangle {
         && root.decision.token == root.token;
     property <bool> can-mutate: root.connected && root.supported && root.component-id != ""
         && !root.preflight-pending && !root.decision-visible;
+    // AI Hub keys are not registered in the global locale catalog yet.
+    // Use the supplied reviewed copy instead of exposing missing-key diagnostics.
     pure function localized(id: string, ru: string, en: string) -> string {
-        if I18n.locale == "en" { return en; }
-        let translated = I18n.i18n(id, ru);
-        // Missing catalog keys must never leak lookup diagnostics into the GUI.
-        return translated == ("[unknown localization ID: " + id + "]") ? ru : translated;
+        return I18n.locale == "en" ? en : ru;
     }
     function prepare(action: string) {
         if root.can-mutate {

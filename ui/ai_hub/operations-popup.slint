@@ -19,11 +19,10 @@ export component AiHubQueuePopup inherits Rectangle {
     callback cancel-running-requested(string, string, int, string);
     callback view-logs-requested(string, string, int, string);
 
+    // AI Hub keys are not registered in the global locale catalog yet.
+    // Use the supplied reviewed copy instead of exposing missing-key diagnostics.
     pure function localized(id: string, ru: string, en: string) -> string {
-        if I18n.locale == "en" { return en; }
-        let translated = I18n.i18n(id, ru);
-        // Missing catalog keys must never leak lookup diagnostics into the GUI.
-        return translated == ("[unknown localization ID: " + id + "]") ? ru : translated;
+        return I18n.locale == "en" ? en : ru;
     }
 
     visible: root.open;
