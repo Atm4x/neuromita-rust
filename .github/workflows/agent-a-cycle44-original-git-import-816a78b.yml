@@ -1,0 +1,28 @@
+name: agent-a-cycle44-original-git-import-816a78b
+on:
+  push:
+    branches: [bridge/agent-a-cycle44-publish-816a78b]
+    paths: [.gitbridge/agent-a-cycle44.payload.b64]
+permissions:
+  contents: write
+jobs:
+  verify-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Cycle44 Git commit and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186
+          base64 --decode .gitbridge/agent-a-cycle44.payload.b64 > /tmp/agent-a-cycle44.bundle
+          echo "dc4a686cc4a6e631b8a2efeef34f6451cc3842d21b0cf79afd13233b88411fcf  /tmp/agent-a-cycle44.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-cycle44.bundle
+          git fetch /tmp/agent-a-cycle44.bundle refs/heads/agent-a-cycle44-out:refs/heads/bridge/agent-a-cycle44-candidate-816a78b
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate-816a78b)" = "816a78b51535f7f6f5744e7df931789360abb546"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate-816a78b^{tree})" = "6b723a3df970d4d5025c1d7bf34b0a52c1fee0e3"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate-816a78b^)" = "1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186"
+          git merge-base --is-ancestor 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186 refs/heads/bridge/agent-a-cycle44-candidate-816a78b
+          git push origin refs/heads/bridge/agent-a-cycle44-candidate-816a78b:refs/heads/bridge/agent-a-cycle44-candidate-816a78b
