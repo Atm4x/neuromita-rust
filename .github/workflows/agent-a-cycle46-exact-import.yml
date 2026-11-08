@@ -1,0 +1,28 @@
+name: agent-a-cycle46-exact-import
+on:
+  push:
+    branches: [bridge/agent-a-cycle46-publish-11873cb]
+    paths: [.gitbridge/agent-a-cycle46.payload.b64]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Cycle46 commit and push isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin dea3365911425aa540b971b2c3958fd3d752bd6a
+          base64 --decode .gitbridge/agent-a-cycle46.payload.b64 > /tmp/agent-a-cycle46.bundle
+          echo "7686a3c1d81c2f5628590bf57553f684d06ad7ef8ef1f8ae9bdbe37fe8c743d3  /tmp/agent-a-cycle46.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-cycle46.bundle
+          git fetch /tmp/agent-a-cycle46.bundle refs/heads/agent-a-cycle46:refs/heads/bridge/agent-a-cycle46-candidate-11873cb
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle46-candidate-11873cb)" = "11873cbaa044a631f250e0a14c5e312570ba1dcc"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle46-candidate-11873cb^{tree})" = "76412d76976614f5570d3d57384f287500702ef8"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle46-candidate-11873cb^)" = "dea3365911425aa540b971b2c3958fd3d752bd6a"
+          git merge-base --is-ancestor dea3365911425aa540b971b2c3958fd3d752bd6a refs/heads/bridge/agent-a-cycle46-candidate-11873cb
+          git push origin refs/heads/bridge/agent-a-cycle46-candidate-11873cb:refs/heads/bridge/agent-a-cycle46-candidate-11873cb
