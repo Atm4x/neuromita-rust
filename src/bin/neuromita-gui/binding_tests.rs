@@ -427,7 +427,67 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 }
 
 fn settings_render_and_bindings(window: &AppWindow) {
-    use super::super::view::{PresetItem, SettingsUi};
+    use super::super::view::{AiEngineUi, PresetItem, SettingsUi};
+    use neuromita::ai_runtime::{
+        AiService,
+        runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
+    };
+    let mut runtime = RuntimeSnapshot::default();
+    assert_eq!(
+        window.global::<AiEngineUi>().get_embedding_status(),
+        "Не настроен"
+    );
+    runtime.services.insert(
+        AiService::Embedding,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::Failed,
+            last_error: Some("Timeout: mock embedding infer".into()),
+            ..Default::default()
+        },
+    );
+    runtime.services.insert(
+        AiService::Reranker,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::ModelReady,
+            active_model: Some(LoadedModel {
+                plugin_id: "mock_reranker".into(),
+                asset_revision: None,
+            }),
+            ..Default::default()
+        },
+    );
+    super::super::ai_engine::runtime_status(window, &runtime);
+    let engine = window.global::<AiEngineUi>();
+    assert!(engine.get_embedding_failed());
+    assert!(
+        engine
+            .get_embedding_status()
+            .contains("Timeout: mock embedding infer")
+    );
+    assert!(!engine.get_reranker_failed());
+    assert!(engine.get_reranker_status().contains("mock_reranker"));
+    engine.set_process_mode("split".into());
+    window.global::<SettingsUi>().set_section(6);
+    window.set_page(PageId::Settings);
+    window.window().take_snapshot().unwrap();
+    runtime.services.insert(
+        AiService::Embedding,
+        ServiceRuntimeStatus {
+            phase: RuntimePhase::ModelReady,
+            active_model: Some(LoadedModel {
+                plugin_id: "mock_embedding".into(),
+                asset_revision: None,
+            }),
+            ..Default::default()
+        },
+    );
+    super::super::ai_engine::runtime_status(window, &runtime);
+    assert!(!engine.get_embedding_failed());
+    assert!(engine.get_embedding_status().contains("mock_embedding"));
+    assert!(!engine.get_embedding_status().contains("Timeout"));
+    super::super::ai_engine::runtime_status(window, &RuntimeSnapshot::default());
+    assert_eq!(engine.get_embedding_status(), "Не настроен");
+    assert!(!engine.get_embedding_failed());
     let settings = window.global::<SettingsUi>();
     settings.set_preset_templates(ModelRc::new(VecModel::from(
         super::super::settings::provider_templates(

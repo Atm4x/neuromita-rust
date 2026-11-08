@@ -222,6 +222,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
+            super::ai_engine::runtime_status(window, &snapshot);
         }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
         Update::SpeechInventory(catalog, devices) => {
@@ -301,6 +302,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();
             super::voice::runtime_status(window, &stopped);
             super::asr::runtime_status(window, &stopped);
+            super::ai_engine::runtime_status(window, &stopped);
             super::asr::session_status(window, &Default::default());
             window.set_core_connected(false);
             window.set_core_connecting(false);
