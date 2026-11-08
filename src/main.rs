@@ -132,7 +132,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config.finetune = Some(neuromita::finetune::FineTuneSettings::load(path)?);
     }
     config.knowledge = knowledge;
+    if options.installed_speech {
+        let directory = if options.data_dir.is_absolute() {
+            options.data_dir.clone()
+        } else {
+            std::env::current_dir()?.join(&options.data_dir)
+        };
+        config = config.with_installed_speech_runtime(
+            neuromita::ai_runtime::installed_speech::InstalledSpeechEnvironment::for_desktop(
+                directory,
+            ),
+        );
+    }
     let app = ApplicationLifecycle::start(config).await?;
+    if let Some(warning) = app.speech_startup_warning() {
+        eprintln!("Installed speech activation failed: {warning}");
+    }
     tracing::info!(address = %app.server().address(), "server listening");
     let result = terminal::run(&app, options, app.finetune()).await;
     let stopped = app.shutdown().await;

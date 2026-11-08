@@ -44,6 +44,7 @@ pub struct Options {
     pub listen: std::net::SocketAddr,
     pub data_dir: PathBuf,
     pub finetune_config: Option<PathBuf>,
+    pub installed_speech: bool,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -52,12 +53,24 @@ fn invalid(message: &str) -> io::Error {
 
 impl Options {
     pub fn parse() -> io::Result<Option<Self>> {
-        let mut args = std::env::args().skip(1);
+        Self::parse_args(std::env::args().skip(1))
+    }
+
+    fn parse_args(args: impl IntoIterator<Item = String>) -> io::Result<Option<Self>> {
+        let mut args = args.into_iter();
         let mut values = HashMap::new();
+        let mut installed_speech = false;
         while let Some(argument) = args.next() {
+            if argument == "--installed-speech" {
+                if installed_speech {
+                    return Err(invalid("duplicate --installed-speech"));
+                }
+                installed_speech = true;
+                continue;
+            }
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH]\n\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /ai worker status, /ai worker restart Embedding|Reranker|Tts|Asr EXPECTED_GENERATION_UUID, /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH] [--installed-speech]\n\n--installed-speech: opt in to previously installed TTS/ASR selections from persistent settings; no model installs or downloads.\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /ai worker status, /ai worker restart Embedding|Reranker|Tts|Asr EXPECTED_GENERATION_UUID, /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -95,6 +108,7 @@ impl Options {
             .map_err(|_| invalid("invalid listen address"))?;
         Ok(Some(Self {
             model,
+            installed_speech,
             character,
             message: values.remove("--message"),
             listen,
@@ -1733,6 +1747,32 @@ fn unquote(value: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_speech_is_explicit_and_cannot_be_duplicated() {
+        let required = [
+            "--model",
+            "gemini-2.5-flash",
+            "--character",
+            "Crazy",
+            "--listen",
+            "127.0.0.1:0",
+            "--data-dir",
+            "/tmp/neuromita-opt-in-test",
+        ];
+        let parse = |extra: &[&str]| {
+            Options::parse_args(required.iter().chain(extra).map(|arg| (*arg).to_owned()))
+        };
+        assert!(!parse(&[]).unwrap().unwrap().installed_speech);
+        assert!(
+            parse(&["--installed-speech"])
+                .unwrap()
+                .unwrap()
+                .installed_speech
+        );
+        assert!(parse(&["--installed-speech", "--installed-speech"]).is_err());
+        assert!(parse(&["--installed-speech", "--unknown"]).is_err());
+    }
 
     #[test]
     fn export_never_overwrites_and_paths_may_contain_spaces() {
