@@ -58,7 +58,7 @@ use crate::{
         SettingsError, SettingsLifecycle, SettingsSource, SettingsStartupMigration,
     },
     timeline::{
-        SessionTimeline, TimelineConfig, TimelineEvent,
+        RegenerateSource, SessionTimeline, TimelineConfig, TimelineEvent,
         conversation::ConversationMessage,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
@@ -381,6 +381,30 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .admission(character, selection)
             .map_err(|_| SubmitError::TimelineUnavailable)
+    }
+
+    fn admit_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: crate::request::TimelineFence,
+        child: BranchId,
+    ) -> Result<TimelineAdmission, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.at.branch_id != fence.selection.branch_id.0 {
+            return Err(SubmitError::StaleTimeline);
+        }
+        timeline
+            .fork_and_admit_regenerate_source(source, child, fence.selection, fence.at.through)
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })
     }
 }
 
@@ -1264,3 +1288,7 @@ impl Lifecycle for ApplicationLifecycle {
         self.shutdown().await
     }
 }
+
+#[cfg(test)]
+#[path = "app/regenerate_admission_tests.rs"]
+mod regenerate_admission_tests;

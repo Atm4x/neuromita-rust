@@ -16,7 +16,10 @@ use crate::{
     prompts::PromptCatalog,
     request::TimelineFence,
     settings::SettingsOwner,
-    timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
+    timeline::{
+        RegenerateSource, conversation::ConversationMessage, domain::BranchId,
+        selection::TimelineAdmission,
+    },
 };
 
 pub(crate) trait RequestIngress: Send + Sync {
@@ -35,6 +38,13 @@ pub(crate) trait RequestIngress: Send + Sync {
         character: CharacterId,
         intent: TurnIntent,
         fence: Option<TimelineFence>,
+    ) -> Result<TimelineAdmission, SubmitError>;
+
+    fn admit_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: TimelineFence,
+        child: BranchId,
     ) -> Result<TimelineAdmission, SubmitError>;
 }
 
@@ -75,6 +85,31 @@ impl ChatApiState {
     pub(crate) fn send(
         &self,
         request: impl GenerationCommand + 'static,
+    ) -> Result<RequestHandle, SubmitError> {
+        self.send_with_regeneration(request, None)
+    }
+
+    /// Internal-only submission: no UI/public API until restart-safe durable
+    /// Regenerate admission and cancellation reconciliation are implemented.
+    #[allow(dead_code)]
+    pub(crate) fn regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: TimelineFence,
+        child: BranchId,
+    ) -> Result<RequestHandle, SubmitError> {
+        let request = super::ReplyRequest::new(
+            source.character,
+            source.original_input,
+            super::RequestSource::Presenter,
+        );
+        self.send_with_regeneration(request, Some((source, fence, child)))
+    }
+
+    fn send_with_regeneration(
+        &self,
+        request: impl GenerationCommand + 'static,
+        regeneration: Option<(RegenerateSource, TimelineFence, BranchId)>,
     ) -> Result<RequestHandle, SubmitError> {
         if !*self.accepting.lock().expect("admission mutex poisoned") {
             return Err(SubmitError::Stopped);
@@ -126,11 +161,20 @@ impl ChatApiState {
         if !*accepting {
             return Err(SubmitError::Stopped);
         }
-        let admission = self.ingress.admit(
-            request.character_id(),
-            request.intent(),
-            request.timeline_fence(),
-        )?;
+        let admission = if let Some((source, fence, child)) = regeneration {
+            if request.character_id() != source.character
+                || request.intent() != TurnIntent::Reply(source.original_input)
+            {
+                return Err(SubmitError::InvalidTargetEvent);
+            }
+            self.ingress.admit_regenerate(source, fence, child)?
+        } else {
+            self.ingress.admit(
+                request.character_id(),
+                request.intent(),
+                request.timeline_fence(),
+            )?
+        };
         let id = RequestId::new();
         let handle = self.registry.register_with_configuration(
             Box::new(request),
@@ -148,7 +192,8 @@ impl ChatApiState {
         &self,
         message: ConversationMessage,
     ) -> Result<EventId, SubmitError> {
-        if !*self.accepting.lock().expect("admission mutex poisoned") {
+        let accepting = self.accepting.lock().expect("admission mutex poisoned");
+        if !*accepting {
             return Err(SubmitError::Stopped);
         }
         self.ingress.publish_conversation_message(message)

@@ -496,6 +496,35 @@ impl SessionTimeline {
         )
     }
 
+    /// Captures the child knowledge epoch before committing the historical
+    /// fork. After selection changes no fallible repository read remains.
+    /// This is an owner primitive, not a durable request-acceptance receipt.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_and_admit_regenerate_source(
+        &mut self,
+        source: RegenerateSource,
+        child: BranchId,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<TimelineAdmission, domain::TimelineError> {
+        self.validate_regenerate_source(source, expected, expected_parent_head)?;
+        let input = self.store.event(self.branch, source.original_input)?;
+        let context_epoch =
+            self.store
+                .context_epoch_at(self.branch, source.character, Some(input.sequence))?;
+        let selection = self.fork_and_select_player_input(
+            source.original_input,
+            source.character,
+            child,
+            expected,
+            expected_parent_head,
+        )?;
+        Ok(TimelineAdmission {
+            selection,
+            context_epoch,
+        })
+    }
+
     fn validate_regenerate_source(
         &self,
         source: RegenerateSource,
