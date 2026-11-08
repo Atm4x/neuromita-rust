@@ -1,0 +1,39 @@
+name: Import exact C4 build-stage commits
+on:
+  push:
+    branches: [bridge/c4-build-stages-patch-20261108]
+    paths: [.github/workflows/bridge-c4-build-stages-import.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c4-build-stages-patch-20261108
+          fetch-depth: 0
+      - name: Verify both patches and exact Git identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum bridge-patches/old.patch | cut -d' ' -f1)" = "0a66a1044823d06309f2a10eb10760221c820ee9bcb3e51c5e3e22ac9df923c0"
+          test "$(sha256sum bridge-patches/new.patch | cut -d' ' -f1)" = "575d6c95976a2d847f6391830dbadca49dd06c83c09d6b1250327954a5e6e0f8"
+          cp bridge-patches/old.patch /tmp/c4-old.patch
+          cp bridge-patches/new.patch /tmp/c4-new.patch
+          git fetch origin refs/heads/codex/ai-platform-hub-c4-operation-status-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "41faa98630bde388c0fb79112414482f53bc3702"
+          git fetch origin refs/heads/codex/ai-platform-hub-c4-declarative-build-stages-20261108:refs/remotes/origin/c4-target
+          test "$(git rev-parse refs/remotes/origin/c4-target)" = "41faa98630bde388c0fb79112414482f53bc3702"
+          git checkout --detach 41faa98630bde388c0fb79112414482f53bc3702
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git am --committer-date-is-author-date /tmp/c4-old.patch
+          test "$(git rev-parse HEAD)" = "352b051313aaf195c8c1ee54c6aaf9fee0a6fd1e"
+          test "$(git rev-parse 'HEAD^{tree}')" = "9e29f9accf27a585b3d78ef6d009c7efd538d008"
+          git am --committer-date-is-author-date /tmp/c4-new.patch
+          test "$(git rev-parse HEAD)" = "9a4a62f6a750d62b03dae83b57d1273f28b33828"
+          test "$(git rev-parse 'HEAD^{tree}')" = "6e7d00e646cd90e81c7e6eb6540cdefb603b8a47"
+          git merge-base --is-ancestor 41faa98630bde388c0fb79112414482f53bc3702 HEAD
+          git diff --check 41faa98630bde388c0fb79112414482f53bc3702 HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c4-declarative-build-stages-20261108
