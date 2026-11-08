@@ -1,0 +1,32 @@
+name: Bridge exact C3 install source identity commit
+on:
+  push:
+    branches: [bridge/c3-source-pin-recovery-20261108]
+    paths: [.github/workflows/bridge-c3-source-pin-recovery.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c3-source-pin-recovery-20261108
+          fetch-depth: 0
+      - name: Verify exact bundle and fast-forward C3 source pinning
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/c3-payload-part{1,2,3,4,5}.txt | base64 -d > /tmp/c3-source-pin.bundle
+          test "$(stat -c %s /tmp/c3-source-pin.bundle)" = '7261'
+          test "$(sha256sum /tmp/c3-source-pin.bundle | cut -d' ' -f1)" = 'a667fce96e818cfd1756d16a0fa77d0ce74f8b411ebb918ced05dcae7a65fe3e'
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-source-pin-kill-recovery-20261108:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = '403c63a05eba0c6914dd6bd2adf2dc3555a35acc'
+          git bundle verify /tmp/c3-source-pin.bundle
+          git fetch /tmp/c3-source-pin.bundle refs/heads/work
+          test "$(git rev-parse FETCH_HEAD)" = '5699c0e75eec393fb5b5d27c7d83b2980e00e23d'
+          git checkout --detach '5699c0e75eec393fb5b5d27c7d83b2980e00e23d'
+          test "$(git rev-parse HEAD^{tree})" = '2f14b250e98c69cf24a5d50105bbcf484b7a3039'
+          git merge-base --is-ancestor '403c63a05eba0c6914dd6bd2adf2dc3555a35acc' HEAD
+          git diff --check '403c63a05eba0c6914dd6bd2adf2dc3555a35acc' HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c3-source-pin-kill-recovery-20261108
