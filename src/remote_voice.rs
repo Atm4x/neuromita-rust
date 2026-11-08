@@ -307,7 +307,7 @@ fn classify_http(status: reqwest::StatusCode) -> RemoteVoiceError {
     }
 }
 fn pcm_to_wav(pcm: &[u8]) -> Result<AudioArtifact, RemoteVoiceError> {
-    if pcm.is_empty() || pcm.len() % 2 != 0 || pcm.len() > MAX_PCM {
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) || pcm.len() > MAX_PCM {
         return Err(RemoteVoiceError::InvalidAudio);
     }
     let len = pcm.len() as u32;
