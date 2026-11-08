@@ -662,7 +662,7 @@ mod tests {
         let rendered = catalog
             .render(CharacterId::Crazy, None, BTreeMap::new(), "main_template.txt")
             .unwrap();
-        assert_eq!(rendered.context, ["5"]);
+        assert_eq!(rendered.context, vec!["5".to_owned()]);
 
         // The Python engine rejects an ELSE with arguments rather than
         // silently treating it as an unconditional branch.
@@ -702,7 +702,7 @@ mod tests {
             let result = snapshot
                 .render(BTreeMap::new(), "main_template.txt")
                 .unwrap();
-            assert_eq!(result.context, ["5", "99"]);
+            assert_eq!(result.context, vec!["5".to_owned(), "99".to_owned()]);
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -722,21 +722,21 @@ mod tests {
         let b = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
         assert_eq!(
             a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
-            ["Привет Игрок."]
+            vec!["Привет Игрок.".to_owned()]
         );
         assert_eq!(
             b.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
-            ["Kind KindName"]
+            vec!["Kind KindName".to_owned()]
         );
         assert_eq!(
             a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
-            ["Привет Игрок."]
+            vec!["Привет Игрок.".to_owned()]
         );
 
         fs::write(&kind_identity, "Changed [{player_name}]").unwrap();
         assert_eq!(
             b.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
-            ["Kind KindName"]
+            vec!["Kind KindName".to_owned()]
         );
         let newly_admitted = catalog.capture(CharacterId::Kind, None).unwrap().unwrap();
         assert_eq!(
@@ -744,11 +744,11 @@ mod tests {
                 .render(BTreeMap::new(), "main_template.txt")
                 .unwrap()
                 .stable,
-            ["Changed KindName"]
+            vec!["Changed KindName".to_owned()]
         );
         assert_eq!(
             a.render(BTreeMap::new(), "main_template.txt").unwrap().stable,
-            ["Привет Игрок."]
+            vec!["Привет Игрок.".to_owned()]
         );
         fs::remove_dir_all(root).unwrap();
     }
