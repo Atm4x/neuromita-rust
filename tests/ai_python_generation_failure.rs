@@ -84,8 +84,7 @@ fn application(
     config
 }
 
-#[tokio::test]
-async fn real_python_embedding_infer_timeout_is_terminal_and_restart_retries_same_history_source() {
+async fn embedding_infer_failure_is_terminal_and_restart_recovers(crash: bool) {
     let _guard = APP_LOCK.lock().await;
     let root = std::env::temp_dir().join(format!("nm-real-python-generation-{}", Uuid::new_v4()));
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -98,9 +97,16 @@ async fn real_python_embedding_infer_timeout_is_terminal_and_restart_retries_sam
     let source = tokio::fs::read_to_string(mock.join("plugin.py"))
         .await
         .unwrap();
-    let injection = "    def infer(self, input_data):\n        if input_data.get('purpose') == 'query':\n            from pathlib import Path\n            marker = Path(__file__).with_name('block_first_query.flag')\n            if marker.exists():\n                marker.unlink()\n                import time\n                time.sleep(9)\n";
+    let action = if crash {
+        "                import os\n                os._exit(73)\n"
+    } else {
+        "                import time\n                time.sleep(9)\n"
+    };
+    let injection = format!(
+        "    def infer(self, input_data):\n        if input_data.get('purpose') == 'query':\n            from pathlib import Path\n            marker = Path(__file__).with_name('block_first_query.flag')\n            if marker.exists():\n                marker.unlink()\n{action}"
+    );
     assert!(source.contains("    def infer(self, input_data):\n"));
-    let source = source.replacen("    def infer(self, input_data):\n", injection, 1);
+    let source = source.replacen("    def infer(self, input_data):\n", &injection, 1);
     tokio::fs::write(plugin.join("plugin.py"), source)
         .await
         .unwrap();
@@ -167,29 +173,70 @@ async fn real_python_embedding_infer_timeout_is_terminal_and_restart_retries_sam
         .await
         .unwrap()
         .unwrap();
+    let reason = if crash {
+        "worker closed stdout"
+    } else {
+        "timed out"
+    };
     assert!(
         matches!(&result.state,
             RequestState::Finished(RequestOutcome::TextGenerationFailed(error))
-                if error.to_string().contains("timed out")
+                if error.to_string().contains(reason)
         ),
         "{:?}",
         result.state
     );
-    assert!(calls.try_recv().is_err(), "timeout reached LLM provider");
+    assert!(
+        calls.try_recv().is_err(),
+        "fatal Python infer reached LLM provider"
+    );
     let status = supervisor.status_snapshot().service(AiService::Embedding);
     assert_eq!(status.phase, RuntimePhase::Failed);
     assert_eq!(status.generation, Some(generation));
-    assert!(
-        status
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .contains("timed out")
-    );
+    assert!(status.last_error.as_deref().unwrap_or("").contains(reason));
     assert!(
         !tokio::fs::try_exists(plugin.join("block_first_query.flag"))
             .await
             .unwrap()
+    );
+    let refreshed = supervisor
+        .refresh_status()
+        .await
+        .service(AiService::Embedding);
+    assert_eq!(refreshed.phase, RuntimePhase::Failed);
+    assert!(
+        refreshed
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains(reason)
+    );
+    let rejected = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "чай",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let rejected_result = timeout(Duration::from_secs(8), rejected.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &rejected_result.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    assert!(
+        calls.try_recv().is_err(),
+        "retired worker reached LLM provider"
+    );
+    assert!(
+        supervisor
+            .status_snapshot()
+            .service(AiService::Embedding)
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains(reason)
     );
 
     supervisor.stop(AiService::Embedding).await.unwrap();
@@ -238,6 +285,16 @@ async fn real_python_embedding_infer_timeout_is_terminal_and_restart_retries_sam
     app.shutdown().await.unwrap();
     supervisor.stop(AiService::Embedding).await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn real_python_embedding_infer_timeout_is_terminal_and_restart_retries_same_history_source() {
+    embedding_infer_failure_is_terminal_and_restart_recovers(false).await;
+}
+
+#[tokio::test]
+async fn real_python_embedding_process_crash_during_infer_is_terminal_and_retry_recovers() {
+    embedding_infer_failure_is_terminal_and_restart_recovers(true).await;
 }
 
 async fn prepared_worker(
@@ -416,8 +473,7 @@ async fn application_ai_knowledge_composes_actual_python_embedding_and_reranker_
     tokio::fs::remove_dir_all(root).await.unwrap();
 }
 
-#[tokio::test]
-async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same_history_source() {
+async fn reranker_infer_failure_is_terminal_and_restart_recovers(crash: bool) {
     use neuromita::{
         adapters::python_reranker::PythonReranker, knowledge::reranking::RerankPolicy,
     };
@@ -437,9 +493,16 @@ async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same
             .unwrap();
         if plugin_id == "mock_reranker" {
             let declaration = "    def infer(self, input_data):\n";
-            let injection = "    def infer(self, input_data):\n        from pathlib import Path\n        marker = Path(__file__).with_name('block_first_rerank.flag')\n        if marker.exists():\n            marker.unlink()\n            import time\n            time.sleep(9)\n";
+            let action = if crash {
+                "            import os\n            os._exit(74)\n"
+            } else {
+                "            import time\n            time.sleep(9)\n"
+            };
+            let injection = format!(
+                "    def infer(self, input_data):\n        from pathlib import Path\n        marker = Path(__file__).with_name('block_first_rerank.flag')\n        if marker.exists():\n            marker.unlink()\n{action}"
+            );
             assert!(source.contains(declaration));
-            source = source.replacen(declaration, injection, 1);
+            source = source.replacen(declaration, &injection, 1);
             tokio::fs::write(target.join("block_first_rerank.flag"), "once")
                 .await
                 .unwrap();
@@ -530,11 +593,16 @@ async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same
         .await
         .unwrap()
         .unwrap();
+    let reason = if crash {
+        "worker closed stdout"
+    } else {
+        "timed out"
+    };
     assert!(
         matches!(
             &result.state,
             RequestState::Finished(RequestOutcome::TextGenerationFailed(error))
-                if error.to_string().contains("timed out")
+                if error.to_string().contains(reason)
         ),
         "{:?}",
         result.state
@@ -546,19 +614,31 @@ async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same
     let status = supervisor.status_snapshot().service(AiService::Reranker);
     assert_eq!(status.phase, RuntimePhase::Failed);
     assert_eq!(status.generation, Some(old_generation));
-    assert!(
-        status
-            .last_error
-            .as_deref()
-            .unwrap_or("")
-            .contains("timed out")
-    );
+    assert!(status.last_error.as_deref().unwrap_or("").contains(reason));
     assert_eq!(
         supervisor
             .status_snapshot()
             .service(AiService::Embedding)
             .phase,
         RuntimePhase::ModelReady
+    );
+    let refreshed = supervisor
+        .refresh_status()
+        .await
+        .service(AiService::Reranker);
+    assert_eq!(refreshed.phase, RuntimePhase::Failed);
+    assert!(
+        refreshed
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains(reason)
+    );
+    assert!(
+        tokio::fs::try_exists(root.join("mock_reranker/block_first_rerank.flag"))
+            .await
+            .unwrap()
+            == false
     );
     supervisor.stop(AiService::Reranker).await.unwrap();
     let next_generation = supervisor.start(AiService::Reranker).await.unwrap();
@@ -595,4 +675,14 @@ async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same
     supervisor.stop(AiService::Reranker).await.unwrap();
     supervisor.stop(AiService::Embedding).await.unwrap();
     tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn real_python_reranker_infer_timeout_is_terminal_and_restart_retries_same_history_source() {
+    reranker_infer_failure_is_terminal_and_restart_recovers(false).await;
+}
+
+#[tokio::test]
+async fn real_python_reranker_process_crash_during_infer_is_terminal_and_retry_recovers() {
+    reranker_infer_failure_is_terminal_and_restart_recovers(true).await;
 }
