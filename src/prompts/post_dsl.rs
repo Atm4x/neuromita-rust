@@ -459,18 +459,18 @@ impl PostDslProgram {
                 {
                     matched.insert(name.as_str());
                     run(
-                            rule,
-                            "",
-                            BTreeMap::from([(name.clone(), value.clone())]),
-                            RuleRunContext {
-                                vars: &mut vars,
-                                locals: &mut locals,
-                                declared: &mut declared,
-                                updates: &mut updates,
-                                logs: &mut logs,
-                                remaining_matches: &mut remaining_matches,
-                            },
-                        )?;
+                        rule,
+                        "",
+                        BTreeMap::from([(name.clone(), value.clone())]),
+                        RuleRunContext {
+                            vars: &mut vars,
+                            locals: &mut locals,
+                            declared: &mut declared,
+                            updates: &mut updates,
+                            logs: &mut logs,
+                            remaining_matches: &mut remaining_matches,
+                        },
+                    )?;
                 }
             }
             if let Some(name) = fields.keys().find(|name| !matched.contains(name.as_str())) {
