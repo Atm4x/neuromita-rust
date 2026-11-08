@@ -764,7 +764,7 @@ pub fn render(window: &AppWindow, model: &AdministrationSnapshot) {
     {
         let profile = settings.values.characters.for_character(character);
         let matches_draft = profile.prompt_set.as_deref().unwrap_or_default()
-            == window.get_character_draft_prompt()
+            == window.get_character_draft_prompt().as_str()
             && encode(profile.presets.reply) == window.get_character_draft_reply()
             && encode(profile.presets.react) == window.get_character_draft_react()
             && encode(profile.presets.initiate) == window.get_character_draft_initiate();
