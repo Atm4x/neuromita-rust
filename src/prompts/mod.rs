@@ -648,6 +648,37 @@ mod tests {
     }
 
     #[test]
+    fn python_keyword_casing_and_local_updates_match_active_dsl() {
+        // NeuroMitaPython src/DSL/dsl_engine.py (97059b0a): SET LOCAL
+        // and the optional IF/ELSEIF THEN keyword are case-insensitive.
+        let root = root();
+        let script = root.join("Crazy/Default/Main/state.script");
+        fs::write(
+            &script,
+            "SET local score = 3\nSET score = score + 2\nIF score == 5 then\n RETURN str(score)\nELSE\n RETURN 'incorrect'\nENDIF\n",
+        )
+        .unwrap();
+        let catalog = PromptCatalog::new(&root);
+        let rendered = catalog
+            .render(CharacterId::Crazy, None, BTreeMap::new(), "main_template.txt")
+            .unwrap();
+        assert_eq!(rendered.context, ["5"]);
+
+        // The Python engine rejects an ELSE with arguments rather than
+        // silently treating it as an unconditional branch.
+        fs::write(
+            &script,
+            "IF False\n RETURN 'never'\nELSE unexpected\n RETURN 'incorrect'\nENDIF\n",
+        )
+        .unwrap();
+        let error = catalog
+            .render(CharacterId::Crazy, None, BTreeMap::new(), "main_template.txt")
+            .unwrap_err();
+        assert!(error.to_string().contains("ELSE must not have arguments"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn post_rules_use_selected_character_set_and_capture_config() {
         let root = root();
         let default_dir = root.join("Crazy/Default");
