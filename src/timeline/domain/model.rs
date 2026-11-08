@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -242,6 +243,10 @@ pub enum TimelineError {
     Invalid(&'static str),
     #[error("timeline storage failed: {0}")]
     Storage(String),
+    #[error(
+        "snapshot link was created at {destination:?}, but directory sync failed: {cause}; publication durability is unknown"
+    )]
+    SnapshotPublicationUncertain { destination: PathBuf, cause: String },
 }
 
 #[cfg(test)]

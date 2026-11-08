@@ -8,37 +8,59 @@ enum Action {
         source: PathBuf,
         destination: PathBuf,
     },
+    Inspect {
+        source: PathBuf,
+        expected: Option<String>,
+    },
     Help,
 }
 
 fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
-    match args.next().as_deref() {
+    let action = match args.next().as_deref() {
         Some(value) if value == "--help" => return Ok(Action::Help),
-        Some(value) if value == "create" => {}
-        _ => return Err("expected 'create' or '--help'".into()),
-    }
-    let (mut source, mut destination) = (None, None);
+        Some(value) if value == "create" => "create",
+        Some(value) if value == "inspect" => "inspect",
+        _ => return Err("expected 'create', 'inspect' or '--help'".into()),
+    };
+    let (mut source, mut destination, mut expected) = (None, None, None);
     while let Some(argument) = args.next() {
         if argument == "--database" {
             if source.is_some() {
                 return Err("duplicate --database".into());
             }
             source = Some(PathBuf::from(args.next().ok_or("--database needs a path")?));
-        } else if argument == "--output" {
+        } else if argument == "--output" && action == "create" {
             if destination.is_some() {
                 return Err("duplicate --output".into());
             }
             destination = Some(PathBuf::from(args.next().ok_or("--output needs a path")?));
+        } else if argument == "--expect" && action == "inspect" {
+            if expected.is_some() {
+                return Err("duplicate --expect".into());
+            }
+            let fingerprint = args
+                .next()
+                .ok_or("--expect needs a fingerprint")?
+                .into_string()
+                .map_err(|_| "--expect requires a UTF-8 fingerprint")?;
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("--expect requires a 64-character hexadecimal fingerprint".into());
+            }
+            expected = Some(fingerprint.to_ascii_lowercase());
         } else {
             return Err("unknown timeline-backup argument".into());
         }
     }
     let source = source.ok_or("explicit --database is required")?;
-    let destination = destination.ok_or("explicit --output is required")?;
     if !source.is_absolute() || !source.is_file() {
         return Err("--database must name an existing absolute SQLite file".into());
     }
+    if action == "inspect" {
+        return Ok(Action::Inspect { source, expected });
+    }
+    let destination = destination.ok_or("explicit --output is required")?;
     if !destination.is_absolute() || destination.parent().is_none_or(|p| !p.is_dir()) {
         return Err("--output must name an absolute path in an existing directory".into());
     }
@@ -52,7 +74,7 @@ pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     match parse(args).map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))? {
         Action::Help => {
             println!(
-                "neuromita timeline-backup create --database ABSOLUTE_SQLITE_PATH --output NEW_ABSOLUTE_SQLITE_PATH\n\nTrusted offline operator only. Stop other writers. Creates a validated, standalone SQLite backup including committed WAL frames. Never overwrites an existing file. Does not back up external SessionArchive, model assets, or other application files."
+                "neuromita timeline-backup create --database ABSOLUTE_SQLITE_PATH --output NEW_ABSOLUTE_SQLITE_PATH\nneuromita timeline-backup inspect --database ABSOLUTE_SQLITE_PATH [--expect 64_HEX_FINGERPRINT]\n\nTrusted offline operator only. Stop other writers. Create: validated standalone SQLite backup including committed WAL frames; never overwrites. Inspect: read-only integrity, canonical/derived and optional fingerprint validation of an existing SQLite Timeline file. Does not authenticate its origin or cover SessionArchive or other application assets."
             );
         }
         Action::Create {
@@ -63,6 +85,23 @@ pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn Error>> {
             println!(
                 "verified SQLite Timeline backup created: {}",
                 destination.display()
+            );
+            println!("timeline revision: {}", receipt.revision);
+            println!("canonical events: {}", receipt.canonical_events);
+            println!("source fingerprint: {}", receipt.source_fingerprint);
+        }
+        Action::Inspect { source, expected } => {
+            let receipt = SqliteTimelineRepository::inspect_verified_snapshot(&source)?;
+            if expected.is_some_and(|fingerprint| fingerprint != receipt.source_fingerprint) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "snapshot fingerprint mismatch",
+                )
+                .into());
+            }
+            println!(
+                "verified existing SQLite Timeline snapshot: {}",
+                source.display()
             );
             println!("timeline revision: {}", receipt.revision);
             println!("canonical events: {}", receipt.canonical_events);
@@ -111,5 +150,18 @@ mod tests {
             ]))
             .is_err()
         );
+        assert!(parse(args(&["inspect", "--database", "./relative.sqlite"])).is_err());
+        assert!(
+            parse(args(&[
+                "inspect",
+                "--database",
+                "/tmp/missing.sqlite",
+                "--expect",
+                "deadbeef"
+            ]))
+            .is_err()
+        );
+        assert!(parse(args(&["inspect", "--output", "/tmp/x"])).is_err());
+        assert!(parse(args(&["create", "--expect", "something"])).is_err());
     }
 }

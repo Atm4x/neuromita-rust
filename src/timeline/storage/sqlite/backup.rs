@@ -81,18 +81,52 @@ fn verify_sqlite_integrity(connection: &Connection) -> Result<(), TimelineError>
 }
 
 #[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<(), TimelineError> {
-    fs::File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(io_error)
+fn sync_directory(directory: &Path) -> io::Result<()> {
+    fs::File::open(directory).and_then(|file| file.sync_all())
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> Result<(), TimelineError> {
+fn sync_directory(_directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
 impl SqliteTimelineRepository {
+    /// Inspect a pre-existing Timeline SQLite snapshot without canonical writes or repair.
+    /// Validates SQLite integrity, foreign keys, canonical/derived indexes and a stable
+    /// optimistic fingerprint. Does not establish provenance or exclusive writer ownership.
+    pub fn inspect_verified_snapshot(
+        source: impl AsRef<Path>,
+    ) -> Result<VerifiedTimelineBackup, TimelineError> {
+        let source = source.as_ref();
+        if !source.is_absolute() || !source.is_file() {
+            return Err(storage(
+                "snapshot source must be an existing absolute SQLite file",
+            ));
+        }
+        #[cfg(unix)]
+        let identity = SourceIdentity::capture(source)?;
+        let preview = Self::inspect_derived_indexes(source)?;
+        if preview.requires_repair() {
+            return Err(storage(
+                "source derived indexes need repair before inspection",
+            ));
+        }
+        let read_only = Connection::open_read_only(source)?;
+        verify_sqlite_integrity(&read_only)?;
+        drop(read_only);
+        let final_preview = Self::inspect_derived_indexes(source)?;
+        if final_preview.requires_repair() || final_preview.confirmation != preview.confirmation {
+            return Err(TimelineError::ConcurrentWrite);
+        }
+        #[cfg(unix)]
+        identity.verify(source)?;
+        Ok(VerifiedTimelineBackup {
+            revision: preview.revision,
+            canonical_events: preview.canonical_events,
+            source_fingerprint: preview.confirmation,
+        })
+    }
+
     /// Create a new, stand-alone SQLite snapshot containing the complete Timeline database.
     /// Includes committed WAL frames, validates the original and backup, and never overwrites
     /// an existing destination. Requires an offline, trusted operator; this is not a live
@@ -147,6 +181,22 @@ impl SqliteTimelineRepository {
         destination: &Path,
         expected_fingerprint: Option<&str>,
         after_stage_verified: impl FnOnce() -> Result<(), TimelineError>,
+    ) -> Result<VerifiedTimelineBackup, TimelineError> {
+        Self::publish_verified_snapshot_with_sync(
+            source,
+            destination,
+            expected_fingerprint,
+            after_stage_verified,
+            |parent, _destination| sync_directory(parent),
+        )
+    }
+
+    fn publish_verified_snapshot_with_sync(
+        source: &Path,
+        destination: &Path,
+        expected_fingerprint: Option<&str>,
+        after_stage_verified: impl FnOnce() -> Result<(), TimelineError>,
+        sync_parent: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> Result<VerifiedTimelineBackup, TimelineError> {
         if !source.is_absolute() || !source.is_file() {
             return Err(storage(
@@ -208,9 +258,11 @@ impl SqliteTimelineRepository {
             .and_then(|file| file.sync_all())
             .map_err(io_error)?;
         fs::hard_link(&staged.0, destination).map_err(io_error)?;
-        if let Err(error) = sync_directory(parent) {
-            let _ = fs::remove_file(destination);
-            return Err(error);
+        if let Err(error) = sync_parent(parent, destination) {
+            return Err(TimelineError::SnapshotPublicationUncertain {
+                destination: destination.to_path_buf(),
+                cause: error.to_string(),
+            });
         }
         Ok(VerifiedTimelineBackup {
             revision: staged_preview.revision,
@@ -370,5 +422,74 @@ mod tests {
         assert!(!stage.exists());
         assert!(!wal.exists());
         assert!(!shm.exists());
+    }
+
+    #[test]
+    fn directory_sync_failure_keeps_published_valid_snapshot_for_inspection() {
+        let fixture = Fixture::new();
+        let original = SqliteTimelineRepository::inspect_derived_indexes(&fixture.source).unwrap();
+        let result = SqliteTimelineRepository::publish_verified_snapshot_with_sync(
+            &fixture.source,
+            &fixture.destination,
+            None,
+            || Ok(()),
+            |parent, destination| {
+                assert_eq!(parent, destination.parent().unwrap());
+                assert!(destination.is_file());
+                Err(io::Error::other("injected directory fsync failure"))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(TimelineError::SnapshotPublicationUncertain { destination, cause })
+                if destination == fixture.destination && cause.contains("injected directory fsync failure")
+        ));
+        fixture.assert_no_stage();
+        let inspected = SqliteTimelineRepository::inspect_verified_snapshot(&fixture.destination)
+            .expect("linked snapshot must remain inspectable after an uncertain sync");
+        assert_eq!(inspected.source_fingerprint, original.confirmation);
+    }
+
+    #[test]
+    fn directory_sync_failure_never_deletes_concurrently_replaced_destination() {
+        let fixture = Fixture::new();
+        let outsider = fixture.directory.join("other-party.txt");
+        fs::write(&outsider, b"unrelated writer's file").unwrap();
+        let result = SqliteTimelineRepository::publish_verified_snapshot_with_sync(
+            &fixture.source,
+            &fixture.destination,
+            None,
+            || Ok(()),
+            |_, destination| {
+                assert!(destination.is_file());
+                fs::rename(&outsider, destination).unwrap();
+                Err(io::Error::other(
+                    "injected fsync failure following replacement",
+                ))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(TimelineError::SnapshotPublicationUncertain { .. })
+        ));
+        assert_eq!(
+            fs::read(&fixture.destination).unwrap(),
+            b"unrelated writer's file"
+        );
+        fixture.assert_no_stage();
+    }
+
+    #[test]
+    fn independent_inspection_rejects_derived_drift_without_writing() {
+        let fixture = Fixture::new();
+        let first = SqliteTimelineRepository::inspect_verified_snapshot(&fixture.source).unwrap();
+        assert_eq!(first.canonical_events, 0);
+        let second = SqliteTimelineRepository::inspect_verified_snapshot(&fixture.source).unwrap();
+        assert_eq!(first, second);
+        let connection = Connection::open_existing(&fixture.source).unwrap();
+        connection.exec("DROP TABLE timeline_observers;").unwrap();
+        drop(connection);
+        assert!(SqliteTimelineRepository::inspect_verified_snapshot(&fixture.source).is_err());
+        fixture.assert_no_stage();
     }
 }

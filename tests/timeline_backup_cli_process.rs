@@ -265,3 +265,75 @@ fn backup_cli_refuses_damaged_derived_indexes_without_publishing_any_file() {
     assert!(!fixture.destination.exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("need repair"));
 }
+
+#[test]
+fn inspect_cli_is_read_only_and_fingerprint_pinned_with_wal_aware_verification() {
+    let fixture = Fixture::new();
+    let before = canonical_snapshot(&fixture.source);
+    let expected = SqliteTimelineRepository::inspect_derived_indexes(&fixture.source)
+        .unwrap()
+        .confirmation;
+    let inspect = |database: &PathBuf, confirmation: &str| {
+        Command::new(env!("CARGO_BIN_EXE_neuromita"))
+            .args([
+                "timeline-backup",
+                "inspect",
+                "--database",
+                database.to_str().unwrap(),
+                "--expect",
+                confirmation,
+            ])
+            .env_remove("GEMINI_API_KEY")
+            .output()
+            .unwrap()
+    };
+    let source = inspect(&fixture.source, &expected);
+    assert!(
+        source.status.success(),
+        "{}",
+        String::from_utf8_lossy(&source.stderr)
+    );
+    assert!(String::from_utf8_lossy(&source.stdout).contains(&expected));
+    assert_eq!(canonical_snapshot(&fixture.source), before);
+    assert!(!fixture.destination.exists());
+    assert!(fixture.call(&fixture.destination).status.success());
+    let backed_up = inspect(&fixture.destination, &expected);
+    assert!(
+        backed_up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&backed_up.stderr)
+    );
+    let wrong = inspect(&fixture.destination, &"f".repeat(64));
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("fingerprint mismatch"));
+    assert_eq!(canonical_snapshot(&fixture.destination), before);
+}
+
+#[test]
+fn inspect_cli_rejects_broken_derived_indexes_and_invalid_sqlite() {
+    let fixture = Fixture::new();
+    let invocation = |database: &PathBuf| {
+        Command::new(env!("CARGO_BIN_EXE_neuromita"))
+            .args([
+                "timeline-backup",
+                "inspect",
+                "--database",
+                database.to_str().unwrap(),
+            ])
+            .env_remove("GEMINI_API_KEY")
+            .output()
+            .unwrap()
+    };
+    assert!(invocation(&fixture.source).status.success());
+    fixture
+        .keeper
+        .execute("DELETE FROM timeline_observers WHERE sequence=1", [])
+        .unwrap();
+    let damaged = invocation(&fixture.source);
+    assert!(!damaged.status.success());
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("need repair"));
+    let invalid = fixture.directory.join("invalid.sqlite3");
+    fs::write(&invalid, b"not sqlite data").unwrap();
+    assert!(!invocation(&invalid).status.success());
+    assert!(!fixture.destination.exists());
+}
