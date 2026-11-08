@@ -1,0 +1,32 @@
+name: agent-a-cycle45-pr314-export
+on:
+  push:
+    branches: [bridge/agent-a-cycle45-export]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export verified PR314 original objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186
+          git fetch origin 816a78b51535f7f6f5744e7df931789360abb546
+          git branch agent-a-cycle45-pr314 816a78b51535f7f6f5744e7df931789360abb546
+          git merge-base --is-ancestor 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186 agent-a-cycle45-pr314
+          git bundle create cycle45-pr314.bundle refs/heads/agent-a-cycle45-pr314 '^1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186'
+          git bundle verify cycle45-pr314.bundle
+          sha256sum cycle45-pr314.bundle > cycle45-pr314.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle45-pr314
+          path: |
+            cycle45-pr314.bundle
+            cycle45-pr314.bundle.sha256
+          retention-days: 2
