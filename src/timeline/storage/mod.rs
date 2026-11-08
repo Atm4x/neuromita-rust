@@ -2,4 +2,6 @@
 mod sqlite;
 
 #[cfg(feature = "sqlite-system")]
-pub use sqlite::{DerivedIndexDrift, DerivedIndexPreview, SqliteTimelineRepository};
+pub use sqlite::{
+    DerivedIndexDrift, DerivedIndexPreview, SqliteTimelineRepository, VerifiedTimelineBackup,
+};

@@ -2,6 +2,8 @@ mod logging;
 mod settings_cli;
 mod terminal;
 #[cfg(feature = "sqlite-system")]
+mod timeline_backup_cli;
+#[cfg(feature = "sqlite-system")]
 mod timeline_index_cli;
 
 use std::{error::Error, num::NonZeroUsize, process::ExitCode, sync::Arc, time::Duration};
@@ -28,6 +30,15 @@ async fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("timeline-backup")) {
+        #[cfg(feature = "sqlite-system")]
+        return match timeline_backup_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("timeline-backup requires the sqlite-system feature");
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("timeline-index")) {
         #[cfg(feature = "sqlite-system")]
         return match timeline_index_cli::run(arguments.collect()) {

@@ -10,8 +10,10 @@ use crate::timeline::domain::{
 };
 use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
 
+mod backup;
 mod maintenance;
 mod native;
+pub use backup::VerifiedTimelineBackup;
 pub use maintenance::{DerivedIndexDrift, DerivedIndexPreview};
 use native::Connection;
 

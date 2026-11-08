@@ -62,6 +62,16 @@ impl Connection {
         Ok(Self(connection))
     }
 
+    pub(super) fn vacuum_into(&self, destination: &Path) -> Result<(), TimelineError> {
+        let destination = destination.to_str().ok_or(TimelineError::Invalid(
+            "SQLite backup destination must be UTF-8",
+        ))?;
+        self.0
+            .execute("VACUUM main INTO ?1", [destination])
+            .map_err(|error| storage(error.to_string()))?;
+        Ok(())
+    }
+
     pub(super) fn exec(&self, sql: &str) -> Result<(), TimelineError> {
         self.0
             .execute_batch(sql)
