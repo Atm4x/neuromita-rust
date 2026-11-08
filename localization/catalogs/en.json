@@ -60,8 +60,8 @@
     "translation": "Checking the Rust application release…"
   },
   "launcher.native-update.busy": {
-    "source": "Проверка релиза Rust-приложения уже выполняется.",
-    "translation": "A Rust application release check is already running."
+    "source": "Операция с обновлением Rust-приложения уже выполняется.",
+    "translation": "A Rust application update operation is already in progress."
   },
   "launcher.native-update.failed": {
     "source": "Не удалось проверить релиз Rust-приложения: {error}",
@@ -1910,5 +1910,25 @@
   "settings.ai-engine.maintenance-unavailable": {
     "source": "Обслуживание недоступно",
     "translation": "Maintenance is unavailable"
+  },
+  "launcher.actions.download-native-update": {
+    "source": "Скачать и проверить обновление",
+    "translation": "Download and verify update"
+  },
+  "launcher.native-update.downloading": {
+    "source": "Получение метаданных и проверенное скачивание Rust-приложения… Установка не выполняется.",
+    "translation": "Fetching metadata and verifying downloaded Rust application… No installation will be performed."
+  },
+  "launcher.native-update.verified-reused": {
+    "source": "Релиз {tag}: файл {asset} повторно проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+    "translation": "Release {tag}: cached file {asset} verified again (SHA-256: {hash}, {bytes} bytes). Not installed."
+  },
+  "launcher.native-update.verified-new": {
+    "source": "Релиз {tag}: файл {asset} скачан и проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+    "translation": "Release {tag}: file {asset} downloaded and verified (SHA-256: {hash}, {bytes} bytes). Not installed."
+  },
+  "launcher.native-update.download-failed": {
+    "source": "Не удалось скачать и проверить обновление: {error}. Установка не выполнялась.",
+    "translation": "Failed to download and verify update: {error}. Nothing was installed."
   }
 }

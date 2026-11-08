@@ -443,20 +443,28 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let finished_checker = update_checker.clone();
     let update_handler = dispatch.clone();
     window.on_native_update_finished(move || {
-        if let Some(result) = finished_checker.take_result() {
+        if let Some(completion) = finished_checker.take_result() {
             update_handler(ShellCommand::LauncherFeedback(
-                super::update_check::finished_notice(result),
+                super::update_check::completion_notice(completion),
             ));
         }
     });
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
+    let download_directory = root.path().to_path_buf();
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
             LauncherAction::CheckUpdates => {
                 let notice = match update_checker.check() {
                     Ok(()) => super::update_check::started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            LauncherAction::DownloadNativeUpdate => {
+                let notice = match update_checker.download(download_directory.clone()) {
+                    Ok(()) => super::update_check::download_started_notice(),
                     Err(error) => super::update_check::start_error_notice(error),
                 };
                 handler(ShellCommand::LauncherFeedback(notice));
@@ -786,6 +794,7 @@ impl Options {
 fn launcher_action(action: LauncherMenuAction) -> LauncherAction {
     match action {
         LauncherMenuAction::CheckUpdates => LauncherAction::CheckUpdates,
+        LauncherMenuAction::DownloadNativeUpdate => LauncherAction::DownloadNativeUpdate,
         LauncherMenuAction::InstallUnity => LauncherAction::InstallUnity,
         LauncherMenuAction::VerifyUnity => LauncherAction::VerifyUnity,
         LauncherMenuAction::OpenUnityFolder => LauncherAction::OpenUnityFolder,

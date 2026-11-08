@@ -1,6 +1,7 @@
 //! Read-only native application update check, independent of AI Core lifecycle.
 
 use std::{
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -10,10 +11,14 @@ use std::{
 };
 
 use slint::ComponentHandle;
+use tokio_util::sync::CancellationToken;
 
 use neuromita::{
     localization::{LocalizedText, i18n},
-    updater::check::{NativeUpdateResult, check_native_update},
+    portable::PortableDataRoot,
+    updater::check::{
+        NativeDownloadResult, NativeUpdateResult, check_native_update, download_native_update,
+    },
 };
 
 use super::view::AppWindow;
@@ -21,7 +26,8 @@ use super::view::AppWindow;
 pub struct NativeUpdateChecker {
     window: slint::Weak<AppWindow>,
     pending: Arc<AtomicBool>,
-    completed: Arc<Mutex<Option<Result<NativeUpdateResult, String>>>>,
+    completed: Arc<Mutex<Option<NativeUpdateCompletion>>>,
+    cancellation: CancellationToken,
 }
 
 impl NativeUpdateChecker {
@@ -30,15 +36,25 @@ impl NativeUpdateChecker {
             window: window.as_weak(),
             pending: Arc::new(AtomicBool::new(false)),
             completed: Arc::new(Mutex::new(None)),
+            cancellation: CancellationToken::new(),
         }
     }
 
     pub fn check(&self) -> Result<(), CheckStartError> {
+        self.start(NativeUpdateTask::Check)
+    }
+
+    pub fn download(&self, data_directory: PathBuf) -> Result<(), CheckStartError> {
+        self.start(NativeUpdateTask::Download(data_directory))
+    }
+
+    fn start(&self, task: NativeUpdateTask) -> Result<(), CheckStartError> {
         if self.pending.swap(true, Ordering::AcqRel) {
             return Err(CheckStartError::Busy);
         }
         let window = self.window.clone();
         let completed = Arc::clone(&self.completed);
+        let cancel = self.cancellation.child_token();
         let spawn = thread::Builder::new()
             .name("neuromita-native-release-check".into())
             .spawn(move || {
@@ -48,19 +64,43 @@ impl NativeUpdateChecker {
                     .map_err(|error| error.to_string())
                     .and_then(|runtime| {
                         runtime.block_on(async {
-                            match tokio::time::timeout(
-                                Duration::from_secs(18),
-                                check_native_update(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(result)) => Ok(result),
-                                Ok(Err(error)) => Err(error.to_string()),
-                                Err(_) => Err("Network request timed out".to_owned()),
+                            match task {
+                                NativeUpdateTask::Check => {
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(18),
+                                        check_native_update(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => Ok(NativeUpdateCompletion::Checked(
+                                            result.map_err(|error| error.to_string()),
+                                        )),
+                                        Err(_) => Err("Release check timed out".to_owned()),
+                                    }
+                                }
+                                NativeUpdateTask::Download(directory) => {
+                                    let root = PortableDataRoot::resolve(Some(&directory))
+                                        .map_err(|error| error.to_string())?;
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(180),
+                                        download_native_update(&root, &cancel),
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => Ok(NativeUpdateCompletion::Downloaded(
+                                            result.map_err(|error| error.to_string()),
+                                        )),
+                                        Err(_) => Err("Download timed out".to_owned()),
+                                    }
+                                }
                             }
                         })
                     });
-                *completed.lock().unwrap_or_else(|error| error.into_inner()) = Some(result);
+                let completion = match result {
+                    Ok(completion) => completion,
+                    Err(error) => NativeUpdateCompletion::Failed(error),
+                };
+                *completed.lock().unwrap_or_else(|error| error.into_inner()) = Some(completion);
                 let _ = window.upgrade_in_event_loop(|window| {
                     window.invoke_native_update_finished();
                 });
@@ -72,7 +112,7 @@ impl NativeUpdateChecker {
         Ok(())
     }
 
-    pub fn take_result(&self) -> Option<Result<NativeUpdateResult, String>> {
+    pub fn take_result(&self) -> Option<NativeUpdateCompletion> {
         let result = self
             .completed
             .lock()
@@ -83,6 +123,23 @@ impl NativeUpdateChecker {
         }
         result
     }
+}
+
+impl Drop for NativeUpdateChecker {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+enum NativeUpdateTask {
+    Check,
+    Download(PathBuf),
+}
+
+pub enum NativeUpdateCompletion {
+    Checked(Result<NativeUpdateResult, String>),
+    Downloaded(Result<NativeDownloadResult, String>),
+    Failed(String),
 }
 
 pub enum CheckStartError {
@@ -101,11 +158,60 @@ pub fn start_error_notice(error: CheckStartError) -> LocalizedText {
     match error {
         CheckStartError::Busy => i18n(
             "launcher.native-update.busy",
-            "Проверка релиза Rust-приложения уже выполняется.",
+            "Операция с обновлением Rust-приложения уже выполняется.",
         ),
         CheckStartError::Spawn(error) => i18n(
             "launcher.native-update.failed",
             "Не удалось проверить релиз Rust-приложения: {error}",
+        )
+        .arg("error", error),
+    }
+}
+
+pub fn download_started_notice() -> LocalizedText {
+    i18n(
+        "launcher.native-update.downloading",
+        "Получение метаданных и проверенное скачивание Rust-приложения… Установка не выполняется.",
+    )
+}
+
+pub fn completion_notice(completion: NativeUpdateCompletion) -> LocalizedText {
+    match completion {
+        NativeUpdateCompletion::Checked(result) => finished_notice(result),
+        NativeUpdateCompletion::Downloaded(result) => download_finished_notice(result),
+        NativeUpdateCompletion::Failed(error) => finished_notice(Err(error)),
+    }
+}
+
+pub fn download_finished_notice(result: Result<NativeDownloadResult, String>) -> LocalizedText {
+    match result {
+        Ok(NativeDownloadResult::NotEligible(reason)) => finished_notice(Ok(reason)),
+        Ok(NativeDownloadResult::Verified {
+            tag,
+            asset_name,
+            sha256,
+            size,
+            reused,
+        }) => {
+            let key = if reused {
+                "launcher.native-update.verified-reused"
+            } else {
+                "launcher.native-update.verified-new"
+            };
+            let source = if reused {
+                "Релиз {tag}: файл {asset} повторно проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена."
+            } else {
+                "Релиз {tag}: файл {asset} скачан и проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена."
+            };
+            i18n(key, source)
+                .arg("tag", tag)
+                .arg("asset", asset_name)
+                .arg("hash", sha256)
+                .arg("bytes", size.to_string())
+        }
+        Err(error) => i18n(
+            "launcher.native-update.download-failed",
+            "Не удалось скачать и проверить обновление: {error}. Установка не выполнялась.",
         )
         .arg("error", error),
     }

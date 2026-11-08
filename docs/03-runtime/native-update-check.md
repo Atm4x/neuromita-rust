@@ -29,3 +29,24 @@ not-published, current, older, candidate asset, unsupported platform, unverifiab
 or network failure distinctly. A candidate is **not automatically applied or staged**.
 Download, file replacement, restart, rollback, actual installed binary identity,
 archive support and UserData preservation remain separate acceptance work for #44.
+
+## Explicit verified native download (no installation)
+
+Home → More → **Download and verify update** performs a fresh lookup of the latest
+`Atm4x/neuromita-rust` release, repeats exact-platform asset and strict version
+selection, then calls the existing `UpdateStager` on its publisher-declared raw
+executable. No previous "available" banner is trusted as an authorization to
+download. Assets from the Python or Unity release feed are never eligible.
+
+The result is stored only in the selected portable `UserData/updates/staged`
+directory after SHA-256 and length checks. A previously cached file is
+re-hashed before reporting success. A corrupt cache, truncated or oversized
+download, publisher digest mismatch, cancellation and other I/O failures are
+reported as failures, not success. While verification is active the GUI keeps
+only one native update operation in flight and does not block the Slint event
+loop. On GUI controller teardown the cancellation token aborts staging.
+
+**Verified download is not installation.** No archive extraction, replacement of
+a live executable, updater helper handoff, restart, rollback or mutation of
+settings is attempted. The publisher must first ship a release with the exact
+raw native artifact name and GitHub asset SHA-256 metadata.
