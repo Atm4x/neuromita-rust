@@ -16,12 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 0b37fd54b93a093b2288737f014876cc383506c5
           fetch-depth: 0
       - name: Verify pinned source parent
         run: |
-          git merge-base --is-ancestor "fb3fce40a733244bca5c2be77d2df9f8278b348a" HEAD
-          test "$(git rev-parse HEAD^{tree})" != "22aee529d2a1755261e20f4020b32cab77352767"
-          git diff --quiet "fb3fce40a733244bca5c2be77d2df9f8278b348a" HEAD -- src/ tests/ docs/
+          test "$(git rev-parse HEAD)" = "0b37fd54b93a093b2288737f014876cc383506c5"
+          test "$(git rev-parse HEAD^{tree})" = "6ff5acbcdb695943840ad55e67945d738b6053b6"
+          git diff --check "a2103729457269197c8cd577dff1df6f851df1fc" HEAD
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
