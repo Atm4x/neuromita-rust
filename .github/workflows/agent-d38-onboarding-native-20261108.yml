@@ -25,8 +25,9 @@ jobs:
           git fetch --no-tags origin refs/heads/codex/onboarding-resumable-guide-20261108
           test "$(git rev-parse FETCH_HEAD)" = "$BASE"
           test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          cp .git-bridge/agent-d38-original.patch /tmp/d38-original.patch
           git checkout --detach "$BASE"
-          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date "$GITHUB_WORKSPACE/.git-bridge/agent-d38-original.patch"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d38-original.patch
           test "$(git rev-parse HEAD)" = "$HEAD"
           test "$(git rev-parse HEAD^{tree})" = "$TREE"
           test "$(git rev-parse HEAD^)" = "$BASE"
