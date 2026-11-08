@@ -515,7 +515,10 @@ fn settings_render_and_bindings(window: &AppWindow) {
         let Some(super::super::runtime::Command::UpdatePreset(_, edit)) = captured.last() else {
             panic!("expected preset update");
         };
-        let connection = edit.connection.as_ref().expect("expected configured preset");
+        let connection = edit
+            .connection
+            .as_ref()
+            .expect("expected configured preset");
         assert!(!connection.stream);
         assert_eq!(connection.max_retries, 4);
     }
