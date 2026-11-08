@@ -418,6 +418,13 @@ impl SettingsPresenter {
     pub fn snapshot(&self) -> Result<Arc<SettingsSnapshot>, SettingsError> {
         self.owner.snapshot_all()
     }
+
+    /// Retry a failed asynchronous Settings Owner write without mutating profiles.
+    /// Success here means only that a new attempt was scheduled; observe persistence
+    /// for the actual on-disk outcome.
+    pub fn request_save(&self) -> Result<(), SettingsError> {
+        self.owner.request_save()
+    }
     pub fn observe(&self) -> Result<watch::Receiver<Arc<SettingsSnapshot>>, SettingsError> {
         self.owner.observe()
     }
