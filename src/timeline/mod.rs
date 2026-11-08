@@ -430,6 +430,82 @@ impl SessionTimeline {
         Ok(new_selection)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Owner-only checkpoint fork. This is a storage/selection primitive, NOT
+    /// accepted Regenerate: queue admission and arbitrary player event anchors
+    /// are intentionally out of scope until one combined protocol exists.
+    pub(crate) fn fork_and_select_checkpoint(
+        &mut self,
+        checkpoint: EventId,
+        child: BranchId,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<TimelineSelection, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if self.branch != expected.branch_id
+            || self.store.branch(self.branch)?.head_sequence != expected_parent_head
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        if self.store.branch(child).is_ok() {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let marker = self.store.event(self.branch, checkpoint)?;
+        if marker.draft.kind != EventKind::Checkpoint {
+            return Err(domain::TimelineError::Invalid("fork requires a checkpoint"));
+        }
+        let next_generation = expected
+            .generation
+            .checked_add(1)
+            .filter(|generation| *generation <= i64::MAX as u64)
+            .ok_or(domain::TimelineError::Invalid(
+                "selection generation overflow",
+            ))?;
+        let epochs = CharacterId::ALL
+            .into_iter()
+            .map(|character| {
+                self.store
+                    .context_epoch_at(self.branch, character, Some(marker.sequence))
+                    .map(|epoch| (character, epoch))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        #[cfg(feature = "sqlite-system")]
+        let selection = if let Some(repository) = &mut self.selection_repository {
+            repository.fork_and_select_checkpoint(
+                self.branch,
+                expected_parent_head,
+                checkpoint,
+                child,
+                expected,
+            )?
+        } else {
+            self.store.fork(self.branch, checkpoint, child)?;
+            TimelineSelection {
+                branch_id: child,
+                generation: next_generation,
+            }
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        let selection = {
+            self.store.fork(self.branch, checkpoint, child)?;
+            TimelineSelection {
+                branch_id: child,
+                generation: next_generation,
+            }
+        };
+        self.workspace.install_selection(selection);
+        self.branch = child;
+        for (character, epoch) in epochs {
+            self.context_updates[&character].send_replace(epoch);
+        }
+        self.selection_updates.send_replace(selection);
+        for character in CharacterId::ALL {
+            self.notify_memory_changed(character);
+        }
+        Ok(selection)
+    }
+
     #[cfg(test)]
     pub(crate) fn append_test_fact(
         &mut self,
@@ -1409,6 +1485,114 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn transient_checkpoint_fork_preserves_original_and_excludes_downstream_reset() {
+        let mut timeline = SessionTimeline::new();
+        let parent = timeline.branch;
+        let expected = timeline.selection();
+        let original = EventId::new();
+        timeline
+            .publish_player_message(
+                CharacterId::Crazy,
+                original,
+                Arc::from("with original media id"),
+            )
+            .unwrap();
+        let mut marker = EventDraft::new(EventKind::Checkpoint);
+        marker.payload.insert("snapshot".into(), json!({}));
+        let checkpoint_id = marker.id;
+        timeline.append_test_fact("mark", marker).unwrap();
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Crazy);
+        timeline.append_test_fact("reset", reset).unwrap();
+        assert_eq!(
+            timeline.store.context_epoch(parent, CharacterId::Crazy),
+            Ok(3)
+        );
+        let child = BranchId::new();
+        let selection = timeline
+            .fork_and_select_checkpoint(checkpoint_id, child, expected, 3)
+            .unwrap();
+        assert_eq!(selection.branch_id, child);
+        assert_eq!(selection.generation, expected.generation + 1);
+        assert_eq!(timeline.anchor().through, 3);
+        assert_eq!(timeline.store.world(parent).unwrap().len(), 3);
+        assert_eq!(timeline.store.world(child).unwrap().len(), 3);
+        assert_eq!(
+            timeline.store.event(child, original).unwrap().draft.id,
+            original
+        );
+        assert_eq!(
+            timeline
+                .store
+                .knows(child, CharacterId::Crazy, original, None),
+            Ok(true)
+        );
+        assert_eq!(
+            timeline
+                .store
+                .knows(child, CharacterId::Kind, original, None),
+            Ok(false)
+        );
+        assert_eq!(
+            timeline.store.context_epoch(child, CharacterId::Crazy),
+            Ok(0)
+        );
+        let another = BranchId::new();
+        assert_eq!(
+            timeline.fork_and_select_checkpoint(checkpoint_id, another, expected, 3),
+            Err(domain::TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(
+            timeline.store.branch(another),
+            Err(domain::TimelineError::NotFound)
+        );
+    }
+
+    #[cfg(feature = "sqlite-system")]
+    #[test]
+    fn persistent_checkpoint_fork_is_restored_as_selected_after_reopen() {
+        let path = std::env::temp_dir().join(format!("neuromita-b58-fork-{}.db", Uuid::new_v4()));
+        let session = SessionId::new();
+        let parent = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root: parent,
+        })
+        .unwrap();
+        let expected = timeline.selection();
+        let original = EventId::new();
+        timeline
+            .publish_player_message(CharacterId::Crazy, original, Arc::from("original"))
+            .unwrap();
+        let mut marker = EventDraft::new(EventKind::Checkpoint);
+        marker.payload.insert("snapshot".into(), json!({}));
+        let checkpoint_id = marker.id;
+        timeline.append_test_fact("mark", marker).unwrap();
+        let child = BranchId::new();
+        let selection = timeline
+            .fork_and_select_checkpoint(checkpoint_id, child, expected, 2)
+            .unwrap();
+        drop(timeline);
+        let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: path.clone(),
+            session,
+            root: parent,
+        })
+        .unwrap();
+        assert_eq!(reopened.selection(), selection);
+        assert_eq!(reopened.anchor().through, 3);
+        assert_eq!(
+            reopened.store.event(child, original).unwrap().draft.id,
+            original
+        );
+        drop(reopened);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
 
     #[test]
     fn legacy_accept_does_not_answer_a_forgotten_trigger() {

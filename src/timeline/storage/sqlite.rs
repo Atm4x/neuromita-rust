@@ -212,6 +212,34 @@ impl SqliteTimelineRepository {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Atomically persist a checkpoint fork AND select it. Never split this
+    /// into TimelineRepository::fork plus TimelineSelectionRepository::select_branch:
+    /// those operations otherwise commit on distinct SQLite connections.
+    pub(crate) fn fork_and_select_checkpoint(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        checkpoint: EventId,
+        child: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.with_write(|connection, store| {
+            if expected.branch_id != parent || read_selection(connection)? != Some(expected) {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            if store.branch(parent)?.head_sequence != expected_parent_head {
+                return Err(TimelineError::ConcurrentWrite);
+            }
+            if store.branch(child).is_ok() {
+                return Err(TimelineError::Conflict);
+            }
+            store.fork(parent, checkpoint, child)?;
+            save_branch(connection, store, child)?;
+            select_branch_in_transaction(connection, child, Some(expected))
+        })
+    }
+
     fn connection(&self) -> Result<Connection, TimelineError> {
         Connection::open(&self.path)
     }
@@ -907,6 +935,30 @@ fn read_selection(connection: &Connection) -> Result<Option<TimelineSelection>, 
     }
 }
 
+fn select_branch_in_transaction(
+    connection: &Connection,
+    branch: BranchId,
+    expected: Option<TimelineSelection>,
+) -> Result<TimelineSelection, TimelineError> {
+    branch_info(connection, branch)?;
+    let current = read_selection(connection)?;
+    if current != expected {
+        return Err(TimelineError::ConcurrentWrite);
+    }
+    let generation = current
+        .map_or(Some(1), |value| value.generation.checked_add(1))
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or(TimelineError::Invalid("selection generation overflow"))?;
+    connection.write(
+        "INSERT INTO timeline_active_selection(slot,branch_id,generation) VALUES('core', ?, ?) ON CONFLICT(slot) DO UPDATE SET branch_id=excluded.branch_id,generation=excluded.generation",
+        &[&branch.0.to_string(), &generation.to_string()],
+    )?;
+    Ok(TimelineSelection {
+        branch_id: branch,
+        generation,
+    })
+}
+
 impl TimelineSelectionRepository for SqliteTimelineRepository {
     fn selection(&self) -> Result<Option<TimelineSelection>, TimelineError> {
         read_selection(&self.connection()?)
@@ -919,25 +971,7 @@ impl TimelineSelectionRepository for SqliteTimelineRepository {
     ) -> Result<TimelineSelection, TimelineError> {
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            branch_info(&connection, branch)?;
-            let current = read_selection(&connection)?;
-            if current != expected {
-                return Err(TimelineError::ConcurrentWrite);
-            }
-            let generation = current
-                .map_or(Some(1), |value| value.generation.checked_add(1))
-                .filter(|value| *value <= i64::MAX as u64)
-                .ok_or(TimelineError::Invalid("selection generation overflow"))?;
-            connection.write(
-                "INSERT INTO timeline_active_selection(slot,branch_id,generation) VALUES('core', ?, ?) ON CONFLICT(slot) DO UPDATE SET branch_id=excluded.branch_id,generation=excluded.generation",
-                &[&branch.0.to_string(), &generation.to_string()],
-            )?;
-            Ok(TimelineSelection {
-                branch_id: branch,
-                generation,
-            })
-        })();
+        let result = select_branch_in_transaction(&connection, branch, expected);
         if result.is_ok() {
             connection.exec("COMMIT")?;
         } else {
@@ -967,6 +1001,138 @@ mod tests {
                 let _ = std::fs::remove_file(format!("{}{}", self.0.display(), suffix));
             }
         }
+    }
+
+    fn checkpoint() -> EventDraft {
+        let mut draft = EventDraft::new(EventKind::Checkpoint);
+        draft.payload.insert("snapshot".into(), json!({}));
+        draft
+    }
+
+    #[test]
+    fn checkpoint_fork_selection_is_one_durable_transaction() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let child = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let initial = repo.select_branch(parent, None).unwrap();
+        let mut secret = EventDraft::new(EventKind::PlayerMessage);
+        secret.actor = Some("player".into());
+        secret.observers.insert(CharacterId::Crazy);
+        secret.payload.insert(
+            "media".into(),
+            json!([{"asset_id": "asset-unchanged", "mime": "image/png"}]),
+        );
+        let original_draft = secret.clone();
+        let original = secret.id;
+        repo.append(parent, 0, "original", json!({}), vec![secret])
+            .unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 1, "mark", json!({}), vec![mark])
+            .unwrap();
+        let mut later = EventDraft::new(EventKind::CharacterContextReset);
+        later.observers.insert(CharacterId::Crazy);
+        repo.append(parent, 2, "later", json!({}), vec![later])
+            .unwrap();
+        let chosen = repo
+            .fork_and_select_checkpoint(parent, 3, checkpoint_id, child, initial)
+            .unwrap();
+        assert_eq!(chosen.branch_id, child);
+        assert_eq!(chosen.generation, initial.generation + 1);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.selection().unwrap(), Some(chosen));
+        assert_eq!(reopened.branch(child).unwrap().fork_sequence, 2);
+        assert_eq!(reopened.branch(child).unwrap().head_sequence, 3);
+        assert_eq!(reopened.world(parent).unwrap().len(), 3);
+        assert_eq!(reopened.world(child).unwrap().len(), 3);
+        assert_eq!(
+            reopened.event(child, original).unwrap().draft,
+            original_draft
+        );
+        assert_eq!(
+            reopened.knows(child, CharacterId::Crazy, original, None),
+            Ok(true)
+        );
+        assert_eq!(
+            reopened.knows(child, CharacterId::Kind, original, None),
+            Ok(false)
+        );
+        assert_eq!(reopened.context_epoch(child, CharacterId::Crazy), Ok(0));
+        assert_eq!(reopened.context_epoch(parent, CharacterId::Crazy), Ok(3));
+    }
+
+    #[test]
+    fn failed_selection_insert_rolls_back_fork_and_revision() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let child = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 0, "mark", json!({}), vec![mark])
+            .unwrap();
+        let before = revision(&Connection::open(&db.0).unwrap()).unwrap();
+        let connection = Connection::open(&db.0).unwrap();
+        connection.exec("CREATE TRIGGER fail_fork_selection BEFORE UPDATE ON timeline_active_selection BEGIN SELECT RAISE(ABORT, 'selection injection'); END").unwrap();
+        assert!(matches!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, child, selection),
+            Err(TimelineError::Storage(_))
+        ));
+        drop(connection);
+        let reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.branch(child), Err(TimelineError::NotFound));
+        assert_eq!(reopened.selection().unwrap(), Some(selection));
+        assert_eq!(revision(&Connection::open(&db.0).unwrap()).unwrap(), before);
+        Connection::open(&db.0)
+            .unwrap()
+            .exec("DROP TRIGGER fail_fork_selection")
+            .unwrap();
+        repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, child, selection)
+            .unwrap();
+        assert!(repo.branch(child).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_fork_rejects_stale_head_and_aba_selection_without_mutation() {
+        let db = TestDb::new();
+        let parent = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let mark = checkpoint();
+        let checkpoint_id = mark.id;
+        repo.append(parent, 0, "mark", json!({}), vec![mark])
+            .unwrap();
+        let stale_head_child = BranchId::new();
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 0, checkpoint_id, stale_head_child, selection),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(stale_head_child), Err(TimelineError::NotFound));
+        let other = BranchId::new();
+        let later = repo
+            .fork_and_select_checkpoint(parent, 1, checkpoint_id, other, selection)
+            .unwrap();
+        let again = repo.select_branch(parent, Some(later)).unwrap();
+        assert_eq!(again.branch_id, parent);
+        let aba_child = BranchId::new();
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, selection),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(aba_child), Err(TimelineError::NotFound));
+        let ok = repo
+            .fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, again)
+            .unwrap();
+        assert_eq!(ok.generation, again.generation + 1);
+        assert_eq!(
+            repo.fork_and_select_checkpoint(parent, 1, checkpoint_id, aba_child, again),
+            Err(TimelineError::ConcurrentWrite)
+        );
     }
 
     #[test]
