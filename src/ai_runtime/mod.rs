@@ -102,6 +102,8 @@ pub enum AiRuntimeError {
     AlreadyRunning,
     #[error("worker generation changed before request completed")]
     StaleGeneration,
+    #[error("worker recovery requires a failed worker generation")]
+    WorkerNotFailed,
     #[error("python worker failed to start: {0}")]
     Spawn(#[source] std::io::Error),
     #[error("python worker IPC failed: {0}")]
@@ -468,6 +470,7 @@ struct Activation<'a> {
     models: &'a [ModelActivation],
     profile: Option<&'a RuntimeProfile>,
     verify: Option<&'a (dyn Fn() -> Result<std::fs::File, AiRuntimeError> + Send + Sync)>,
+    expected_failed: Option<(AiService, Uuid)>,
 }
 
 impl AiService {
@@ -760,6 +763,7 @@ impl AiSupervisor {
             models,
             profile: Some(profile),
             verify: Some(verify),
+            expected_failed: None,
         })
         .await
     }
@@ -827,6 +831,28 @@ impl AiSupervisor {
             models,
             profile: None,
             verify: None,
+            expected_failed: None,
+        })
+        .await
+    }
+
+    /// Replace only an already failed generation, using the exact previously selected models.
+    /// Both the generation and the failure state are checked under the activation lock.
+    pub async fn restart_failed_composed(
+        &self,
+        service: AiService,
+        expected_generation: Uuid,
+        composition: &composition::RuntimeComposition,
+        models: &[ModelActivation],
+    ) -> Result<Uuid, AiRuntimeError> {
+        self.activate(Activation {
+            service,
+            services: composition.services(),
+            layers: composition.paths(),
+            models,
+            profile: None,
+            verify: None,
+            expected_failed: Some((service, expected_generation)),
         })
         .await
     }
@@ -839,6 +865,7 @@ impl AiSupervisor {
             models,
             profile,
             verify,
+            expected_failed,
         } = request;
         use std::collections::HashSet;
         let selected: HashSet<_> = services.iter().copied().collect();
@@ -856,6 +883,31 @@ impl AiSupervisor {
         let key = self.topology.key(service);
         let slot = self.activation_lock(key).await;
         let _guard = slot.lock().await;
+        if let Some((requested, expected_generation)) = expected_failed {
+            let current = self.workers.lock().await.get(&key).cloned();
+            let Some(current) = current else {
+                return Err(AiRuntimeError::NotRunning);
+            };
+            let worker = current.lock().await;
+            if worker.generation != expected_generation
+                || self.status_snapshot().service(requested).generation != Some(expected_generation)
+            {
+                return Err(AiRuntimeError::StaleGeneration);
+            }
+            if !worker.failed
+                || self.status_snapshot().service(requested).phase != RuntimePhase::Failed
+            {
+                return Err(AiRuntimeError::WorkerNotFailed);
+            }
+            if worker.selections.len() != models.len()
+                || models.iter().any(|model| {
+                    worker.selections.get(&model.service)
+                        != Some(&(model.plugin_id.clone(), model.asset_revision.clone()))
+                })
+            {
+                return Err(AiRuntimeError::ActivationSuperseded);
+            }
+        }
         let mut runtime_profiles = HashMap::new();
         if let Some(profile) = profile {
             let previous = self.workers.lock().await.get(&key).cloned();
