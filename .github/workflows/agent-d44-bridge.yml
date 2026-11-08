@@ -1,0 +1,60 @@
+name: Agent D44 exact native-update patch bridge
+on:
+  push:
+    branches:
+      - codex/agent-d44-bridge-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify D44 patch digest, reconstruct exact commit and publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7e339281cec2e3987c2571e44e493d1b14aaa210
+          EXPECTED=d74631cc585a15d915243d518b82b37eae10f51c
+          TREE=e2cb3920202c32a1ca56c40aa4016137207abd3a
+          echo '53b1ae7db46f2e535bc2914e27a795bc78d6c56bbc3886a21ef63ebb62c10c91  /tmp/d44.patch.br' >/tmp/compressed.sha
+          echo '175114730acfc9898e30425b155353ebf24e7fab2b98735cf113078cc487ae71  /tmp/d44.patch' >/tmp/plain.sha
+          base64 -d .agent-bridge/d44.patch.br.b64 > /tmp/d44.patch.br
+          sha256sum -c /tmp/compressed.sha
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d44.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d44.patch.br')))"
+          sha256sum -c /tmp/plain.sha
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d44.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d44-native-update-check-20261108
+  windows-native:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d44-native-update-check-20261108
+      - name: Verify exact Agent D44 commit
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "d74631cc585a15d915243d518b82b37eae10f51c"
+          test "$(git rev-parse HEAD^{tree})" = "e2cb3920202c32a1ca56c40aa4016137207abd3a"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+      - name: Native update semantics on Windows
+        run: cargo test --locked --offline --lib updater::native::tests
+      - name: GUI application compile on Windows
+        run: cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Complete Windows target check
+        run: cargo check --locked --offline --all-targets
