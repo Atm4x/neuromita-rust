@@ -1,0 +1,60 @@
+name: Agent D46 verified native download exact patch import and Windows
+on:
+  push:
+    branches: [bridge/agent-d46-native-verified-download-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate exact original patch, commit identity and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=3a365f63979ee1bdb924a072116d5e97e07282d3
+          EXPECTED=fb57f60948cf774cae41e9cfe276b14a31eeb4d8
+          TREE=63ff72e511a03ea1734a7977031e5e5865ad13fc
+          cat .agent-bridge/d46.part0{1,2,3,4}.b64 | tr -d '\n' | base64 -d >/tmp/d46.patch.br
+          echo '17330b7f120ddef0d65c2dfec123b1ed2d5f1fa0a47f6c22ef6f4c9baaf23983  /tmp/d46.patch.br' | sha256sum --check
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d46.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d46.patch.br')))"
+          echo '8d0c8eb01e319a5b6865ff166377bea500eb9f42a6a16fb12bdd0e9d14445757  /tmp/d46.patch' | sha256sum --check
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d46.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d46-verified-native-download-20261108
+  windows-native:
+    needs: import
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d46-verified-native-download-20261108
+      - name: Verify original D46 SHA and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "fb57f60948cf774cae41e9cfe276b14a31eeb4d8"
+          test "$(git rev-parse HEAD^{tree})" = "63ff72e511a03ea1734a7977031e5e5865ad13fc"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Native download contracts and complete lifecycle tests
+        run: cargo test --locked --offline --lib updater::check::tests
+      - name: Native Windows GUI compile
+        run: cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Native all-targets compile
+        run: cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
