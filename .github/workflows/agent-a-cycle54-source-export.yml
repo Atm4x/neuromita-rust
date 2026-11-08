@@ -1,0 +1,33 @@
+name: Agent A Cycle54 incremental source export
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle54-export-20261109
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 786ba4c9dd5202937cfe5a1732b68d39a96a307e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exactly PR351 increment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '786ba4c9dd5202937cfe5a1732b68d39a96a307e'
+          test "$(git rev-parse HEAD^)" = '7af68061150e663fb079fa0b152786a2bfd9675e'
+          git update-ref refs/heads/cycle54-source 786ba4c9dd5202937cfe5a1732b68d39a96a307e
+          git bundle create cycle54-source.bundle refs/heads/cycle54-source ^7af68061150e663fb079fa0b152786a2bfd9675e
+          git bundle verify cycle54-source.bundle
+          sha256sum cycle54-source.bundle > cycle54-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle54-source-increment
+          path: |
+            cycle54-source.bundle
+            cycle54-source.bundle.sha256
+          retention-days: 1
