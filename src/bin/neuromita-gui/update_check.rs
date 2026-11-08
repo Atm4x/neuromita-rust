@@ -16,8 +16,11 @@ use tokio_util::sync::CancellationToken;
 use neuromita::{
     localization::{LocalizedText, i18n},
     portable::PortableDataRoot,
-    updater::check::{
-        NativeDownloadResult, NativeUpdateResult, check_native_update, download_native_update,
+    updater::{
+        check::{
+            NativeDownloadResult, NativeUpdateResult, check_native_update, download_native_update,
+        },
+        install::{NativeInstallOutcome, prepare_latest_native_update},
     },
 };
 
@@ -46,6 +49,10 @@ impl NativeUpdateChecker {
 
     pub fn download(&self, data_directory: PathBuf) -> Result<(), CheckStartError> {
         self.start(NativeUpdateTask::Download(data_directory))
+    }
+
+    pub fn install(&self, data_directory: PathBuf) -> Result<(), CheckStartError> {
+        self.start(NativeUpdateTask::Install(data_directory))
     }
 
     fn start(&self, task: NativeUpdateTask) -> Result<(), CheckStartError> {
@@ -93,6 +100,23 @@ impl NativeUpdateChecker {
                                         Err(_) => Err("Download timed out".to_owned()),
                                     }
                                 }
+                                NativeUpdateTask::Install(directory) => {
+                                    let root = PortableDataRoot::resolve(Some(&directory))
+                                        .map_err(|error| error.to_string())?;
+                                    match tokio::time::timeout(
+                                        Duration::from_secs(180),
+                                        prepare_latest_native_update(&root, &cancel),
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => Ok(NativeUpdateCompletion::InstallPrepared(
+                                            result.map_err(|error| error.to_string()),
+                                        )),
+                                        Err(_) => {
+                                            Err("Installation preparation timed out".to_owned())
+                                        }
+                                    }
+                                }
                             }
                         })
                     });
@@ -134,11 +158,13 @@ impl Drop for NativeUpdateChecker {
 enum NativeUpdateTask {
     Check,
     Download(PathBuf),
+    Install(PathBuf),
 }
 
 pub enum NativeUpdateCompletion {
     Checked(Result<NativeUpdateResult, String>),
     Downloaded(Result<NativeDownloadResult, String>),
+    InstallPrepared(Result<NativeInstallOutcome, String>),
     Failed(String),
 }
 
@@ -179,8 +205,38 @@ pub fn completion_notice(completion: NativeUpdateCompletion) -> LocalizedText {
     match completion {
         NativeUpdateCompletion::Checked(result) => finished_notice(result),
         NativeUpdateCompletion::Downloaded(result) => download_finished_notice(result),
+        NativeUpdateCompletion::InstallPrepared(Ok(NativeInstallOutcome::NotEligible(reason))) => {
+            finished_notice(Ok(reason))
+        }
+        NativeUpdateCompletion::InstallPrepared(Ok(NativeInstallOutcome::Prepared { .. })) => i18n(
+            "launcher.native-update.prepared",
+            "Обновление подготовлено к применению после закрытия приложения.",
+        ),
+        NativeUpdateCompletion::InstallPrepared(Err(error)) => install_error_notice(error),
         NativeUpdateCompletion::Failed(error) => finished_notice(Err(error)),
     }
+}
+
+pub fn install_started_notice() -> LocalizedText {
+    i18n(
+        "launcher.native-update.preparing",
+        "Проверяется пакет и готовится установка нативного обновления с перезапуском…",
+    )
+}
+
+pub fn install_error_notice(error: impl std::fmt::Display) -> LocalizedText {
+    i18n(
+        "launcher.native-update.install-failed",
+        "Применение обновления не начато: {error}",
+    )
+    .arg("error", error.to_string())
+}
+
+pub fn handoff_notice() -> LocalizedText {
+    i18n(
+        "launcher.native-update.handoff",
+        "Обновление проверено. Приложение закрывается; отдельный updater применит его после завершения процесса и попробует перезапустить GUI.",
+    )
 }
 
 pub fn download_finished_notice(result: Result<NativeDownloadResult, String>) -> LocalizedText {

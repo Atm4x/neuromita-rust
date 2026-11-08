@@ -45,6 +45,7 @@ pub enum ShellCommand {
 pub enum LauncherAction {
     CheckUpdates,
     DownloadNativeUpdate,
+    InstallNativeUpdate,
     InstallUnity,
     VerifyUnity,
     OpenUnityFolder,
@@ -58,6 +59,10 @@ impl LauncherAction {
             Self::DownloadNativeUpdate => i18n(
                 "launcher.actions.download-native-update",
                 "Скачать и проверить обновление",
+            ),
+            Self::InstallNativeUpdate => i18n(
+                "launcher.actions.install-native-update",
+                "Установить Rust-обновление и перезапустить",
             ),
             Self::InstallUnity => i18n("launcher.actions.install", "Установить / обновить Unity"),
             Self::VerifyUnity => i18n("launcher.actions.verify", "Проверить файлы Unity"),

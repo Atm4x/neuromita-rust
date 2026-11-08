@@ -50,3 +50,39 @@ loop. On GUI controller teardown the cancellation token aborts staging.
 a live executable, updater helper handoff, restart, rollback or mutation of
 settings is attempted. The publisher must first ship a release with the exact
 raw native artifact name and GitHub asset SHA-256 metadata.
+
+## Explicit raw executable activation (D47)
+
+Home → More → **Install Rust update and restart** is a separate, destructive user
+operation. It does not trust a prior download confirmation: it obtains fresh
+native-release metadata, refuses older/unknown versions and non-native assets,
+and re-verifies cached bytes (or downloads and checks SHA-256 again) before
+creating an installation transaction. Only the publisher's exact platform-
+specific executable is mapped to the fixed local `neuromita-gui[.exe]` target.
+There is no generic rename API for Python/Unity packages or archives.
+
+The running application must actually be the installed `neuromita-gui[.exe]`
+next to `neuromita-updater[.exe]`. Its persistent root must be the ordinary
+installation-owned `UserData` directory, not a custom data directory or a
+symlink. Missing helper, non-installed executable, or an existing update
+transaction fails closed **before staging or replacing the running binary**.
+Only the existing `SingleFileActivator` can prepare the journal and verified
+candidate. Preparation never mutates the installed executable or UserData.
+
+After successful preparation, the real GUI process schedules the fixed helper,
+which checks the parent's *PID plus process-creation identity*, and then quits
+the normal Slint event loop. The application runtime shuts down normally;
+only after that process exits can the helper apply the journaled file move and
+attempt to launch the new GUI executable. If scheduling the helper fails, the
+prepared/unapplied candidate is discarded under the installation lock, leaving
+both the old executable and user data unchanged. If the transaction has been
+partially applied, cleanup refuses to discard unknown installation state.
+
+**Current recovery limits:** The activator protects and verifies the old and new
+executable bytes around an interrupted rename. It currently cleans the backup
+after the new executable's *digest* is verified, **not** after a ready/healthy
+signal from the restarted GUI. A new binary that starts and immediately fails
+is therefore **not automatically rolled back**. This action must not be called
+full runtime-health or installer-archive rollback. Production publication of a
+compatible helper and a real native release, live Windows GUI acceptance and
+post-restart health acknowledgement remain separate #44 criteria.

@@ -71,11 +71,9 @@ struct HandoffIntent {
     target: String,
 }
 
-/// Launches a separate installed helper and returns after the child has started.
-/// The caller must subsequently perform its normal graceful shutdown; the
-/// helper independently waits for *this exact process identity* to exit.
-/// The transaction must have been prepared by `SingleFileActivator::prepare`.
-pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, HandoffError> {
+/// Read-only preflight, invoked before staging and again when scheduling the helper.
+/// Refuses development binaries, custom user-data directories and missing helpers.
+pub fn validate_handoff_environment(activator: &SingleFileActivator) -> Result<(), HandoffError> {
     if fs::canonicalize(std::env::current_exe()?)? != activator.target_path() {
         return Err(HandoffError::WrongCaller);
     }
@@ -87,14 +85,24 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
     {
         return Err(HandoffError::NonPortableDataRoot);
     }
-    if activator.recover()? != RecoveryOutcome::Prepared {
-        return Err(HandoffError::NotPrepared);
-    }
     let helper = activator.install_root().join(HELPER_NAME);
     require_regular_file(&helper)?;
     if fs::canonicalize(&helper)? == activator.target_path() {
         return Err(HandoffError::UnsafeHelper);
     }
+    Ok(())
+}
+
+/// Launches a separate installed helper and returns after the child has started.
+/// The caller must subsequently perform its normal graceful shutdown; the
+/// helper independently waits for *this exact process identity* to exit.
+/// The transaction must have been prepared by `SingleFileActivator::prepare`.
+pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, HandoffError> {
+    validate_handoff_environment(activator)?;
+    if activator.recover()? != RecoveryOutcome::Prepared {
+        return Err(HandoffError::NotPrepared);
+    }
+    let helper = activator.install_root().join(HELPER_NAME);
     let identity = current_process_identity()?;
     let intent = HandoffIntent {
         parent_pid: process::id(),

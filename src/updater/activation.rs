@@ -136,10 +136,39 @@ impl SingleFileActivator {
         asset: &UpdateAsset,
         artifact: &StagedArtifact,
     ) -> Result<(), ActivationError> {
-        if asset.name() != self.target_name
-            || asset.size() != artifact.size()
-            || asset.sha256() != artifact.sha256()
+        if asset.name() != self.target_name {
+            return Err(ActivationError::UnsafeTarget);
+        }
+        self.prepare_verified(asset, artifact)
+    }
+
+    /// Map only the exact publisher-named native GUI release to its installed filename.
+    /// General callers cannot use this to rename arbitrary release assets.
+    pub fn prepare_native_gui(
+        &self,
+        asset: &UpdateAsset,
+        artifact: &StagedArtifact,
+    ) -> Result<(), ActivationError> {
+        let installed_name = if cfg!(windows) {
+            "neuromita-gui.exe"
+        } else {
+            "neuromita-gui"
+        };
+        if self.target_name != installed_name
+            || Some(asset.name())
+                != super::check::native_asset_name(std::env::consts::OS, std::env::consts::ARCH)
         {
+            return Err(ActivationError::UnsafeTarget);
+        }
+        self.prepare_verified(asset, artifact)
+    }
+
+    fn prepare_verified(
+        &self,
+        asset: &UpdateAsset,
+        artifact: &StagedArtifact,
+    ) -> Result<(), ActivationError> {
+        if asset.size() != artifact.size() || asset.sha256() != artifact.sha256() {
             return Err(ActivationError::UnsafeTarget);
         }
         let expected_stage = self
@@ -210,6 +239,18 @@ impl SingleFileActivator {
             let _ = fs::remove_dir(&workspace);
         }
         attempt
+    }
+
+    /// Discard a prepared, unapplied transaction when launching the helper fails.
+    /// A modified target or a partially-applied transaction is never discarded.
+    pub fn discard_prepared(&self) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if self.recover_unlocked()? != RecoveryOutcome::Prepared {
+            return Err(ActivationError::Conflict(
+                "only an unapplied, fully verified candidate can be discarded",
+            ));
+        }
+        self.cleanup()
     }
 
     pub fn apply(&self) -> Result<RecoveryOutcome, ActivationError> {
@@ -594,6 +635,76 @@ mod tests {
             fs::metadata(f.target()).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    #[test]
+    fn exact_native_gui_release_can_be_prepared_without_arbitrary_rename() {
+        let Some(release_name) =
+            super::super::check::native_asset_name(std::env::consts::OS, std::env::consts::ARCH)
+        else {
+            return;
+        };
+        let fixture = Fixture::new();
+        let target_name = if cfg!(windows) {
+            "neuromita-gui.exe"
+        } else {
+            "neuromita-gui"
+        };
+        fs::rename(fixture.target(), fixture.install.join(target_name)).unwrap();
+        let activator =
+            SingleFileActivator::new(&fixture.install, &fixture.data, target_name).unwrap();
+        let published = UpdateAsset::new(
+            release_name,
+            "https://example.invalid/release",
+            fixture.asset.size(),
+            &format!("sha256:{}", fixture.asset.sha256()),
+        )
+        .unwrap();
+        let foreign = UpdateAsset::new(
+            "PythonBuild.zip",
+            "https://example.invalid/python",
+            fixture.asset.size(),
+            &format!("sha256:{}", fixture.asset.sha256()),
+        )
+        .unwrap();
+        assert!(matches!(
+            activator.prepare_native_gui(&foreign, &fixture.artifact),
+            Err(ActivationError::UnsafeTarget)
+        ));
+        assert!(!fixture.workspace().exists());
+        activator
+            .prepare_native_gui(&published, &fixture.artifact)
+            .unwrap();
+        assert_eq!(activator.recover().unwrap(), RecoveryOutcome::Prepared);
+        activator.discard_prepared().unwrap();
+        assert_eq!(activator.recover().unwrap(), RecoveryOutcome::NoTransaction);
+        assert_eq!(
+            fs::read(fixture.install.join(target_name)).unwrap(),
+            b"old version"
+        );
+        assert_eq!(
+            fs::read(fixture.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+        assert!(fixture.artifact.path().is_file());
+    }
+
+    #[test]
+    fn cleanup_refuses_to_discard_an_applied_transaction() {
+        let fixture = Fixture::new();
+        fixture
+            .activation
+            .prepare(&fixture.asset, &fixture.artifact)
+            .unwrap();
+        assert_eq!(
+            fixture.activation.apply().unwrap(),
+            RecoveryOutcome::NewVersionVerified
+        );
+        assert!(matches!(
+            fixture.activation.discard_prepared(),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(fixture.target()).unwrap(), b"new version");
     }
 
     #[test]

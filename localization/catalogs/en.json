@@ -1930,5 +1930,25 @@
   "launcher.native-update.download-failed": {
     "source": "Не удалось скачать и проверить обновление: {error}. Установка не выполнялась.",
     "translation": "Failed to download and verify update: {error}. Nothing was installed."
+  },
+  "launcher.actions.install-native-update": {
+    "source": "Установить Rust-обновление и перезапустить",
+    "translation": "Install Rust update and restart"
+  },
+  "launcher.native-update.preparing": {
+    "source": "Проверяется пакет и готовится установка нативного обновления с перезапуском…",
+    "translation": "Verifying the package and preparing a native update for restart…"
+  },
+  "launcher.native-update.prepared": {
+    "source": "Обновление подготовлено к применению после закрытия приложения.",
+    "translation": "The update is prepared for activation once the application closes."
+  },
+  "launcher.native-update.install-failed": {
+    "source": "Применение обновления не начато: {error}",
+    "translation": "Update activation has not started: {error}"
+  },
+  "launcher.native-update.handoff": {
+    "source": "Обновление проверено. Приложение закрывается; отдельный updater применит его после завершения процесса и попробует перезапустить GUI.",
+    "translation": "Update verified. The application is closing; the separate updater will apply it after this process exits and attempt to restart the GUI."
   }
 }

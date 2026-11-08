@@ -33,7 +33,7 @@ pub enum NativeDownloadResult {
     },
 }
 
-async fn latest_native_release() -> Result<Option<CheckedRelease>, UpdateError> {
+pub(crate) async fn latest_native_release() -> Result<Option<CheckedRelease>, UpdateError> {
     let catalog = GithubUpdateCatalog::new(NATIVE_REPOSITORY)?;
     match catalog.latest_release().await {
         Ok(release) => Ok(Some(release)),

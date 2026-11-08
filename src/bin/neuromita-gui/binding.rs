@@ -10,7 +10,7 @@ use super::{
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
-    update_check::NativeUpdateChecker,
+    update_check::{NativeUpdateChecker, NativeUpdateCompletion},
     view::{
         AppWindow, ComponentCard, GuideContentsEntry, GuideFocusTarget, GuideSectionEntry, I18n,
         LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
@@ -442,8 +442,39 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
     let update_checker = Rc::new(NativeUpdateChecker::new(&window));
     let finished_checker = update_checker.clone();
     let update_handler = dispatch.clone();
+    let install_directory = root.path().to_path_buf();
     window.on_native_update_finished(move || {
-        if let Some(completion) = finished_checker.take_result() {
+        let Some(completion) = finished_checker.take_result() else {
+            return;
+        };
+        if let NativeUpdateCompletion::InstallPrepared(Ok(
+            neuromita::updater::install::NativeInstallOutcome::Prepared { .. },
+        )) = &completion
+        {
+            let handoff = neuromita::portable::PortableDataRoot::resolve(Some(&install_directory))
+                .map_err(|error| error.to_string())
+                .and_then(|data_root| {
+                    neuromita::updater::install::schedule_prepared_native_update(&data_root)
+                        .map_err(|error| error.to_string())
+                });
+            match handoff {
+                Ok(_) => {
+                    update_handler(ShellCommand::LauncherFeedback(
+                        super::update_check::handoff_notice(),
+                    ));
+                    if let Err(error) = slint::quit_event_loop() {
+                        update_handler(ShellCommand::LauncherFeedback(
+                            super::update_check::install_error_notice(format!(
+                                "Updater started but GUI shutdown failed: {error}. Close the application to continue."
+                            )),
+                        ));
+                    }
+                }
+                Err(error) => update_handler(ShellCommand::LauncherFeedback(
+                    super::update_check::install_error_notice(error),
+                )),
+            }
+        } else {
             update_handler(ShellCommand::LauncherFeedback(
                 super::update_check::completion_notice(completion),
             ));
@@ -465,6 +496,13 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             LauncherAction::DownloadNativeUpdate => {
                 let notice = match update_checker.download(download_directory.clone()) {
                     Ok(()) => super::update_check::download_started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            LauncherAction::InstallNativeUpdate => {
+                let notice = match update_checker.install(download_directory.clone()) {
+                    Ok(()) => super::update_check::install_started_notice(),
                     Err(error) => super::update_check::start_error_notice(error),
                 };
                 handler(ShellCommand::LauncherFeedback(notice));
@@ -795,6 +833,7 @@ fn launcher_action(action: LauncherMenuAction) -> LauncherAction {
     match action {
         LauncherMenuAction::CheckUpdates => LauncherAction::CheckUpdates,
         LauncherMenuAction::DownloadNativeUpdate => LauncherAction::DownloadNativeUpdate,
+        LauncherMenuAction::InstallNativeUpdate => LauncherAction::InstallNativeUpdate,
         LauncherMenuAction::InstallUnity => LauncherAction::InstallUnity,
         LauncherMenuAction::VerifyUnity => LauncherAction::VerifyUnity,
         LauncherMenuAction::OpenUnityFolder => LauncherAction::OpenUnityFolder,
