@@ -77,9 +77,9 @@ pub enum Command {
 pub enum RemoteVoiceAction {
     Add,
     Delete,
-    Select(String),
+    SelectWithSave(String, RemoteVoicePreset),
     Save(RemoteVoicePreset),
-    Preview(String, Option<CharacterId>),
+    Preview(String, Option<CharacterId>, RemoteVoicePreset),
     Cancel,
 }
 
@@ -439,16 +439,24 @@ async fn observe(
                 },
                 Some(Command::RemoteVoice(action)) => {
                     match action {
-                        RemoteVoiceAction::Preview(text, character) => {
+                        RemoteVoiceAction::Preview(text, character, draft_preset) => {
                             if preview_cancel.is_some() {
                                 publish(Update::RemoteVoiceState("Проверка уже выполняется".into(), true));
                             } else {
                                 let prepare = (|| -> Result<_, String> {
-                                    let preset = remote_config.active().map_err(|e| e.to_string())?.clone();
+                                    let next = remote_config
+                                        .prepared_preview(draft_preset, character)
+                                        .map_err(|e| e.to_string())?;
+                                    let preset = next.active().map_err(|e| e.to_string())?.clone();
                                     let player = find_binary(directory, "NEUROMITA_FFPLAY",
                                         if cfg!(windows) { "ffplay.exe" } else { "ffplay" })
                                         .ok_or_else(|| "FFplay не найден: укажите NEUROMITA_FFPLAY или установите AIData/bin/ffplay".to_owned())?;
                                     let client = FishAudioClient::new().map_err(|e| e.to_string())?;
+                                    // Save before preview: failure must NOT replay the older
+                                    // stored voice and report it as the just-edited one.
+                                    remote_store.save(&next).map_err(|e| e.to_string())?;
+                                    remote_config = next;
+                                    publish(Update::RemoteVoices(remote_config.clone()));
                                     Ok((preset, player, client))
                                 })();
                                 match prepare {
@@ -487,7 +495,9 @@ async fn observe(
                             let result = match action {
                                 RemoteVoiceAction::Add => next.add(),
                                 RemoteVoiceAction::Delete => next.delete_active(),
-                                RemoteVoiceAction::Select(id) => next.select(&id),
+                                RemoteVoiceAction::SelectWithSave(id, preset) => {
+                                    next.update(preset).and_then(|_| next.select(&id))
+                                },
                                 RemoteVoiceAction::Save(preset) => next.update(preset),
                                 RemoteVoiceAction::Preview(..) | RemoteVoiceAction::Cancel => unreachable!(),
                             }.and_then(|_| remote_store.save(&next));

@@ -6,7 +6,8 @@ The desktop API speech backend uses the Fish Audio cloud provider. Remote preset
 
 - Select **API**, add an independent profile, edit its name, Fish Audio API key, model, speed and default voice ID.
 - Enter a voice ID for a specific Mita to override that profile's default. If the field is blank the default voice is used. Stable `CharacterId`, not a display name, is routed through production generation.
-- Save, switch between profiles, and remove profiles (the final profile cannot be removed).
+- Save, switch between profiles, and remove profiles (the final profile cannot be removed). Switching atomically saves the edited source profile and selects the target; an invalid source profile does not silently switch.
+- Preview validates the current editor snapshot and saves it before sending a request; a failed save or stale profile blocks playback instead of reusing an older voice.
 - Preview an individual character's voice through the same HTTP synthesizer and FFplay used by the desktop app. Clicking Cancel aborts the in-flight request or playback. The PCM payload is packaged into a WAV **in memory** and no temporary audio file is created.
 - Production uses the active profile **only** when API TTS is enabled; Telegram/Local retain the existing runtime's voice provider.
 

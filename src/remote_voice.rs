@@ -165,6 +165,29 @@ impl RemoteVoiceConfig {
         *old = preset;
         Ok(())
     }
+    /// Build a validated preview snapshot. A stale or invalid editor must not
+    /// replay the previously saved voice (possibly belonging to another Mita).
+    pub fn prepared_preview(
+        &self,
+        preset: RemoteVoicePreset,
+        character: Option<CharacterId>,
+    ) -> Result<Self, RemoteVoiceError> {
+        if self.active_id != preset.id {
+            return Err(RemoteVoiceError::InvalidPreset(
+                "selected voice preset changed; reload before preview".into(),
+            ));
+        }
+        if preset.api_key.is_empty() {
+            return Err(RemoteVoiceError::InvalidPreset(
+                "API key is not configured".into(),
+            ));
+        }
+        preset.voice_for(character)?;
+        let mut next = self.clone();
+        next.update(preset)?;
+        Ok(next)
+    }
+
     pub fn delete_active(&mut self) -> Result<(), RemoteVoiceError> {
         if self.presets.len() == 1 {
             return Err(RemoteVoiceError::InvalidPreset(
@@ -384,7 +407,13 @@ impl FishAudioClient {
                 .json(&request)
                 .send()
                 .await
-                .map_err(|_| RemoteVoiceError::Network)?;
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        RemoteVoiceError::Timeout
+                    } else {
+                        RemoteVoiceError::Network
+                    }
+                })?;
             if !response.status().is_success() {
                 return Err(classify_http(response.status()));
             }
@@ -402,7 +431,13 @@ impl FishAudioClient {
             while let Some(chunk) = response
                 .chunk()
                 .await
-                .map_err(|_| RemoteVoiceError::Network)?
+                .map_err(|error| {
+                    if error.is_timeout() {
+                        RemoteVoiceError::Timeout
+                    } else {
+                        RemoteVoiceError::Network
+                    }
+                })?
             {
                 if bytes.len().saturating_add(chunk.len()) > MAX_PCM {
                     return Err(RemoteVoiceError::TooLarge);
@@ -488,6 +523,41 @@ mod tests {
         assert!(cfg.delete_active().is_ok());
         assert!(cfg.delete_active().is_err());
     }
+    #[test]
+    fn preview_rejects_stale_or_invalid_character_voice_without_fallback() {
+        let mut config = RemoteVoiceConfig::default();
+        config.presets[0].default_voice_id = "a".repeat(32);
+        let mut draft = config.active().unwrap().clone();
+        draft.api_key = "test-key".into();
+        draft.default_voice_id = "b".repeat(32);
+        let preview = config
+            .prepared_preview(draft.clone(), Some(CharacterId::Crazy))
+            .unwrap();
+        assert_eq!(
+            preview
+                .active()
+                .unwrap()
+                .voice_for(Some(CharacterId::Crazy))
+                .unwrap(),
+            "b".repeat(32)
+        );
+        assert_eq!(
+            config.active().unwrap().voice_for(None).unwrap(),
+            "a".repeat(32)
+        );
+        let mut stale = draft.clone();
+        stale.id = uuid::Uuid::new_v4().to_string();
+        assert!(config.prepared_preview(stale, None).is_err());
+        draft
+            .character_voice_ids
+            .insert(CharacterId::Crazy, "wrong-voice".into());
+        assert!(
+            config
+                .prepared_preview(draft, Some(CharacterId::Crazy))
+                .is_err()
+        );
+    }
+
     #[test]
     fn validates_urls_and_pcm_header() {
         assert_eq!(

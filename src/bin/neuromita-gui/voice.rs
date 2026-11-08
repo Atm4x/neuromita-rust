@@ -250,14 +250,14 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         let ids = ui.get_api_preset_ids();
         let index = ui.get_api_profiles().iter().position(|name| name == label);
         if let Some(id) = index.and_then(|index| ids.row_data(index)) {
-            if let Ok(preset) = current_preset(&ui) {
-                send(Command::RemoteVoice(
-                    super::runtime::RemoteVoiceAction::Save(preset),
-                ));
+            match current_preset(&ui) {
+                Ok(preset) => send(Command::RemoteVoice(
+                    super::runtime::RemoteVoiceAction::SelectWithSave(id.into(), preset),
+                )),
+                Err(error) => window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into()),
             }
-            send(Command::RemoteVoice(
-                super::runtime::RemoteVoiceAction::Select(id.into()),
-            ));
         }
     });
     let send = dispatch.clone();
@@ -276,17 +276,21 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
         let Some(window) = weak.upgrade() else {
             return;
         };
-        if let Ok(preset) = current_preset(&window.global::<VoiceUi>()) {
-            send(Command::RemoteVoice(
-                super::runtime::RemoteVoiceAction::Save(preset),
-            ));
-        }
+        let preset = match current_preset(&window.global::<VoiceUi>()) {
+            Ok(preset) => preset,
+            Err(error) => {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+                return;
+            }
+        };
         let target = usize::try_from(character)
             .ok()
             .and_then(|index| neuromita::character::CharacterId::ALL.get(index))
             .copied();
         send(Command::RemoteVoice(
-            super::runtime::RemoteVoiceAction::Preview(text.into(), target),
+            super::runtime::RemoteVoiceAction::Preview(text.into(), target, preset),
         ));
     });
     let send = dispatch.clone();
