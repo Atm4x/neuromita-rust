@@ -1,0 +1,36 @@
+name: "B57 focused regenerate preview verification"
+on:
+  push:
+    branches:
+      - bridge/agent-b57-verify-20261108
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify pinned source parent
+        run: |
+          test "$(git rev-parse HEAD^)" = "fb3fce40a733244bca5c2be77d2df9f8278b348a"
+          test "$(git rev-parse HEAD^{tree})" != "22aee529d2a1755261e20f4020b32cab77352767"
+          git diff --quiet "fb3fce40a733244bca5c2be77d2df9f8278b348a" HEAD -- src/ tests/ docs/
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libx11-dev
+      - name: Executable accepted regenerate provenance integration test
+        run: cargo test --locked --offline --test vertical_slice accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_foreign_targets -- --test-threads=1
+      - name: Core compile
+        run: cargo check --locked --offline --no-default-features --lib
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
