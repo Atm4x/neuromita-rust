@@ -25,6 +25,30 @@ pub trait TimelineRepository {
         session: SessionId,
         character: CharacterId,
     ) -> Result<Vec<BranchId>, TimelineError>;
+    /// Read only local facts for the admitted request on its child branch.
+    /// A Regenerate RequestId is minted before the child fork and can never
+    /// occur in the inherited parent prefix. This is evidence, not a replay permit.
+    fn regenerate_request_facts(
+        &self,
+        branch: BranchId,
+        request: Uuid,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.branch(branch)?;
+        Ok(self
+            .world(branch)?
+            .into_iter()
+            .filter(|fact| {
+                fact.branch_id == branch
+                    && fact
+                        .draft
+                        .payload
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        == Some(request)
+            })
+            .collect())
+    }
     /// A monotonic fence for consistent cross-owner read-only enumeration.
     /// Transient stores have no independent writer.
     fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {

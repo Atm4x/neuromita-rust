@@ -297,3 +297,211 @@ fn sqlite_enumeration_revision_detects_independent_writer_changes() {
         let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
     }
 }
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_recovery_uses_request_index_without_scanning_unrelated_worlds() {
+    use crate::timeline::storage::SqliteTimelineRepository;
+    use serde_json::json;
+
+    let path = std::env::temp_dir().join(format!("b71-index-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (source, child, request) =
+        super::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+    let repository = SqliteTimelineRepository::open(&path).unwrap();
+    assert!(
+        repository
+            .regenerate_request_facts(child, request.0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        timeline
+            .reconcile_regenerate(child, request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
+    );
+    let pinned = timeline
+        .capture_turn(
+            source.character,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    let dispatch = timeline
+        .permit_regenerate_dispatch(child, request, timeline.selection())
+        .unwrap();
+    let accepted = timeline
+        .append_reply(GeneratedReply {
+            request,
+            intent: TurnIntent::Reply(source.original_input),
+            turn: pinned,
+            expected_revision: 0,
+            content: json!("recovered from indexed child"),
+            audience: ConversationAudience::private_to(source.character),
+            effects: Vec::new(),
+        })
+        .unwrap();
+    let indexed = repository
+        .regenerate_request_facts(child, request.0)
+        .unwrap();
+    assert_eq!(indexed.len(), 2);
+    assert_eq!(indexed[0].draft.id, dispatch);
+    assert_eq!(indexed[1].draft.id, accepted);
+    assert!(indexed.iter().all(|fact| fact.branch_id == child));
+    assert!(
+        repository
+            .regenerate_request_facts(root, request.0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repository
+            .regenerate_request_facts(child, RequestId::new().0)
+            .unwrap()
+            .is_empty()
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut statement = connection
+        .prepare("EXPLAIN QUERY PLAN SELECT fact_json FROM timeline_events WHERE branch_id=? AND json_extract(fact_json,'$.draft.payload.request_id')=? AND json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL ORDER BY sequence")
+        .unwrap();
+    let plan = statement
+        .query_map([child.0.to_string(), request.0.to_string()], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("timeline_regenerate_events_by_request")),
+        "indexed query plan: {plan:?}"
+    );
+    drop(statement);
+    drop((connection, repository, timeline));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .enumerate_regenerate_admissions(source.character)
+            .unwrap()[0]
+            .outcome,
+        RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    assert!(
+        reopened
+            .enumerate_regenerate_admissions(CharacterId::Kind)
+            .unwrap()
+            .is_empty()
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[test]
+fn transient_indexed_lifecycle_contract_is_branch_local() {
+    let mut timeline = SessionTimeline::new();
+    let (source, child, request) =
+        super::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+    let root = timeline.store.branch(child).unwrap().parent.unwrap();
+    let dispatch = timeline
+        .permit_regenerate_dispatch(child, request, timeline.selection())
+        .unwrap();
+    let indexed = timeline
+        .store
+        .regenerate_request_facts(child, request.0)
+        .unwrap();
+    assert_eq!(indexed.len(), 1);
+    assert_eq!(indexed[0].draft.id, dispatch);
+    assert_eq!(indexed[0].branch_id, child);
+    assert!(
+        timeline
+            .store
+            .regenerate_request_facts(root, request.0)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        timeline
+            .enumerate_regenerate_admissions(CharacterId::Kind)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        timeline
+            .enumerate_regenerate_admissions(source.character)
+            .unwrap()[0]
+            .outcome,
+        RegenerateRecoveryOutcome::MayHaveDispatched(dispatch)
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_indexed_accepted_source_obeys_parent_cutoff_and_character_scope() {
+    use crate::timeline::storage::SqliteTimelineRepository;
+
+    let path = std::env::temp_dir().join(format!("b71-ancestor-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (source, child, _) = super::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+    let repo = SqliteTimelineRepository::open(&path).unwrap();
+    assert_eq!(
+        repo.accepted_reply_at(root, source.character, source.accepted_request.0, Some(1))
+            .unwrap(),
+        None
+    );
+    let root_accepted = repo
+        .accepted_reply_at(root, source.character, source.accepted_request.0, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(root_accepted.draft.id, source.accepted_message);
+    assert_eq!(
+        repo.accepted_reply_at(child, source.character, source.accepted_request.0, Some(1))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repo.accepted_reply_at(child, source.character, source.accepted_request.0, None)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repo.accepted_reply_at(child, CharacterId::Kind, source.accepted_request.0, None)
+            .unwrap(),
+        None
+    );
+    assert!(
+        repo.accepted_reply_at(
+            child,
+            source.character,
+            source.accepted_request.0,
+            Some(100)
+        )
+        .is_err()
+    );
+    drop((repo, timeline));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}

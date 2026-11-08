@@ -671,44 +671,46 @@ impl SessionTimeline {
         if admission.request != request {
             return Err(domain::TimelineError::Conflict);
         }
-        let world = self.store.world(child)?;
-        let abandoned = domain::abandoned_regenerate(&world, request.0)?;
-        let may_have_dispatched = domain::dispatch_may_have_started(&world, request.0)?;
-        let outcome =
-            match self
-                .store
-                .accepted_reply_at(child, admission.character, request.0, None)?
+        let facts = self.store.regenerate_request_facts(child, request.0)?;
+        let abandoned = domain::abandoned_regenerate(&facts, request.0)?;
+        let may_have_dispatched = domain::dispatch_may_have_started(&facts, request.0)?;
+        let mut accepted = None;
+        for fact in &facts {
+            if domain::accepted_reply_request(fact, admission.character) == Some(request.0)
+                && accepted.replace(fact).is_some()
             {
-                None => match (abandoned, may_have_dispatched) {
-                    (Some(fact), _) => RegenerateRecoveryOutcome::Abandoned(fact.draft.id),
-                    (None, Some(fact)) => {
-                        RegenerateRecoveryOutcome::MayHaveDispatched(fact.draft.id)
-                    }
-                    (None, None) => RegenerateRecoveryOutcome::DispatchUnknown,
-                },
-                Some(accepted) => {
-                    if abandoned.is_some() {
-                        return Err(domain::TimelineError::Conflict);
-                    }
-                    if accepted.branch_id != child
-                        || accepted.sequence <= info.fork_sequence + 1
-                        || accepted.draft.links.len() != 1
-                        || accepted.draft.links[0].relation != CausalRelation::ReplyTo
-                        || accepted.draft.links[0].event_id != admission.original_input
-                        || accepted
-                            .draft
-                            .payload
-                            .get("reply_to")
-                            .and_then(|value| value.as_str())
-                            != Some(admission.original_input.0.to_string().as_str())
-                    {
-                        return Err(domain::TimelineError::Invalid(
-                            "regenerate acceptance has invalid causal source",
-                        ));
-                    }
-                    RegenerateRecoveryOutcome::AcceptedReply(accepted.draft.id)
+                return Err(domain::TimelineError::Conflict);
+            }
+        }
+        let outcome = match accepted {
+            None => match (abandoned, may_have_dispatched) {
+                (Some(fact), _) => RegenerateRecoveryOutcome::Abandoned(fact.draft.id),
+                (None, Some(fact)) => RegenerateRecoveryOutcome::MayHaveDispatched(fact.draft.id),
+                (None, None) => RegenerateRecoveryOutcome::DispatchUnknown,
+            },
+            Some(accepted) => {
+                if abandoned.is_some() {
+                    return Err(domain::TimelineError::Conflict);
                 }
-            };
+                if accepted.branch_id != child
+                    || accepted.sequence <= info.fork_sequence + 1
+                    || accepted.draft.links.len() != 1
+                    || accepted.draft.links[0].relation != CausalRelation::ReplyTo
+                    || accepted.draft.links[0].event_id != admission.original_input
+                    || accepted
+                        .draft
+                        .payload
+                        .get("reply_to")
+                        .and_then(|value| value.as_str())
+                        != Some(admission.original_input.0.to_string().as_str())
+                {
+                    return Err(domain::TimelineError::Invalid(
+                        "regenerate acceptance has invalid causal source",
+                    ));
+                }
+                RegenerateRecoveryOutcome::AcceptedReply(accepted.draft.id)
+            }
+        };
         #[cfg(feature = "sqlite-system")]
         let selection = if let Some(repository) = &self.selection_repository {
             repository

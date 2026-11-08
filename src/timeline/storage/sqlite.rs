@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS timeline_events(
     PRIMARY KEY(branch_id, sequence),
     FOREIGN KEY(branch_id) REFERENCES timeline_branches(branch_id)
 );
+CREATE INDEX IF NOT EXISTS timeline_regenerate_events_by_request
+    ON timeline_events(branch_id, json_extract(fact_json,'$.draft.payload.request_id'), sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_observers(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -942,6 +945,64 @@ impl TimelineRepository for SqliteTimelineRepository {
                 }
             }
             Ok(result)
+        })
+    }
+    fn accepted_reply_at(
+        &self,
+        branch: BranchId,
+        character: CharacterId,
+        request: Uuid,
+        through: Option<u64>,
+    ) -> Result<Option<TimelineFact>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let lineage = IndexedWorld::through(connection, branch, through)?;
+            let mut accepted = None;
+            for (local_branch, ceiling) in lineage.lineage.iter().rev() {
+                let historical_ceiling = (*ceiling).min(through.unwrap_or(u64::MAX));
+                let rows = connection.query(
+                    "SELECT fact_json FROM timeline_events WHERE branch_id=? AND json_extract(fact_json,'$.draft.payload.request_id')=? AND json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL AND sequence<=? ORDER BY sequence",
+                    &[
+                        &local_branch.0.to_string(),
+                        &request.to_string(),
+                        &historical_ceiling.to_string(),
+                    ],
+                )?;
+                for row in rows {
+                    let fact: TimelineFact = decode(&row[0])?;
+                    if crate::timeline::domain::accepted_reply_request(&fact, character)
+                        == Some(request)
+                    {
+                        if accepted.replace(fact).is_some() {
+                            return Err(TimelineError::Conflict);
+                        }
+                    }
+                }
+            }
+            Ok(accepted)
+        })
+    }
+    fn regenerate_request_facts(
+        &self,
+        branch: BranchId,
+        request: Uuid,
+    ) -> Result<Vec<TimelineFact>, TimelineError> {
+        self.read_snapshot(|connection| {
+            let info = branch_info(connection, branch)?;
+            let rows = connection.query(
+                "SELECT fact_json FROM timeline_events WHERE branch_id=? AND json_extract(fact_json,'$.draft.payload.request_id')=? AND json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL ORDER BY sequence",
+                &[&branch.0.to_string(), &request.to_string()],
+            )?;
+            rows.into_iter()
+                .map(|row| {
+                    let fact: TimelineFact = decode(&row[0])?;
+                    if fact.branch_id != branch || fact.sequence > info.head_sequence {
+                        return Err(TimelineError::Invalid(
+                            "indexed regenerate fact is outside admitted branch",
+                        ));
+                    }
+                    Ok(fact)
+                })
+                .collect()
         })
     }
     fn enumeration_revision(&self) -> Result<Option<u64>, TimelineError> {
