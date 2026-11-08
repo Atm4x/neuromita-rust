@@ -1,0 +1,31 @@
+name: Bridge C4 preserved dismissal exact fast-forward
+on:
+  push:
+    branches: [bridge/c4-single-ref-source-20261108]
+    paths: [.github/workflows/bridge-c4-dismissal.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/c4-single-ref-source-20261108
+          fetch-depth: 0
+      - name: Verify follow-up commit and fast-forward candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' 'IyB2MiBnaXQgYnVuZGxlCi02NjQxNzE0ZGJmNDg2ZDg0NDlmMWNkNjNjMDI1YzU0NzYwZTgyNWJmIGZpeChndWkpOiBrZWVwIENvcmUgaW5zdGFsbCBvcGVyYXRpb24gdmlzaWJsZSBhY3Jvc3MgQUkgSHViIHJlZnJlc2gKNDFmYWE5ODYzMGJkZTM4OGMwZmI3OTExMjQxNDQ4MmY1M2JjMzcwMiByZWZzL2hlYWRzL2NvZGV4L2FpLXBsYXRmb3JtLWh1Yi1jNC1vcGVyYXRpb24tc3RhdHVzLTIwMjYxMTA4CgpQQUNLAAAAAgAAAAmeEHicnYtBasMwEADvesUeGwpFq6wlu5TQ0lNPfYO8WiULsRQkpeT5db/QuQwMzGgi4BZxzG7GTOJskkjJHx1GnzAtmMMx8xpWzOYWm5QB3hMGpLRmmn2aiZaMvC9s3cQTBW9ldtOaTbyPS23wfZPy8QWfNckD3vhP73VvUV+4bifAsBBaChbh2e6YvW46hvxjNVkfT+e7Hl6hyYhaIGnftHdJoKWPeL1CqUNZIHKrvUOJP3qOQ2sxv8KvU/r5A1HqcUVyoMMTt/HADqFb9jDzJyTyeJwBOQDG/6EGoQawwgEU6Lo9/2rqwCrMFFdmHtDKlIm5mYez1gEWARQVTjzrrIBnlFcwCdYWHckXCJAb9JIDIftgGHn/AThRL03gimomFKKmyuevqgPQ8hCoeJz7wPSBaUKUyJxiwxlHAkUlUyfFVDrvyz23+Kru/o15TIwA2dQNjP8BGdru4ijtv/6R05nh60tsb6NMXLR4nJsuM11mQpNIfnu/SMupvye1ZRqkF6a4hj5/evH8xmmNvADfVg78/Ahf+cw2ToBVdKuZS2mf8XB9eQW6K3icFcyxDcIwEAXQJlVaGOAPAOyQDnoQbZzcV2yRnK3YTpQKiQUoWQOJtRiAEmhf8e6r2/r5Lq44WkJcHFyMpseFC1yEZS9oFtRVCGen4ud6UwJhZOQ4Oe2QrElorXctMVvqD4jqgH1uEEzH/5J18FkTBUYFI32gUnblFpWiPgUx6fUpHsUXzG4xxPYDxoXDdFfn9Fol90Erpmz+YBgehLZ4nAE2AMn/wgLCApAyFAy99PLQlSzEH23AXsb/gNrmVsNukUZ8FMhRAqAps6Omqrr4nPUWaedXbP6ckdZsAIgdY/sHjdDUwQ54iPfBlfBDPhYwOGuDt594nJuQMj91Aw//5O8CgpM3CHBMduBjl0rJLM7NLC5OTdHNL0gtSizJzM/TzUyxUlBSmlzHL7ZZhr+e0wq7GgUbWzuFovz8Er3ETN2M0iRdLMomTxQX3TxbolQSAJK7LA3/AbuD+YTOcs/KZV4yBBgBwh/i3URleJx7zfSaaYK1iOujqcWeNzrid25KZs8UkOBUv6X7aaO/DCMA2OcMnfkBXX/eXpT+4NpeIOepv2eex3m0oo54nDtyiunwKaYNZmxsmXm6+aUlkwtZhDcHsH2ZBwCHSAoknSLwWzLNZSv5rAfEh4+bydimFPA=' | base64 -d > /tmp/c4-dismiss.bundle
+          test "$(sha256sum /tmp/c4-dismiss.bundle | cut -d' ' -f1)" = '6501e73a2efa57ba593210b2c7d74a6060c6e44f1c9e6a7f7a1e5a369c29739a'
+          git fetch origin refs/heads/codex/ai-platform-hub-c4-operation-status-20261108:refs/remotes/origin/c4-candidate
+          test "$(git rev-parse refs/remotes/origin/c4-candidate)" = '6641714dbf486d8449f1cd63c025c54760e825bf'
+          git bundle verify /tmp/c4-dismiss.bundle
+          git fetch /tmp/c4-dismiss.bundle refs/heads/codex/ai-platform-hub-c4-operation-status-20261108
+          test "$(git rev-parse FETCH_HEAD)" = '41faa98630bde388c0fb79112414482f53bc3702'
+          git checkout --detach '41faa98630bde388c0fb79112414482f53bc3702'
+          test "$(git rev-parse 'HEAD^{tree}')" = '29e2cc281f4e20dea4d6321a6d1d91f73fcb7b1f'
+          git merge-base --is-ancestor '6641714dbf486d8449f1cd63c025c54760e825bf' HEAD
+          git diff --check '6641714dbf486d8449f1cd63c025c54760e825bf' HEAD
+          git push origin HEAD:refs/heads/codex/ai-platform-hub-c4-operation-status-20261108
