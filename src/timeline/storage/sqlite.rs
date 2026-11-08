@@ -174,6 +174,46 @@ impl SqliteTimelineRepository {
         Ok(repo)
     }
 
+    /// Explicitly reconstructs all read-only lookup tables from canonical Timeline facts.
+    /// Failure rolls back the whole rebuild, never replacing or rewriting the events,
+    /// receipts, branch selection or the logical Timeline revision.
+    pub fn rebuild_derived_indexes(&mut self) -> Result<(), TimelineError> {
+        let connection = self.connection()?;
+        connection.exec("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let store = load(&connection)?;
+            connection.exec(
+                "DELETE FROM timeline_fact_keys;
+                 DELETE FROM timeline_observers;
+                 DELETE FROM timeline_acquisitions;
+                 DELETE FROM timeline_resets;",
+            )?;
+            for branch in store.persisted_branches() {
+                for fact in &branch.events {
+                    index_fact(&connection, fact)?;
+                    for observer in &fact.draft.observers {
+                        connection.write(
+                            "INSERT INTO timeline_observers(branch_id,sequence,character_id) VALUES(?,?,?)",
+                            &[
+                                &fact.branch_id.0.to_string(),
+                                &fact.sequence.to_string(),
+                                &observer.to_string(),
+                            ],
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => connection.exec("COMMIT"),
+            Err(error) => {
+                connection.exec("ROLLBACK")?;
+                Err(error)
+            }
+        }
+    }
+
     fn connection(&self) -> Result<Connection, TimelineError> {
         Connection::open(&self.path)
     }
@@ -1206,6 +1246,196 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn explicit_rebuild_restores_missing_lookup_rows_without_changing_canonical_events() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Durable canonical memory");
+        let memory_id = memory.id;
+        let mut observed = EventDraft::new(EventKind::UnityEvent);
+        observed.observers.insert(CharacterId::Kind);
+        let observed_id = observed.id;
+        let original = repo
+            .append(
+                branch,
+                0,
+                "canonical-pair",
+                json!({}),
+                vec![memory, observed],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let initial_revision = revision(&conn).unwrap();
+        assert!(
+            repo.knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert_eq!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        conn.exec("DROP TABLE timeline_fact_keys; DELETE FROM timeline_observers; DELETE FROM timeline_acquisitions; DELETE FROM timeline_resets").unwrap();
+        drop(repo);
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(repo.event(branch, memory_id), Err(TimelineError::NotFound));
+        assert!(
+            !repo
+                .knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap()
+                .is_empty()
+        );
+
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(revision(&conn).unwrap(), initial_revision);
+        assert_eq!(repo.world(branch).unwrap(), original);
+        assert_eq!(repo.event(branch, observed_id).unwrap(), original[1]);
+        assert!(
+            repo.knows(branch, CharacterId::Crazy, memory_id, None)
+                .unwrap()
+        );
+        assert_eq!(
+            repo.read(branch, 0, None, 10, Some(CharacterId::Kind))
+                .unwrap(),
+            vec![original[1].clone()]
+        );
+        drop(repo);
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.event(branch, memory_id).unwrap(), original[0]);
+        reopened.rebuild_derived_indexes().unwrap();
+        assert_eq!(revision(&conn).unwrap(), initial_revision);
+        assert_eq!(reopened.world(branch).unwrap(), original);
+    }
+
+    #[test]
+    fn derived_rebuild_rolls_back_all_tables_on_injected_insert_failure() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let fact = repo
+            .append(
+                branch,
+                0,
+                "durable",
+                json!({}),
+                vec![memory_draft("Retained")],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let original_revision = revision(&conn).unwrap();
+        conn.exec("DELETE FROM timeline_fact_keys").unwrap();
+        conn.exec("CREATE TRIGGER fail_derived_rebuild BEFORE INSERT ON timeline_observers BEGIN SELECT RAISE(ABORT, 'injected rebuild failure'); END").unwrap();
+        assert!(matches!(
+            repo.rebuild_derived_indexes(),
+            Err(TimelineError::Storage(_))
+        ));
+        assert!(
+            conn.query("SELECT 1 FROM timeline_fact_keys", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            conn.query("SELECT 1 FROM timeline_observers", &[])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(revision(&conn).unwrap(), original_revision);
+        assert_eq!(repo.world(branch).unwrap(), fact);
+        conn.exec("DROP TRIGGER fail_derived_rebuild").unwrap();
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(repo.event(branch, fact[0].draft.id).unwrap(), fact[0]);
+        assert_eq!(revision(&conn).unwrap(), original_revision);
+    }
+
+    #[test]
+    fn derived_rebuild_restores_context_reset_barrier_after_reopen() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let memory = memory_draft("Remembered before reset");
+        let id = memory.id;
+        repo.append(branch, 0, "acquire", json!({}), vec![memory])
+            .unwrap();
+        let mut reset = EventDraft::new(EventKind::CharacterContextReset);
+        reset.observers.insert(CharacterId::Crazy);
+        repo.append(branch, 1, "reset", json!({}), vec![reset])
+            .unwrap();
+        assert_eq!(repo.context_epoch(branch, CharacterId::Crazy), Ok(2));
+        assert_eq!(repo.knows(branch, CharacterId::Crazy, id, None), Ok(false));
+
+        let conn = Connection::open(&db.0).unwrap();
+        let revision_before = revision(&conn).unwrap();
+        conn.exec("DELETE FROM timeline_resets").unwrap();
+        drop(repo);
+        let mut reopened = SqliteTimelineRepository::open(&db.0).unwrap();
+        assert_eq!(reopened.context_epoch(branch, CharacterId::Crazy), Ok(0));
+        assert_eq!(
+            reopened.knows(branch, CharacterId::Crazy, id, None),
+            Ok(true)
+        );
+        reopened.rebuild_derived_indexes().unwrap();
+        assert_eq!(reopened.context_epoch(branch, CharacterId::Crazy), Ok(2));
+        assert_eq!(
+            reopened.knows(branch, CharacterId::Crazy, id, None),
+            Ok(false)
+        );
+        assert_eq!(revision(&conn).unwrap(), revision_before);
+    }
+
+    #[test]
+    fn invalid_canonical_fact_blocks_rebuild_without_destroying_existing_indexes() {
+        let db = TestDb::new();
+        let mut repo = SqliteTimelineRepository::open(&db.0).unwrap();
+        let branch = BranchId::new();
+        repo.create_session(SessionId::new(), branch).unwrap();
+        let facts = repo
+            .append(
+                branch,
+                0,
+                "durable",
+                json!({}),
+                vec![memory_draft("Canonical")],
+            )
+            .unwrap();
+        let conn = Connection::open(&db.0).unwrap();
+        let previous = conn
+            .query("SELECT event_id FROM timeline_fact_keys", &[])
+            .unwrap();
+        let original = encode(&facts[0]).unwrap();
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&"not-json", &branch.0.to_string()],
+        )
+        .unwrap();
+        assert!(matches!(
+            repo.rebuild_derived_indexes(),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(
+            conn.query("SELECT event_id FROM timeline_fact_keys", &[])
+                .unwrap(),
+            previous
+        );
+        conn.write(
+            "UPDATE timeline_events SET fact_json=? WHERE branch_id=? AND sequence=1",
+            &[&original, &branch.0.to_string()],
+        )
+        .unwrap();
+        repo.rebuild_derived_indexes().unwrap();
+        assert_eq!(repo.event(branch, facts[0].draft.id).unwrap(), facts[0]);
     }
 
     #[test]
