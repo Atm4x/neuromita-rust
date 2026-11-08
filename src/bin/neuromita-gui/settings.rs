@@ -351,7 +351,8 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                     send_temperature: window.get_preset_temperature_enabled(),
                     send_max_output_tokens: window.get_preset_tokens_enabled(),
                     stream: window.get_preset_stream(),
-                    max_retries: window.get_preset_max_retries()
+                    max_retries: window
+                        .get_preset_max_retries()
                         .parse::<u8>()
                         .ok()
                         .filter(|count| *count <= 4)
