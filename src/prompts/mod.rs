@@ -64,6 +64,8 @@ pub struct RenderedPrompt {
     pub context: Vec<String>,
     /// Declarative initialization operations; rendering never writes memory.
     pub initialization: Vec<PromptInitializationDeclaration>,
+    /// Evaluated nonlocal DSL SET writes, not committed during rendering.
+    pub variable_updates: BTreeMap<String, Value>,
 }
 
 impl RenderedPrompt {
@@ -139,6 +141,7 @@ impl PromptSetSnapshot {
             stable,
             context,
             initialization: runtime.declarations(),
+            variable_updates: runtime.variable_updates(),
         })
     }
 }
@@ -419,6 +422,7 @@ impl PromptCatalog {
             stable: rendered.0,
             context: rendered.1,
             initialization: runtime.declarations(),
+            variable_updates: runtime.variable_updates(),
         })
     }
 }

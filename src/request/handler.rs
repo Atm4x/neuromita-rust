@@ -142,8 +142,13 @@ impl MessageHandler {
                 record.admitted_prompt(),
             ) => result,
         };
-        let (mut context, prompt, post_dsl) = match prepared {
-            Ok(prepared) => (prepared.context, prepared.prompt, prepared.post_dsl),
+        let (mut context, prompt, post_dsl, variable_updates) = match prepared {
+            Ok(prepared) => (
+                prepared.context,
+                prepared.prompt,
+                prepared.post_dsl,
+                prepared.variable_updates,
+            ),
             Err(super::prompt_preparation::PromptPreparationError::Character(
                 CharacterError::StaleState,
             )) => {
@@ -234,7 +239,8 @@ impl MessageHandler {
                     ))?;
                 let request = GenerationRequest::new(context, preset, selected)
                     .with_prompt(prompt)
-                    .with_post_dsl(post_dsl);
+                    .with_post_dsl(post_dsl)
+                    .with_prompt_variables(variable_updates);
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),
