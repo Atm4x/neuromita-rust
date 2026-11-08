@@ -301,7 +301,7 @@ async fn start(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| directory.join("Prompts"));
     let mut config = config.with_prompt_catalog(neuromita::prompts::PromptCatalog::new(root));
-    config.remote_voice_store = Some(directory.join("remote_voice.json"));
+    config.remote_voice_store = Some(directory.join("remote_voice.rust.json"));
     ApplicationLifecycle::start(config)
         .await
         .map_err(|e| e.to_string())
@@ -358,7 +358,7 @@ async fn observe(
 ) -> Result<(), String> {
     let administration = app.presenter();
     let remote_store = RemoteVoiceStore {
-        path: directory.join("remote_voice.json"),
+        path: directory.join("remote_voice.rust.json"),
     };
     let mut remote_config = remote_store.load().map_err(|error| error.to_string())?;
     publish(Update::RemoteVoices(remote_config.clone()));
