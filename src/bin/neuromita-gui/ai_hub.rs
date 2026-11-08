@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::{
     runtime::Command,
-    view::{AppWindow, HubModel},
+    view::{AppWindow, HubInstallPreview, HubModel},
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
@@ -27,6 +27,35 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
         })
     });
     let weak = window.as_weak();
+    let send_preview = send.clone();
+    window.on_ai_hub_preview_install(move |identity, token| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let entries = window.get_ai_hub_entries();
+        let matches = entries
+            .iter()
+            .filter(|entry| entry.category == identity.category && entry.id == identity.id)
+            .count();
+        if matches == 1
+            && (identity.category.as_str() == "tts" || identity.category.as_str() == "asr")
+        {
+            send_preview(Command::PreviewAiHubInstall {
+                category: identity.category.into(),
+                id: identity.id.into(),
+                token,
+            });
+        } else {
+            window.set_ai_hub_install_preview(HubInstallPreview {
+                category: identity.category,
+                id: identity.id,
+                token,
+                summary: "".into(),
+                error: "Модель отсутствует или неоднозначна".into(),
+            });
+        }
+    });
+    let weak = window.as_weak();
     window.on_ai_hub_refresh(move || {
         if let Some(window) = weak.upgrade()
             && window.get_ai_hub_can_refresh()
@@ -37,6 +66,7 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
 }
 
 pub fn inventory(window: &AppWindow, inventory: &SpeechInventory) {
+    window.set_ai_hub_install_preview(HubInstallPreview::default());
     let catalog = SpeechHubCatalog::from_inventory(inventory);
     window.set_ai_hub_entries(ModelRc::new(VecModel::from(
         catalog.entries.into_iter().map(model).collect::<Vec<_>>(),
@@ -57,6 +87,7 @@ pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
 }
 
 pub fn stopped(window: &AppWindow) {
+    window.set_ai_hub_install_preview(HubInstallPreview::default());
     window.set_ai_hub_can_refresh(false);
     window.set_ai_hub_loaded_tts_id("".into());
     window.set_ai_hub_loaded_asr_id("".into());
@@ -78,4 +109,21 @@ fn model(entry: SpeechHubEntry) -> HubModel {
         setting_two: "".into(),
         setting_two_value: "".into(),
     }
+}
+
+pub fn install_preview(
+    window: &AppWindow,
+    category: String,
+    id: String,
+    token: i32,
+    summary: String,
+    error: String,
+) {
+    window.set_ai_hub_install_preview(HubInstallPreview {
+        category: category.into(),
+        id: id.into(),
+        token,
+        summary: summary.into(),
+        error: error.into(),
+    });
 }

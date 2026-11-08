@@ -2,6 +2,10 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
+        install_review::{
+            InstallPlanReview, InstallPreviewError, InstallReviewFence,
+            preview_installed_environment,
+        },
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
@@ -68,6 +72,11 @@ pub enum Command {
     SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    PreviewAiHubInstall {
+        category: String,
+        id: String,
+        token: i32,
+    },
     RefreshHardware,
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
@@ -96,6 +105,13 @@ pub enum Update {
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
+    AiHubInstallPreview {
+        category: String,
+        id: String,
+        token: i32,
+        summary: String,
+        error: String,
+    },
     Releases(Arc<neuromita::presentation::ReleasesSnapshot>),
     ReleaseError(String),
     Memory(Box<neuromita::presentation::MemoryListPage>),
@@ -310,6 +326,43 @@ async fn start(
         .map_err(|e| e.to_string())
 }
 
+fn summarize_ai_hub_review(review: &InstallPlanReview) -> String {
+    let mut lines = vec![
+        format!(
+            "Python: {} · SDK и источник проверены",
+            review.identity.python_version
+        ),
+        format!("Backend: {}", review.backend_options.join(", ")),
+        format!(
+            "Пакетов: {} · требований: {}",
+            review.packages.len(),
+            review.requirements.len()
+        ),
+        format!(
+            "Файлов моделей: обязательных {}, дополнительных {}",
+            review.required_assets.len(),
+            review.optional_assets.len()
+        ),
+        format!(
+            "Действий с отдельным подтверждением: {} · hooks: {}",
+            review.actions.len(),
+            review.asset_hooks.len()
+        ),
+        format!("Отпечаток плана: {}", &review.fingerprint[..16]),
+        "План проверен, но установка ещё не разрешена и не запускалась.".to_owned(),
+    ];
+    if !review.required_backends.is_empty() {
+        lines.insert(
+            2,
+            format!(
+                "Дополнительные backend: {}",
+                review.required_backends.join(", ")
+            ),
+        );
+    }
+    lines.join("\n")
+}
+
 async fn run(
     directory: PathBuf,
     initial_model: Option<String>,
@@ -378,6 +431,16 @@ async fn observe(
     let mut runtime_status = administration.ai_runtime.observe();
     let mut speech_status = administration.speech.observe();
     let mut microphone_test = administration.audio_input.observe_test();
+    let (plan_results, mut plan_updates) = mpsc::unbounded_channel::<(
+        u64,
+        u64,
+        String,
+        String,
+        i32,
+        Result<InstallPlanReview, InstallPreviewError>,
+    )>();
+    let mut plan_fence = InstallReviewFence::default();
+    let mut active_install_preview: Option<tokio::task::AbortHandle> = None;
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
     let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
@@ -489,7 +552,47 @@ async fn observe(
                     }
                 },
                 Some(Command::RefreshHardware) => publish(hardware_snapshot().await),
+                Some(Command::PreviewAiHubInstall { category, id, token }) => {
+                    if let Some(handle) = active_install_preview.take() { handle.abort(); }
+                    let (request, generation) = plan_fence.begin();
+                    let service = match category.as_str() {
+                        "tts" => Some(neuromita::ai_runtime::AiService::Tts),
+                        "asr" => Some(neuromita::ai_runtime::AiService::Asr),
+                        _ => None,
+                    };
+                    let available = if let Some(service) = service {
+                        let snapshot = catalog.snapshot().await;
+                        let matching = match service {
+                            neuromita::ai_runtime::AiService::Tts => &snapshot.tts,
+                            neuromita::ai_runtime::AiService::Asr => &snapshot.asr,
+                            _ => unreachable!(),
+                        };
+                        matching.iter().filter(|model| model.id == id).count() == 1
+                    } else {
+                        false
+                    };
+                    if let Some(service) = service.filter(|_| available) {
+                        let send = plan_results.clone();
+                        let data_directory = directory.to_path_buf();
+                        let model_id = id.clone();
+                        let task = tokio::spawn(async move {
+                            let result = preview_installed_environment(
+                                &data_directory, service, &model_id, &serde_json::json!({})
+                            ).await;
+                            let _ = send.send((request, generation, category, id, token, result));
+                        });
+                        active_install_preview = Some(task.abort_handle());
+                    } else {
+                        publish(Update::AiHubInstallPreview {
+                            category, id, token, summary: String::new(),
+                            error: "Модель отсутствует или неоднозначна в актуальном каталоге".into(),
+                        });
+                    }
+                },
                 Some(Command::RefreshSpeechInventory) => {
+                    plan_fence.catalog_replaced();
+                    if let Some(handle) = active_install_preview.take() { handle.abort(); }
+
                     let devices = match administration.audio_input.devices().await {
                         Ok(devices) => devices,
                         Err(error) => {
@@ -544,6 +647,27 @@ async fn observe(
                     Ok(()) => {},
                     Err(error) => publish(Update::AdminError(error.to_string())),
                 },
+            },
+            reviewed = plan_updates.recv() => {
+                if let Some((request, generation, category, id, token, result)) = reviewed
+                    && plan_fence.accepts(request, generation)
+                {
+                    active_install_preview = None;
+                    let (summary, error) = match result {
+                        Ok(review) => (summarize_ai_hub_review(&review), String::new()),
+                        Err(InstallPreviewError::InvalidSelection) => (String::new(),
+                            "Модель недоступна или исходник не прошёл проверку безопасности.".into()),
+                        Err(InstallPreviewError::Sdk(_)) => (String::new(),
+                            "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into()),
+                        Err(InstallPreviewError::PythonVersion | InstallPreviewError::Python(_)) => (String::new(),
+                            "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into()),
+                        Err(InstallPreviewError::Plan(_)) => (String::new(),
+                            "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into()),
+                        Err(InstallPreviewError::InvalidPlan(_)) => (String::new(),
+                            "Полученный план не прошёл проверку зависимостей, backend или путей.".into()),
+                    };
+                    publish(Update::AiHubInstallPreview { category, id, token, summary, error });
+                }
             },
             transcript = transcript_updates.recv() => {
                 if let Some(transcript) = transcript {

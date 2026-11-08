@@ -12,6 +12,7 @@ pub mod constraints;
 mod distribution;
 pub mod hardware;
 pub mod install;
+pub mod install_review;
 pub mod installed_speech;
 mod layer;
 #[cfg(target_os = "linux")]
@@ -197,6 +198,15 @@ impl WorkerProcess {
         layers: &[PathBuf],
         models: &[ModelActivation],
     ) -> Result<Self, AiRuntimeError> {
+        Self::launch_with_stderr(config, layers, models, std::process::Stdio::inherit()).await
+    }
+
+    async fn launch_with_stderr(
+        config: &PythonHostConfig,
+        layers: &[PathBuf],
+        models: &[ModelActivation],
+        stderr: std::process::Stdio,
+    ) -> Result<Self, AiRuntimeError> {
         let layer_leases = revision_lease::shared_layers(layers).map_err(AiRuntimeError::Spawn)?;
         let mut imports = vec![config.sdk_root.clone()];
         imports.extend(layers.iter().cloned());
@@ -256,7 +266,7 @@ impl WorkerProcess {
             .env_remove("PYTHONHOME")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr)
             .kill_on_drop(true);
         #[cfg(target_os = "linux")]
         linux_worker_lifetime::require_parent_death_kill(&mut command);
@@ -1426,7 +1436,8 @@ pub async fn fetch_install_plan_for(
     if !layer::valid_segment(plugin_id) {
         return Err(AiRuntimeError::Protocol("invalid plugin identifier".into()));
     }
-    let mut worker = WorkerProcess::launch(config, &[], &[]).await?;
+    let mut worker =
+        WorkerProcess::launch_with_stderr(config, &[], &[], std::process::Stdio::null()).await?;
     let result = worker
         .request(
             "install_plan",

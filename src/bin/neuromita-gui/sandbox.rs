@@ -207,6 +207,15 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             super::ai_hub::runtime_status(window, &snapshot);
         }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
+        Update::AiHubInstallPreview {
+            category,
+            id,
+            token,
+            summary,
+            error,
+        } => {
+            super::ai_hub::install_preview(window, category, id, token, summary, error);
+        }
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
             super::asr::inventory(window, &catalog, &devices);

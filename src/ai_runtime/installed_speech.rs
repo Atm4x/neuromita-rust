@@ -153,7 +153,7 @@ impl InstalledSpeechEnvironment {
         Ok(())
     }
 
-    fn installed_uv(&self) -> Result<PathBuf, InstalledSpeechError> {
+    pub(super) fn installed_uv(&self) -> Result<PathBuf, InstalledSpeechError> {
         let root = self.ai_data().join("bootstrap/uv");
         let mut matches = Vec::new();
         for entry in entries(&root)? {

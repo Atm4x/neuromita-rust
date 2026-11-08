@@ -1,6 +1,14 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
 
+export struct HubInstallPreview {
+    token: int,
+    category: string,
+    id: string,
+    summary: string,
+    error: string,
+}
+
 export struct HubModelIdentity {
     category: string,
     id: string,

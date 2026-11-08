@@ -1,6 +1,6 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
-import { HubModelIdentity, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { HubModelIdentity, HubInstallPreview, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component AiHubPage inherits Rectangle {
@@ -23,6 +23,10 @@ export component AiHubPage inherits Rectangle {
     private property <HubModel> selected-model;
     in property <[HubModel]> entries;
     in property <[int]> category-counts;
+    in-out property <int> review-token: 0;
+    in property <HubInstallPreview> install-preview;
+    private property <bool> review-requested: false;
+    callback preview-install-requested(HubModelIdentity, int);
     in property <bool> can-refresh: false;
     in property <int> discovery-warning-count: 0;
     in property <string> loaded-tts-id: "";
@@ -63,8 +67,20 @@ export component AiHubPage inherits Rectangle {
             root.selection-changed = false;
         }
     }
-    changed entries => { root.reconcile-selected(); }
+    changed dirty => {
+        if root.dirty {
+            root.review-token += 1;
+            root.review-requested = false;
+        }
+    }
+    changed entries => {
+        root.review-token += 1;
+        root.review-requested = false;
+        root.reconcile-selected();
+    }
     function open-details(index: int) {
+        root.review-token += 1;
+        root.review-requested = false;
         if index >= 0 && index < root.entries.length {
             root.selected-model = root.entries[index];
             root.selected-key = {
@@ -82,11 +98,15 @@ export component AiHubPage inherits Rectangle {
         }
     }
     function close-details() {
+        root.review-token += 1;
+        root.review-requested = false;
         root.pending-category = "";
         if root.dirty { root.confirm-discard = true; }
         else { root.settings-open = false; root.selected-key = { category: "", id: "" }; }
     }
     function discard-and-leave() {
+        root.review-token += 1;
+        root.review-requested = false;
         root.confirm-discard = false;
         root.dirty = false;
         root.settings-open = false;
@@ -454,6 +474,40 @@ export component AiHubPage inherits Rectangle {
                                 Label {
                                     text: "Черновик сохранён только в окне. Запись в Core заблокирована.";
                                     color: Theme.muted; font-size: 11px;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            height: root.review-requested && root.install-preview.token == root.review-token
+                                && root.install-preview.category == root.selected-key.category
+                                && root.install-preview.id == root.selected-key.id ? 185px : 82px;
+                            border-radius: 10px; border-width: 1px; border-color: Theme.border;
+                            background: Theme.text.with-alpha(0.028);
+                            VerticalLayout {
+                                padding: 12px; spacing: 8px;
+                                HorizontalLayout { height: 34px; spacing: 12px;
+                                    VerticalLayout { alignment: center; horizontal-stretch: 1;
+                                        Label { text: "План установки"; font-size: 13px; font-weight: 700; }
+                                        Label { text: "Настройки по умолчанию · выполняется installplan.py"; font-size: 10px; color: Theme.muted; }
+                                    }
+                                    HubAction {
+                                        caption: "Проверить план"; compact: true;
+                                        enabled: !root.dirty && !root.selection-missing && !root.selection-changed;
+                                        activated => {
+                                            root.review-token += 1;
+                                            root.review-requested = true;
+                                            root.preview-install-requested(root.selected-key, root.review-token);
+                                        }
+                                    }
+                                }
+                                if root.review-requested: Text {
+                                    text: root.install-preview.token != root.review-token
+                                        ? "Получение реального плана через установленный Python SDK…"
+                                        : root.install-preview.error != "" ? root.install-preview.error : root.install-preview.summary;
+                                    color: root.install-preview.error != "" ? Theme.warning : Theme.muted;
+                                    font-size: 11px; wrap: word-wrap;
+                                    overflow: elide;
+                                    vertical-stretch: 1;
                                 }
                             }
                         }

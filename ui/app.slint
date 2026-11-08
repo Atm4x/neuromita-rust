@@ -6,7 +6,7 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
-import { HubModel, HubModelIdentity } from "ai-hub/components.slint";
+import { HubModel, HubModelIdentity, HubInstallPreview } from "ai-hub/components.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -69,6 +69,9 @@ export component AppWindow inherits Window {
     in property <int> ai-hub-discovery-warning-count: 0;
     in property <string> ai-hub-loaded-tts-id: "";
     in property <string> ai-hub-loaded-asr-id: "";
+    in-out property <int> ai-hub-review-token: 0;
+    in property <HubInstallPreview> ai-hub-install-preview;
+    callback ai-hub-preview-install(HubModelIdentity, int);
     callback ai-hub-refresh();
     callback ai-hub-find-selection-index(HubModelIdentity) -> int;
     in property <string> chat-attitude: "—";
@@ -116,6 +119,9 @@ export component AppWindow inherits Window {
                 discovery-warning-count: root.ai-hub-discovery-warning-count;
                 loaded-tts-id: root.ai-hub-loaded-tts-id;
                 loaded-asr-id: root.ai-hub-loaded-asr-id;
+                review-token <=> root.ai-hub-review-token;
+                install-preview: root.ai-hub-install-preview;
+                preview-install-requested(identity, token) => { root.ai-hub-preview-install(identity, token); }
                 refresh-requested => { root.ai-hub-refresh(); }
                 find-selection-index(identity) => { root.ai-hub-find-selection-index(identity) }
             }
