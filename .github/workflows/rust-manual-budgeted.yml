@@ -1,8 +1,11 @@
-# Fork-only workflow: intentionally no push, pull_request or schedule trigger.
-# Dispatch from this fork's main branch, then select any fork ref to check.
-name: Rust checks (manual / budgeted)
+# Fork-only CI gate. No push / pull_request / schedule triggers.
+# Automatic runs occur only at the CREATION of a ci/<scope>/... branch.
+# IMPORTANT: this workflow file MUST be present in the new branch's first
+# remote commit. See docs/ci-branch-gates.md before creating a gate branch.
+name: Rust checks (branch gates / manual)
 
 on:
+  create:
   workflow_dispatch:
     inputs:
       target_ref:
@@ -11,7 +14,7 @@ on:
         required: true
         default: 'fix/prompt-dsl-postdsl-acceptance-20261108'
       scope:
-        description: 'format = cheap; core = fmt/check/clippy/lib tests; full = include GUI'
+        description: 'format = fmt; core = check/clippy/lib; full = all features & GUI'
         type: choice
         required: true
         default: format
@@ -20,33 +23,53 @@ on:
           - core
           - full
 
-# Read-only token, and checkout does not retain credentials.
 permissions:
   contents: read
 
-# One active run for the entire workflow; a new manual run cancels the old one.
+# Strictly one active run in this fork. New checks cancel older checks.
 concurrency:
-  group: budgeted-rust-manual-${{ github.repository }}
+  group: budgeted-rust-gates-${{ github.repository }}
   cancel-in-progress: true
 
 jobs:
   rust:
-    name: "${{ inputs.scope }} @ ${{ inputs.target_ref }}"
+    # A create event is emitted for every branch/tag. Only these three prefixes
+    # allocate a runner. Explicit manual dispatch remains available.
+    if: >-
+      ${{
+        github.repository == 'ViNonerX/neuromita-rust' &&
+        (
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event_name == 'create' &&
+            github.event.ref_type == 'branch' &&
+            (
+              startsWith(github.event.ref, 'ci/format/') ||
+              startsWith(github.event.ref, 'ci/core/') ||
+              startsWith(github.event.ref, 'ci/full/')
+            )
+          )
+        )
+      }}
+    name: "${{ github.event_name == 'create' && github.event.ref || inputs.scope }}"
     runs-on: ubuntu-24.04
-    # Hard ceilings: 8 min format, 25 min core, 40 min full.
-    timeout-minutes: ${{ inputs.scope == 'format' && 8 || inputs.scope == 'core' && 25 || 40 }}
+    timeout-minutes: ${{ (inputs.scope == 'format' || startsWith(github.event.ref, 'ci/format/')) && 8 || (inputs.scope == 'core' || startsWith(github.event.ref, 'ci/core/')) && 25 || 40 }}
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      CHECK_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || startsWith(github.event.ref, 'ci/format/') && 'format' || startsWith(github.event.ref, 'ci/core/') && 'core' || 'full' }}
     steps:
-      - name: Checkout selected fork ref
+      - name: Checkout exactly the snapshot selected by the trigger
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.target_ref }}
+          # create: immutable SHA from the branch-creation event.
+          # manual: explicitly specified fork ref (existing manual behavior).
+          ref: ${{ github.event_name == 'create' && github.sha || inputs.target_ref }}
           persist-credentials: false
 
-      - name: Show exact revision under test
+      - name: Show source snapshot and check scope
         run: |
+          echo "Scope: ${CHECK_SCOPE}"
           git log -1 --format='commit: %H%nsubject: %s'
           git status --short
 
@@ -57,43 +80,42 @@ jobs:
           rustc --version
           cargo --version
 
-      # Fail fast before downloading crates, apt dependencies or compiling.
-      - name: Formatting
+      - name: Formatting (cheap; fail before compilation)
         run: cargo fmt --all -- --check
 
       - name: Install minimal native dependencies
-        if: ${{ inputs.scope != 'format' }}
+        if: ${{ env.CHECK_SCOPE != 'format' }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev
 
       - name: Install GUI native dependencies
-        if: ${{ inputs.scope == 'full' }}
+        if: ${{ env.CHECK_SCOPE == 'full' }}
         run: |
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
             libxi-dev libxcursor-dev libgl1-mesa-dev libudev-dev
 
       - name: Core cargo check
-        if: ${{ inputs.scope == 'core' }}
-        run: cargo check --locked --all-targets
+        if: ${{ env.CHECK_SCOPE == 'core' }}
+        run: cargo check --locked --offline --all-targets
 
       - name: Core clippy
-        if: ${{ inputs.scope == 'core' }}
-        run: cargo clippy --locked --all-targets -- -D warnings
+        if: ${{ env.CHECK_SCOPE == 'core' }}
+        run: cargo clippy --locked --offline --all-targets -- -D warnings
 
       - name: Core library tests
-        if: ${{ inputs.scope == 'core' }}
-        run: cargo test --locked --lib
+        if: ${{ env.CHECK_SCOPE == 'core' }}
+        run: cargo test --locked --offline --lib
 
       - name: Full cargo check (including GUI)
-        if: ${{ inputs.scope == 'full' }}
-        run: cargo check --locked --all-features --all-targets
+        if: ${{ env.CHECK_SCOPE == 'full' }}
+        run: cargo check --locked --offline --all-features --all-targets
 
       - name: Full clippy (including GUI)
-        if: ${{ inputs.scope == 'full' }}
-        run: cargo clippy --locked --all-features --all-targets -- -D warnings
+        if: ${{ env.CHECK_SCOPE == 'full' }}
+        run: cargo clippy --locked --offline --all-features --all-targets -- -D warnings
 
       - name: Full tests (including GUI)
-        if: ${{ inputs.scope == 'full' }}
-        run: cargo test --locked --all-features --all-targets
+        if: ${{ env.CHECK_SCOPE == 'full' }}
+        run: cargo test --locked --offline --all-features --all-targets
