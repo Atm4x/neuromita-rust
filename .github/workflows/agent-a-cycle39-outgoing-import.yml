@@ -1,0 +1,27 @@
+name: agent-a-cycle39-outgoing-import
+on:
+  push:
+    branches: [bridge/agent-a-cycle36-bundle-export]
+    paths: [.gitbridge/agent-a-cycle39-outgoing.b64]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact Cycle39 Git object
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin a8e2ce7f9cbd71044f15522460f550e95a97b063
+          base64 --decode .gitbridge/agent-a-cycle39-outgoing.b64 > /tmp/agent-a-cycle39.bundle
+          echo "987aa0a77f77e16889a0ee83b5a1b5ea9ad249972fa4e95bbe2548dc6cd5b8ed  /tmp/agent-a-cycle39.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-cycle39.bundle
+          git fetch /tmp/agent-a-cycle39.bundle refs/heads/agent-a-cycle39:refs/heads/bridge/agent-a-cycle39-candidate
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle39-candidate)" = "86adbbd8bec0868db45125b5ac1cecd306aaed8c"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle39-candidate^{tree})" = "86d6fa73903d9139ae1685cbb7e6c094b294d515"
+          git merge-base --is-ancestor a8e2ce7f9cbd71044f15522460f550e95a97b063 refs/heads/bridge/agent-a-cycle39-candidate
+          git push origin refs/heads/bridge/agent-a-cycle39-candidate:refs/heads/bridge/agent-a-cycle39-candidate
