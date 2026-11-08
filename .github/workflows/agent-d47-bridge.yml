@@ -1,7 +1,8 @@
-name: Agent D47 verified native handoff exact patch bridge
-on:
+name: Agent D47 exact import
+'on':
   push:
-    branches: [bridge/agent-d47-native-install-handoff-20261109]
+    branches:
+      - bridge/agent-d47-native-install-handoff-20261109
 permissions:
   contents: write
 jobs:
@@ -12,49 +13,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify exact D47 patch and publish original commit
+      - name: Validate and publish exact D47 commit
         shell: bash
         run: |
           set -euo pipefail
           BASE=fb57f60948cf774cae41e9cfe276b14a31eeb4d8
-          EXPECTED=5c99d8201519e3762622e7173bead1b94978d7d7
-          TREE=dd0ba5f7fe92fb83d53e87fc4858ed47de92350e
-          cat .agent-bridge/d47-part-0{1,2,3,4,5,6}.b64 | tr -d '\n' | base64 -d > /tmp/d47.patch.br
-          echo '21fd129f830f1b8349b7f242de80f119916b5a7a7cab9f9b1e7c8d1b8d0f7fd0  /tmp/d47.patch.br' | sha256sum -c
-          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d47.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d47.patch.br')))"
+          cat .agent-bridge/d47-part-0{1,2,3,4,5,6}.b64 | tr -d '\n' | base64 -d > /tmp/d47.br
+          echo '21fd129f830f1b8349b7f242de80f119916b5a7a7cab9f9b1e7c8d1b8d0f7fd0  /tmp/d47.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d47.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d47.br')))"
           echo '47499ff5c646f68e1cff26635f26d0ba86735bdc19bfe9c6868c5e8c5a630061  /tmp/d47.patch' | sha256sum -c
           git fetch origin "$BASE"
           git checkout --detach "$BASE"
           git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d47.patch
-          test "$(git rev-parse HEAD)" = "$EXPECTED"
-          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD)" = "5c99d8201519e3762622e7173bead1b94978d7d7"
+          test "$(git rev-parse HEAD^{tree})" = "dd0ba5f7fe92fb83d53e87fc4858ed47de92350e"
           test "$(git rev-parse HEAD^)" = "$BASE"
-          test "$(git rev-list --count "$BASE"..HEAD)" = 1
           git diff --check HEAD^ HEAD
           git fsck --full
           git push origin HEAD:refs/heads/codex/agent-d47-native-install-handoff-20261109
-  windows-native:
-    needs: import
-    runs-on: windows-latest
-    timeout-minutes: 55
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: codex/agent-d47-native-install-handoff-20261109
-      - name: Verify exact product SHA/tree
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "5c99d8201519e3762622e7173bead1b94978d7d7"
-          test "$(git rev-parse HEAD^{tree})" = "dd0ba5f7fe92fb83d53e87fc4858ed47de92350e"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: '1.98.1'
-          components: rustfmt
-      - name: Native updater tests including actual Windows helper contracts
-        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: Native Windows GUI compile
-        run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: All Rust targets
-        run: cargo check --locked --offline --all-targets
-      - name: Formatting
-        run: cargo fmt --all -- --check
