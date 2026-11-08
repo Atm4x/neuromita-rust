@@ -377,26 +377,49 @@ fn validate_envelope(
         }
         let inherited = if let (Some(parent), Some(checkpoint)) = (info.parent, info.checkpoint) {
             let fact = detached.event(parent, checkpoint)?;
-            if fact.sequence != info.fork_sequence || fact.draft.kind != EventKind::Checkpoint {
-                return Err(SessionArchiveError::Invalid("invalid fork checkpoint"));
+            if fact.sequence != info.fork_sequence {
+                return Err(SessionArchiveError::Invalid("invalid fork anchor sequence"));
             }
             let marker = branch
                 .events
                 .first()
                 .ok_or(SessionArchiveError::Invalid("missing fork marker"))?;
+            let mut expected_payload = serde_json::Map::new();
+            expected_payload.insert(
+                "parent_branch_id".into(),
+                Value::String(parent.0.to_string()),
+            );
+            match fact.draft.kind {
+                EventKind::Checkpoint => {
+                    expected_payload.insert(
+                        "checkpoint_id".into(),
+                        Value::String(checkpoint.0.to_string()),
+                    );
+                }
+                EventKind::PlayerMessage => {
+                    let character = marker
+                        .draft
+                        .payload
+                        .get("character_id")
+                        .and_then(Value::as_str)
+                        .and_then(crate::identity::CharacterId::parse)
+                        .ok_or(SessionArchiveError::Invalid("invalid input fork recipient"))?;
+                    if fact.draft.actor.as_deref() != Some("player")
+                        || !fact.draft.observers.contains(&character)
+                    {
+                        return Err(SessionArchiveError::Invalid("invalid input fork witness"));
+                    }
+                    expected_payload.insert(
+                        "input_event_id".into(),
+                        Value::String(checkpoint.0.to_string()),
+                    );
+                    expected_payload
+                        .insert("character_id".into(), Value::String(character.to_string()));
+                }
+                _ => return Err(SessionArchiveError::Invalid("invalid fork anchor kind")),
+            }
             if marker.draft.kind != EventKind::BranchCreated
-                || marker
-                    .draft
-                    .payload
-                    .get("parent_branch_id")
-                    .and_then(Value::as_str)
-                    != Some(&parent.0.to_string())
-                || marker
-                    .draft
-                    .payload
-                    .get("checkpoint_id")
-                    .and_then(Value::as_str)
-                    != Some(&checkpoint.0.to_string())
+                || marker.draft.payload != expected_payload
             {
                 return Err(SessionArchiveError::Invalid("invalid branch marker"));
             }

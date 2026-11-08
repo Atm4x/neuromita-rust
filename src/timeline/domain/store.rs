@@ -8,6 +8,7 @@ use crate::identity::{CharacterId, EventId};
 
 use super::{
     index::{AppendIndex, WorldIndex, WorldLookup},
+    messages::CharacterMessageProjection,
     model::{
         BranchId, BranchInfo, CausalRelation, EventDraft, EventKind, KnownEvent, SessionId,
         TimelineError, TimelineFact,
@@ -597,9 +598,36 @@ impl TimelineStore {
         checkpoint_id: EventId,
         child_id: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, checkpoint_id, child_id, None)
+    }
+
+    /// An immutable prefix that ends at the original player event, not at a
+    /// synthetic checkpoint and never at an accepted assistant message.
+    pub fn fork_at_player_input(
+        &mut self,
+        branch_id: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child_id: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, input, child_id, Some(character))
+    }
+
+    fn fork_at(
+        &mut self,
+        branch_id: BranchId,
+        anchor_id: EventId,
+        child_id: BranchId,
+        player_recipient: Option<CharacterId>,
+    ) -> Result<BranchInfo, TimelineError> {
         if let Some(existing) = self.branches.get(&child_id) {
-            return if existing.info.parent == Some(branch_id)
-                && existing.info.checkpoint == Some(checkpoint_id)
+            return if player_recipient.is_none()
+                && existing.info.parent == Some(branch_id)
+                && existing.info.checkpoint == Some(anchor_id)
+                && existing
+                    .events
+                    .first()
+                    .is_some_and(|fact| fact.draft.payload.contains_key("checkpoint_id"))
             {
                 Ok(existing.info)
             } else {
@@ -607,32 +635,66 @@ impl TimelineStore {
             };
         }
         let parent = self.branch(branch_id)?;
-        let checkpoint = self.event(branch_id, checkpoint_id)?;
-        if checkpoint.draft.kind != EventKind::Checkpoint {
-            return Err(TimelineError::Invalid("fork requires a checkpoint"));
-        }
-        let marker_sequence = checkpoint
-            .sequence
-            .checked_add(1)
-            .ok_or(TimelineError::Invalid("sequence overflow"))?;
+        let anchor = self.event(branch_id, anchor_id)?;
         let mut payload = Map::new();
         payload.insert(
             "parent_branch_id".into(),
             Value::String(branch_id.0.to_string()),
         );
-        payload.insert(
-            "checkpoint_id".into(),
-            Value::String(checkpoint_id.0.to_string()),
-        );
+        match player_recipient {
+            None => {
+                if anchor.draft.kind != EventKind::Checkpoint {
+                    return Err(TimelineError::Invalid("fork requires a checkpoint"));
+                }
+                payload.insert(
+                    "checkpoint_id".into(),
+                    Value::String(anchor_id.0.to_string()),
+                );
+            }
+            Some(character) => {
+                if anchor.draft.kind != EventKind::PlayerMessage
+                    || anchor.draft.actor.as_deref() != Some("player")
+                    || !anchor.draft.observers.contains(&character)
+                {
+                    return Err(TimelineError::Invalid(
+                        "fork requires an addressed player input",
+                    ));
+                }
+                let mut projection = CharacterMessageProjection::new(character);
+                for known in self.view(branch_id, character, None)? {
+                    projection.observe(&known);
+                }
+                if !projection
+                    .messages()
+                    .iter()
+                    .any(|message| message.event_id == anchor_id)
+                {
+                    return Err(TimelineError::Invalid(
+                        "player input is not currently visible",
+                    ));
+                }
+                payload.insert(
+                    "input_event_id".into(),
+                    Value::String(anchor_id.0.to_string()),
+                );
+                payload.insert("character_id".into(), Value::String(character.to_string()));
+            }
+        }
+        let marker_sequence = anchor
+            .sequence
+            .checked_add(1)
+            .ok_or(TimelineError::Invalid("sequence overflow"))?;
         let mut marker = EventDraft::new(EventKind::BranchCreated);
         marker.payload = payload;
         let info = BranchInfo {
             id: child_id,
             session_id: parent.session_id,
             parent: Some(branch_id),
-            fork_sequence: checkpoint.sequence,
+            fork_sequence: anchor.sequence,
             head_sequence: marker_sequence,
-            checkpoint: Some(checkpoint_id),
+            // Historical storage column name; the event is a typed input anchor
+            // when the marker carries input_event_id rather than checkpoint_id.
+            checkpoint: Some(anchor_id),
         };
         let fact = TimelineFact {
             session_id: parent.session_id,

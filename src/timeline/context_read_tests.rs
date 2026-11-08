@@ -82,6 +82,15 @@ impl TimelineRepository for Counted {
     ) -> Result<BranchInfo, TimelineError> {
         TimelineStore::fork(&mut self.inner, parent, checkpoint, child)
     }
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_player_input(&mut self.inner, parent, input, character, child)
+    }
     fn view(
         &self,
         branch: BranchId,

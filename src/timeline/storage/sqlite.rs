@@ -213,14 +213,53 @@ impl SqliteTimelineRepository {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    /// Atomically persist a checkpoint fork AND select it. Never split this
-    /// into TimelineRepository::fork plus TimelineSelectionRepository::select_branch:
-    /// those operations otherwise commit on distinct SQLite connections.
     pub(crate) fn fork_and_select_checkpoint(
         &mut self,
         parent: BranchId,
         expected_parent_head: u64,
         checkpoint: EventId,
+        child: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            checkpoint,
+            None,
+            child,
+            expected,
+        )
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_and_select_player_input(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        expected: TimelineSelection,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            input,
+            Some(character),
+            child,
+            expected,
+        )
+    }
+
+    /// Fork, active selection and timeline revision commit in one SQLite
+    /// BEGIN IMMEDIATE transaction; even an injected selection failure rolls
+    /// back the new branch and its inherited prefix.
+    fn fork_and_select_anchor(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        anchor: EventId,
+        player_recipient: Option<CharacterId>,
         child: BranchId,
         expected: TimelineSelection,
     ) -> Result<TimelineSelection, TimelineError> {
@@ -234,7 +273,10 @@ impl SqliteTimelineRepository {
             if store.branch(child).is_ok() {
                 return Err(TimelineError::Conflict);
             }
-            store.fork(parent, checkpoint, child)?;
+            match player_recipient {
+                Some(character) => store.fork_at_player_input(parent, anchor, character, child)?,
+                None => store.fork(parent, anchor, child)?,
+            };
             save_branch(connection, store, child)?;
             select_branch_in_transaction(connection, child, Some(expected))
         })
@@ -894,6 +936,19 @@ impl TimelineRepository for SqliteTimelineRepository {
             Ok(info)
         })
     }
+    fn fork_at_player_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.with_write(|connection, store| {
+            let info = store.fork_at_player_input(parent, input, character, child)?;
+            save_branch(connection, store, child)?;
+            Ok(info)
+        })
+    }
     fn view(
         &self,
         branch: BranchId,
@@ -1411,5 +1466,81 @@ mod tests {
             Err(TimelineError::ConcurrentWrite),
         );
         assert_eq!(repo.world(branch).unwrap(), stored);
+    }
+}
+
+#[cfg(all(test, feature = "sqlite-system"))]
+mod historical_input_fork_tests {
+    use super::*;
+    use crate::timeline::conversation::{ConversationMessage, ConversationSpeaker};
+    use serde_json::json;
+
+    #[test]
+    fn historical_input_sqlite_transaction_rolls_back_and_rejects_two_writers() {
+        let db = std::env::temp_dir().join(format!("neuromita-b59-sql-{}.db", Uuid::new_v4()));
+        let parent = BranchId::new();
+        let mut repo = SqliteTimelineRepository::open(&db).unwrap();
+        repo.create_session(SessionId::new(), parent).unwrap();
+        let selection = repo.select_branch(parent, None).unwrap();
+        let message = ConversationMessage::new(
+            "source",
+            ConversationSpeaker::Player,
+            json!("image and text"),
+            [CharacterId::Crazy],
+        );
+        let input = message.id;
+        repo.append(
+            parent,
+            0,
+            "source",
+            json!({}),
+            vec![message.into_draft().unwrap()],
+        )
+        .unwrap();
+        let before = revision(&Connection::open(&db).unwrap()).unwrap();
+        Connection::open(&db).unwrap().exec("CREATE TRIGGER fail_selection BEFORE UPDATE ON timeline_active_selection BEGIN SELECT RAISE(ABORT, 'fail'); END").unwrap();
+        let failed = BranchId::new();
+        assert!(matches!(
+            repo.fork_and_select_player_input(
+                parent,
+                1,
+                input,
+                CharacterId::Crazy,
+                failed,
+                selection
+            ),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(repo.branch(failed), Err(TimelineError::NotFound));
+        assert_eq!(repo.selection().unwrap(), Some(selection));
+        assert_eq!(revision(&Connection::open(&db).unwrap()).unwrap(), before);
+        Connection::open(&db)
+            .unwrap()
+            .exec("DROP TRIGGER fail_selection")
+            .unwrap();
+        let winner = BranchId::new();
+        let loser = BranchId::new();
+        let mut second_writer = SqliteTimelineRepository::open(&db).unwrap();
+        let committed = repo
+            .fork_and_select_player_input(parent, 1, input, CharacterId::Crazy, winner, selection)
+            .unwrap();
+        assert_eq!(
+            second_writer.fork_and_select_player_input(
+                parent,
+                1,
+                input,
+                CharacterId::Crazy,
+                loser,
+                selection
+            ),
+            Err(TimelineError::ConcurrentWrite)
+        );
+        assert_eq!(repo.branch(loser), Err(TimelineError::NotFound));
+        assert_eq!(repo.selection().unwrap(), Some(committed));
+        assert_eq!(repo.event(winner, input).unwrap().draft.id, input);
+        drop((repo, second_writer));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+        }
     }
 }

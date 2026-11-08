@@ -17,6 +17,8 @@ mod context_read_tests;
 pub mod conversation;
 pub mod domain;
 pub mod file_attachments;
+#[cfg(test)]
+mod historical_input_fork_tests;
 pub mod ingress;
 mod legacy;
 #[cfg(test)]
@@ -431,12 +433,40 @@ impl SessionTimeline {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    /// Owner-only checkpoint fork. This is a storage/selection primitive, NOT
-    /// accepted Regenerate: queue admission and arbitrary player event anchors
-    /// are intentionally out of scope until one combined protocol exists.
     pub(crate) fn fork_and_select_checkpoint(
         &mut self,
         checkpoint: EventId,
+        child: BranchId,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<TimelineSelection, domain::TimelineError> {
+        self.fork_and_select_anchor(checkpoint, None, child, expected, expected_parent_head)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    /// Owner-only historical input fork; this does not admit or enqueue a
+    /// Regenerate request and must never be exposed as that operation.
+    pub(crate) fn fork_and_select_player_input(
+        &mut self,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        expected: TimelineSelection,
+        expected_parent_head: u64,
+    ) -> Result<TimelineSelection, domain::TimelineError> {
+        self.fork_and_select_anchor(
+            input,
+            Some(character),
+            child,
+            expected,
+            expected_parent_head,
+        )
+    }
+
+    fn fork_and_select_anchor(
+        &mut self,
+        anchor: EventId,
+        player_recipient: Option<CharacterId>,
         child: BranchId,
         expected: TimelineSelection,
         expected_parent_head: u64,
@@ -450,9 +480,32 @@ impl SessionTimeline {
         if self.store.branch(child).is_ok() {
             return Err(domain::TimelineError::Conflict);
         }
-        let marker = self.store.event(self.branch, checkpoint)?;
-        if marker.draft.kind != EventKind::Checkpoint {
-            return Err(domain::TimelineError::Invalid("fork requires a checkpoint"));
+        let source = self.store.event(self.branch, anchor)?;
+        match player_recipient {
+            None if source.draft.kind != EventKind::Checkpoint => {
+                return Err(domain::TimelineError::Invalid("fork requires a checkpoint"));
+            }
+            Some(character) => {
+                if source.draft.kind != EventKind::PlayerMessage
+                    || source.draft.actor.as_deref() != Some("player")
+                    || !source.draft.observers.contains(&character)
+                {
+                    return Err(domain::TimelineError::Invalid(
+                        "fork requires an addressed player input",
+                    ));
+                }
+                let world = self.store.world(self.branch)?;
+                if !MitaView::from_facts(self.branch, expected_parent_head, character, &world)
+                    .messages()
+                    .iter()
+                    .any(|message| message.event_id == anchor)
+                {
+                    return Err(domain::TimelineError::Invalid(
+                        "player input is not currently visible",
+                    ));
+                }
+            }
+            _ => {}
         }
         let next_generation = expected
             .generation
@@ -465,22 +518,38 @@ impl SessionTimeline {
             .into_iter()
             .map(|character| {
                 self.store
-                    .context_epoch_at(self.branch, character, Some(marker.sequence))
+                    .context_epoch_at(self.branch, character, Some(source.sequence))
                     .map(|epoch| (character, epoch))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         #[cfg(feature = "sqlite-system")]
         let selection = if let Some(repository) = &mut self.selection_repository {
-            repository.fork_and_select_checkpoint(
-                self.branch,
-                expected_parent_head,
-                checkpoint,
-                child,
-                expected,
-            )?
+            match player_recipient {
+                Some(character) => repository.fork_and_select_player_input(
+                    self.branch,
+                    expected_parent_head,
+                    anchor,
+                    character,
+                    child,
+                    expected,
+                )?,
+                None => repository.fork_and_select_checkpoint(
+                    self.branch,
+                    expected_parent_head,
+                    anchor,
+                    child,
+                    expected,
+                )?,
+            }
         } else {
-            self.store.fork(self.branch, checkpoint, child)?;
+            match player_recipient {
+                Some(character) => {
+                    self.store
+                        .fork_at_player_input(self.branch, anchor, character, child)?
+                }
+                None => self.store.fork(self.branch, anchor, child)?,
+            };
             TimelineSelection {
                 branch_id: child,
                 generation: next_generation,
@@ -488,7 +557,13 @@ impl SessionTimeline {
         };
         #[cfg(not(feature = "sqlite-system"))]
         let selection = {
-            self.store.fork(self.branch, checkpoint, child)?;
+            match player_recipient {
+                Some(character) => {
+                    self.store
+                        .fork_at_player_input(self.branch, anchor, character, child)?
+                }
+                None => self.store.fork(self.branch, anchor, child)?,
+            };
             TimelineSelection {
                 branch_id: child,
                 generation: next_generation,
