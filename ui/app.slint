@@ -95,6 +95,7 @@ export component AppWindow inherits Window {
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
     in property <string> notice;
+    in property <string> launcher-error;
     in property <[ChatRow]> chat-messages;
     in property <int> chat-clients;
     in property <bool> chat-server-running;
@@ -223,15 +224,15 @@ export component AppWindow inherits Window {
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
                 home => { root.navigate(PageId.home); }
             }
-            if root.notice != "": VerticalLayout {
+            if root.notice != "" || root.launcher-error != "": VerticalLayout {
                 width: 100%; height: 100%; padding-top: 24px; padding-left: 28px; padding-right: 28px; alignment: start;
                 HorizontalLayout { alignment: center;
                     Rectangle {
                         width: min(650px, parent.width); height: 64px;
                         border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;
                         HorizontalLayout { padding-left: 18px; padding-right: 12px; spacing: 8px;
-                            Label { horizontal-stretch: 1; text: root.notice; wrap: word-wrap; }
-                            VerticalLayout { padding: 0px; alignment: center; width: 32px;
+                            Label { horizontal-stretch: 1; text: root.launcher-error != "" ? root.launcher-error : root.notice; wrap: word-wrap; }
+                            if root.launcher-error == "": VerticalLayout { padding: 0px; alignment: center; width: 32px;
                                 ActionSurface {
                                     width: 32px; height: 32px; label: I18n.i18n("common.dismiss", "Закрыть");
                                     Label { text: "×"; font-size: 22px; horizontal-alignment: center; }
