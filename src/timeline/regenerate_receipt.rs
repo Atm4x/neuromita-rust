@@ -38,6 +38,8 @@ pub struct RegenerateConfigurationReference {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegenerateRecoveryOutcome {
     DispatchUnknown,
+    /// A durable pre-provider authorization exists, but a real call is not proven.
+    MayHaveDispatched(EventId),
     AcceptedReply(EventId),
     Abandoned(EventId),
 }

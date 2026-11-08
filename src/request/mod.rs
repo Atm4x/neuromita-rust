@@ -21,7 +21,7 @@ pub use diagnostics::{
     RequestTraceSummary, TraceMark, TraceTiming, UsageTrace,
 };
 pub(crate) use diagnostics::{DiagnosticsLookup, DiagnosticsStore};
-pub(crate) use handler::MessageHandler;
+pub(crate) use handler::{MessageHandler, ProviderDispatchFence};
 pub use model::*;
 pub(crate) use record::RequestRecord;
 pub use record::{RequestHandle, RequestObserver};

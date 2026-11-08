@@ -77,6 +77,7 @@ pub enum EventKind {
     Checkpoint,
     BranchCreated,
     RegenerateAbandoned,
+    RegenerateMayHaveDispatched,
 }
 
 impl EventKind {

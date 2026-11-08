@@ -595,9 +595,11 @@ impl TimelineStore {
             return Err(TimelineError::ConcurrentWrite);
         }
         if drafts.iter().any(|draft| {
-            draft.kind == EventKind::RegenerateAbandoned
-                || (draft.kind == EventKind::CharacterMessage
-                    && draft.payload.contains_key("request_id"))
+            matches!(
+                draft.kind,
+                EventKind::RegenerateAbandoned | EventKind::RegenerateMayHaveDispatched
+            ) || (draft.kind == EventKind::CharacterMessage
+                && draft.payload.contains_key("request_id"))
         }) {
             let world = self.world(branch_id)?;
             super::validate_regenerate_transition(branch_id, &world, &drafts)?;

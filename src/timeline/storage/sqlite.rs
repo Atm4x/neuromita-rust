@@ -861,9 +861,11 @@ impl SqliteTimelineRepository {
                 return Err(TimelineError::ConcurrentWrite);
             }
             if drafts.iter().any(|draft| {
-                draft.kind == EventKind::RegenerateAbandoned
-                    || (draft.kind == EventKind::CharacterMessage
-                        && draft.payload.contains_key("request_id"))
+                matches!(
+                    draft.kind,
+                    EventKind::RegenerateAbandoned | EventKind::RegenerateMayHaveDispatched
+                ) || (draft.kind == EventKind::CharacterMessage
+                    && draft.payload.contains_key("request_id"))
             }) {
                 let existing = read_page(&connection, branch, 0, None, i64::MAX as usize, None)?;
                 crate::timeline::domain::validate_regenerate_transition(
@@ -1377,6 +1379,57 @@ mod tests {
                 .world(branch)
                 .unwrap(),
             facts
+        );
+    }
+
+    #[test]
+    fn regenerate_dispatch_sql_abort_leaves_no_permit_and_retries_exactly_once() {
+        use crate::timeline::{SessionTimeline, TimelineConfig};
+        let db = TestDb::new();
+        let session = SessionId::new();
+        let root = BranchId::new();
+        let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: db.0.clone(),
+            session,
+            root,
+        })
+        .unwrap();
+        let (_, child, request) =
+            crate::timeline::regenerate_owner_tests::admitted_recovery_source(&mut timeline);
+        let selected = timeline.selection();
+        let connection = Connection::open(&db.0).unwrap();
+        let before = revision(&connection).unwrap();
+        connection.exec("CREATE TRIGGER b65_dispatch_abort BEFORE INSERT ON timeline_events BEGIN SELECT RAISE(ABORT, 'b65 injection'); END").unwrap();
+        assert!(matches!(
+            timeline.permit_regenerate_dispatch(child, request, selected),
+            Err(TimelineError::Storage(_))
+        ));
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 2);
+        assert_eq!(revision(&connection).unwrap(), before);
+        assert!(
+            crate::timeline::domain::dispatch_may_have_started(
+                &timeline.store.world(child).unwrap(),
+                request.0
+            )
+            .unwrap()
+            .is_none()
+        );
+        connection.exec("DROP TRIGGER b65_dispatch_abort").unwrap();
+        let granted = timeline
+            .permit_regenerate_dispatch(child, request, selected)
+            .unwrap();
+        assert_eq!(revision(&connection).unwrap(), before + 1);
+        assert_eq!(timeline.store.branch(child).unwrap().head_sequence, 3);
+        assert_eq!(
+            timeline.permit_regenerate_dispatch(child, request, selected),
+            Err(TimelineError::Conflict)
+        );
+        assert_eq!(
+            timeline
+                .reconcile_regenerate(child, request)
+                .unwrap()
+                .outcome,
+            crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(granted)
         );
     }
 

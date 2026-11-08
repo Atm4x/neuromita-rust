@@ -611,3 +611,24 @@ async fn native_archive_round_trip_preserves_exact_regenerate_admission() {
     }
     let _ = std::fs::remove_dir_all(assets_dir);
 }
+
+#[tokio::test]
+async fn provider_dispatch_fence_persists_before_external_call_and_denies_duplicate() {
+    let mut case = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = case.api.regenerate(case.source, case.fence, child).unwrap();
+    let id = case.queue.try_recv().unwrap();
+    assert_eq!(id, handle.id());
+    let admission = case.api.registry.get(id).unwrap().admission();
+    let fence = TimelineRequestIngress {
+        timeline: Arc::clone(&case.timeline),
+    };
+    fence.before_provider(id, admission).unwrap();
+    let owner = case.timeline.lock().unwrap();
+    assert!(matches!(
+        owner.reconcile_regenerate(child, id).unwrap().outcome,
+        crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(_)
+    ));
+    drop(owner);
+    assert!(fence.before_provider(id, admission).is_err());
+}

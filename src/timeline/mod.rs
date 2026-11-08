@@ -25,6 +25,8 @@ mod legacy;
 mod memory_maintenance_tests;
 mod memory_operations;
 #[cfg(test)]
+mod regenerate_dispatch_tests;
+#[cfg(test)]
 mod regenerate_owner_tests;
 mod regenerate_receipt;
 #[doc(hidden)]
@@ -592,14 +594,19 @@ impl SessionTimeline {
         }
         let world = self.store.world(child)?;
         let abandoned = domain::abandoned_regenerate(&world, request.0)?;
+        let may_have_dispatched = domain::dispatch_may_have_started(&world, request.0)?;
         let outcome =
             match self
                 .store
                 .accepted_reply_at(child, admission.character, request.0, None)?
             {
-                None => abandoned.map_or(RegenerateRecoveryOutcome::DispatchUnknown, |fact| {
-                    RegenerateRecoveryOutcome::Abandoned(fact.draft.id)
-                }),
+                None => match (abandoned, may_have_dispatched) {
+                    (Some(fact), _) => RegenerateRecoveryOutcome::Abandoned(fact.draft.id),
+                    (None, Some(fact)) => {
+                        RegenerateRecoveryOutcome::MayHaveDispatched(fact.draft.id)
+                    }
+                    (None, None) => RegenerateRecoveryOutcome::DispatchUnknown,
+                },
                 Some(accepted) => {
                     if abandoned.is_some() {
                         return Err(domain::TimelineError::Conflict);
@@ -638,6 +645,57 @@ impl SessionTimeline {
             selection,
             outcome,
         })
+    }
+
+    /// Durably authorize at most one potential provider invocation. The event
+    /// is written BEFORE calling external code. After a crash this is only
+    /// "may have dispatched", never confirmation or a replay permit.
+    pub(crate) fn permit_regenerate_dispatch(
+        &mut self,
+        child: BranchId,
+        request: RequestId,
+        expected: TimelineSelection,
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if child != self.branch || expected.branch_id != child {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let admission =
+            self.regenerate_admission_receipt(child)?
+                .ok_or(domain::TimelineError::Invalid(
+                    "branch has no durable regenerate admission",
+                ))?;
+        if admission.request != request {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let world = self.store.world(child)?;
+        if domain::dispatch_may_have_started(&world, request.0)?.is_some()
+            || domain::abandoned_regenerate(&world, request.0)?.is_some()
+            || self
+                .store
+                .accepted_reply_at(child, admission.character, request.0, None)?
+                .is_some()
+        {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let mut draft = EventDraft::new(EventKind::RegenerateMayHaveDispatched);
+        let id = draft.id;
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.0.to_string()));
+        self.store.append_guarded(
+            child,
+            self.store.branch(child)?.head_sequence,
+            &format!("regenerate-dispatch:{}", request.0),
+            json!({"request_id": request.0.to_string()}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(id)
     }
 
     /// Terminally suppress late acceptance in this Timeline world. This does

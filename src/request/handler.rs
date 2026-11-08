@@ -21,6 +21,14 @@ use crate::{
     voice::{VoiceError, VoiceOptions, VoiceProvider},
 };
 
+pub(crate) trait ProviderDispatchFence: Send + Sync {
+    fn before_provider(
+        &self,
+        request: RequestId,
+        admission: crate::timeline::selection::TimelineAdmission,
+    ) -> Result<(), String>;
+}
+
 #[derive(Clone)]
 pub(crate) struct MessageHandler {
     pub(crate) character: CharacterHandle,
@@ -36,6 +44,7 @@ pub(crate) struct MessageHandler {
     pub(crate) context_updates: watch::Receiver<u64>,
     pub(crate) games: Arc<GamePolicy>,
     pub(crate) assets: Option<Arc<crate::timeline::storage::assets::TimelineAssetStore>>,
+    pub(crate) dispatch_fence: Arc<dyn ProviderDispatchFence>,
 }
 
 impl MessageHandler {
@@ -238,6 +247,9 @@ impl MessageHandler {
                     .with_post_dsl(post_dsl)
                     .with_tools(settings.values.tools.clone())
                     .with_assets(self.assets.clone());
+                self.dispatch_fence
+                    .before_provider(id, record.admission())
+                    .map_err(GenerationError::Response)?;
                 let mut combined = RecordObserver {
                     record: &record,
                     capture: observer.as_mut(),

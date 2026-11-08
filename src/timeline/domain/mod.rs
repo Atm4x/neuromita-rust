@@ -10,7 +10,9 @@ mod projection;
 mod provenance;
 mod regenerate_lifecycle;
 mod replies;
-pub(crate) use regenerate_lifecycle::{abandoned_regenerate, validate_regenerate_transition};
+pub(crate) use regenerate_lifecycle::{
+    abandoned_regenerate, dispatch_may_have_started, validate_regenerate_transition,
+};
 mod repository;
 mod request_evidence;
 pub(crate) use replies::{accepted_reply_count, accepted_reply_request};

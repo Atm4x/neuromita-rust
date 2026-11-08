@@ -49,7 +49,8 @@ use crate::{
     prompts::PromptCatalog,
     reminders::{ReminderConfig, ReminderService},
     request::{
-        ChatApiState, MessageHandler, RequestId, RequestIngress, RequestRegistry, SubmitError,
+        ChatApiState, MessageHandler, ProviderDispatchFence, RequestId, RequestIngress,
+        RequestRegistry, SubmitError,
     },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
@@ -317,6 +318,33 @@ pub struct ApplicationLifecycle {
 
 struct TimelineRequestIngress {
     timeline: Arc<Mutex<SessionTimeline>>,
+}
+
+impl ProviderDispatchFence for TimelineRequestIngress {
+    fn before_provider(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), String> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| "timeline mutex poisoned".to_owned())?;
+        let child = admission.selection.branch_id;
+        let Some(receipt) = timeline
+            .regenerate_admission_receipt(child)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(());
+        };
+        if receipt.request != request {
+            return Ok(());
+        }
+        timeline
+            .permit_regenerate_dispatch(child, request, admission.selection)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl RequestIngress for TimelineRequestIngress {
@@ -644,6 +672,10 @@ impl ApplicationLifecycle {
                 .await
                 .map_err(|error| ApplicationError::Task(error.to_string()))?;
         }
+        let shared_ingress = Arc::new(TimelineRequestIngress {
+            timeline: Arc::clone(&timeline),
+        });
+        let dispatch_fence: Arc<dyn ProviderDispatchFence> = shared_ingress.clone();
         let mut handlers = HashMap::new();
         let mut workers = Vec::new();
         for id in CharacterId::ALL {
@@ -667,14 +699,13 @@ impl ApplicationLifecycle {
                 context_updates,
                 games: Arc::clone(&games),
                 assets: timeline_assets.clone(),
+                dispatch_fence: Arc::clone(&dispatch_fence),
             };
             workers.push(tokio::spawn(
                 worker.run_queue(receive, workers_stop.clone()),
             ));
         }
-        let ingress: Arc<dyn RequestIngress> = Arc::new(TimelineRequestIngress {
-            timeline: Arc::clone(&timeline),
-        });
+        let ingress: Arc<dyn RequestIngress> = shared_ingress;
         let api = Arc::new(ChatApiState::new(
             registry,
             handlers,
