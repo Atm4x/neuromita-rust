@@ -1,4 +1,6 @@
 mod logging;
+#[cfg(feature = "sqlite-system")]
+mod recovery_inventory_cli;
 mod settings_cli;
 mod terminal;
 #[cfg(feature = "sqlite-system")]
@@ -32,6 +34,15 @@ async fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("recovery-inventory")) {
+        #[cfg(feature = "sqlite-system")]
+        return match recovery_inventory_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        return fail("recovery-inventory requires the sqlite-system feature");
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("timeline-backup")) {
         #[cfg(feature = "sqlite-system")]
         return match timeline_backup_cli::run(arguments.collect()) {
