@@ -353,23 +353,46 @@ mod tests {
         let character = registry.get(CharacterId::Crazy).unwrap();
         let admission = {
             let timeline = timeline.lock().unwrap();
-            timeline.admission(CharacterId::Crazy, timeline.selection()).unwrap()
+            timeline
+                .admission(CharacterId::Crazy, timeline.selection())
+                .unwrap()
         };
         let initial_anchor = timeline.lock().unwrap().anchor();
         let prepared = PromptPreparation::new()
             .prepare(
-                &character, RequestId::new(), "".into(), TurnIntent::Initiate,
-                ContextPosition::Latest, admission,
-                PromptCatalog::new(&root).capture(CharacterId::Crazy, None).unwrap(),
+                &character,
+                RequestId::new(),
+                "".into(),
+                TurnIntent::Initiate,
+                ContextPosition::Latest,
+                admission,
+                PromptCatalog::new(&root)
+                    .capture(CharacterId::Crazy, None)
+                    .unwrap(),
             )
-            .await.unwrap();
-        assert_eq!(prepared.variable_updates.get("Love"), Some(&serde_json::json!(8)));
-        assert_eq!(prepared.context.variables.get("Love"), Some(&serde_json::json!(8)));
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.variable_updates.get("Love"),
+            Some(&serde_json::json!(8))
+        );
+        assert_eq!(
+            prepared.context.variables.get("Love"),
+            Some(&serde_json::json!(8))
+        );
         assert_eq!(prepared.prompt.unwrap().stable.as_ref(), &[Arc::from("8")]);
         assert_eq!(timeline.lock().unwrap().anchor(), initial_anchor);
-        assert!(!character.debug_variables().await.unwrap().contains_key("Love"));
+        assert!(
+            !character
+                .debug_variables()
+                .await
+                .unwrap()
+                .contains_key("Love")
+        );
         stop.cancel();
-        for task in tasks { task.await.unwrap(); }
+        for task in tasks {
+            task.await.unwrap();
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
