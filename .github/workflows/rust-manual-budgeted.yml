@@ -1,0 +1,99 @@
+# Fork-only workflow: intentionally no push, pull_request or schedule trigger.
+# Dispatch from this fork's main branch, then select any fork ref to check.
+name: Rust checks (manual / budgeted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Branch, tag or SHA to check in this fork'
+        type: string
+        required: true
+        default: 'fix/prompt-dsl-postdsl-acceptance-20261108'
+      scope:
+        description: 'format = cheap; core = fmt/check/clippy/lib tests; full = include GUI'
+        type: choice
+        required: true
+        default: format
+        options:
+          - format
+          - core
+          - full
+
+# Read-only token, and checkout does not retain credentials.
+permissions:
+  contents: read
+
+# One active run for the entire workflow; a new manual run cancels the old one.
+concurrency:
+  group: budgeted-rust-manual-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: "${{ inputs.scope }} @ ${{ inputs.target_ref }}"
+    runs-on: ubuntu-24.04
+    # Hard ceilings: 8 min format, 25 min core, 40 min full.
+    timeout-minutes: ${{ inputs.scope == 'format' && 8 || inputs.scope == 'core' && 25 || 40 }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout selected fork ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
+
+      - name: Show exact revision under test
+        run: |
+          git log -1 --format='commit: %H%nsubject: %s'
+          git status --short
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.89.0
+          rustc --version
+          cargo --version
+
+      # Fail fast before downloading crates, apt dependencies or compiling.
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install minimal native dependencies
+        if: ${{ inputs.scope != 'format' }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev
+
+      - name: Install GUI native dependencies
+        if: ${{ inputs.scope == 'full' }}
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libgl1-mesa-dev libudev-dev
+
+      - name: Core cargo check
+        if: ${{ inputs.scope == 'core' }}
+        run: cargo check --locked --all-targets
+
+      - name: Core clippy
+        if: ${{ inputs.scope == 'core' }}
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Core library tests
+        if: ${{ inputs.scope == 'core' }}
+        run: cargo test --locked --lib
+
+      - name: Full cargo check (including GUI)
+        if: ${{ inputs.scope == 'full' }}
+        run: cargo check --locked --all-features --all-targets
+
+      - name: Full clippy (including GUI)
+        if: ${{ inputs.scope == 'full' }}
+        run: cargo clippy --locked --all-features --all-targets -- -D warnings
+
+      - name: Full tests (including GUI)
+        if: ${{ inputs.scope == 'full' }}
+        run: cargo test --locked --all-features --all-targets
