@@ -36,6 +36,8 @@ pub enum ConversationError {
     InvalidMessageEdit,
     #[error("failed input is no longer the last visible player message")]
     RetrySuperseded,
+    #[error("regenerate target is not the latest visible canonically accepted reply to a player event")]
+    RegenerateUnavailable,
     #[error(transparent)]
     Presenter(#[from] PresenterError),
 }
@@ -62,6 +64,48 @@ impl ConversationChangePreview {
     }
     pub fn message_count(&self) -> usize {
         self.targets.len()
+    }
+}
+
+/// Read-only accepted-reply provenance bound to one exact Timeline snapshot.
+/// It does not mutate, enqueue, or promise that destructive regeneration is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegeneratePreview {
+    character: CharacterId,
+    accepted_message: crate::identity::EventId,
+    accepted_request: RequestId,
+    original_input: crate::identity::EventId,
+    at: ContextAnchor,
+    selection: TimelineSelection,
+    visible_downstream: usize,
+}
+
+impl RegeneratePreview {
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn accepted_message(&self) -> crate::identity::EventId {
+        self.accepted_message
+    }
+
+    pub fn accepted_request(&self) -> RequestId {
+        self.accepted_request
+    }
+
+    pub fn original_input(&self) -> crate::identity::EventId {
+        self.original_input
+    }
+
+    pub fn timeline_fence(&self) -> TimelineFence {
+        TimelineFence {
+            at: self.at,
+            selection: self.selection,
+        }
+    }
+
+    pub fn visible_downstream(&self) -> usize {
+        self.visible_downstream
     }
 }
 
@@ -258,6 +302,103 @@ impl ConversationPresenter {
         Ok(self
             .chat
             .retry_failed_at(character, source, TimelineFence { at, selection })?)
+    }
+
+    /// Resolve the original Reply(EventId) from an accepted Timeline receipt.
+    /// Regenerate is deliberately not admitted here: downstream effects and
+    /// cross-observer branch semantics require a separate atomic owner operation.
+    pub async fn preview_regenerate(
+        &self,
+        character: CharacterId,
+        accepted: crate::identity::EventId,
+        expected: TimelineFence,
+    ) -> Result<RegeneratePreview, ConversationError> {
+        {
+            let timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| ConversationError::TimelineUnavailable)?;
+            if timeline.anchor() != expected.at || timeline.selection() != expected.selection {
+                return Err(ConversationError::StalePreview);
+            }
+        }
+
+        let captured = self.characters.context(character, expected.at).await?;
+        let visible = captured.view.messages();
+        let latest = visible
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == MessageRole::Assistant
+                    && message.speaker.as_deref() == Some(character.as_str())
+            })
+            .ok_or(ConversationError::RegenerateUnavailable)?;
+        if latest.event_id != accepted {
+            return Err(ConversationError::RegenerateUnavailable);
+        }
+        let request = latest
+            .request_id
+            .ok_or(ConversationError::RegenerateUnavailable)?;
+
+        let timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| ConversationError::TimelineUnavailable)?;
+        if timeline.anchor() != expected.at || timeline.selection() != expected.selection {
+            return Err(ConversationError::StalePreview);
+        }
+        let receipt = timeline
+            .accepted_reply_at(character, request, expected.at)?
+            .filter(|fact| fact.draft.id == accepted)
+            .ok_or(ConversationError::RegenerateUnavailable)?;
+        let causes = receipt
+            .draft
+            .links
+            .iter()
+            .filter(|link| link.relation == crate::timeline::domain::CausalRelation::ReplyTo)
+            .map(|link| link.event_id)
+            .collect::<Vec<_>>();
+        let [original_input] = causes.as_slice() else {
+            return Err(ConversationError::RegenerateUnavailable);
+        };
+        let original_input = *original_input;
+        let canonical_reply_to = original_input.0.to_string();
+        if receipt.draft.payload.get("reply_to").and_then(serde_json::Value::as_str)
+            != Some(canonical_reply_to.as_str())
+        {
+            return Err(ConversationError::RegenerateUnavailable);
+        }
+        let cause = timeline.reaction_cause_at(
+            character,
+            crate::request::TurnIntent::Reply(original_input),
+            expected.at,
+        )?;
+        if !cause.is_some_and(|fact| {
+            fact.draft.kind == crate::timeline::domain::EventKind::PlayerMessage
+                && fact.draft.actor.as_deref() == Some("player")
+        }) {
+            return Err(ConversationError::RegenerateUnavailable);
+        }
+        if !visible.iter().any(|message| {
+            message.event_id == original_input
+                && message.role == MessageRole::User
+                && message.speaker.as_deref() == Some("player")
+                && message.sequence < receipt.sequence
+        }) {
+            return Err(ConversationError::RegenerateUnavailable);
+        }
+        Ok(RegeneratePreview {
+            character,
+            accepted_message: accepted,
+            accepted_request: request,
+            original_input,
+            at: expected.at,
+            selection: expected.selection,
+            visible_downstream: visible
+                .iter()
+                .filter(|message| message.sequence > receipt.sequence)
+                .count(),
+        })
     }
 
     pub fn cancel(&self, request: RequestId) -> Result<CancelResult, PresenterError> {

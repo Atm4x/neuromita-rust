@@ -678,6 +678,118 @@ async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_at
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn accepted_regenerate_preview_binds_canonical_reply_and_rejects_stale_or_foreign_targets() {
+    use neuromita::{
+        presentation::ConversationError,
+        request::TimelineFence,
+        timeline::domain::EventKind,
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let conversation = &app.presenter().conversation;
+    let request = conversation
+        .reply(CharacterId::Crazy, "Canonical regenerate input".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Text("Accepted answer")).unwrap();
+    assert!(matches!(
+        finished(&request).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, request.id(), true).await;
+
+    let before = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let user = before
+        .messages
+        .iter()
+        .find(|message| message.kind == EventKind::PlayerMessage)
+        .unwrap()
+        .event_id;
+    let accepted = before
+        .messages
+        .iter()
+        .find(|message| {
+            message.kind == EventKind::CharacterMessage
+                && message.request_id == Some(request.id())
+        })
+        .unwrap()
+        .event_id;
+    let fence = TimelineFence {
+        at: before.at,
+        selection: before.selection,
+    };
+
+    let preview = conversation
+        .preview_regenerate(CharacterId::Crazy, accepted, fence)
+        .await
+        .unwrap();
+    assert_eq!(preview.character(), CharacterId::Crazy);
+    assert_eq!(preview.accepted_message(), accepted);
+    assert_eq!(preview.accepted_request(), request.id());
+    assert_eq!(preview.original_input(), user);
+    assert_eq!(preview.timeline_fence(), fence);
+    assert_eq!(preview.visible_downstream(), 0);
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Kind, accepted, fence)
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, neuromita::timeline::EventId::new(), fence)
+            .await,
+        Err(ConversationError::RegenerateUnavailable)
+    ));
+
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Later message".into()).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        conversation
+            .preview_regenerate(CharacterId::Crazy, accepted, fence)
+            .await,
+        Err(ConversationError::StalePreview)
+    ));
+    let after = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let new_fence = TimelineFence {
+        at: after.at,
+        selection: after.selection,
+    };
+    let renewed = conversation
+        .preview_regenerate(CharacterId::Crazy, accepted, new_fence)
+        .await
+        .unwrap();
+    assert_eq!(renewed.visible_downstream(), 1);
+    assert_eq!(renewed.original_input(), user);
+    assert_eq!(
+        after
+            .messages
+            .iter()
+            .filter(|message| message.event_id == user)
+            .count(),
+        1
+    );
+    assert_eq!(after.messages.len(), before.messages.len() + 1);
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn presenter_to_provider_observation_cancellation_and_commit() {
     let _serial = CORE_TEST_MUTEX.lock().await;
