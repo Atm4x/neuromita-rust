@@ -12,9 +12,10 @@ use neuromita::{
         speech_catalog::{REMOTE_TTS_TEMPLATES, SpeechInventory},
     },
     character::character_catalog,
+    remote_voice::{RemoteVoiceConfig, RemoteVoicePreset},
     settings::{TtsBackend, TtsPreferences},
 };
-use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VoicePreviewMode {
@@ -49,11 +50,33 @@ fn model_id(label: &str) -> String {
         .to_owned()
 }
 
-fn api_profile_id(label: &str) -> &str {
-    REMOTE_TTS_TEMPLATES
-        .iter()
-        .find(|template| template.name == label)
-        .map_or(label, |template| template.id)
+fn current_preset(ui: &VoiceUi) -> Result<RemoteVoicePreset, String> {
+    let id: String = ui.get_api_preset_id().into();
+    if id.is_empty() {
+        return Err("Облачный профиль ещё не загружен".into());
+    }
+    let voices = ui.get_character_voice_ids().iter().collect::<Vec<_>>();
+    let character_voice_ids = neuromita::character::CharacterId::ALL
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, character)| {
+            voices
+                .get(index + 1)
+                .map(|value| (character, value.to_string()))
+        })
+        .filter(|(_, value)| !value.is_empty())
+        .collect();
+    Ok(RemoteVoicePreset {
+        id,
+        name: ui.get_api_preset_name().into(),
+        template_id: "fish_audio".into(),
+        api_key: ui.get_api_key().into(),
+        model: ui.get_api_model().into(),
+        speed_percent: u16::try_from(ui.get_api_speed())
+            .map_err(|_| "Некорректная скорость".to_owned())?,
+        default_voice_id: voices.first().map(ToString::to_string).unwrap_or_default(),
+        character_voice_ids,
+    })
 }
 
 fn read(window: &AppWindow) -> Result<TtsPreferences, String> {
@@ -80,7 +103,7 @@ fn read(window: &AppWindow) -> Result<TtsPreferences, String> {
         local_language: ui.get_local_language().into(),
         local_auto_load: ui.get_local_auto_load(),
         local_lazy_init: ui.get_local_lazy_init(),
-        api_profile: api_profile_id(&ui.get_api_profile()).to_owned(),
+        api_profile: "fish_audio".into(),
         api_model: ui.get_api_model().into(),
         api_speed_percent: ui
             .get_api_speed()
@@ -119,7 +142,20 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     ui.on_persist(move || {
         if let Some(window) = weak.upgrade() {
             match read(&window) {
-                Ok(value) => send(Command::SaveTts(value)),
+                Ok(value) => {
+                    send(Command::SaveTts(value));
+                    let ui = window.global::<VoiceUi>();
+                    if ui.get_backend() == 2 && !ui.get_api_preset_id().is_empty() {
+                        match current_preset(&ui) {
+                            Ok(preset) => send(Command::RemoteVoice(
+                                super::runtime::RemoteVoiceAction::Save(preset),
+                            )),
+                            Err(error) => window
+                                .global::<SettingsUi>()
+                                .set_settings_error(error.into()),
+                        }
+                    }
+                }
                 Err(error) => window
                     .global::<SettingsUi>()
                     .set_settings_error(error.into()),
@@ -144,12 +180,38 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
                 .copied()
                 .map(Some)
         };
-        if let Some(id) = id {
-            send(Command::SaveCharacterVoice(id, value.into()));
-        } else if let Some(window) = voice_window.upgrade() {
+        let Some(window) = voice_window.upgrade() else {
+            return;
+        };
+        let Some(id) = id else {
             window
                 .global::<SettingsUi>()
                 .set_settings_error("Invalid character selection".into());
+            return;
+        };
+        let ui = window.global::<VoiceUi>();
+        if ui.get_backend() == 2 && !ui.get_api_preset_id().is_empty() {
+            let mut voices = ui
+                .get_character_voice_ids()
+                .iter()
+                .collect::<Vec<SharedString>>();
+            if let Ok(row) = usize::try_from(character + 1)
+                && let Some(entry) = voices.get_mut(row)
+            {
+                *entry = value.clone();
+            }
+            ui.set_character_voice_ids(ModelRc::new(VecModel::from(voices)));
+            ui.set_voice_id(value);
+            match current_preset(&ui) {
+                Ok(preset) => send(Command::RemoteVoice(
+                    super::runtime::RemoteVoiceAction::Save(preset),
+                )),
+                Err(error) => window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into()),
+            }
+        } else {
+            send(Command::SaveCharacterVoice(id, value.into()));
         }
     });
     let weak = window.as_weak();
@@ -163,6 +225,79 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             ui.set_character(character);
             ui.set_voice_id(value);
         }
+    });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_api_profile_save(move || {
+        if let Some(window) = weak.upgrade() {
+            match current_preset(&window.global::<VoiceUi>()) {
+                Ok(preset) => send(Command::RemoteVoice(
+                    super::runtime::RemoteVoiceAction::Save(preset),
+                )),
+                Err(error) => window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into()),
+            }
+        }
+    });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_api_profile_select(move |label| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let ui = window.global::<VoiceUi>();
+        let ids = ui.get_api_preset_ids();
+        let index = ui.get_api_profiles().iter().position(|name| name == label);
+        if let Some(id) = index.and_then(|index| ids.row_data(index)) {
+            match current_preset(&ui) {
+                Ok(preset) => send(Command::RemoteVoice(
+                    super::runtime::RemoteVoiceAction::SelectWithSave(id.into(), preset),
+                )),
+                Err(error) => window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into()),
+            }
+        }
+    });
+    let send = dispatch.clone();
+    ui.on_api_profile_add(move || {
+        send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Add))
+    });
+    let send = dispatch.clone();
+    ui.on_api_profile_delete(move || {
+        send(Command::RemoteVoice(
+            super::runtime::RemoteVoiceAction::Delete,
+        ))
+    });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_voice_test(move |text, character| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let preset = match current_preset(&window.global::<VoiceUi>()) {
+            Ok(preset) => preset,
+            Err(error) => {
+                window
+                    .global::<SettingsUi>()
+                    .set_settings_error(error.into());
+                return;
+            }
+        };
+        let target = usize::try_from(character)
+            .ok()
+            .and_then(|index| neuromita::character::CharacterId::ALL.get(index))
+            .copied();
+        send(Command::RemoteVoice(
+            super::runtime::RemoteVoiceAction::Preview(text.into(), target, preset),
+        ));
+    });
+    let send = dispatch.clone();
+    ui.on_voice_test_cancel(move || {
+        send(Command::RemoteVoice(
+            super::runtime::RemoteVoiceAction::Cancel,
+        ))
     });
     let weak = window.as_weak();
     let send = dispatch.clone();
@@ -208,57 +343,37 @@ pub fn render(window: &AppWindow, settings: &TtsPreferences) {
     ui.set_local_language(settings.local_language.clone().into());
     ui.set_local_auto_load(settings.local_auto_load);
     ui.set_local_lazy_init(settings.local_lazy_init);
-    let api_profile = REMOTE_TTS_TEMPLATES
-        .iter()
-        .find(|template| template.id == settings.api_profile)
-        .map(|template| template.name.to_owned())
-        .unwrap_or_else(|| settings.api_profile.clone());
-    ui.set_api_profile(api_profile.into());
-    ui.set_api_models(ModelRc::new(VecModel::from(
-        REMOTE_TTS_TEMPLATES
-            .iter()
-            .find(|template| template.id == settings.api_profile)
-            .map(|template| {
-                template
-                    .models
-                    .iter()
-                    .copied()
-                    .map(Into::into)
-                    .collect::<Vec<_>>()
+    if ui.get_api_preset_id().is_empty() {
+        let ids = (-1..neuromita::character::CharacterId::ALL.len() as i32)
+            .map(|id| {
+                if id == -1 {
+                    settings.default_voice_id.clone()
+                } else {
+                    settings
+                        .character_voice_ids
+                        .get(&neuromita::character::CharacterId::ALL[id as usize])
+                        .cloned()
+                        .unwrap_or_default()
+                }
+                .into()
             })
-            .unwrap_or_default(),
-    )));
-    ui.set_api_model(settings.api_model.clone().into());
-    ui.set_api_speed(i32::from(settings.api_speed_percent));
-    let ids = (-1..neuromita::character::CharacterId::ALL.len() as i32)
-        .map(|id| {
-            if id == -1 {
+            .collect::<Vec<_>>();
+        ui.set_character_voice_ids(ModelRc::new(VecModel::from(ids)));
+        let current = ui.get_character();
+        ui.set_voice_id(
+            if current == -1 {
                 settings.default_voice_id.clone()
             } else {
-                settings
-                    .character_voice_ids
-                    .get(&neuromita::character::CharacterId::ALL[id as usize])
+                usize::try_from(current)
+                    .ok()
+                    .and_then(|index| neuromita::character::CharacterId::ALL.get(index))
+                    .and_then(|id| settings.character_voice_ids.get(id))
                     .cloned()
                     .unwrap_or_default()
             }
-            .into()
-        })
-        .collect::<Vec<_>>();
-    ui.set_character_voice_ids(ModelRc::new(VecModel::from(ids)));
-    let current = ui.get_character();
-    ui.set_voice_id(
-        if current == -1 {
-            settings.default_voice_id.clone()
-        } else {
-            usize::try_from(current)
-                .ok()
-                .and_then(|index| neuromita::character::CharacterId::ALL.get(index))
-                .and_then(|id| settings.character_voice_ids.get(id))
-                .cloned()
-                .unwrap_or_default()
-        }
-        .into(),
-    );
+            .into(),
+        );
+    }
 }
 
 pub fn inventory(window: &AppWindow, models: &SpeechInventory) {
@@ -293,28 +408,6 @@ pub fn inventory(window: &AppWindow, models: &SpeechInventory) {
         "en".into(),
         "auto".into(),
     ])));
-    ui.set_api_profiles(ModelRc::new(VecModel::from(
-        REMOTE_TTS_TEMPLATES
-            .iter()
-            .map(|template| template.name.into())
-            .collect::<Vec<_>>(),
-    )));
-    let profile = ui.get_api_profile();
-    let active_provider = api_profile_id(&profile);
-    ui.set_api_models(ModelRc::new(VecModel::from(
-        REMOTE_TTS_TEMPLATES
-            .iter()
-            .find(|template| template.id == active_provider)
-            .map(|template| {
-                template
-                    .models
-                    .iter()
-                    .copied()
-                    .map(Into::into)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-    )));
     ui.set_telegram_status("Telegram не подключён".into());
     ui.set_preview_available(false);
 }
@@ -349,6 +442,68 @@ pub fn preview(window: &AppWindow, mode: VoicePreviewMode) {
 pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
     let text = super::speech_status::describe(&snapshot.service(AiService::Tts));
     window.global::<VoiceUi>().set_runtime_status(text.into());
+}
+
+pub fn render_remote(window: &AppWindow, config: &RemoteVoiceConfig) {
+    let ui = window.global::<VoiceUi>();
+    let names = config
+        .presets
+        .iter()
+        .map(|p| format!("{} ({})", p.name, &p.id[..8]).into())
+        .collect::<Vec<SharedString>>();
+    let ids = config
+        .presets
+        .iter()
+        .map(|p| p.id.clone().into())
+        .collect::<Vec<SharedString>>();
+    let selected = config
+        .presets
+        .iter()
+        .position(|p| p.id == config.active_id)
+        .unwrap_or(0);
+    let Some(preset) = config.presets.get(selected) else {
+        return;
+    };
+    let label = names.get(selected).cloned().unwrap_or_default();
+    ui.set_api_profiles(ModelRc::new(VecModel::from(names)));
+    ui.set_api_preset_ids(ModelRc::new(VecModel::from(ids)));
+    ui.set_api_profile(label);
+    ui.set_api_preset_id(preset.id.clone().into());
+    ui.set_api_preset_name(preset.name.clone().into());
+    ui.set_api_key(preset.api_key.clone().into());
+    ui.set_api_model(preset.model.clone().into());
+    ui.set_api_speed(i32::from(preset.speed_percent));
+    ui.set_api_models(ModelRc::new(VecModel::from(
+        REMOTE_TTS_TEMPLATES[0]
+            .models
+            .iter()
+            .copied()
+            .map(Into::into)
+            .collect::<Vec<SharedString>>(),
+    )));
+    let voices = std::iter::once(preset.default_voice_id.clone())
+        .chain(
+            neuromita::character::CharacterId::ALL
+                .into_iter()
+                .map(|id| {
+                    preset
+                        .character_voice_ids
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default()
+                }),
+        )
+        .map(Into::into)
+        .collect::<Vec<SharedString>>();
+    ui.set_character_voice_ids(ModelRc::new(VecModel::from(voices.clone())));
+    let chosen = usize::try_from(ui.get_character() + 1).unwrap_or(0);
+    ui.set_voice_id(voices.get(chosen).cloned().unwrap_or_default());
+}
+
+pub fn remote_status(window: &AppWindow, message: &str, busy: bool) {
+    let ui = window.global::<VoiceUi>();
+    ui.set_remote_status(message.into());
+    ui.set_remote_preview_busy(busy);
 }
 
 #[cfg(test)]

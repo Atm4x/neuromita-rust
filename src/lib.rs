@@ -34,3 +34,4 @@ pub use interaction::UserInput;
 pub mod turn;
 
 pub mod releases;
+pub mod remote_voice;

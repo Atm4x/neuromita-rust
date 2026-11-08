@@ -221,6 +221,7 @@ impl MessageHandler {
         context.runtime_context = message.game_context().cloned().map(Arc::new);
         let voice_options = voice_enabled.then_some(VoiceOptions {
             voice: voice_settings.voice,
+            character: Some(record.snapshot().metadata.character_id),
             volume: voice_settings.volume,
         });
         let acceptance = AcceptanceContext {

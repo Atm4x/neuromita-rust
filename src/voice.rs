@@ -7,6 +7,7 @@ use crate::settings::Volume;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceOptions {
     pub voice: String,
+    pub character: Option<crate::character::CharacterId>,
     pub volume: Volume,
 }
 
