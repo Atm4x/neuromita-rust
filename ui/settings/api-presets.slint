@@ -82,7 +82,7 @@ component ApiParameterRow inherits HorizontalLayout {
         }
     }
     Centered { width: 180px;
-        SettingsField { text <=> root.value; height: 40px; width: 180px; enabled: root.parameter.editable; }
+        if root.parameter.id != "stream": SettingsField { text <=> root.value; height: 40px; width: 180px; enabled: root.parameter.editable; }
     }
 }
 
@@ -365,16 +365,18 @@ export component ApiPresetsWorkspace inherits VerticalLayout {
                                 for parameter in SettingsUi.preset-parameters: ApiParameterRow {
                                     parameter: parameter;
                                     wire-key: parameter.id == "max_tokens" ? SettingsUi.preset-output-token-wire-key : parameter.wire-key;
-                                    sent: parameter.id == "temperature" ? SettingsUi.preset-temperature-enabled : parameter.id == "max_tokens" ? SettingsUi.preset-tokens-enabled : parameter.sent;
+                                    sent: parameter.id == "temperature" ? SettingsUi.preset-temperature-enabled : parameter.id == "max_tokens" ? SettingsUi.preset-tokens-enabled : parameter.id == "stream" ? SettingsUi.preset-stream : parameter.sent;
                                     toggled(value) => {
                                         if parameter.id == "temperature" { SettingsUi.preset-temperature-enabled = value; }
                                         if parameter.id == "max_tokens" { SettingsUi.preset-tokens-enabled = value; }
+                                        if parameter.id == "stream" { SettingsUi.preset-stream = value; }
                                     }
-                                    value: parameter.id == "temperature" ? SettingsUi.preset-temperature : parameter.id == "max_tokens" ? SettingsUi.preset-tokens : parameter.id == "timeout" ? SettingsUi.preset-timeout : "";
+                                    value: parameter.id == "temperature" ? SettingsUi.preset-temperature : parameter.id == "max_tokens" ? SettingsUi.preset-tokens : parameter.id == "timeout" ? SettingsUi.preset-timeout : parameter.id == "max_retries" ? SettingsUi.preset-max-retries : "";
                                     edited(value) => {
                                         if parameter.id == "temperature" { SettingsUi.preset-temperature = value; }
                                         if parameter.id == "max_tokens" { SettingsUi.preset-tokens = value; }
                                         if parameter.id == "timeout" { SettingsUi.preset-timeout = value; }
+                                        if parameter.id == "max_retries" { SettingsUi.preset-max-retries = value; }
                                     }
                                 }
                             }
