@@ -1,0 +1,28 @@
+name: agent-a-cycle42-original-git-import
+on:
+  push:
+    branches: [bridge/agent-a-cycle42-publish]
+    paths: [.gitbridge/agent-a-cycle42.payload.b64]
+permissions:
+  contents: write
+jobs:
+  verify-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Cycle42 Git commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 6f22fe92aefa42a30616fe2035e32a17c674acc9
+          base64 --decode .gitbridge/agent-a-cycle42.payload.b64 > /tmp/agent-a-cycle42.bundle
+          echo "a67ae7ad84d917e8196c19424b7a9f5ed13ad8714def712e4380ac0b3982ad01  /tmp/agent-a-cycle42.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-cycle42.bundle
+          git fetch /tmp/agent-a-cycle42.bundle refs/heads/agent-a-cycle42:refs/heads/bridge/agent-a-cycle42-candidate
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle42-candidate)" = "feffdb0d57ce83ebb32539818e07ea0a246ced04"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle42-candidate^{tree})" = "deab1ce07da7c83c52c4bd6c10d7bbc280885d42"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle42-candidate^)" = "6f22fe92aefa42a30616fe2035e32a17c674acc9"
+          git merge-base --is-ancestor 6f22fe92aefa42a30616fe2035e32a17c674acc9 refs/heads/bridge/agent-a-cycle42-candidate
+          git push origin refs/heads/bridge/agent-a-cycle42-candidate:refs/heads/bridge/agent-a-cycle42-candidate
