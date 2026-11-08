@@ -12,7 +12,7 @@ The desktop API speech backend uses the Fish Audio cloud provider. Remote preset
 
 ## Configuration and credentials
 
-The dedicated `<data-dir>/remote_voice.json` file contains version 1, a stable active preset ID and up to 32 full presets. Writes use a temporary file and rename, and newly created files are owner-only on Unix.
+The dedicated `<data-dir>/remote_voice.rust.json` file contains version 1, a stable active preset ID and up to 32 full presets. Writes use a temporary file and rename, and newly created files are owner-only on Unix.
 
 **Security limitation:** API keys are saved as **plaintext** in this separate file; they are not written to AppSettings or its export, but no OS keychain/encryption is yet integrated. On Windows file access follows the containing directory's ACL. Protect the profile directory, do not sync the JSON into public repositories or logs. A future keychain migration is required for stronger at-rest protection.
 
