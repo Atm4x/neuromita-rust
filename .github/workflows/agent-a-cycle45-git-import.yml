@@ -1,0 +1,26 @@
+name: agent-a-cycle45-git-import
+on:
+  push:
+    branches: [bridge/agent-a-cycle44-publish]
+    paths: [.gitbridge/agent-a-cycle45.payload.b64]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Verify and publish original Cycle45 Git commit to candidate ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 43894a8e766815605232cb0f763b2ee1d5dfda0a
+          base64 --decode .gitbridge/agent-a-cycle45.payload.b64 > /tmp/cycle45.bundle
+          echo "cd0f4081195bece227c40c0eaecbcbbe1f90f28dcd94477f37459ddb03672885  /tmp/cycle45.bundle" | sha256sum -c -
+          git bundle verify /tmp/cycle45.bundle
+          git fetch /tmp/cycle45.bundle refs/heads/agent-a-cycle45:refs/heads/bridge/agent-a-cycle45-candidate
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle45-candidate)" = "68c115717647df1952dc7af473399690f1111c2e"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle45-candidate^{tree})" = "b52267cde1697477309b8006cbb53504aed68976"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle45-candidate^)" = "43894a8e766815605232cb0f763b2ee1d5dfda0a"
+          git push origin refs/heads/bridge/agent-a-cycle45-candidate:refs/heads/bridge/agent-a-cycle45-candidate
