@@ -98,6 +98,7 @@ component PromptSetChoice inherits Rectangle {
 
 component CharacterWorkspace inherits HorizontalLayout {
     in property <bool> connected;
+    in property <int> active-character: -1;
     in-out property <int> character;
     in-out property <string> search;
     in-out property <bool> prompt-expanded: true;
@@ -142,7 +143,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                             VerticalLayout {
                                 padding: 0px; spacing: 2px; alignment: center;
                                 SettingsLabel { text: CharacterCatalog.name(entry); font-weight: 700; }
-                                SettingsLabel { text: "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
+                                SettingsLabel { text: root.connected && root.active-character == entry.index ? I18n.i18n("settings.characters.active-chat", "Активна в чате") : "id: " + entry.id; color: SettingsTheme.muted; font-size: 11px; }
                             }
                         }
                         activated => {
@@ -182,6 +183,7 @@ component CharacterWorkspace inherits HorizontalLayout {
                         font-size: 20px; font-weight: 700;
                     }
                     SettingsLabel { text: "id: " + CharacterCatalog.entries[root.character].id; color: SettingsTheme.muted; }
+                    SettingsLabel { text: root.connected && root.active-character == root.character ? I18n.i18n("settings.characters.chat-identity", "Активный собеседник") : I18n.i18n("settings.characters.config-only", "Выбрана для настройки"); color: SettingsTheme.muted; font-size: 11px; }
                 }
             }
             HorizontalLayout {
@@ -345,6 +347,7 @@ VerticalLayout {
 
 export component SettingsPage inherits Rectangle {
     in property <bool> connected;
+    in property <int> active-character: -1;
     in property <bool> connecting;
     callback home();
     callback wiki();
@@ -503,7 +506,7 @@ export component SettingsPage inherits Rectangle {
                 }
                 if SettingsUi.section == 2: VerticalLayout {
                     padding: 2px; spacing: 12px;
-                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; }
+                    CharacterWorkspace { character <=> SettingsUi.selected-character; prompt-expanded <=> SettingsUi.character-prompt-expanded; connected: root.connected; active-character: root.active-character; }
                 }
                 if SettingsUi.section == 3: voice-scroll := SettingsScrollView {
                     content-height: voice-page.preferred-height;
