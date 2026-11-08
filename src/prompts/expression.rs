@@ -108,11 +108,11 @@ fn lex(input: &str) -> Result<Vec<Token>, PromptError> {
             ',' => out.push(Token::Comma),
             '+' | '-' | '*' | '/' | '%' | '<' | '>' | '=' | '!' => {
                 let mut text = ch.to_string();
-                if let Some(&(_, '=')) = it.peek() {
-                    if matches!(ch, '<' | '>' | '=' | '!') {
-                        it.next();
-                        text.push('=');
-                    }
+                if let Some(&(_, '=')) = it.peek()
+                    && matches!(ch, '<' | '>' | '=' | '!')
+                {
+                    it.next();
+                    text.push('=');
                 }
                 out.push(Token::Operator(text));
             }
