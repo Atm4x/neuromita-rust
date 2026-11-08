@@ -129,7 +129,8 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev \
-            libxi-dev libxcursor-dev libgl1-mesa-dev libudev-dev
+            libxi-dev libxcursor-dev libgl1-mesa-dev libudev-dev \
+            libfontconfig1-dev
 
       - name: Core cargo check
         id: core_check
