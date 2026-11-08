@@ -1,0 +1,47 @@
+name: Agent B64 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b64-verify-20261108
+jobs:
+  exact-b64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 267f0788c66ffed181a229b2c6cef86899ef2970
+          fetch-depth: 2
+      - name: Verify exact B64 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "267f0788c66ffed181a229b2c6cef86899ef2970"
+          test "$(git rev-parse HEAD^{tree})" = "a11f42c485d399ae30017f4cad42cd29f1622856"
+          test "$(git rev-parse HEAD^)" = "10ca3c5dcc251a88e94e6e58410457e4285c89f1"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused B64 terminal acceptance tests
+        shell: bash
+        run: |
+          cargo test --locked --offline --lib abandoned_regenerate -- --test-threads=2
+          cargo test --locked --offline --lib sqlite_abandonment_and_acceptance_race_can_commit_only_one -- --test-threads=2
+          cargo test --locked --offline --lib descendant_branch_inherits_terminal_fence_without_blocking_new_requests -- --test-threads=2
+      - name: Full Rust library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
