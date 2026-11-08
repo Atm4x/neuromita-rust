@@ -651,3 +651,63 @@ async fn changed_plugin_source_during_plan_preflight_rejects_without_layers() {
     assert!(!fixture.root.join("AIData/overlays").exists());
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn production_records_selected_models_and_completion_without_model_ready_claim() {
+    use neuromita::{
+        ai_runtime::install_operation::OperationExecution,
+        presentation::AiInstallOperationPresenter,
+    };
+    let fixture = Fixture::new(ProcessTopology::Split).await;
+    let selected = model(AiService::Asr, "mock_asr");
+    let config = fixture.runtime.prepare(&[selected]).await.unwrap();
+    assert_eq!(config.workers.len(), 1);
+    let views = AiInstallOperationPresenter::new(fixture.root.join("AIData"))
+        .list()
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    let view = &views[0];
+    assert_eq!(view.execution, OperationExecution::RecordedComplete);
+    assert_eq!(view.models.len(), 1);
+    assert_eq!(view.models[0].service, AiService::Asr);
+    assert_eq!(view.models[0].plugin_id, "mock_asr");
+    assert_eq!(view.models[0].package_revision, "rev1");
+    assert_eq!(view.models[0].asset_revision, None);
+    assert!(view.needs_receipt_recheck);
+    assert!(view.stages.iter().all(|stage| {
+        stage.state == neuromita::ai_runtime::install_operation::StageState::Verified
+    }));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn production_persists_safe_error_category_when_mock_uv_overlay_fails() {
+    use neuromita::{
+        ai_runtime::install_operation::{OperationExecution, OperationFailure},
+        presentation::AiInstallOperationPresenter,
+    };
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture
+        .add_plugin(
+            "forced_failure",
+            "InstallPlan(packages=(__import__('neuromita_ai_sdk').PackageRequirement('examplepkg', '1.0.0'),))",
+        )
+        .await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "forced_failure")])
+        .await
+        .err()
+        .expect("mock uv must reject pip install");
+    assert!(matches!(error, AiProductionError::Plugin(_)), "{error}");
+    let views = AiInstallOperationPresenter::new(fixture.root.join("AIData"))
+        .list()
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].execution, OperationExecution::Interrupted);
+    assert_eq!(views[0].last_failure, Some(OperationFailure::Overlay));
+    assert_eq!(views[0].models[0].plugin_id, "forced_failure");
+    assert!(views[0].needs_receipt_recheck);
+    fixture.close().await;
+}

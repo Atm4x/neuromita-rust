@@ -22,7 +22,10 @@ use super::{
         AssetState, ModelAssetStatus, PluginInstallError, PluginInstallHandler, PluginInstallPlan,
         PluginInstallRequest,
     },
-    install_operation::{InstallOperation, InstallOperationError, OperationStage, StageState},
+    install_operation::{
+        InstallOperation, InstallOperationError, OperationFailure, OperationModel, OperationStage,
+        StageState,
+    },
     install_source::{InstallSourceError, InstallSourcePin},
     layer::valid_segment,
     managed::{ManagedRuntimeBootstrap, ManagedRuntimeError},
@@ -605,106 +608,118 @@ impl AiProductionInstaller {
             source_pin.digest(),
         )?;
         let stages = operation_stages(&preflighted);
-        let mut operation = InstallOperation::open(data, &fingerprint, stages)?;
-        let mut next_stage = 0;
-        let mut layers = Vec::with_capacity(selections.len());
-        let mut activation = Vec::with_capacity(selections.len());
-        for preflighted_model in preflighted {
-            let PreflightedModel {
-                selected: selection,
-                plan,
-                assets,
-            } = preflighted_model;
-            let mut backend_layers = Vec::new();
-            let mut dependencies = Vec::new();
-            let backend = &selection.backend;
-            let backend_id = backend_name(backend.kind);
-            source_pin.verify()?;
-            operation.start(next_stage)?;
-            let task_backend_installer = backends.clone();
-            let task_backend = backend.clone();
-            let task =
-                tokio::spawn(async move { task_backend_installer.install(&task_backend).await });
-            let _abort_on_drop = AbortOnDrop(task.abort_handle());
-            let path = task.await??;
-            source_pin.verify()?;
-            if !backends.installed(backend).await? {
-                return Err(AiProductionError::Invalid(
-                    "backend receipt missing after installation".into(),
-                ));
-            }
-            operation.verified(next_stage)?;
-            next_stage += 1;
-            dependencies.push(path);
-            backend_layers.push(backend.clone());
-            let mut backend_packages = backend.packages.clone();
-            for extra in &selection.extra_backends {
+        let models = preflighted
+            .iter()
+            .map(|entry| OperationModel {
+                service: entry.selected.service,
+                plugin_id: entry.selected.plugin_id.clone(),
+                package_revision: entry.selected.package_revision.clone(),
+                asset_revision: entry.assets.revision().map(str::to_owned),
+            })
+            .collect();
+        let mut operation = InstallOperation::open_described(data, &fingerprint, stages, models)?;
+        let result: Result<AiApplicationConfig, AiProductionError> = async {
+            let mut next_stage = 0;
+            let mut layers = Vec::with_capacity(selections.len());
+            let mut activation = Vec::with_capacity(selections.len());
+            for preflighted_model in preflighted {
+                let PreflightedModel {
+                    selected: selection,
+                    plan,
+                    assets,
+                } = preflighted_model;
+                let mut backend_layers = Vec::new();
+                let mut dependencies = Vec::new();
+                let backend = &selection.backend;
+                let backend_id = backend_name(backend.kind);
                 source_pin.verify()?;
                 operation.start(next_stage)?;
-                let worker = backends.clone();
-                let plan = extra.clone();
-                let task = tokio::spawn(async move { worker.install(&plan).await });
+                let task_backend_installer = backends.clone();
+                let task_backend = backend.clone();
+                let task =
+                    tokio::spawn(
+                        async move { task_backend_installer.install(&task_backend).await },
+                    );
                 let _abort_on_drop = AbortOnDrop(task.abort_handle());
-                let extra_path = task.await??;
+                let path = task.await??;
                 source_pin.verify()?;
-                dependencies.push(extra_path);
-                if !backends.installed(extra).await? {
+                if !backends.installed(backend).await? {
                     return Err(AiProductionError::Invalid(
-                        "supplemental backend receipt missing".into(),
+                        "backend receipt missing after installation".into(),
                     ));
                 }
                 operation.verified(next_stage)?;
                 next_stage += 1;
-                backend_layers.push(extra.clone());
-                backend_packages.extend(extra.packages.iter().cloned());
-            }
-            source_pin.verify()?;
-            operation.start(next_stage)?;
-            let task_installer = installer.clone();
-            let task_plugin = selection.plugin_id.clone();
-            let task_revision = selection.package_revision.clone();
-            let task_python = self.bootstrap.python_version.clone();
-            let task_backend = backend_id.to_owned();
-            let task_backend_packages = backend_packages;
-            let task_plan = plan.clone();
-            let task_approvals = selection.approved_actions.clone();
-            let task = tokio::spawn(async move {
-                task_installer
-                    .install_with_approval(
-                        PluginInstallRequest {
-                            plugin_id: &task_plugin,
-                            revision: &task_revision,
-                            python_version: &task_python,
-                            selected_backend: Some(&task_backend),
-                            plan: &task_plan,
-                            backend_packages: &task_backend_packages,
-                        },
-                        &task_approvals,
-                    )
-                    .await
-            });
-            let _abort_on_drop = AbortOnDrop(task.abort_handle());
-            let installed = task.await??;
-            source_pin.verify()?;
-            if !installer.overlays.installed(&installed.overlay).await? {
-                return Err(AiProductionError::Invalid(
-                    "plugin overlay receipt missing".into(),
-                ));
-            }
-            operation.verified(next_stage)?;
-            next_stage += 1;
-            dependencies.push(installed.overlay_path);
-            // Generated hooks may write outside the immutable asset layer. Never
-            // automatically re-execute an interrupted or already verified hook.
-            let recovered_generated = if let ModelAssets::Generated { revision, .. } = &assets {
-                match operation.stage_state(next_stage)? {
-                    StageState::Pending => {
-                        source_pin.verify()?;
-                        operation.start(next_stage)?;
-                        None
+                dependencies.push(path);
+                backend_layers.push(backend.clone());
+                let mut backend_packages = backend.packages.clone();
+                for extra in &selection.extra_backends {
+                    source_pin.verify()?;
+                    operation.start(next_stage)?;
+                    let worker = backends.clone();
+                    let plan = extra.clone();
+                    let task = tokio::spawn(async move { worker.install(&plan).await });
+                    let _abort_on_drop = AbortOnDrop(task.abort_handle());
+                    let extra_path = task.await??;
+                    source_pin.verify()?;
+                    dependencies.push(extra_path);
+                    if !backends.installed(extra).await? {
+                        return Err(AiProductionError::Invalid(
+                            "supplemental backend receipt missing".into(),
+                        ));
                     }
-                    StageState::Started | StageState::Verified => {
-                        store
+                    operation.verified(next_stage)?;
+                    next_stage += 1;
+                    backend_layers.push(extra.clone());
+                    backend_packages.extend(extra.packages.iter().cloned());
+                }
+                source_pin.verify()?;
+                operation.start(next_stage)?;
+                let task_installer = installer.clone();
+                let task_plugin = selection.plugin_id.clone();
+                let task_revision = selection.package_revision.clone();
+                let task_python = self.bootstrap.python_version.clone();
+                let task_backend = backend_id.to_owned();
+                let task_backend_packages = backend_packages;
+                let task_plan = plan.clone();
+                let task_approvals = selection.approved_actions.clone();
+                let task = tokio::spawn(async move {
+                    task_installer
+                        .install_with_approval(
+                            PluginInstallRequest {
+                                plugin_id: &task_plugin,
+                                revision: &task_revision,
+                                python_version: &task_python,
+                                selected_backend: Some(&task_backend),
+                                plan: &task_plan,
+                                backend_packages: &task_backend_packages,
+                            },
+                            &task_approvals,
+                        )
+                        .await
+                });
+                let _abort_on_drop = AbortOnDrop(task.abort_handle());
+                let installed = task.await??;
+                source_pin.verify()?;
+                if !installer.overlays.installed(&installed.overlay).await? {
+                    return Err(AiProductionError::Invalid(
+                        "plugin overlay receipt missing".into(),
+                    ));
+                }
+                operation.verified(next_stage)?;
+                next_stage += 1;
+                dependencies.push(installed.overlay_path);
+                // Generated hooks may write outside the immutable asset layer. Never
+                // automatically re-execute an interrupted or already verified hook.
+                let recovered_generated = if let ModelAssets::Generated { revision, .. } = &assets {
+                    match operation.stage_state(next_stage)? {
+                        StageState::Pending => {
+                            source_pin.verify()?;
+                            operation.start(next_stage)?;
+                            None
+                        }
+                        StageState::Started | StageState::Verified => {
+                            store
                             .verified_revision(&selection.plugin_id, revision)
                             .await
                             .map_err(|_| {
@@ -712,101 +727,117 @@ impl AiProductionInstaller {
                                     "interrupted model generation has no verified asset receipt",
                                 )
                             })?;
-                        operation.verified(next_stage)?;
-                        Some(revision.clone())
+                            operation.verified(next_stage)?;
+                            Some(revision.clone())
+                        }
                     }
-                }
-            } else {
-                source_pin.verify()?;
-                operation.start(next_stage)?;
-                None
-            };
-            let task_store = store.clone();
-            let task_installer = installer.clone();
-            let task_host = host.clone();
-            let task_plugin = selection.plugin_id.clone();
-            let task_assets = assets;
-            let task_python = self.bootstrap.python_version.clone();
-            let asset_revision = if let Some(revision) = recovered_generated {
-                Some(revision)
-            } else {
-                let task = tokio::spawn(async move {
-                    AssetPreparation {
-                        store: task_store,
-                        installer: task_installer,
-                        host: task_host,
-                        plugin_id: task_plugin,
-                        plan,
-                        selected: task_assets,
-                        default_assets: installed.assets,
-                        dependency_layers: dependencies,
-                        python_version: task_python,
-                    }
-                    .run()
-                    .await
-                });
-                let _abort_on_drop = AbortOnDrop(task.abort_handle());
-                task.await??
-            };
-            source_pin.verify()?;
-            if let Some(revision) = &asset_revision {
-                store
-                    .verified_revision(&selection.plugin_id, revision)
-                    .await?;
-            }
-            operation.verified(next_stage)?;
-            next_stage += 1;
-            layers.push(ServiceSelection {
-                service: selection.service,
-                backends: backend_layers,
-                overlays: vec![installed.overlay],
-            });
-            activation.push(ModelActivation {
-                service: selection.service,
-                plugin_id: selection.plugin_id.clone(),
-                settings: selection.settings.clone(),
-                asset_revision,
-            });
-        }
-        let mut workers = Vec::new();
-        match self.topology {
-            ProcessTopology::Shared => workers.push(AiWorkerSelection {
-                service: activation[0].service,
-                composition: RuntimeComposition::resolve(
-                    self.topology,
-                    activation[0].service,
-                    &layers,
-                    &backends,
-                    &installer.overlays,
-                )
-                .await?,
-                models: activation,
-            }),
-            ProcessTopology::Split => {
-                for model in activation {
-                    workers.push(AiWorkerSelection {
-                        service: model.service,
-                        composition: RuntimeComposition::resolve(
-                            self.topology,
-                            model.service,
-                            &layers,
-                            &backends,
-                            &installer.overlays,
-                        )
-                        .await?,
-                        models: vec![model],
+                } else {
+                    source_pin.verify()?;
+                    operation.start(next_stage)?;
+                    None
+                };
+                let task_store = store.clone();
+                let task_installer = installer.clone();
+                let task_host = host.clone();
+                let task_plugin = selection.plugin_id.clone();
+                let task_assets = assets;
+                let task_python = self.bootstrap.python_version.clone();
+                let asset_revision = if let Some(revision) = recovered_generated {
+                    Some(revision)
+                } else {
+                    let task = tokio::spawn(async move {
+                        AssetPreparation {
+                            store: task_store,
+                            installer: task_installer,
+                            host: task_host,
+                            plugin_id: task_plugin,
+                            plan,
+                            selected: task_assets,
+                            default_assets: installed.assets,
+                            dependency_layers: dependencies,
+                            python_version: task_python,
+                        }
+                        .run()
+                        .await
                     });
+                    let _abort_on_drop = AbortOnDrop(task.abort_handle());
+                    task.await??
+                };
+                source_pin.verify()?;
+                if let Some(revision) = &asset_revision {
+                    store
+                        .verified_revision(&selection.plugin_id, revision)
+                        .await?;
+                }
+                operation.verified(next_stage)?;
+                next_stage += 1;
+                layers.push(ServiceSelection {
+                    service: selection.service,
+                    backends: backend_layers,
+                    overlays: vec![installed.overlay],
+                });
+                activation.push(ModelActivation {
+                    service: selection.service,
+                    plugin_id: selection.plugin_id.clone(),
+                    settings: selection.settings.clone(),
+                    asset_revision,
+                });
+            }
+            let mut workers = Vec::new();
+            match self.topology {
+                ProcessTopology::Shared => workers.push(AiWorkerSelection {
+                    service: activation[0].service,
+                    composition: RuntimeComposition::resolve(
+                        self.topology,
+                        activation[0].service,
+                        &layers,
+                        &backends,
+                        &installer.overlays,
+                    )
+                    .await?,
+                    models: activation,
+                }),
+                ProcessTopology::Split => {
+                    for model in activation {
+                        workers.push(AiWorkerSelection {
+                            service: model.service,
+                            composition: RuntimeComposition::resolve(
+                                self.topology,
+                                model.service,
+                                &layers,
+                                &backends,
+                                &installer.overlays,
+                            )
+                            .await?,
+                            models: vec![model],
+                        });
+                    }
                 }
             }
+            source_pin.verify()?;
+            operation.finish()?;
+            Ok(AiApplicationConfig {
+                topology: self.topology,
+                host,
+                workers,
+                voice_profiles: self.voice_profiles.clone(),
+            })
         }
-        source_pin.verify()?;
-        operation.finish()?;
-        Ok(AiApplicationConfig {
-            topology: self.topology,
-            host,
-            workers,
-            voice_profiles: self.voice_profiles.clone(),
-        })
+        .await;
+        if let Err(error) = &result {
+            let kind = match error {
+                AiProductionError::Source(_) => OperationFailure::SourceChanged,
+                AiProductionError::Backend(_) => OperationFailure::Backend,
+                AiProductionError::Plugin(_) => OperationFailure::Overlay,
+                AiProductionError::Assets(_) | AiProductionError::Generated(_) => {
+                    OperationFailure::Assets
+                }
+                AiProductionError::Composition(_) => OperationFailure::Composition,
+                _ => OperationFailure::Other,
+            };
+            operation.record_failure(kind)?;
+        }
+        result
     }
 
     pub async fn prepare_and_activate(

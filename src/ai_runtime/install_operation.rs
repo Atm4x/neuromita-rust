@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use super::AiService;
+
 const SCHEMA: u8 = 1;
 const MAX_JOURNAL_BYTES: u64 = 1024 * 1024;
 
@@ -33,6 +35,53 @@ pub struct OperationStage {
     pub repeatable: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OperationModel {
+    pub service: AiService,
+    pub plugin_id: String,
+    pub package_revision: String,
+    pub asset_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationFailure {
+    SourceChanged,
+    Backend,
+    Overlay,
+    Assets,
+    Composition,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationExecution {
+    Running,
+    Interrupted,
+    NeedsReceiptResolution,
+    RecordedComplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationStageView {
+    pub id: String,
+    pub state: StageState,
+    pub repeatable: bool,
+}
+
+/// A journal witness, not a receipt, worker status, or model-ready assertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationReadModel {
+    pub operation_id: Uuid,
+    pub models: Vec<OperationModel>,
+    pub stages: Vec<OperationStageView>,
+    pub execution: OperationExecution,
+    pub last_failure: Option<OperationFailure>,
+    pub needs_receipt_recheck: bool,
+    pub journal_has_torn_tail: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageState {
     Pending,
@@ -48,6 +97,11 @@ enum Event {
         operation_id: Uuid,
         fingerprint: String,
         stages: Vec<OperationStage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        models: Vec<OperationModel>,
+    },
+    Failed {
+        kind: OperationFailure,
     },
     Started {
         index: usize,
@@ -63,6 +117,8 @@ struct Snapshot {
     operation_id: Uuid,
     stages: Vec<OperationStage>,
     states: Vec<StageState>,
+    models: Vec<OperationModel>,
+    last_failure: Option<OperationFailure>,
     completed: bool,
 }
 
@@ -79,6 +135,17 @@ fn check_directory(path: &Path) -> Result<(), InstallOperationError> {
         return Err(InstallOperationError::Invalid("unsafe operation directory"));
     }
     Ok(())
+}
+
+fn optional_directory(path: &Path) -> Result<bool, InstallOperationError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            check_directory(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn ensure_child_directory(path: &Path) -> Result<(), InstallOperationError> {
@@ -106,6 +173,7 @@ fn open_owner(path: &Path) -> Result<File, InstallOperationError> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)?;
     if !file.metadata()?.is_file() || file.metadata()?.len() != 0 {
         return Err(InstallOperationError::Corrupted);
@@ -115,6 +183,80 @@ fn open_owner(path: &Path) -> Result<File, InstallOperationError> {
         Err(std::fs::TryLockError::WouldBlock) => Err(InstallOperationError::Busy),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
+}
+
+fn valid_models(models: &[OperationModel]) -> bool {
+    models.len() <= 5
+        && models.iter().all(|model| {
+            super::layer::valid_segment(&model.plugin_id)
+                && super::layer::valid_segment(&model.package_revision)
+                && model
+                    .asset_revision
+                    .as_deref()
+                    .is_none_or(super::layer::valid_segment)
+        })
+        && models.iter().enumerate().all(|(index, model)| {
+            !models[..index]
+                .iter()
+                .any(|other| other.service == model.service || other.plugin_id == model.plugin_id)
+        })
+}
+
+fn read_events(
+    file: &mut File,
+    fingerprint: &str,
+    repair_torn_tail: bool,
+) -> Result<(Option<Snapshot>, bool), InstallOperationError> {
+    if file.metadata()?.len() > MAX_JOURNAL_BYTES {
+        return Err(InstallOperationError::Corrupted);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_JOURNAL_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+        return Err(InstallOperationError::Corrupted);
+    }
+    let mut snapshot = None;
+    let mut offset = 0usize;
+    let mut torn = false;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if !line.ends_with(b"\n") {
+            torn = true;
+            if repair_torn_tail {
+                file.set_len(offset as u64)?;
+                file.sync_all()?;
+            }
+            break;
+        }
+        if line.len() > 8192 {
+            return Err(InstallOperationError::Corrupted);
+        }
+        let event = serde_json::from_slice(line).map_err(|_| InstallOperationError::Corrupted)?;
+        apply(&mut snapshot, event, fingerprint)?;
+        offset += line.len();
+    }
+    Ok((snapshot, torn))
+}
+
+fn existing_file(path: &Path, for_lock: bool) -> Result<Option<File>, InstallOperationError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(InstallOperationError::Corrupted);
+    }
+    let file = OpenOptions::new().read(true).write(for_lock).open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = file.metadata()?;
+        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+            return Err(InstallOperationError::Corrupted);
+        }
+    }
+    Ok(Some(file))
 }
 
 fn apply(
@@ -128,6 +270,7 @@ fn apply(
             operation_id,
             fingerprint: saved,
             stages,
+            models,
         } if version == SCHEMA
             && saved == fingerprint
             && !stages.is_empty()
@@ -137,6 +280,7 @@ fn apply(
                     && stage.id.len() <= 256
                     && !stage.id.chars().any(char::is_control)
             })
+            && valid_models(&models)
             && snapshot.as_ref().is_none_or(|old| old.completed) =>
         {
             let count = stages.len();
@@ -144,8 +288,17 @@ fn apply(
                 operation_id,
                 stages,
                 states: vec![StageState::Pending; count],
+                models,
+                last_failure: None,
                 completed: false,
             });
+        }
+        Event::Failed { kind } => {
+            let current = snapshot.as_mut().ok_or(InstallOperationError::Corrupted)?;
+            if current.completed {
+                return Err(InstallOperationError::Corrupted);
+            }
+            current.last_failure = Some(kind);
         }
         Event::Started { index } => {
             let current = snapshot.as_mut().ok_or(InstallOperationError::Corrupted)?;
@@ -158,6 +311,7 @@ fn apply(
                 return Err(InstallOperationError::Corrupted);
             }
             current.states[index] = StageState::Started;
+            current.last_failure = None;
         }
         Event::Verified { index } => {
             let current = snapshot.as_mut().ok_or(InstallOperationError::Corrupted)?;
@@ -165,6 +319,7 @@ fn apply(
                 return Err(InstallOperationError::Corrupted);
             }
             current.states[index] = StageState::Verified;
+            current.last_failure = None;
         }
         Event::Completed => {
             let current = snapshot.as_mut().ok_or(InstallOperationError::Corrupted)?;
@@ -177,6 +332,7 @@ fn apply(
                 return Err(InstallOperationError::Corrupted);
             }
             current.completed = true;
+            current.last_failure = None;
         }
         _ => return Err(InstallOperationError::Corrupted),
     }
@@ -191,7 +347,18 @@ impl InstallOperation {
         fingerprint: &str,
         stages: Vec<OperationStage>,
     ) -> Result<Self, InstallOperationError> {
-        if !ai_data.is_absolute()
+        Self::open_described(ai_data, fingerprint, stages, Vec::new())
+    }
+
+    /// Store only public model identity; settings, credentials, and full plan stay private.
+    pub fn open_described(
+        ai_data: &Path,
+        fingerprint: &str,
+        stages: Vec<OperationStage>,
+        models: Vec<OperationModel>,
+    ) -> Result<Self, InstallOperationError> {
+        if !valid_models(&models)
+            || !ai_data.is_absolute()
             || fingerprint.len() != 64
             || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
             || stages.is_empty()
@@ -231,29 +398,16 @@ impl InstallOperation {
         if file.metadata()?.len() > MAX_JOURNAL_BYTES {
             return Err(InstallOperationError::Corrupted);
         }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let mut snapshot: Option<Snapshot> = None;
-        let mut offset = 0usize;
-        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
-            if !line.ends_with(b"\n") {
-                // The only repair allowed is discarding a torn trailing event.
-                file.set_len(offset as u64)?;
-                file.sync_all()?;
-                break;
-            }
-            if line.len() > 8192 {
-                return Err(InstallOperationError::Corrupted);
-            }
-            let event: Event =
-                serde_json::from_slice(line).map_err(|_| InstallOperationError::Corrupted)?;
-            apply(&mut snapshot, event, fingerprint)?;
-            offset += line.len();
-        }
+        let (snapshot, _) = read_events(&mut file, fingerprint, true)?;
         let next = if let Some(old) = &snapshot {
             if !old.completed {
-                if old.stages != stages {
-                    return Err(InstallOperationError::Invalid("preflight stages changed"));
+                if old.stages != stages
+                    || (!old.models.is_empty() && old.models != models)
+                    || (models.is_empty() && !old.models.is_empty())
+                {
+                    return Err(InstallOperationError::Invalid(
+                        "preflight stages or models changed",
+                    ));
                 }
                 false
             } else {
@@ -270,6 +424,8 @@ impl InstallOperation {
                 operation_id: Uuid::nil(),
                 states: Vec::new(),
                 stages: Vec::new(),
+                models: Vec::new(),
+                last_failure: None,
                 completed: true,
             }),
         };
@@ -279,9 +435,137 @@ impl InstallOperation {
                 operation_id: Uuid::new_v4(),
                 fingerprint: fingerprint.into(),
                 stages,
+                models,
             })?;
         }
         Ok(operation)
+    }
+
+    /// Read an existing operation without creating files, locking out its writer,
+    /// repairing torn bytes, or treating journal verification as model readiness.
+    pub fn inspect(
+        ai_data: &Path,
+        fingerprint: &str,
+    ) -> Result<Option<OperationReadModel>, InstallOperationError> {
+        if !ai_data.is_absolute()
+            || fingerprint.len() != 64
+            || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(InstallOperationError::Invalid("invalid operation lookup"));
+        }
+        check_directory(ai_data)?;
+        let operations = ai_data.join("operations");
+        if !optional_directory(&operations)? {
+            return Ok(None);
+        }
+        let root = operations.join("production");
+        if !optional_directory(&root)? {
+            return Ok(None);
+        }
+        let Some(mut journal) = existing_file(&root.join(format!("{fingerprint}.jsonl")), false)?
+        else {
+            return Ok(None);
+        };
+        let Some(owner) = existing_file(&root.join(format!("{fingerprint}.lock")), true)? else {
+            return Err(InstallOperationError::Corrupted);
+        };
+        if owner.metadata()?.len() != 0 {
+            return Err(InstallOperationError::Corrupted);
+        }
+        let running = match owner.try_lock() {
+            Ok(()) => false,
+            Err(std::fs::TryLockError::WouldBlock) => true,
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        };
+        let (snapshot, torn) = read_events(&mut journal, fingerprint, false)?;
+        if !running {
+            owner.unlock()?;
+        }
+        Ok(snapshot.map(|snapshot| {
+            let execution = if snapshot.completed {
+                OperationExecution::RecordedComplete
+            } else if running {
+                OperationExecution::Running
+            } else if snapshot
+                .states
+                .iter()
+                .zip(&snapshot.stages)
+                .any(|(state, stage)| *state == StageState::Started && !stage.repeatable)
+            {
+                OperationExecution::NeedsReceiptResolution
+            } else {
+                OperationExecution::Interrupted
+            };
+            OperationReadModel {
+                operation_id: snapshot.operation_id,
+                models: snapshot.models,
+                stages: snapshot
+                    .stages
+                    .into_iter()
+                    .zip(snapshot.states)
+                    .map(|(stage, state)| OperationStageView {
+                        id: stage.id,
+                        repeatable: stage.repeatable,
+                        state,
+                    })
+                    .collect(),
+                execution,
+                last_failure: snapshot.last_failure,
+                needs_receipt_recheck: true,
+                journal_has_torn_tail: torn,
+            }
+        }))
+    }
+
+    /// Enumerate only bounded Core-owned journals without exposing private fingerprints.
+    /// If a managed record is corrupt, refuse the entire projection.
+    pub fn inspect_all(ai_data: &Path) -> Result<Vec<OperationReadModel>, InstallOperationError> {
+        if !ai_data.is_absolute() {
+            return Err(InstallOperationError::Invalid("invalid operation root"));
+        }
+        check_directory(ai_data)?;
+        let operations = ai_data.join("operations");
+        if !optional_directory(&operations)? {
+            return Ok(Vec::new());
+        }
+        let root = operations.join("production");
+        if !optional_directory(&root)? {
+            return Ok(Vec::new());
+        }
+        let mut snapshots = Vec::new();
+        for (index, entry) in std::fs::read_dir(root)?.enumerate() {
+            if index >= 512 {
+                return Err(InstallOperationError::Invalid(
+                    "operation directory inventory limit reached",
+                ));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(fingerprint) = name.strip_suffix(".jsonl") else {
+                continue;
+            };
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(InstallOperationError::Corrupted);
+            }
+            if snapshots.len() >= 128 {
+                return Err(InstallOperationError::Invalid(
+                    "operation journal inventory limit reached",
+                ));
+            }
+            snapshots.push(
+                Self::inspect(ai_data, fingerprint)?.ok_or(InstallOperationError::Corrupted)?,
+            );
+        }
+        snapshots.sort_unstable_by_key(|view| view.operation_id);
+        Ok(snapshots)
+    }
+
+    pub fn record_failure(&mut self, kind: OperationFailure) -> Result<(), InstallOperationError> {
+        self.append(Event::Failed { kind })
     }
 
     fn append(&mut self, event: Event) -> Result<(), InstallOperationError> {
