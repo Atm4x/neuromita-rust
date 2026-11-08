@@ -1,0 +1,47 @@
+name: Agent B65 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b65-verify-20261108
+jobs:
+  exact-b65:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0879964bc236ec849d7626201968cf7b9174b72c
+          fetch-depth: 2
+      - name: Verify exact B65 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "0879964bc236ec849d7626201968cf7b9174b72c"
+          test "$(git rev-parse HEAD^{tree})" = "57e2c2d78d3a5d880bc19f99f4ea4aeba46979db"
+          test "$(git rev-parse HEAD^)" = "267f0788c66ffed181a229b2c6cef86899ef2970"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused dispatch and regenerate tests
+        shell: bash
+        run: |
+          cargo test --locked --offline --lib dispatch_ -- --test-threads=2
+          cargo test --locked --offline --lib regenerate -- --test-threads=2
+          cargo test --locked --offline --lib regenerate_dispatch_sql_abort_leaves_no_permit_and_retries_exactly_once -- --test-threads=2
+      - name: Full Rust library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
