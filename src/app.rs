@@ -352,13 +352,16 @@ impl RegenerateCancellation for TimelineRequestIngress {
         &self,
         request: RequestId,
         admission: TimelineAdmission,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::timeline::domain::TimelineError> {
         self.timeline
             .lock()
-            .map_err(|_| "timeline mutex poisoned".to_owned())?
+            .map_err(|_| {
+                crate::timeline::domain::TimelineError::Storage(
+                    "timeline mutex poisoned".to_owned(),
+                )
+            })?
             .abandon_regenerate_request(admission.selection.branch_id, request, admission.selection)
             .map(|_| ())
-            .map_err(|error| error.to_string())
     }
 }
 

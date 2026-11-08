@@ -18,7 +18,9 @@ use crate::{
     settings::SettingsOwner,
     timeline::{
         RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateSource,
-        conversation::ConversationMessage, domain::BranchId, selection::TimelineAdmission,
+        conversation::ConversationMessage,
+        domain::{BranchId, TimelineError},
+        selection::TimelineAdmission,
     },
 };
 
@@ -27,7 +29,7 @@ pub(crate) trait RegenerateCancellation: Send + Sync {
         &self,
         request: RequestId,
         admission: TimelineAdmission,
-    ) -> Result<(), String>;
+    ) -> Result<(), TimelineError>;
 }
 
 pub(crate) trait RequestIngress: RegenerateCancellation {
@@ -90,7 +92,17 @@ impl ChatApiState {
     pub(crate) fn close(&self) {
         *self.accepting.lock().expect("admission mutex poisoned") = false;
         self.registry.cancel_all();
+        for (request, result) in self.reconcile_pending_terminals() {
+            if let Err(error) = result {
+                tracing::warn!(%request, %error, "regenerate terminal remains unresolved at shutdown");
+            }
+        }
     }
+    /// Operations-level retry, never re-enqueues or invokes a provider.
+    pub(crate) fn reconcile_pending_terminals(&self) -> Vec<(RequestId, Result<(), String>)> {
+        self.registry.reconcile_pending_terminals()
+    }
+
     pub(crate) fn send(
         &self,
         request: impl GenerationCommand + 'static,

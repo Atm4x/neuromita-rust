@@ -28,6 +28,13 @@ struct Execution {
     message: Option<Box<dyn GenerationCommand>>,
     trace: Option<RequestTrace>,
     draft_text: Option<Arc<str>>,
+    pending_terminal: Option<PendingTerminal>,
+}
+
+#[derive(Clone)]
+enum PendingTerminal {
+    Failure(RequestOutcome),
+    Cancelled,
 }
 
 #[derive(Clone)]
@@ -144,6 +151,7 @@ impl RequestRecord {
                 message: Some(message),
                 trace: Some(trace),
                 draft_text: None,
+                pending_terminal: None,
             }),
             updates,
             cancellation: CancellationToken::new(),
@@ -250,6 +258,16 @@ impl RequestRecord {
             }
             let request = self.snapshot().metadata.id;
             if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                if matches!(
+                    error,
+                    crate::timeline::domain::TimelineError::Storage(_)
+                        | crate::timeline::domain::TimelineError::ConcurrentWrite
+                ) {
+                    let mut inner = self.inner.lock().expect("request mutex poisoned");
+                    if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                        inner.pending_terminal = Some(PendingTerminal::Cancelled);
+                    }
+                }
                 tracing::warn!(%request, %error, "durable regenerate abandonment refused");
                 return CancelResult::TooLate;
             }
@@ -267,6 +285,7 @@ impl RequestRecord {
             return CancelResult::TooLate;
         }
         inner.cancel_reason.get_or_insert(reason);
+        inner.pending_terminal = None;
         self.cancellation.cancel();
         if matches!(inner.snapshot.state, RequestState::Pending) {
             inner.phase = EffectPhase::Discarded;
@@ -284,6 +303,7 @@ impl RequestRecord {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.phase != EffectPhase::Working
             || inner.snapshot.state.is_terminal()
+            || inner.pending_terminal.is_some()
             || self.cancellation.is_cancelled()
         {
             return false;
@@ -312,7 +332,43 @@ impl RequestRecord {
         }
     }
 
+    /// Repair the volatile outcome only after its terminal fact is durable.
+    /// The pending outcome is request-local and cannot authorize a replay.
+    pub(crate) fn reconcile_pending_terminal(&self) -> Result<bool, String> {
+        let pending = {
+            let inner = self.inner.lock().expect("request mutex poisoned");
+            inner.pending_terminal.clone()
+        };
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        let Some(ingress) = &self.cancel_ingress else {
+            return Ok(false);
+        };
+        let request = self.snapshot().metadata.id;
+        ingress
+            .abandon_regenerate(request, self.admission)
+            .map_err(|error| error.to_string())?;
+        match pending {
+            PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
+            PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
+        }
+        Ok(true)
+    }
+
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
+        if self
+            .inner
+            .lock()
+            .expect("request mutex poisoned")
+            .pending_terminal
+            .is_some()
+        {
+            if let Err(error) = self.reconcile_pending_terminal() {
+                tracing::warn!(%error, "regenerate terminal still requires reconciliation");
+            }
+            return;
+        }
         if matches!(
             outcome,
             RequestOutcome::TextGenerationFailed(_) | RequestOutcome::InternalError(_)
@@ -325,14 +381,24 @@ impl RequestRecord {
             if should_abandon {
                 let request = self.snapshot().metadata.id;
                 if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
-                    tracing::warn!(%request, %error, "failed to persist terminal regenerate failure");
+                    let mut inner = self.inner.lock().expect("request mutex poisoned");
+                    if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                        inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
+                    }
+                    tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
+                    return;
                 }
             }
         }
+        self.finish_volatile(outcome);
+    }
+
+    fn finish_volatile(&self, outcome: RequestOutcome) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal() {
             return;
         }
+        inner.pending_terminal = None;
         let cancelled = inner.phase != EffectPhase::Applied && self.cancellation.is_cancelled();
         if inner.phase != EffectPhase::Applied {
             inner.phase = if matches!(
@@ -363,6 +429,30 @@ impl RequestRecord {
     }
 
     pub(crate) fn finish_cancelled(&self) {
+        {
+            let inner = self.inner.lock().expect("request mutex poisoned");
+            if inner.snapshot.state.is_terminal()
+                || inner.phase == EffectPhase::Applied
+                || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
+            {
+                return;
+            }
+        }
+        if let Some(ingress) = &self.cancel_ingress {
+            let request = self.snapshot().metadata.id;
+            if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                let mut inner = self.inner.lock().expect("request mutex poisoned");
+                if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                    inner.pending_terminal = Some(PendingTerminal::Cancelled);
+                }
+                tracing::warn!(%request, %error, "regenerate cancellation remains pending durable reconciliation");
+                return;
+            }
+        }
+        self.finish_cancelled_volatile();
+    }
+
+    fn finish_cancelled_volatile(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal()
             || inner.phase == EffectPhase::Applied
@@ -370,8 +460,10 @@ impl RequestRecord {
         {
             return;
         }
+        inner.pending_terminal = None;
         inner.phase = EffectPhase::Discarded;
         inner.message.take();
+        self.cancellation.cancel();
         if let Some(trace) = &mut inner.trace {
             trace.cancelled();
             trace.finished();

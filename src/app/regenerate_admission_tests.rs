@@ -1170,3 +1170,301 @@ async fn handle_cancel_after_selection_invalidation_persists_on_original_child()
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
 }
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn terminal_provider_failure_sql_abort_remains_repairable_without_replay() {
+    let db = std::env::temp_dir().join(format!("b67-failure-repair-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    let gate = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    gate.before_provider(handle.id(), record.admission())
+        .unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TRIGGER b67_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected b67 terminal failure'); END;").unwrap();
+    let revision: i64 = connection
+        .query_row(
+            "SELECT revision FROM timeline_revision WHERE slot=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    record.finish(crate::request::RequestOutcome::InternalError(
+        Arc::<str>::from("failed provider").into(),
+    ));
+    assert!(!handle.snapshot().state.is_terminal());
+    assert!(fixture.api.registry.get(handle.id()).is_some());
+    assert_eq!(fixture.api.registry.active_count(), 1);
+    let retry = fixture.api.reconcile_pending_terminals();
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].0, handle.id());
+    assert!(retry[0].1.is_err());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT revision FROM timeline_revision WHERE slot=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        revision
+    );
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(_)
+    ));
+    connection.execute_batch("DROP TRIGGER b67_abort;").unwrap();
+    assert!(
+        fixture
+            .api
+            .reconcile_pending_terminals()
+            .into_iter()
+            .all(|(_, result)| result.is_ok())
+    );
+    assert!(matches!(
+        handle.snapshot().state,
+        crate::request::RequestState::Finished(crate::request::RequestOutcome::InternalError(_))
+    ));
+    assert!(fixture.api.registry.get(handle.id()).is_none());
+    assert_eq!(fixture.api.registry.active_count(), 0);
+    assert!(fixture.api.reconcile_pending_terminals().is_empty());
+    assert!(
+        gate.before_provider(handle.id(), record.admission())
+            .is_err()
+    );
+    drop((fixture, connection, gate, record));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn finish_cancelled_does_not_retire_regenerate_on_sql_failure() {
+    let db = std::env::temp_dir().join(format!("b67-cancel-repair-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TRIGGER b67_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected b67 cancellation failure'); END;").unwrap();
+    record.finish_cancelled();
+    assert!(!handle.snapshot().state.is_terminal());
+    assert!(!record.cancellation.is_cancelled());
+    assert!(fixture.api.registry.get(handle.id()).is_some());
+    connection.execute_batch("DROP TRIGGER b67_abort;").unwrap();
+    let result = fixture.api.reconcile_pending_terminals();
+    assert_eq!(result.len(), 1);
+    assert!(result[0].1.is_ok());
+    assert!(matches!(
+        handle.snapshot().state,
+        crate::request::RequestState::Cancelled
+    ));
+    assert!(record.cancellation.is_cancelled());
+    assert!(fixture.api.registry.get(handle.id()).is_none());
+    drop((fixture, connection));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn crash_after_failed_terminal_append_is_repairable_using_only_durable_receipt() {
+    let db = std::env::temp_dir().join(format!("b67-crash-repair-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let admitted = fixture.api.registry.get(handle.id()).unwrap().admission();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TRIGGER b67_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected b67 terminal failure'); END;").unwrap();
+    fixture.api.registry.get(handle.id()).unwrap().finish(
+        crate::request::RequestOutcome::InternalError(Arc::<str>::from("failed provider").into()),
+    );
+    assert!(!handle.snapshot().state.is_terminal());
+    drop(fixture);
+    connection.execute_batch("DROP TRIGGER b67_abort;").unwrap();
+    drop(connection);
+    let mut reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    ));
+    let first = reopened
+        .abandon_regenerate_request(child, handle.id(), admitted.selection)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .abandon_regenerate_request(child, handle.id(), admitted.selection)
+            .unwrap(),
+        first
+    );
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn failed_shutdown_cancel_stays_registered_and_can_be_reconciled_after_storage_recovers() {
+    let db = std::env::temp_dir().join(format!("b67-shutdown-repair-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TRIGGER b67_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected b67 shutdown failure'); END;").unwrap();
+    fixture.api.close();
+    assert!(!handle.snapshot().state.is_terminal());
+    assert!(!handle.record.cancellation.is_cancelled());
+    assert!(fixture.api.registry.get(handle.id()).is_some());
+    connection.execute_batch("DROP TRIGGER b67_abort;").unwrap();
+    let results = fixture.api.reconcile_pending_terminals();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, handle.id());
+    assert!(results[0].1.is_ok());
+    assert!(matches!(
+        handle.snapshot().state,
+        crate::request::RequestState::Cancelled
+    ));
+    assert!(fixture.api.registry.get(handle.id()).is_none());
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop((fixture, connection));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
