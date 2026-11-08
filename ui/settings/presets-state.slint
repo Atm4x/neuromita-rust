@@ -36,6 +36,42 @@ export global SettingsUi {
     in-out property <[PromptSetItem]> prompt-set-options;
     in-out property <[string]> character-prompt-sets;
     in-out property <int> selected-character;
+    // Editable draft for the selected SETTINGS character, not the active chat target.
+    in-out property <int> character-draft-id: -1;
+    in-out property <string> character-draft-revision;
+    in-out property <string> character-draft-prompt;
+    in-out property <string> character-draft-reply: "active";
+    in-out property <string> character-draft-react: "active";
+    in-out property <string> character-draft-initiate: "active";
+    in-out property <string> character-baseline-prompt;
+    in-out property <string> character-baseline-reply: "active";
+    in-out property <string> character-baseline-react: "active";
+    in-out property <string> character-baseline-initiate: "active";
+    in-out property <bool> character-draft-split;
+    in-out property <bool> character-profile-pending;
+    in-out property <string> character-profile-error;
+    out property <bool> character-draft-dirty: character-draft-prompt != character-baseline-prompt ||
+        character-draft-reply != character-baseline-reply ||
+        character-draft-react != character-baseline-react ||
+        character-draft-initiate != character-baseline-initiate;
+    public function character-load(index: int) {
+        if (index >= 0 && index < character-presets.length && index < character-prompt-sets.length) {
+            character-draft-id = index;
+            character-draft-revision = settings-revision;
+            character-draft-prompt = character-prompt-sets[index];
+            character-draft-reply = character-presets[index].reply;
+            character-draft-react = character-presets[index].react;
+            character-draft-initiate = character-presets[index].initiate;
+            character-baseline-prompt = character-draft-prompt;
+            character-baseline-reply = character-draft-reply;
+            character-baseline-react = character-draft-react;
+            character-baseline-initiate = character-draft-initiate;
+            character-draft-split = character-presets[index].split;
+            character-profile-error = "";
+        }
+    }
+    callback character-profile-save(int, string, string, string, string, string);
+    callback character-profile-retry();
     in-out property <bool> character-prompt-expanded: true;
     in-out property <string> preset-edit-id;
     in-out property <bool> preset-configured;
