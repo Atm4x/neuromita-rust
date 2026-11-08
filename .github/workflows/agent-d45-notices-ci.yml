@@ -14,6 +14,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
+          components: rustfmt
       - name: Check native GUI notice boundary
         run: cargo check --locked --offline --features gui --bin neuromita-gui
       - name: Check all project targets
