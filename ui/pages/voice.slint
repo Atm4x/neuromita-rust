@@ -33,6 +33,10 @@ export global VoiceUi {
     in-out property <[string]> api-models;
     in-out property <string> api-model;
     in-out property <string> api-key;
+    in-out property <string> api-preset-id;
+    in-out property <string> api-preset-name;
+    in-out property <bool> remote-preview-busy: false;
+    in-out property <string> remote-status;
     in-out property <int> api-speed: 100;
     in-out property <int> character: 0;
     in-out property <int> avatar-offset: 0;
@@ -50,6 +54,9 @@ export global VoiceUi {
     callback local-initialize();
     callback local-restart();
     callback open-engine-settings();
+    callback api-profile-select(string);
+    callback api-profile-save();
+    callback voice-test-cancel();
     callback api-profile-add();
     callback api-profile-delete();
 }
@@ -271,10 +278,11 @@ export component VoiceSettingsPage inherits VerticalLayout {
             VerticalLayout { padding: 17px; spacing: 11px; alignment: start;
                 VoiceCardHeading { title: I18n.i18n("voice.api.title", "Профиль API озвучки"); description: I18n.i18n("voice.api.description", "Подключение к провайдеру и голоса персонажей."); glyph: "\u{f0c2}"; }
                 HorizontalLayout { height: 40px; spacing: 8px;
-                    VoiceSelectField { title: I18n.i18n("voice.api.profile", "Профиль"); options: VoiceUi.api-profiles; value: VoiceUi.api-profile == "" ? I18n.i18n("voice.api.choose", "Выберите профиль") : VoiceUi.api-profile; chosen(v) => { VoiceUi.api-profile = v; VoiceUi.persist(); } horizontal-stretch: 1; }
-                    VoiceButton { text: ""; glyph: "\u{f067}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-add(); } }
-                    VoiceButton { text: ""; glyph: "\u{f1f8}"; width: 38px; enabled: false; activated => { VoiceUi.api-profile-delete(); } }
+                    VoiceSelectField { title: I18n.i18n("voice.api.profile", "Профиль"); options: VoiceUi.api-profiles; value: VoiceUi.api-profile == "" ? I18n.i18n("voice.api.choose", "Выберите профиль") : VoiceUi.api-profile; chosen(v) => { VoiceUi.api-profile-select(v); } horizontal-stretch: 1; }
+                    VoiceButton { text: ""; glyph: "\u{f067}"; width: 38px; enabled: !VoiceUi.remote-preview-busy; activated => { VoiceUi.api-profile-add(); } }
+                    VoiceButton { text: ""; glyph: "\u{f1f8}"; width: 38px; enabled: !VoiceUi.remote-preview-busy; activated => { VoiceUi.api-profile-delete(); } }
                 }
+                VoiceFieldRow { title: "Название профиля"; hint: "Fish Audio"; value <=> VoiceUi.api-preset-name; committed(v) => { VoiceUi.api-profile-save(); } }
                 SecretField { title: I18n.i18n("voice.api.key", "API ключ"); hint: I18n.i18n("voice.api.key-hint", "Ключ провайдера"); value <=> VoiceUi.api-key; }
                 VoiceSelectField { title: I18n.i18n("voice.api.model", "Модель"); options: VoiceUi.api-models; value: VoiceUi.api-model == "" ? I18n.i18n("voice.api.model-choose", "Выберите модель") : VoiceUi.api-model; chosen(v) => { VoiceUi.api-model = v; VoiceUi.persist(); } }
                 SettingsText { text: I18n.i18n("voice.api.usage", "Бесплатные и платные модели зависят от выбранного провайдера."); color: SettingsTheme.muted; font-size: 11px; height: 23px; }
@@ -284,6 +292,7 @@ export component VoiceSettingsPage inherits VerticalLayout {
                     VoiceButton { width: 35px; text: "−"; activated => { VoiceUi.api-speed = max(50, VoiceUi.api-speed - 5); VoiceUi.persist(); } }
                     VoiceButton { width: 35px; text: "+"; activated => { VoiceUi.api-speed = min(200, VoiceUi.api-speed + 5); VoiceUi.persist(); } }
                 }
+                VoiceButton { text: "Сохранить профиль и ключ"; glyph: "\u{f0c7}"; horizontal-stretch: 1; enabled: !VoiceUi.remote-preview-busy; activated => { VoiceUi.api-profile-save(); } }
                 CharacterVoiceTabs { selected: VoiceUi.character; offset <=> VoiceUi.avatar-offset; voice-id <=> VoiceUi.voice-id; changed-id(character, value) => { VoiceUi.voice-id-changed(character, value); } changed-selection(character) => { VoiceUi.select-character(character); } }
             }
         }
@@ -304,12 +313,14 @@ export component VoiceSettingsPage inherits VerticalLayout {
                     SettingsText { text: I18n.i18n("voice.local.model-hint", "Параметры синтеза и голоса — в настройках выбранной модели."); color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
                 }
             }
-            if VoiceUi.backend == 2: VoiceCard { height: 300px;
+            if VoiceUi.backend == 2: VoiceCard { height: 340px;
                 VerticalLayout { padding: 17px; spacing: 10px;
                     VoiceCardHeading { title: I18n.i18n("voice.api.test-title", "Проверка голоса"); description: I18n.i18n("voice.api.test-hint", "Прослушайте голос выбранного персонажа."); glyph: "\u{f04b}"; }
                     SettingsText { text: VoiceUi.character >= 0 && VoiceUi.character < CharacterCatalog.entries.length ? CharacterCatalog.name(CharacterCatalog.entries[VoiceUi.character]) : I18n.i18n("voice.api.all", "Все персонажи"); font-size: 11px; }
                     SettingsTextArea { value <=> VoiceUi.sample-text; height: 82px; }
-                    VoiceButton { text: I18n.i18n("voice.api.test-button", "Проверить и прослушать"); glyph: "\u{f04b}"; accent: true; horizontal-stretch: 1; enabled: VoiceUi.preview-available; activated => { VoiceUi.voice-test(VoiceUi.sample-text, VoiceUi.character); } }
+                    VoiceButton { text: I18n.i18n("voice.api.test-button", "Проверить и прослушать"); glyph: "\u{f04b}"; accent: true; horizontal-stretch: 1; enabled: !VoiceUi.remote-preview-busy; activated => { VoiceUi.voice-test(VoiceUi.sample-text, VoiceUi.character); } }
+                    VoiceButton { text: "Отменить проверку"; horizontal-stretch: 1; enabled: VoiceUi.remote-preview-busy; activated => { VoiceUi.voice-test-cancel(); } }
+                    SettingsText { text: VoiceUi.remote-status; color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
                     SettingsText { text: I18n.i18n("voice.api.paid", "Проверка отправляет текст провайдеру. Платные модели расходуют баланс API."); color: SettingsTheme.muted; font-size: 11px; wrap: word-wrap; overflow: clip; }
                 }
             }
