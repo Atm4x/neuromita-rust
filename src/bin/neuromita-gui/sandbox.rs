@@ -166,7 +166,11 @@ pub(super) fn render_catalog(
         .set_entries(ModelRc::new(VecModel::from(entries)));
 }
 
-fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::EditorState) {
+pub(super) fn apply(
+    window: &AppWindow,
+    update: Update,
+    memory_editor: &super::memory::EditorState,
+) {
     match update {
         Update::RecognizedText {
             text,

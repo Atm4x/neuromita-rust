@@ -427,7 +427,12 @@ fn sandbox_render_and_bindings(catalog: Rc<RefCell<Localizer>>) {
 }
 
 fn settings_render_and_bindings(window: &AppWindow) {
-    use super::super::view::{AiEngineUi, PresetItem, SettingsUi};
+    use super::super::{
+        memory::{EditorState, MemoryEditor},
+        runtime::Update,
+        view::{AiEngineUi, PresetItem, SettingsUi},
+    };
+    let editor: EditorState = std::sync::Arc::new(std::sync::Mutex::new(MemoryEditor::default()));
     use neuromita::ai_runtime::{
         AiService,
         runtime_status::{LoadedModel, RuntimePhase, RuntimeSnapshot, ServiceRuntimeStatus},
@@ -456,7 +461,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
             ..Default::default()
         },
     );
-    super::super::ai_engine::runtime_status(window, &runtime);
+    super::super::sandbox::apply(window, Update::RuntimeStatus(runtime.clone()), &editor);
     let engine = window.global::<AiEngineUi>();
     assert!(engine.get_embedding_failed());
     assert!(
@@ -469,7 +474,7 @@ fn settings_render_and_bindings(window: &AppWindow) {
     engine.set_process_mode("split".into());
     window.global::<SettingsUi>().set_section(6);
     window.set_page(PageId::Settings);
-    window.window().take_snapshot().unwrap();
+    let failed_frame = window.window().take_snapshot().unwrap();
     runtime.services.insert(
         AiService::Embedding,
         ServiceRuntimeStatus {
@@ -481,11 +486,35 @@ fn settings_render_and_bindings(window: &AppWindow) {
             ..Default::default()
         },
     );
-    super::super::ai_engine::runtime_status(window, &runtime);
+    super::super::sandbox::apply(window, Update::RuntimeStatus(runtime.clone()), &editor);
     assert!(!engine.get_embedding_failed());
     assert!(engine.get_embedding_status().contains("mock_embedding"));
     assert!(!engine.get_embedding_status().contains("Timeout"));
-    super::super::ai_engine::runtime_status(window, &RuntimeSnapshot::default());
+    let recovered_frame = window.window().take_snapshot().unwrap();
+    assert_ne!(
+        failed_frame.as_bytes(),
+        recovered_frame.as_bytes(),
+        "RuntimeStatus recovery did not change AppWindow pixels"
+    );
+    if let Some(directory) = std::env::var_os("NEUROMITA_GUI_CAPTURE_DIR") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, image) in [
+            ("ai-engine-app-failed.ppm", failed_frame),
+            ("ai-engine-app-recovered.ppm", recovered_frame),
+        ] {
+            let mut ppm = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+            for pixel in image.as_bytes().chunks_exact(4) {
+                ppm.extend_from_slice(&pixel[..3]);
+            }
+            std::fs::write(directory.join(name), ppm).unwrap();
+        }
+    }
+    super::super::sandbox::apply(
+        window,
+        Update::RuntimeStatus(RuntimeSnapshot::default()),
+        &editor,
+    );
     assert_eq!(engine.get_embedding_status(), "Не настроен");
     assert!(!engine.get_embedding_failed());
     let settings = window.global::<SettingsUi>();
@@ -815,7 +844,8 @@ fn memory_render_and_contract(window: &AppWindow) {
         window
             .global::<super::super::view::SettingsUi>()
             .set_character_prompt_expanded(false);
-        ui.invoke_edit(page.records()[0].id.0.to_string().into());
+        let selected_memory_id = page.records()[0].id;
+        ui.invoke_edit(selected_memory_id.0.to_string().into());
         assert!(ui.get_graph_eligible());
         ui.invoke_graph_preview(0);
         assert!(ui.get_graph_pending());
@@ -825,7 +855,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             panic!("expected graph maintenance preview")
         };
         assert_eq!(graph_character, CharacterId::Crazy);
-        assert_eq!(graph_memory, page.records()[0].id);
+        assert_eq!(graph_memory, selected_memory_id);
         assert_eq!(
             graph_mode,
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Clear
@@ -966,7 +996,7 @@ fn memory_render_and_contract(window: &AppWindow) {
             panic!("expected typed graph reindex preview")
         };
         assert_eq!(reindex_character, CharacterId::Crazy);
-        assert_eq!(reindex_source, page.records()[0].id);
+        assert_eq!(reindex_source, selected_memory_id);
         assert_eq!(
             reindex_mode,
             neuromita::knowledge::maintenance::GraphMaintenanceMode::Reindex
