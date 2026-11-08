@@ -2231,3 +2231,331 @@ async fn semantic_generation_transient_embedding_timeout_is_terminal_then_retry_
     assert!(calls.try_recv().is_err());
     app.shutdown().await.unwrap();
 }
+
+struct PartiallyFailedSourceEmbedding {
+    space: neuromita::knowledge::embedding::EmbeddingSpace,
+    queries: std::sync::atomic::AtomicUsize,
+    documents: std::sync::atomic::AtomicUsize,
+    failed_archived: std::sync::atomic::AtomicBool,
+}
+
+impl PartiallyFailedSourceEmbedding {
+    fn new() -> Self {
+        Self {
+            space: neuromita::knowledge::embedding::EmbeddingSpace::new(
+                "fixture",
+                "partial-source-atomicity",
+                "v1",
+                2,
+            )
+            .unwrap(),
+            queries: std::sync::atomic::AtomicUsize::new(0),
+            documents: std::sync::atomic::AtomicUsize::new(0),
+            failed_archived: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+impl neuromita::knowledge::embedding::EmbeddingProvider for PartiallyFailedSourceEmbedding {
+    fn space(&self) -> &neuromita::knowledge::embedding::EmbeddingSpace {
+        &self.space
+    }
+
+    fn embed(
+        &self,
+        purpose: neuromita::knowledge::embedding::EmbeddingPurpose,
+        text: String,
+    ) -> neuromita::knowledge::embedding::EmbeddingFuture<
+        '_,
+        neuromita::knowledge::embedding::Embedding,
+    > {
+        use neuromita::knowledge::embedding::{Embedding, EmbeddingError, EmbeddingPurpose};
+        use std::sync::atomic::Ordering;
+        Box::pin(async move {
+            match purpose {
+                EmbeddingPurpose::Query => {
+                    self.queries.fetch_add(1, Ordering::SeqCst);
+                }
+                EmbeddingPurpose::Document => {
+                    self.documents.fetch_add(1, Ordering::SeqCst);
+                    if text.contains("Archived marble lantern")
+                        && !self.failed_archived.swap(true, Ordering::SeqCst)
+                    {
+                        return Err(EmbeddingError::Transport(
+                            "archived History source failed after earlier embeddings".into(),
+                        ));
+                    }
+                }
+            }
+            Embedding::new(vec![1.0, 0.0], &self.space)
+        })
+    }
+}
+
+#[tokio::test]
+async fn partial_memory_history_embedding_failure_never_commits_partial_cache_or_prompt() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::semantic_memory::{SemanticMemoryRetriever, SemanticRetrievalFilter},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    use std::sync::atomic::Ordering;
+
+    let _lock = ONE_APP.lock().await;
+    for warm_memory_cache in [false, true] {
+        let (tx, mut calls) = mpsc::unbounded_channel();
+        let provider = Arc::new(PartiallyFailedSourceEmbedding::new());
+        let retriever = Arc::new(SemanticMemoryRetriever::new(provider.clone(), 32).unwrap());
+        let mut application = config(tx);
+        application.knowledge = KnowledgeRetrieval::semantic(retriever.clone());
+        let app = ApplicationLifecycle::start(application).await.unwrap();
+        let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+        let memory = MemoryRecord::fact(
+            MemoryId::new(),
+            MemoryPriority::Critical,
+            "Marble lantern is kept in the character Memory",
+        );
+        let memory_id = memory.id;
+        owner
+            .edit_memories(
+                owner.memories().await.unwrap(),
+                vec![MemoryCommand::ImportRecord {
+                    record: memory.clone(),
+                }],
+            )
+            .await
+            .unwrap();
+        let archived = ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Archived marble lantern photo in the hidden gallery".into()).unwrap(),
+        )
+        .unwrap();
+        ChatApi::publish_message(
+            CharacterId::Crazy,
+            UserInput::new("Current conversation".into()).unwrap(),
+        )
+        .unwrap();
+
+        if warm_memory_cache {
+            retriever
+                .retrieve_filtered(
+                    CharacterId::Crazy,
+                    &[memory],
+                    "Marble lantern",
+                    SemanticRetrievalFilter::all(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(retriever.preview_cache_clear().total_entries, 1);
+        }
+
+        let previous = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+        SettingsApi::replace(
+            previous.revision,
+            HistoryGenerationSettings {
+                mode: HistoryGenerationMode::Vector,
+                max_results: 2,
+                active_messages: 1,
+                ..previous.value
+            },
+        )
+        .unwrap();
+        let failed = ChatApi::initiate(InitiateRequest::new(
+            CharacterId::Crazy,
+            "Marble lantern",
+            RequestSource::Presenter,
+        ))
+        .unwrap();
+        let outcome = timeout(Duration::from_secs(5), failed.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                outcome.state,
+                RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+            ),
+            "{outcome:?}"
+        );
+        assert!(calls.try_recv().is_err(), "partial source leaked to LLM");
+        assert!(provider.failed_archived.load(Ordering::SeqCst));
+        assert_eq!(
+            retriever.preview_cache_clear().total_entries,
+            usize::from(warm_memory_cache),
+            "a failed multi-source retrieval must not publish any newly embedded document"
+        );
+
+        let retry = ChatApi::initiate(InitiateRequest::new(
+            CharacterId::Crazy,
+            "Marble lantern",
+            RequestSource::Presenter,
+        ))
+        .unwrap();
+        let call = next_call(&mut calls).await;
+        let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+        assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+        assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+        assert!(evidence.contains("Archived marble lantern"), "{evidence}");
+        call.reply.send("Sources restored".into()).unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(5), retry.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            RequestState::Finished(RequestOutcome::Success(_))
+        ));
+        assert_eq!(retriever.preview_cache_clear().total_entries, 2);
+        assert_eq!(
+            provider.documents.load(Ordering::SeqCst),
+            if warm_memory_cache { 3 } else { 4 },
+            "retry must recompute each source whose embedding was not committed"
+        );
+        assert_eq!(
+            provider.queries.load(Ordering::SeqCst),
+            if warm_memory_cache { 3 } else { 2 }
+        );
+        assert!(calls.try_recv().is_err());
+        app.shutdown().await.unwrap();
+    }
+}
+
+struct TransientJointReranker {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl neuromita::knowledge::reranking::RerankProvider for TransientJointReranker {
+    fn score<'a>(
+        &'a self,
+        _: &'a str,
+        texts: &'a [String],
+    ) -> neuromita::knowledge::reranking::RerankFuture<'a> {
+        use neuromita::knowledge::embedding::EmbeddingError;
+        use std::sync::atomic::Ordering;
+        Box::pin(async move {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(EmbeddingError::Transport(
+                    "partial joint-source reranker failed before result publication".into(),
+                ));
+            }
+            Ok(texts.iter().map(|_| 0.5).collect())
+        })
+    }
+}
+
+#[tokio::test]
+async fn failed_joint_reranker_never_publishes_partial_sources_and_retry_reuses_valid_cache() {
+    use neuromita::{
+        api::CharacterApi,
+        knowledge::{reranking::RerankPolicy, semantic_memory::SemanticMemoryRetriever},
+        memory::{MemoryCommand, MemoryId, MemoryPriority, MemoryRecord},
+    };
+    use std::sync::atomic::Ordering;
+
+    let _lock = ONE_APP.lock().await;
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let provider = Arc::new(JointEmbedding::new());
+    let reranker = Arc::new(TransientJointReranker {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let retriever = Arc::new(
+        SemanticMemoryRetriever::new(provider.clone(), 32)
+            .unwrap()
+            .with_reranker(
+                reranker.clone(),
+                RerankPolicy {
+                    alpha: 1.0,
+                    limit: 4,
+                },
+            )
+            .unwrap(),
+    );
+    let mut application = config(tx);
+    application.knowledge = KnowledgeRetrieval::semantic(retriever.clone());
+    let app = ApplicationLifecycle::start(application).await.unwrap();
+    let owner = CharacterApi::get(CharacterId::Crazy).unwrap();
+    let memory = MemoryRecord::fact(
+        MemoryId::new(),
+        MemoryPriority::Critical,
+        "Indigo compass is stored in Memory",
+    );
+    let memory_id = memory.id;
+    owner
+        .edit_memories(
+            owner.memories().await.unwrap(),
+            vec![MemoryCommand::ImportRecord { record: memory }],
+        )
+        .await
+        .unwrap();
+    let archived = ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Indigo compass is pictured in the archived gallery".into()).unwrap(),
+    )
+    .unwrap();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("Current unrelated message".into()).unwrap(),
+    )
+    .unwrap();
+    let settings = SettingsApi::snapshot::<HistoryGenerationSettings>().unwrap();
+    SettingsApi::replace(
+        settings.revision,
+        HistoryGenerationSettings {
+            mode: HistoryGenerationMode::Fusion,
+            max_results: 2,
+            active_messages: 1,
+            ..settings.value
+        },
+    )
+    .unwrap();
+
+    let failed = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Indigo compass",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let outcome = timeout(Duration::from_secs(5), failed.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            outcome.state,
+            RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        calls.try_recv().is_err(),
+        "failed reranker leaked partial source evidence"
+    );
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(retriever.preview_cache_clear().total_entries, 2);
+
+    let retry = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "Indigo compass",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = next_call(&mut calls).await;
+    let evidence = call.input.prepared_knowledge.as_deref().unwrap_or("");
+    assert!(evidence.contains(&memory_id.0.to_string()), "{evidence}");
+    assert!(evidence.contains(&archived.0.to_string()), "{evidence}");
+    call.reply.send("Both sources accepted".into()).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), retry.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert_eq!(reranker.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.queries.load(Ordering::SeqCst), 2);
+    assert_eq!(provider.documents.load(Ordering::SeqCst), 1);
+    assert_eq!(retriever.preview_cache_clear().total_entries, 2);
+    assert!(calls.try_recv().is_err());
+    app.shutdown().await.unwrap();
+}
