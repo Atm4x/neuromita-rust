@@ -408,3 +408,206 @@ async fn cancelling_after_admission_does_not_erase_committed_history() {
         child.0
     );
 }
+
+#[tokio::test]
+async fn regenerate_receipt_is_exact_queued_request_and_survives_cancel() {
+    let mut fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let owner = fixture.timeline.lock().unwrap();
+    let receipt = owner.regenerate_admission_receipt(child).unwrap().unwrap();
+    assert_eq!(receipt.request, handle.id());
+    assert_eq!(receipt.accepted_request, fixture.source.accepted_request);
+    assert_eq!(receipt.accepted_message, fixture.source.accepted_message);
+    assert_eq!(receipt.original_input, fixture.source.original_input);
+    assert_eq!(receipt.parent_head, fixture.fence.at.through);
+    assert_eq!(
+        receipt.parent_generation,
+        fixture.fence.selection.generation
+    );
+    assert_eq!(receipt.child_branch, child);
+    assert_eq!(receipt.configuration.provider_model, "model");
+    drop(owner);
+    assert!(matches!(
+        handle.cancel(),
+        crate::request::CancelResult::Cancelled
+    ));
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    assert_eq!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .regenerate_admission_receipt(child)
+            .unwrap()
+            .unwrap(),
+        receipt
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn sqlite_receipt_commits_before_volatile_request_registration_and_reopens() {
+    let db = std::env::temp_dir().join(format!("b62-durable-receipt-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let id = RequestId::new();
+    let receipt = crate::timeline::RegenerateAdmissionReceipt {
+        request: id,
+        accepted_request: fixture.source.accepted_request,
+        accepted_message: fixture.source.accepted_message,
+        original_input: fixture.source.original_input,
+        character: fixture.source.character,
+        parent_branch: fixture.fence.selection.branch_id,
+        parent_head: fixture.fence.at.through,
+        parent_generation: fixture.fence.selection.generation,
+        child_branch: child,
+        configuration: crate::timeline::RegenerateConfigurationReference {
+            settings_revision: 1,
+            preset_id: 0,
+            provider_model: "model".into(),
+            prompt_set: None,
+        },
+    };
+    fixture
+        .timeline
+        .lock()
+        .unwrap()
+        .fork_and_admit_regenerate_source(
+            fixture.source,
+            child,
+            fixture.fence.selection,
+            fixture.fence.at.through,
+            &receipt,
+        )
+        .unwrap();
+    assert!(fixture.api.registry.get(id).is_none());
+    assert_eq!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .regenerate_admission_receipt(child)
+            .unwrap(),
+        Some(receipt.clone())
+    );
+    drop(fixture);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.selection().branch_id, child);
+    assert_eq!(
+        reopened.regenerate_admission_receipt(child).unwrap(),
+        Some(receipt.clone())
+    );
+    let repository = crate::timeline::storage::SqliteTimelineRepository::open(&db).unwrap();
+    let persisted = repository.archive_snapshot().unwrap();
+    let mut branches = persisted.persisted_branches();
+    let admitted = branches
+        .iter_mut()
+        .find(|branch| branch.info.id == child)
+        .unwrap();
+    let marker = &mut admitted.events[0].draft.payload;
+    let data = marker
+        .get_mut(crate::timeline::RegenerateAdmissionReceipt::KEY)
+        .unwrap();
+    data["accepted_message"] = json!(EventId::new());
+    assert!(crate::timeline::domain::TimelineStore::load_persisted(branches).is_err());
+    drop((repository, reopened));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn native_archive_round_trip_preserves_exact_regenerate_admission() {
+    use crate::timeline::storage::{SqliteTimelineRepository, archive, assets::TimelineAssetStore};
+    let db = std::env::temp_dir().join(format!("b62-archive-source-{}.db", uuid::Uuid::new_v4()));
+    let dst = std::env::temp_dir().join(format!("b62-archive-target-{}.db", uuid::Uuid::new_v4()));
+    let assets_dir =
+        std::env::temp_dir().join(format!("b62-archive-assets-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&assets_dir, 1024 * 1024).unwrap();
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let saved = fixture
+        .timeline
+        .lock()
+        .unwrap()
+        .regenerate_admission_receipt(child)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.request, handle.id());
+    let repository = SqliteTimelineRepository::open(&db).unwrap();
+    let bytes = archive::export_sqlite(&repository, session, &assets).unwrap();
+    let mut restored = SqliteTimelineRepository::open(&dst).unwrap();
+    assert_eq!(
+        archive::import_sqlite(&mut restored, &bytes, &assets).unwrap(),
+        session
+    );
+    let marker = restored
+        .archive_snapshot()
+        .unwrap()
+        .world(child)
+        .unwrap()
+        .into_iter()
+        .find(|fact| {
+            fact.branch_id == child
+                && fact.draft.kind == crate::timeline::domain::EventKind::BranchCreated
+        })
+        .unwrap();
+    assert_eq!(
+        crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload).unwrap(),
+        Some(saved.clone())
+    );
+    let mut tampered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    for branch in tampered["branches"].as_array_mut().unwrap() {
+        if branch["info"]["id"] == json!(child) {
+            branch["events"][0]["draft"]["payload"]["regenerate_admission"]["original_input"] =
+                json!(EventId::new());
+        }
+    }
+    let tampered = serde_json::to_vec(&tampered).unwrap();
+    let other = std::env::temp_dir().join(format!("b62-tamper-target-{}.db", uuid::Uuid::new_v4()));
+    let mut rejected = SqliteTimelineRepository::open(&other).unwrap();
+    assert!(archive::import_sqlite(&mut rejected, &tampered, &assets).is_err());
+    drop((fixture, repository, restored, rejected));
+    for path in [&db, &dst, &other] {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+    let _ = std::fs::remove_dir_all(assets_dir);
+}

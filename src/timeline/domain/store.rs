@@ -257,7 +257,66 @@ impl TimelineStore {
                     .and_then(|branch| branch.info.parent);
             }
         }
+        store.validate_regenerate_admissions()?;
         Ok(store)
+    }
+
+    /// Validate all durable child admissions after loading either SQLite or a
+    /// native archive. Old checkpoint/player forks without receipts are valid.
+    fn validate_regenerate_admissions(&self) -> Result<(), TimelineError> {
+        let mut requests = HashSet::new();
+        for branch in self.branches.values() {
+            let Some(parent) = branch.info.parent else {
+                continue;
+            };
+            let Some(marker) = branch.events.first() else {
+                return Err(TimelineError::Storage("missing branch marker".into()));
+            };
+            let Some(receipt) =
+                crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+            else {
+                continue;
+            };
+            if marker.draft.kind != EventKind::BranchCreated
+                || branch.info.checkpoint != Some(receipt.original_input)
+                || marker
+                    .draft
+                    .payload
+                    .get("parent_branch_id")
+                    .and_then(Value::as_str)
+                    != Some(parent.0.to_string().as_str())
+                || marker
+                    .draft
+                    .payload
+                    .get("input_event_id")
+                    .and_then(Value::as_str)
+                    != Some(receipt.original_input.0.to_string().as_str())
+                || marker
+                    .draft
+                    .payload
+                    .get("character_id")
+                    .and_then(Value::as_str)
+                    != Some(receipt.character.to_string().as_str())
+                || !requests.insert((branch.info.session_id, receipt.request))
+            {
+                return Err(TimelineError::Invalid(
+                    "duplicate or invalid regenerate admission marker",
+                ));
+            }
+            receipt.validate(
+                self,
+                parent,
+                branch.info.id,
+                receipt.original_input,
+                receipt.character,
+            )?;
+            if self.event(parent, receipt.original_input)?.sequence != branch.info.fork_sequence {
+                return Err(TimelineError::Invalid(
+                    "regenerate fork does not preserve input anchor",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Replay imported receipts through the same domain append validator used
@@ -598,11 +657,22 @@ impl TimelineStore {
         checkpoint_id: EventId,
         child_id: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
-        self.fork_at(branch_id, checkpoint_id, child_id, None)
+        self.fork_at(branch_id, checkpoint_id, child_id, None, None)
     }
 
     /// An immutable prefix that ends at the original player event, not at a
     /// synthetic checkpoint and never at an accepted assistant message.
+    pub(crate) fn fork_at_regenerate_input(
+        &mut self,
+        branch_id: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child_id: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.fork_at(branch_id, input, child_id, Some(character), Some(receipt))
+    }
+
     pub fn fork_at_player_input(
         &mut self,
         branch_id: BranchId,
@@ -610,7 +680,7 @@ impl TimelineStore {
         character: CharacterId,
         child_id: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
-        self.fork_at(branch_id, input, child_id, Some(character))
+        self.fork_at(branch_id, input, child_id, Some(character), None)
     }
 
     fn fork_at(
@@ -619,6 +689,7 @@ impl TimelineStore {
         anchor_id: EventId,
         child_id: BranchId,
         player_recipient: Option<CharacterId>,
+        admission: Option<&crate::timeline::RegenerateAdmissionReceipt>,
     ) -> Result<BranchInfo, TimelineError> {
         if let Some(existing) = self.branches.get(&child_id) {
             return if player_recipient.is_none()
@@ -679,6 +750,28 @@ impl TimelineStore {
                 );
                 payload.insert("character_id".into(), Value::String(character.to_string()));
             }
+        }
+        if let Some(receipt) = admission {
+            let recipient = player_recipient.ok_or(TimelineError::Invalid(
+                "regenerate admission requires player input",
+            ))?;
+            receipt.validate(self, branch_id, child_id, anchor_id, recipient)?;
+            for existing in self.branches.values() {
+                if let Some(marker) = existing.events.first() {
+                    if crate::timeline::RegenerateAdmissionReceipt::from_marker(
+                        &marker.draft.payload,
+                    )?
+                    .is_some_and(|previous| previous.request == receipt.request)
+                    {
+                        return Err(TimelineError::Conflict);
+                    }
+                }
+            }
+            payload.insert(
+                crate::timeline::RegenerateAdmissionReceipt::KEY.into(),
+                serde_json::to_value(receipt)
+                    .map_err(|_| TimelineError::Invalid("invalid regenerate receipt encoding"))?,
+            );
         }
         let marker_sequence = anchor
             .sequence

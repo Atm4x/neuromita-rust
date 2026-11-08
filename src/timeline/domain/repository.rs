@@ -195,6 +195,14 @@ pub trait TimelineRepository {
         character: CharacterId,
         child: BranchId,
     ) -> Result<BranchInfo, TimelineError>;
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError>;
     fn view(
         &self,
         branch: BranchId,
@@ -288,6 +296,16 @@ impl TimelineRepository for TimelineStore {
         child: BranchId,
     ) -> Result<BranchInfo, TimelineError> {
         TimelineStore::fork_at_player_input(self, parent, input, character, child)
+    }
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        TimelineStore::fork_at_regenerate_input(self, parent, input, character, child, receipt)
     }
     fn view(
         &self,

@@ -17,8 +17,8 @@ use crate::{
     request::TimelineFence,
     settings::SettingsOwner,
     timeline::{
-        RegenerateSource, conversation::ConversationMessage, domain::BranchId,
-        selection::TimelineAdmission,
+        RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateSource,
+        conversation::ConversationMessage, domain::BranchId, selection::TimelineAdmission,
     },
 };
 
@@ -45,6 +45,7 @@ pub(crate) trait RequestIngress: Send + Sync {
         source: RegenerateSource,
         fence: TimelineFence,
         child: BranchId,
+        receipt: &RegenerateAdmissionReceipt,
     ) -> Result<TimelineAdmission, SubmitError>;
 }
 
@@ -161,13 +162,32 @@ impl ChatApiState {
         if !*accepting {
             return Err(SubmitError::Stopped);
         }
+        let id = RequestId::new();
         let admission = if let Some((source, fence, child)) = regeneration {
             if request.character_id() != source.character
                 || request.intent() != TurnIntent::Reply(source.original_input)
             {
                 return Err(SubmitError::InvalidTargetEvent);
             }
-            self.ingress.admit_regenerate(source, fence, child)?
+            let receipt = RegenerateAdmissionReceipt {
+                request: id,
+                accepted_request: source.accepted_request,
+                accepted_message: source.accepted_message,
+                original_input: source.original_input,
+                character: source.character,
+                parent_branch: fence.selection.branch_id,
+                parent_head: fence.at.through,
+                parent_generation: fence.selection.generation,
+                child_branch: child,
+                configuration: RegenerateConfigurationReference {
+                    settings_revision: settings.revision,
+                    preset_id: preset_id.0,
+                    provider_model: preset.template().model().to_owned(),
+                    prompt_set: prompt.as_ref().map(|snapshot| snapshot.name().to_owned()),
+                },
+            };
+            self.ingress
+                .admit_regenerate(source, fence, child, &receipt)?
         } else {
             self.ingress.admit(
                 request.character_id(),
@@ -175,7 +195,6 @@ impl ChatApiState {
                 request.timeline_fence(),
             )?
         };
-        let id = RequestId::new();
         let handle = self.registry.register_with_configuration(
             Box::new(request),
             id,

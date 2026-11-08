@@ -265,3 +265,48 @@ fn request_id_alone_does_not_authorize_a_forged_causal_receipt() {
         assert_eq!(timeline.selection(), selection);
     }
 }
+
+#[test]
+fn duplicate_durable_request_id_rejected_before_second_fork_mutates_owner() {
+    let mut timeline = SessionTimeline::new();
+    let parent = timeline.selection().branch_id;
+    let source = accepted_source(&mut timeline, CharacterId::Crazy);
+    let first_selection = timeline.selection();
+    let first = BranchId::new();
+    let request = RequestId::new();
+    let mut receipt = RegenerateAdmissionReceipt {
+        request,
+        accepted_request: source.accepted_request,
+        accepted_message: source.accepted_message,
+        original_input: source.original_input,
+        character: source.character,
+        parent_branch: parent,
+        parent_head: 2,
+        parent_generation: first_selection.generation,
+        child_branch: first,
+        configuration: RegenerateConfigurationReference {
+            settings_revision: 0,
+            preset_id: 0,
+            provider_model: "model".into(),
+            prompt_set: None,
+        },
+    };
+    let selected = timeline
+        .fork_and_admit_regenerate_source(source, first, first_selection, 2, &receipt)
+        .unwrap();
+    let returned = timeline.select_branch(parent, selected.selection).unwrap();
+    let second = BranchId::new();
+    receipt.child_branch = second;
+    receipt.parent_generation = returned.generation;
+    let before = timeline.store.world(parent).unwrap();
+    assert_eq!(
+        timeline.fork_and_admit_regenerate_source(source, second, returned, 2, &receipt),
+        Err(domain::TimelineError::Conflict),
+    );
+    assert_eq!(timeline.selection(), returned);
+    assert_eq!(timeline.store.world(parent).unwrap(), before);
+    assert_eq!(
+        timeline.store.branch(second),
+        Err(domain::TimelineError::NotFound)
+    );
+}

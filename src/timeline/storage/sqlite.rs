@@ -4,6 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::identity::{CharacterId, EventId};
+use crate::timeline::RegenerateAdmissionReceipt;
 use crate::timeline::domain::{
     AppendGuard, Branch, BranchId, BranchInfo, EventDraft, EventKind, KnownEvent, Receipt,
     SessionId, SessionProvenance, TimelineError, TimelineFact, TimelineRepository, TimelineStore,
@@ -228,6 +229,7 @@ impl SqliteTimelineRepository {
             None,
             child,
             expected,
+            None,
         )
     }
 
@@ -248,6 +250,28 @@ impl SqliteTimelineRepository {
             Some(character),
             child,
             expected,
+            None,
+        )
+    }
+
+    pub(crate) fn fork_and_select_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        expected_parent_head: u64,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        expected: TimelineSelection,
+        receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<TimelineSelection, TimelineError> {
+        self.fork_and_select_anchor(
+            parent,
+            expected_parent_head,
+            input,
+            Some(character),
+            child,
+            expected,
+            Some(receipt),
         )
     }
 
@@ -262,6 +286,7 @@ impl SqliteTimelineRepository {
         player_recipient: Option<CharacterId>,
         child: BranchId,
         expected: TimelineSelection,
+        admission: Option<&RegenerateAdmissionReceipt>,
     ) -> Result<TimelineSelection, TimelineError> {
         self.with_write(|connection, store| {
             if expected.branch_id != parent || read_selection(connection)? != Some(expected) {
@@ -273,9 +298,22 @@ impl SqliteTimelineRepository {
             if store.branch(child).is_ok() {
                 return Err(TimelineError::Conflict);
             }
-            match player_recipient {
-                Some(character) => store.fork_at_player_input(parent, anchor, character, child)?,
-                None => store.fork(parent, anchor, child)?,
+            match (player_recipient, admission) {
+                (Some(character), Some(receipt)) => {
+                    if receipt.parent_head != expected_parent_head
+                        || receipt.parent_generation != expected.generation
+                    {
+                        return Err(TimelineError::ConcurrentWrite);
+                    }
+                    store.fork_at_regenerate_input(parent, anchor, character, child, receipt)?
+                }
+                (Some(character), None) => {
+                    store.fork_at_player_input(parent, anchor, character, child)?
+                }
+                (None, None) => store.fork(parent, anchor, child)?,
+                (None, Some(_)) => {
+                    return Err(TimelineError::Invalid("regenerate requires player input"));
+                }
             };
             save_branch(connection, store, child)?;
             select_branch_in_transaction(connection, child, Some(expected))
@@ -945,6 +983,20 @@ impl TimelineRepository for SqliteTimelineRepository {
     ) -> Result<BranchInfo, TimelineError> {
         self.with_write(|connection, store| {
             let info = store.fork_at_player_input(parent, input, character, child)?;
+            save_branch(connection, store, child)?;
+            Ok(info)
+        })
+    }
+    fn fork_at_regenerate_input(
+        &mut self,
+        parent: BranchId,
+        input: EventId,
+        character: CharacterId,
+        child: BranchId,
+        receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<BranchInfo, TimelineError> {
+        self.with_write(|connection, store| {
+            let info = store.fork_at_regenerate_input(parent, input, character, child, receipt)?;
             save_branch(connection, store, child)?;
             Ok(info)
         })

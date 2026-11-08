@@ -415,6 +415,17 @@ fn validate_envelope(
                     );
                     expected_payload
                         .insert("character_id".into(), Value::String(character.to_string()));
+                    if let Some(receipt) = crate::timeline::RegenerateAdmissionReceipt::from_marker(
+                        &marker.draft.payload,
+                    )? {
+                        receipt.validate(&detached, parent, info.id, checkpoint, character)?;
+                        expected_payload.insert(
+                            crate::timeline::RegenerateAdmissionReceipt::KEY.into(),
+                            serde_json::to_value(&receipt).map_err(|_| {
+                                SessionArchiveError::Invalid("invalid regenerate receipt")
+                            })?,
+                        );
+                    }
                 }
                 _ => return Err(SessionArchiveError::Invalid("invalid fork anchor kind")),
             }

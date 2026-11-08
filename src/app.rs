@@ -388,6 +388,7 @@ impl RequestIngress for TimelineRequestIngress {
         source: RegenerateSource,
         fence: crate::request::TimelineFence,
         child: BranchId,
+        receipt: &crate::timeline::RegenerateAdmissionReceipt,
     ) -> Result<TimelineAdmission, SubmitError> {
         let mut timeline = self
             .timeline
@@ -397,7 +398,13 @@ impl RequestIngress for TimelineRequestIngress {
             return Err(SubmitError::StaleTimeline);
         }
         timeline
-            .fork_and_admit_regenerate_source(source, child, fence.selection, fence.at.through)
+            .fork_and_admit_regenerate_source(
+                source,
+                child,
+                fence.selection,
+                fence.at.through,
+                receipt,
+            )
             .map_err(|error| match error {
                 TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
                 TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {

@@ -26,6 +26,10 @@ mod memory_maintenance_tests;
 mod memory_operations;
 #[cfg(test)]
 mod regenerate_owner_tests;
+mod regenerate_receipt;
+#[doc(hidden)]
+pub use regenerate_receipt::{RegenerateAdmissionReceipt, RegenerateConfigurationReference};
+
 // Administrative purge is not reachable from generation or runtime until an authorized UI exists.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod memory_purge;
@@ -452,7 +456,14 @@ impl SessionTimeline {
         expected: TimelineSelection,
         expected_parent_head: u64,
     ) -> Result<TimelineSelection, domain::TimelineError> {
-        self.fork_and_select_anchor(checkpoint, None, child, expected, expected_parent_head)
+        self.fork_and_select_anchor(
+            checkpoint,
+            None,
+            child,
+            expected,
+            expected_parent_head,
+            None,
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -472,6 +483,7 @@ impl SessionTimeline {
             child,
             expected,
             expected_parent_head,
+            None,
         )
     }
 
@@ -506,23 +518,50 @@ impl SessionTimeline {
         child: BranchId,
         expected: TimelineSelection,
         expected_parent_head: u64,
+        receipt: &RegenerateAdmissionReceipt,
     ) -> Result<TimelineAdmission, domain::TimelineError> {
         self.validate_regenerate_source(source, expected, expected_parent_head)?;
+        if receipt.parent_branch != expected.branch_id
+            || receipt.parent_head != expected_parent_head
+            || receipt.parent_generation != expected.generation
+            || receipt.child_branch != child
+            || receipt.accepted_request != source.accepted_request
+            || receipt.accepted_message != source.accepted_message
+            || receipt.original_input != source.original_input
+            || receipt.character != source.character
+        {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate admission receipt mismatched",
+            ));
+        }
         let input = self.store.event(self.branch, source.original_input)?;
         let context_epoch =
             self.store
                 .context_epoch_at(self.branch, source.character, Some(input.sequence))?;
-        let selection = self.fork_and_select_player_input(
+        let selection = self.fork_and_select_anchor(
             source.original_input,
-            source.character,
+            Some(source.character),
             child,
             expected,
             expected_parent_head,
+            Some(receipt),
         )?;
         Ok(TimelineAdmission {
             selection,
             context_epoch,
         })
+    }
+
+    pub(crate) fn regenerate_admission_receipt(
+        &self,
+        branch: BranchId,
+    ) -> Result<Option<RegenerateAdmissionReceipt>, domain::TimelineError> {
+        let facts = self.store.world(branch)?;
+        let marker = facts
+            .iter()
+            .find(|fact| fact.branch_id == branch && fact.draft.kind == EventKind::BranchCreated)
+            .ok_or(domain::TimelineError::NotFound)?;
+        RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)
     }
 
     fn validate_regenerate_source(
@@ -612,6 +651,7 @@ impl SessionTimeline {
         child: BranchId,
         expected: TimelineSelection,
         expected_parent_head: u64,
+        admission: Option<&RegenerateAdmissionReceipt>,
     ) -> Result<TimelineSelection, domain::TimelineError> {
         self.assert_selection(expected)?;
         if self.branch != expected.branch_id
@@ -667,8 +707,17 @@ impl SessionTimeline {
 
         #[cfg(feature = "sqlite-system")]
         let selection = if let Some(repository) = &mut self.selection_repository {
-            match player_recipient {
-                Some(character) => repository.fork_and_select_player_input(
+            match (player_recipient, admission) {
+                (Some(character), Some(receipt)) => repository.fork_and_select_regenerate_input(
+                    self.branch,
+                    expected_parent_head,
+                    anchor,
+                    character,
+                    child,
+                    expected,
+                    receipt,
+                )?,
+                (Some(character), None) => repository.fork_and_select_player_input(
                     self.branch,
                     expected_parent_head,
                     anchor,
@@ -676,21 +725,38 @@ impl SessionTimeline {
                     child,
                     expected,
                 )?,
-                None => repository.fork_and_select_checkpoint(
+                (None, None) => repository.fork_and_select_checkpoint(
                     self.branch,
                     expected_parent_head,
                     anchor,
                     child,
                     expected,
                 )?,
+                (None, Some(_)) => {
+                    return Err(domain::TimelineError::Invalid("invalid regenerate anchor"));
+                }
             }
         } else {
-            match player_recipient {
-                Some(character) => {
-                    self.store
-                        .fork_at_player_input(self.branch, anchor, character, child)?
+            match (player_recipient, admission) {
+                (Some(character), Some(receipt)) => {
+                    self.store.fork_at_regenerate_input(
+                        self.branch,
+                        anchor,
+                        character,
+                        child,
+                        receipt,
+                    )?;
                 }
-                None => self.store.fork(self.branch, anchor, child)?,
+                (Some(character), None) => {
+                    self.store
+                        .fork_at_player_input(self.branch, anchor, character, child)?;
+                }
+                (None, None) => {
+                    self.store.fork(self.branch, anchor, child)?;
+                }
+                (None, Some(_)) => {
+                    return Err(domain::TimelineError::Invalid("invalid regenerate anchor"));
+                }
             };
             TimelineSelection {
                 branch_id: child,
@@ -699,12 +765,26 @@ impl SessionTimeline {
         };
         #[cfg(not(feature = "sqlite-system"))]
         let selection = {
-            match player_recipient {
-                Some(character) => {
-                    self.store
-                        .fork_at_player_input(self.branch, anchor, character, child)?
+            match (player_recipient, admission) {
+                (Some(character), Some(receipt)) => {
+                    self.store.fork_at_regenerate_input(
+                        self.branch,
+                        anchor,
+                        character,
+                        child,
+                        receipt,
+                    )?;
                 }
-                None => self.store.fork(self.branch, anchor, child)?,
+                (Some(character), None) => {
+                    self.store
+                        .fork_at_player_input(self.branch, anchor, character, child)?;
+                }
+                (None, None) => {
+                    self.store.fork(self.branch, anchor, child)?;
+                }
+                (None, Some(_)) => {
+                    return Err(domain::TimelineError::Invalid("invalid regenerate anchor"));
+                }
             };
             TimelineSelection {
                 branch_id: child,
