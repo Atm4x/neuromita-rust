@@ -1,4 +1,4 @@
-name: Bridge exact C3 install source identity commit
+name: Bridge exact C3 install source identity commit (verified payload)
 on:
   push:
     branches: [bridge/c3-source-pin-recovery-20261108]
