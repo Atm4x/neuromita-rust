@@ -58,6 +58,10 @@ pub enum InstallPreviewError {
     ReviewChanged,
     #[error("для этого плана пока требуется отдельный установщик backend или моделей")]
     UnsupportedInstall,
+    #[error("зафиксированный wheel-stage отсутствует или не соответствует выбранному плану")]
+    WheelPin,
+    #[error("проверенный wheel-stage не удалось выполнить")]
+    WheelExecution,
 }
 
 /// Request an actual Python plugin install plan using *only existing* SDK and Python.
@@ -82,6 +86,7 @@ pub(super) struct EvaluatedInstall {
     pub(super) plan: PluginInstallPlan,
     pub(super) uv: PathBuf,
     pub(super) python: PathBuf,
+    pub(super) wheel_lock: Option<Vec<u8>>,
 }
 
 pub(super) async fn inspect_installed_environment(
@@ -131,12 +136,22 @@ pub(super) async fn inspect_installed_environment(
         plugin_directory.join("plugin.py")
     };
     let install_script = read_review_source(&script)?;
+    let wheel_lock_path = plugin_directory.join("wheel-stages.lock.json");
+    let wheel_lock = match std::fs::symlink_metadata(&wheel_lock_path) {
+        Ok(_) => Some(read_review_source(&wheel_lock_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(InstallPreviewError::InvalidSelection),
+    };
     let entrypoint = plugin_directory.join("plugin.py");
     let entrypoint_bytes = read_review_source(&entrypoint)?;
     let mut source = Context::new(&SHA256);
     for bytes in [&manifest, &entrypoint_bytes, &install_script] {
         source.update(&bytes.len().to_le_bytes());
         source.update(bytes);
+    }
+    if let Some(lock) = wheel_lock.as_ref() {
+        source.update(&lock.len().to_le_bytes());
+        source.update(lock);
     }
     let plugin_revision = fingerprint_bytes(source.finish().as_ref());
     let ai_data = data_directory.join("AIData");
@@ -217,6 +232,12 @@ pub(super) async fn inspect_installed_environment(
     if read_review_source(&plugin_directory.join("plugin.json"))? != manifest
         || read_review_source(&entrypoint)? != entrypoint_bytes
         || read_review_source(&script)? != install_script
+        || wheel_lock
+            .as_ref()
+            .is_some_and(|lock| {
+                !matches!(read_review_source(&wheel_lock_path), Ok(observed) if &observed == lock)
+            })
+        || wheel_lock.is_none() && std::fs::symlink_metadata(&wheel_lock_path).is_ok()
     {
         return Err(InstallPreviewError::ReviewChanged);
     }
@@ -225,6 +246,7 @@ pub(super) async fn inspect_installed_environment(
         plan,
         uv,
         python,
+        wheel_lock,
     })
 }
 

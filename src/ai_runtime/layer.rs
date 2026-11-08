@@ -590,6 +590,25 @@ impl LayerInstaller<'_> {
         let mut cleanup = StagingCleanup::new(staging.clone())?;
         async {
             if !packages.is_empty() {
+                let wheel_snapshot = if let Some((source, expected)) = wheel {
+                    let directory = staging.join(".verified-wheel-input");
+                    tokio::fs::create_dir(&directory).await?;
+                    let name = source.file_name().ok_or_else(|| {
+                        LayerError::Invalid("wheel path is missing filename".into())
+                    })?;
+                    let snapshot = directory.join(name);
+                    tokio::fs::copy(source, &snapshot).await?;
+                    if !sha256_file(&snapshot)?.eq_ignore_ascii_case(expected)
+                        || !sha256_file(source)?.eq_ignore_ascii_case(expected)
+                    {
+                        return Err(LayerError::Invalid(
+                            "wheel source changed while taking staged snapshot".into(),
+                        ));
+                    }
+                    Some((snapshot, directory))
+                } else {
+                    None
+                };
                 let mut cmd = Command::new(self.uv_executable);
                 cmd.args([
                     "pip",
@@ -606,8 +625,8 @@ impl LayerInstaller<'_> {
                 .env_remove("VIRTUAL_ENV")
                 .stdin(cleanup.child_stdin()?)
                 .kill_on_drop(true);
-                if let Some((source, _)) = wheel {
-                    cmd.arg("--no-index").arg(source);
+                if let Some((snapshot, _)) = &wheel_snapshot {
+                    cmd.arg("--no-index").arg(snapshot);
                 } else {
                     for package in packages {
                         cmd.arg(format!("{}=={}", package.name, package.version));
@@ -654,12 +673,18 @@ impl LayerInstaller<'_> {
                             .collect(),
                     ));
                 }
-                if let Some((path, expected)) = wheel
-                    && !sha256_file(path)?.eq_ignore_ascii_case(expected)
-                {
-                    return Err(LayerError::Invalid(
-                        "source wheel changed during installation".into(),
-                    ));
+                if let Some((path, expected)) = wheel {
+                    let (snapshot, directory) = wheel_snapshot
+                        .as_ref()
+                        .ok_or_else(|| LayerError::Invalid("wheel snapshot missing".into()))?;
+                    if !sha256_file(path)?.eq_ignore_ascii_case(expected)
+                        || !sha256_file(snapshot)?.eq_ignore_ascii_case(expected)
+                    {
+                        return Err(LayerError::Invalid(
+                            "wheel source or snapshot changed during installation".into(),
+                        ));
+                    }
+                    tokio::fs::remove_dir_all(directory).await?;
                 }
             }
             distribution::inspect(&staging, packages).map_err(LayerError::Corrupted)?;

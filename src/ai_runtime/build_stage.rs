@@ -322,6 +322,7 @@ with ZipFile(path, 'w') as z:
         let path = installer.install(&stage).await.unwrap();
         assert!(path.join("sample_pkg/__init__.py").is_file());
         assert!(path.join(".neuromita-build-stage.json").is_file());
+        assert!(!path.join(".verified-wheel-input").exists());
         assert_eq!(installer.install(&stage).await.unwrap(), path);
         std::fs::write(wheel_cache.join(wheel_name), b"corrupt").unwrap();
         assert!(installer.install(&stage).await.is_err());
