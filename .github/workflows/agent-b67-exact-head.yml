@@ -1,0 +1,47 @@
+name: Agent B67 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b67-verify-20261108
+jobs:
+  exact-b67:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ce95f1fc77b154e5d79f6727f0c8d8e3d11a35b5
+          fetch-depth: 2
+      - name: Verify exact B67 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "ce95f1fc77b154e5d79f6727f0c8d8e3d11a35b5"
+          test "$(git rev-parse HEAD^{tree})" = "ae312a55235760f05f1b5926bd273f0b244377b4"
+          test "$(git rev-parse HEAD^)" = "76ec38d45441e7056eedc0b91da2d065d803f090"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Targeted reconciliation and regenerate tests
+        shell: bash
+        run: |
+          cargo test --locked --offline --lib app::regenerate_admission_tests:: -- --test-threads=2
+          cargo test --locked --offline --lib regenerate -- --test-threads=2
+          for i in $(seq 1 10); do cargo test --locked --offline --lib handle_cancel_vs_independent_sqlite_acceptance_has_one_durable_winner -- --test-threads=2 >/dev/null; done
+      - name: Full library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
