@@ -153,10 +153,12 @@ impl PresetsPresenter {
                 };
                 let (stream, max_retries) = match &record.definition {
                     PresetDefinition::Unconfigured => (false, 2),
-                    PresetDefinition::OpenAi(definition) =>
-                        (definition.options.stream, definition.options.max_retries),
-                    PresetDefinition::Gemini(definition) =>
-                        (definition.options.stream, definition.options.max_retries),
+                    PresetDefinition::OpenAi(definition) => {
+                        (definition.options.stream, definition.options.max_retries)
+                    }
+                    PresetDefinition::Gemini(definition) => {
+                        (definition.options.stream, definition.options.max_retries)
+                    }
                 };
                 let key = self.catalog.editor_key(id);
                 PresetView {
@@ -468,7 +470,10 @@ impl PresetsPresenter {
                 id: "stream",
                 wire_key: "stream",
                 title: i18n("settings.parameter.stream.title", "Потоковая генерация"),
-                description: i18n("settings.parameter.stream.description", "Показывать безопасный текст ответа по мере генерации."),
+                description: i18n(
+                    "settings.parameter.stream.description",
+                    "Показывать безопасный текст ответа по мере генерации.",
+                ),
                 editable: true,
                 sent: false,
             },
@@ -476,7 +481,10 @@ impl PresetsPresenter {
                 id: "max_retries",
                 wire_key: "",
                 title: i18n("settings.parameter.max_retries.title", "Повторы запросов"),
-                description: i18n("settings.parameter.max_retries.description", "Число HTTP retry до начала чтения тела, от 0 до 4."),
+                description: i18n(
+                    "settings.parameter.max_retries.description",
+                    "Число HTTP retry до начала чтения тела, от 0 до 4.",
+                ),
                 editable: true,
                 sent: false,
             },
