@@ -26,6 +26,42 @@ impl Connection {
         Ok(Self(connection))
     }
 
+    pub(super) fn open_read_only(path: &Path) -> Result<Self, TimelineError> {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(|error| storage(error.to_string()))?;
+        connection
+            .busy_timeout(Duration::from_secs(10))
+            .map_err(|error| storage(error.to_string()))?;
+        Ok(Self(connection))
+    }
+
+    pub(super) fn open_existing(path: &Path) -> Result<Self, TimelineError> {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(|error| storage(error.to_string()))?;
+        connection
+            .busy_timeout(Duration::from_secs(10))
+            .map_err(|error| storage(error.to_string()))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .map_err(|error| storage(error.to_string()))?;
+        Ok(Self(connection))
+    }
+
+    pub(super) fn scratch() -> Result<Self, TimelineError> {
+        let connection =
+            rusqlite::Connection::open_in_memory().map_err(|error| storage(error.to_string()))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .map_err(|error| storage(error.to_string()))?;
+        Ok(Self(connection))
+    }
+
     pub(super) fn exec(&self, sql: &str) -> Result<(), TimelineError> {
         self.0
             .execute_batch(sql)

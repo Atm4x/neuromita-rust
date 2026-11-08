@@ -10,7 +10,9 @@ use crate::timeline::domain::{
 };
 use crate::timeline::selection::{TimelineSelection, TimelineSelectionRepository};
 
+mod maintenance;
 mod native;
+pub use maintenance::{DerivedIndexDrift, DerivedIndexPreview};
 use native::Connection;
 
 const SCHEMA: &str = "
@@ -180,31 +182,7 @@ impl SqliteTimelineRepository {
     pub fn rebuild_derived_indexes(&mut self) -> Result<(), TimelineError> {
         let connection = self.connection()?;
         connection.exec("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            let store = load(&connection)?;
-            connection.exec(
-                "DELETE FROM timeline_fact_keys;
-                 DELETE FROM timeline_observers;
-                 DELETE FROM timeline_acquisitions;
-                 DELETE FROM timeline_resets;",
-            )?;
-            for branch in store.persisted_branches() {
-                for fact in &branch.events {
-                    index_fact(&connection, fact)?;
-                    for observer in &fact.draft.observers {
-                        connection.write(
-                            "INSERT INTO timeline_observers(branch_id,sequence,character_id) VALUES(?,?,?)",
-                            &[
-                                &fact.branch_id.0.to_string(),
-                                &fact.sequence.to_string(),
-                                &observer.to_string(),
-                            ],
-                        )?;
-                    }
-                }
-            }
-            Ok(())
-        })();
+        let result = maintenance::rebuild_in_transaction(&connection);
         match result {
             Ok(()) => connection.exec("COMMIT"),
             Err(error) => {

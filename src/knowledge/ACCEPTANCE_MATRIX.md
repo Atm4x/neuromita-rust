@@ -58,3 +58,5 @@
 - **M6/M7** — полноценная поведенческая и recovery parity; согласовывать с Agent B, если изменение затрагивает canonical SessionTimeline.
 
 Следующий отчёт обязан показывать *конкретные G/M/R/D идентификаторы*, а не только дробь. Изменение любого статуса требует ссылки на функциональный PR, тест запуска/результата и проверенное пользовательское поведение; `cargo check` без исполнения GUI callback-тестов не является доказательством полного GUI acceptance.
+
+Cycle49 D5/M7 addendum: a trusted-local `timeline-index inspect` / `repair --confirm` offline operator flow now previews canonical-versus-derived drift, includes a content-bound optimistic concurrency fingerprint, refuses stale/corrupt snapshots and applies the original four-index rebuild under one SQLite write transaction. Source code: `timeline::storage::sqlite::maintenance`, CLI `src/timeline_index_cli.rs`; supporting details in `SQLITE_DERIVED_RECOVERY_20261108.md`. This is not full History/SessionArchive or canonical-corruption recovery; D5 and M7 stay OPEN and totals remain 16 PASS / 4 PARTIAL / 6 OPEN.
