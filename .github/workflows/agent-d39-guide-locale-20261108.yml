@@ -1,0 +1,70 @@
+name: Agent D39 exact Guide locale persistence import and Windows checks
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d39-guide-language-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate and publish exact D39 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7541a84c36af4f9c947e7da3c57e985ea7a13d16
+          HEAD=358056e7060d302f83199f2b71e69e24c5e05ec1
+          TREE=639d4bb1fe0a9b974d3695aa7dad7f62f6f098cc
+          BRANCH=codex/onboarding-guide-durable-language-20261108
+          base64 -d .git-bridge/d39.patch.xz.b64 > /tmp/d39.patch.xz
+          echo 'e715fb95fbf6c8c216c9358a78eeca53011839fee6bdeb756cf0798002815fb9  /tmp/d39.patch.xz' | sha256sum -c
+          xz -d -c /tmp/d39.patch.xz > /tmp/d39.patch
+          echo 'e712abdd3635b16bfa10b385d669bccd6175fef045cad096d49ba91fb8ae1023  /tmp/d39.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/onboarding-guide-durable-navigation-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d39.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-durable-language-20261108
+          fetch-depth: 0
+      - name: Verify D39 commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 358056e7060d302f83199f2b71e69e24c5e05ec1
+          test "$(git rev-parse HEAD^{tree})" = 639d4bb1fe0a9b974d3695aa7dad7f62f6f098cc
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows persistent locale and Slint GUI compile
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib presentation::settings::tests -- --test-threads=2
+          cargo test --locked --offline --test onboarding_consent -- --test-threads=2
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
