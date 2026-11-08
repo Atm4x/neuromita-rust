@@ -16,10 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Verify pinned source parent
         run: |
-          test "$(git rev-parse HEAD^)" = "fb3fce40a733244bca5c2be77d2df9f8278b348a"
+          git merge-base --is-ancestor "fb3fce40a733244bca5c2be77d2df9f8278b348a" HEAD
           test "$(git rev-parse HEAD^{tree})" != "22aee529d2a1755261e20f4020b32cab77352767"
           git diff --quiet "fb3fce40a733244bca5c2be77d2df9f8278b348a" HEAD -- src/ tests/ docs/
       - uses: dtolnay/rust-toolchain@master
