@@ -1,0 +1,32 @@
+name: agent-a-cycle52-exact-source-delta
+on:
+  push:
+    branches: [bridge/agent-a-cycle52-export-26680db]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export original PR345 from PR338 exact base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 4a4d1f2ca582ef5e0ca91af116e8be9216369b8b
+          git fetch origin 26680db027a9e2b559a9d03afdd858ed28ee69c4
+          git branch cycle52-pr345 26680db027a9e2b559a9d03afdd858ed28ee69c4
+          git merge-base --is-ancestor 4a4d1f2ca582ef5e0ca91af116e8be9216369b8b cycle52-pr345
+          git bundle create cycle52-pr345-delta.bundle refs/heads/cycle52-pr345 '^4a4d1f2ca582ef5e0ca91af116e8be9216369b8b'
+          git bundle verify cycle52-pr345-delta.bundle
+          sha256sum cycle52-pr345-delta.bundle > cycle52-pr345-delta.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle52-pr345-delta
+          path: |
+            cycle52-pr345-delta.bundle
+            cycle52-pr345-delta.bundle.sha256
+          retention-days: 2
