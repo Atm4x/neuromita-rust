@@ -125,3 +125,100 @@ fn operation_root_symlink_is_rejected_without_writing_into_target() {
     assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn operation_child_interrupted_after_publishing_first_stage() {
+    let Ok(root) = std::env::var("NM_INSTALL_OPERATION_CHILD_ROOT") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let ready = root.join("child-ready");
+    let fingerprint = "f".repeat(64);
+    let stages = vec![
+        OperationStage {
+            id: "backend".into(),
+            repeatable: true,
+        },
+        OperationStage {
+            id: "overlay".into(),
+            repeatable: true,
+        },
+        OperationStage {
+            id: "asset".into(),
+            repeatable: false,
+        },
+    ];
+    let mut op = InstallOperation::open(&root, &fingerprint, stages).unwrap();
+    op.start(0).unwrap();
+    std::fs::write(root.join("backend-receipt"), b"verified").unwrap();
+    op.verified(0).unwrap();
+    op.start(1).unwrap();
+    std::fs::write(root.join("operation-id"), op.operation_id().to_string()).unwrap();
+    std::fs::write(ready, []).unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn killed_process_reopens_same_operation_without_forging_completion() {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let root = std::env::temp_dir().join(format!("nm-process-recovery-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "operation_child_interrupted_after_publishing_first_stage",
+        ])
+        .env("NM_INSTALL_OPERATION_CHILD_ROOT", &root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let ready = root.join("child-ready");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !ready.exists() {
+        if Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not durably reach the interrupted installation stage");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let operation_id = std::fs::read_to_string(root.join("operation-id")).unwrap();
+    assert_eq!(
+        std::fs::read(root.join("backend-receipt")).unwrap(),
+        b"verified"
+    );
+    let stages = vec![
+        OperationStage {
+            id: "backend".into(),
+            repeatable: true,
+        },
+        OperationStage {
+            id: "overlay".into(),
+            repeatable: true,
+        },
+        OperationStage {
+            id: "asset".into(),
+            repeatable: false,
+        },
+    ];
+    let mut recovered = InstallOperation::open(&root, &"f".repeat(64), stages).unwrap();
+    assert_eq!(recovered.operation_id().to_string(), operation_id);
+    assert_eq!(recovered.stage_state(0).unwrap(), StageState::Verified);
+    assert_eq!(recovered.stage_state(1).unwrap(), StageState::Started);
+    assert_eq!(recovered.stage_state(2).unwrap(), StageState::Pending);
+    assert!(recovered.finish().is_err());
+    recovered.start(1).unwrap();
+    recovered.verified(1).unwrap();
+    recovered.start(2).unwrap();
+    assert!(recovered.finish().is_err());
+    drop(recovered);
+    std::fs::remove_dir_all(root).unwrap();
+}

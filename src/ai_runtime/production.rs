@@ -23,6 +23,7 @@ use super::{
         PluginInstallRequest,
     },
     install_operation::{InstallOperation, InstallOperationError, OperationStage, StageState},
+    install_source::{InstallSourceError, InstallSourcePin},
     layer::valid_segment,
     managed::{ManagedRuntimeBootstrap, ManagedRuntimeError},
     overlay::OverlayInstaller,
@@ -98,6 +99,8 @@ pub enum AiProductionError {
     Bootstrap(#[from] ManagedRuntimeError),
     #[error(transparent)]
     Operation(#[from] InstallOperationError),
+    #[error(transparent)]
+    Source(#[from] InstallSourceError),
     #[error("AI installation task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
     #[error(transparent)]
@@ -128,6 +131,7 @@ fn operation_fingerprint(
     python_executable: &std::path::Path,
     uv_executable: &std::path::Path,
     sdk_root: &std::path::Path,
+    source_digest: &str,
 ) -> Result<String, AiProductionError> {
     let selected: Vec<Value> = preflighted
         .iter()
@@ -179,6 +183,7 @@ fn operation_fingerprint(
         "python_executable": python_executable,
         "uv_executable": uv_executable,
         "sdk_root": sdk_root,
+        "source_digest": source_digest,
         "selected": selected,
     });
     let encoded = serde_json::to_vec(&pinned).map_err(|_| {
@@ -576,6 +581,12 @@ impl AiProductionInstaller {
             models_directory: Some(store.root.clone()),
             request_timeout: self.timeout,
         };
+        let source_pin = InstallSourcePin::capture(
+            &self.plugins_directory,
+            selections.iter().map(|model| model.plugin_id.clone()),
+            &host.python_executable,
+            &managed.uv_executable,
+        )?;
         let mut preflighted = Vec::with_capacity(selections.len());
         for selection in selections {
             let plan =
@@ -583,6 +594,7 @@ impl AiProductionInstaller {
                     .await?;
             plan.validate(&self.bootstrap.python_version)?;
             preflighted.push(self.preflight_model(selection, plan, &store).await?);
+            source_pin.verify()?;
         }
         let fingerprint = operation_fingerprint(
             &preflighted,
@@ -590,6 +602,7 @@ impl AiProductionInstaller {
             &host.python_executable,
             &backends.uv_executable,
             &host.sdk_root,
+            source_pin.digest(),
         )?;
         let stages = operation_stages(&preflighted);
         let mut operation = InstallOperation::open(data, &fingerprint, stages)?;
@@ -606,6 +619,7 @@ impl AiProductionInstaller {
             let mut dependencies = Vec::new();
             let backend = &selection.backend;
             let backend_id = backend_name(backend.kind);
+            source_pin.verify()?;
             operation.start(next_stage)?;
             let task_backend_installer = backends.clone();
             let task_backend = backend.clone();
@@ -613,6 +627,7 @@ impl AiProductionInstaller {
                 tokio::spawn(async move { task_backend_installer.install(&task_backend).await });
             let _abort_on_drop = AbortOnDrop(task.abort_handle());
             let path = task.await??;
+            source_pin.verify()?;
             if !backends.installed(backend).await? {
                 return Err(AiProductionError::Invalid(
                     "backend receipt missing after installation".into(),
@@ -624,12 +639,15 @@ impl AiProductionInstaller {
             backend_layers.push(backend.clone());
             let mut backend_packages = backend.packages.clone();
             for extra in &selection.extra_backends {
+                source_pin.verify()?;
                 operation.start(next_stage)?;
                 let worker = backends.clone();
                 let plan = extra.clone();
                 let task = tokio::spawn(async move { worker.install(&plan).await });
                 let _abort_on_drop = AbortOnDrop(task.abort_handle());
-                dependencies.push(task.await??);
+                let extra_path = task.await??;
+                source_pin.verify()?;
+                dependencies.push(extra_path);
                 if !backends.installed(extra).await? {
                     return Err(AiProductionError::Invalid(
                         "supplemental backend receipt missing".into(),
@@ -640,6 +658,7 @@ impl AiProductionInstaller {
                 backend_layers.push(extra.clone());
                 backend_packages.extend(extra.packages.iter().cloned());
             }
+            source_pin.verify()?;
             operation.start(next_stage)?;
             let task_installer = installer.clone();
             let task_plugin = selection.plugin_id.clone();
@@ -666,6 +685,7 @@ impl AiProductionInstaller {
             });
             let _abort_on_drop = AbortOnDrop(task.abort_handle());
             let installed = task.await??;
+            source_pin.verify()?;
             if !installer.overlays.installed(&installed.overlay).await? {
                 return Err(AiProductionError::Invalid(
                     "plugin overlay receipt missing".into(),
@@ -679,6 +699,7 @@ impl AiProductionInstaller {
             let recovered_generated = if let ModelAssets::Generated { revision, .. } = &assets {
                 match operation.stage_state(next_stage)? {
                     StageState::Pending => {
+                        source_pin.verify()?;
                         operation.start(next_stage)?;
                         None
                     }
@@ -696,6 +717,7 @@ impl AiProductionInstaller {
                     }
                 }
             } else {
+                source_pin.verify()?;
                 operation.start(next_stage)?;
                 None
             };
@@ -726,6 +748,7 @@ impl AiProductionInstaller {
                 let _abort_on_drop = AbortOnDrop(task.abort_handle());
                 task.await??
             };
+            source_pin.verify()?;
             if let Some(revision) = &asset_revision {
                 store
                     .verified_revision(&selection.plugin_id, revision)
@@ -776,6 +799,7 @@ impl AiProductionInstaller {
                 }
             }
         }
+        source_pin.verify()?;
         operation.finish()?;
         Ok(AiApplicationConfig {
             topology: self.topology,

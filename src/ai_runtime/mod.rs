@@ -16,6 +16,7 @@ pub mod install;
 pub mod install_admission;
 pub mod install_operation;
 pub mod install_review;
+mod install_source;
 pub mod installed_speech;
 mod layer;
 #[cfg(target_os = "linux")]

@@ -623,3 +623,31 @@ async fn later_service_symlinked_asset_source_cannot_publish_earlier_backend() {
     assert!(!fixture.root.join("AIData/overlays").exists());
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn changed_plugin_source_during_plan_preflight_rejects_without_layers() {
+    let mut fixture = Fixture::new(ProcessTopology::Split).await;
+    fixture.add_plugin("mutable_tts", "InstallPlan()").await;
+    fixture.runtime.plugins_directory = fixture.root.join("plugins");
+    let path = fixture.root.join("plugins/mutable_tts/plugin.py");
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
+    let changed = original.replace(
+        "def install_plan(self): return replace(InstallPlan(), supported_backends=(\"remote-api\",))",
+        "def install_plan(self):\n        from pathlib import Path\n        Path(__file__).with_name('sidecar.txt').write_text('changed')\n        return replace(InstallPlan(), supported_backends=(\"remote-api\",))",
+    );
+    assert_ne!(
+        original, changed,
+        "fixture install-plan entrypoint must be present"
+    );
+    tokio::fs::write(path, changed).await.unwrap();
+    let error = fixture
+        .runtime
+        .prepare(&[model(AiService::Tts, "mutable_tts")])
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, AiProductionError::Source(_)), "{error}");
+    assert!(!fixture.root.join("AIData/backends").exists());
+    assert!(!fixture.root.join("AIData/overlays").exists());
+    fixture.close().await;
+}
