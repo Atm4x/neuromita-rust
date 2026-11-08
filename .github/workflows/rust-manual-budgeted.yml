@@ -66,6 +66,28 @@ jobs:
           # manual: explicitly specified fork ref (existing manual behavior).
           ref: ${{ github.event_name == 'create' && github.sha || inputs.target_ref }}
           persist-credentials: false
+          fetch-depth: 2
+
+      # On automatic gates, verify that the agent created a CI-only child
+      # commit from the ready revision, never a modified source snapshot.
+      - name: Verify CI gate is a single workflow-only commit
+        if: ${{ github.event_name == 'create' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent_count="$(git rev-list --parents -n 1 HEAD | awk '{print NF-1}')"
+          if [ "$parent_count" != "1" ]; then
+            echo "::error::CI gate commit must have exactly one parent"
+            exit 1
+          fi
+          changed="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+          if [ "$changed" != ".github/workflows/rust-manual-budgeted.yml" ]; then
+            echo "::error::Gate commit must change only the CI workflow"
+            printf 'Actual changed files: %s\\n' "$changed"
+            exit 1
+          fi
+          echo "READY_SOURCE_SHA=$(git rev-parse HEAD^)" >> "$GITHUB_ENV"
+          echo "Ready source commit: $(git rev-parse HEAD^)"
 
       - name: Show source snapshot and check scope
         run: |
