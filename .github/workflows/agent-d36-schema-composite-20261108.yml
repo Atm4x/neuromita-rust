@@ -1,0 +1,75 @@
+name: Agent D36 exact-commit schema-bound activation and Windows tests
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d36-import-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact local commit and publish a single candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=874d2c7ee60f8ae34de431757419196915fecdb0
+          HEAD=970845a4dee2bedb6318733dc1f9bc832db25974
+          TREE=439805991598c25e4a317e60ab973a0ca99b85cb
+          BRANCH=codex/python-schema-composite-activation-20261108
+          cat .git-bridge/d36.0{1..6} > /tmp/d36.patch.br.b64
+          test "$(wc -c </tmp/d36.patch.br.b64)" -eq 8148
+          base64 -d /tmp/d36.patch.br.b64 > /tmp/d36.patch.br
+          echo 'efc640cf9bc93f2508227bc25df18fa3ccca1d55caca744007bae3c234da48c1  /tmp/d36.patch.br' | sha256sum --check
+          if ! command -v brotli >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq brotli
+          fi
+          brotli -d /tmp/d36.patch.br -o /tmp/d36.patch
+          git fetch --no-tags origin refs/heads/codex/python-schema-readonly-audit-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d36.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-e2e:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/python-schema-composite-activation-20261108
+          fetch-depth: 0
+      - name: Verify pinned commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 970845a4dee2bedb6318733dc1f9bc832db25974
+          test "$(git rev-parse HEAD^{tree})" = 439805991598c25e4a317e60ab973a0ca99b85cb
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native Windows schema-bound activation and crash recovery
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo test --locked --offline --test python_schema_source_audit -- --test-threads=8
+          cargo test --locked --offline --lib settings::preset_activation::tests -- --test-threads=1
+          cargo check --locked --offline --example activate_python_presets
