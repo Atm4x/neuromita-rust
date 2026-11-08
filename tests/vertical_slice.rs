@@ -2787,6 +2787,47 @@ async fn profile_change_during_generation_preserves_request_character_and_next_p
         }));
     }
 
+    // Even after changing Crazy's profile, cancelling a pending Kind request
+    // must discard its late completion without affecting either character.
+    let cancelled = app
+        .presenter()
+        .chat
+        .reply(CharacterId::Kind, "cancel before completion".into())
+        .unwrap();
+    let late = server.next().await;
+    assert!(late.path.contains("models/alpha:generateContent"));
+    assert!(matches!(
+        app.presenter().chat.cancel(cancelled.id()).unwrap(),
+        CancelResult::Cancelled | CancelResult::Requested
+    ));
+    assert!(matches!(
+        finished(&cancelled).await.state,
+        RequestState::Cancelled
+    ));
+    let _ = late.respond.send(Reply::Text("late and ignored"));
+    assert!(!app.timeline().iter().any(|event| {
+        event.request_id == Some(cancelled.id())
+            && matches!(event.content, EventContent::CharacterReply { .. })
+    }));
+    assert_eq!(
+        app.character(CharacterId::Kind)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        1
+    );
+    assert_eq!(
+        app.character(CharacterId::Crazy)
+            .unwrap()
+            .state()
+            .await
+            .unwrap()
+            .accepted_replies,
+        2
+    );
+
     app.shutdown().await.unwrap();
     server.shutdown().await;
 }
