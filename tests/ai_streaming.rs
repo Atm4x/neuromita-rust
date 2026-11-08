@@ -65,7 +65,7 @@ class Plugin:
             Arc::from("stream test"),
             VoiceOptions {
                 voice: "default".into(),
-                    character: None,
+                character: None,
                 volume: Volume::new(80).unwrap(),
             },
         )
