@@ -1,0 +1,73 @@
+name: Agent D35 exact history import + native Windows schema-audit acceptance
+on:
+  push:
+    branches:
+      - codex/bridge-agent-d35-schema-import-20261108
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original source and publish D35 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=288133405aa54cde9a1853a26afa0c694f05abac
+          HEAD=22577fa7681d002053f0587cb61ddbd8c0f8110b
+          TREE=098a2847b02d15d332e70e3bc306d4011f0bbffd
+          BRANCH=codex/python-schema-readonly-audit-20261108
+          base64 -d .git-bridge/agent-d35-original.patch.br.b64 > /tmp/d35.patch.br
+          echo '4f2c828ae903c3d63a9c0cdeabff8478a6d7c2dce8f7e4af2f0e1b9b57705d86  /tmp/d35.patch.br' | sha256sum --check
+          if ! command -v brotli >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq brotli
+          fi
+          brotli -d /tmp/d35.patch.br -o /tmp/d35.patch
+          git fetch --no-tags origin refs/heads/codex/settings-native-windows-recovery-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d35.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/python-schema-readonly-audit-20261108
+          fetch-depth: 0
+      - name: Verify pinned D35 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 22577fa7681d002053f0587cb61ddbd8c0f8110b
+          test "$(git rev-parse HEAD^{tree})" = 098a2847b02d15d332e70e3bc306d4011f0bbffd
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native schema audit and existing transaction regression
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --test python_schema_source_audit -- --test-threads=8
+          cargo test --locked --offline --test python_preset_staging -- --test-threads=8
+          cargo test --locked --offline --test python_preset_three_file -- --test-threads=8
+          cargo check --locked --offline --all-targets
