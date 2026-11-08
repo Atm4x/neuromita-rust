@@ -105,6 +105,7 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         super::asr::preview(&window);
     }
 
+    let reopen_guide_directory = options.data_directory.clone();
     let weak = window.as_weak();
     let dispatch = Rc::new(move |command| {
         let Some(window) = weak.upgrade() else {
@@ -145,6 +146,20 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         };
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
+    });
+    let reopen_window = window.as_weak();
+    window.on_onboarding_guide_reopen(move || {
+        let Some(window) = reopen_window.upgrade() else {
+            return;
+        };
+        match neuromita::onboarding::guide_reopen_position(&reopen_guide_directory) {
+            Ok((level, page)) => {
+                reset_guide_image_view(&window);
+                sync_guide_position(&window, level, page);
+                window.set_onboarding_guide_visible(true);
+            }
+            Err(error) => window.set_notice(format!("Cannot open Guide: {error}").into()),
+        }
     });
     let wiki_window = window.as_weak();
     let wiki_controller = wiki_history.clone();
@@ -451,12 +466,13 @@ pub(super) fn sync_guide_position(
 ) {
     use neuromita::onboarding::guide;
 
-    if window.get_onboarding_guide_level() != level.index() {
+    let level_changed = window.get_onboarding_guide_level() != level.index();
+    if level_changed {
         window.set_onboarding_guide_level(level.index());
         reset_guide_image_view(window);
     }
     let page = i32::from(page).min((guide::count(level) - 1) as i32);
-    if window.get_onboarding_guide_page() != page {
+    if level_changed || window.get_onboarding_guide_page() != page {
         update_guide(window, page);
     }
 }

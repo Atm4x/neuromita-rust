@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     in property <[GuideContentsEntry]> onboarding-guide-contents;
     callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
+    callback onboarding-guide-reopen();
     callback onboarding-guide-finish();
     callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
@@ -185,12 +186,7 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
                 wiki => { root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
-                guide => {
-                    root.onboarding-guide-select-image-mode(0);
-                    root.onboarding-guide-select-step(0);
-                    root.onboarding-guide-visible = true;
-                    root.onboarding-guide-navigate(0);
-                }
+                guide => { root.onboarding-guide-reopen(); }
                 language-selected(code) => { root.language-selected(code); }
             }
             if root.page == PageId.wiki: WikiReader {

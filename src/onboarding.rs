@@ -55,6 +55,24 @@ pub fn startup_state(data_dir: &Path) -> Result<StartupState, io::Error> {
     })
 }
 
+pub fn guide_reopen_position(data_dir: &Path) -> Result<(guide::GuideLevel, u8), io::Error> {
+    let state = startup_state(data_dir)?;
+    if state.requires_consent {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Guide cannot open before EULA acceptance",
+        ));
+    }
+    Ok((
+        state.guide_level,
+        if state.requires_guide {
+            state.guide_page
+        } else {
+            0
+        },
+    ))
+}
+
 pub fn selected_guide_level(data_dir: &Path) -> Result<guide::GuideLevel, io::Error> {
     let path = data_dir.join("settings.json");
     if !path.exists() {
@@ -225,6 +243,34 @@ mod tests {
         assert!(!finished.requires_consent);
         accept(&dir.0, "en").unwrap();
         assert_eq!(startup_state(&dir.0).unwrap(), finished);
+    }
+
+    #[test]
+    fn manual_reopen_resumes_incomplete_guide_but_starts_completed_help_at_first_page() {
+        let dir = Directory::new();
+        let path = dir.0.join("settings.json");
+        assert_eq!(
+            guide_reopen_position(&dir.0).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(!path.exists());
+        accept(&dir.0, "en").unwrap();
+        let repo = JsonSettingsRepository::new(path);
+        let mut stored = repo.load().unwrap();
+        stored.settings.onboarding.guide_level = guide::GuideLevel::Full;
+        stored.settings.onboarding.guide_page = 8;
+        repo.save(&stored).unwrap();
+        assert_eq!(
+            guide_reopen_position(&dir.0).unwrap(),
+            (guide::GuideLevel::Full, 8)
+        );
+        stored.settings.onboarding.guide_completed = true;
+        repo.save(&stored).unwrap();
+        assert_eq!(
+            guide_reopen_position(&dir.0).unwrap(),
+            (guide::GuideLevel::Full, 0)
+        );
+        assert_eq!(repo.load().unwrap(), stored);
     }
 
     #[test]
