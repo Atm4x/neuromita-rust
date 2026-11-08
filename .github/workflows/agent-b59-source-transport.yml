@@ -1,0 +1,31 @@
+name: agent-b59-source-transport
+on:
+  push:
+    branches: [bridge/agent-b59-source-20261108]
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pinned B58
+        uses: actions/checkout@v4
+        with:
+          ref: 89700e0f0708df8d81dd7a2a8366f2a96f0ef9a0
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact source and archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "89700e0f0708df8d81dd7a2a8366f2a96f0ef9a0"
+          test "$(git rev-parse HEAD^{tree})" = "2f8551c39fb13264110045f95a51c2a10deafb25"
+          git archive --format=tar HEAD | gzip -1 > b59-pinned-source.tar.gz
+          sha256sum b59-pinned-source.tar.gz
+      - name: Upload source-only archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: b59-pinned-source
+          path: b59-pinned-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
