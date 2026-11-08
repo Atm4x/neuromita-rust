@@ -85,8 +85,11 @@ later push won't retroactively trigger the gate.
   (8/25/40 minutes). Concurrent accepted gate jobs cancel older ones.
 - Ordinary branch creation is skipped **before** job concurrency and runner
   allocation, so it cannot cancel a running gate or use job minutes.
-- The workflow uses a read-only `GITHUB_TOKEN`; checkout does not persist
-  its credentials.
+- The build steps use read-only checkout without persisted credentials.
+  A final reporting step alone receives a short-lived `GITHUB_TOKEN` with
+  `statuses: write` and posts a scoped GitHub Commit Status to both the CI
+  gate commit and its original source parent; no repository code write
+  permissions are granted.
 - Code is checked with `--locked --offline` using the vendored Cargo
   dependencies (no remote Cargo crate fetch). Format check runs first.
 - No compiler caches, uploaded artifacts, or secrets are required.
@@ -105,3 +108,39 @@ manual run and observes the same runtime ceilings and concurrency limits.
 The GitHub connector may be able to **create a CI gate branch** even when
 it cannot dispatch workflows. Workflow execution still depends on Actions
 being enabled in the fork; inspecting the run result is a separate task.
+
+## Reading the result from an agent / GitHub connector
+
+The installed GitHub connector can retrieve **commit statuses** and can read
+workflow jobs/logs when given the numeric workflow-run ID, but it cannot
+directly list `create`-event runs. Every gate therefore posts a
+`ci/gate/format`, `ci/gate/core`, or `ci/gate/full` commit status when the
+job finishes. That status contains:
+
+- `state` (`success` or `failure`);
+- `description`, with the first failing step and scope;
+- `target_url`, whose suffix is the numeric GitHub Actions run ID.
+
+Agent workflow after the gate finishes:
+
+1. Get the source commit SHA (the working PR head) or the gate commit SHA.
+2. Call GitHub `get_commit_combined_status` for
+   `ViNonerX/neuromita-rust` and that SHA; select the
+   `ci/gate/<scope>` context.
+3. Take the final number in the returned `target_url` and call
+   `fetch_workflow_run_jobs` with that run ID.
+4. For each failed job, call `fetch_workflow_job_steps` and
+   `fetch_workflow_job_logs` with the returned job ID. Inspect the actual
+   compiler/test error before editing code.
+5. Do not turn the Draft PR into a Ready PR merely because format passed.
+
+The reporting step runs on the same runner and consumes no extra job, cache,
+or artifact budget. The fork's GitHub Actions page still holds the original
+full logs. If the workflow fails before a runner/step can start (for example,
+a YAML validation problem), no commit status can be published; in that case
+the GitHub Actions run URL needs to be obtained once from the website.
+
+GitHub uses the run's creation SHA as `github.sha` for `create` events.
+The automatic gate deliberately checks out that exact SHA and enforces that
+its only extra file is the CI workflow. No additional source code can be
+smuggled into the gate revision.
