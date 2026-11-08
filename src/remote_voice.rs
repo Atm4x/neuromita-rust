@@ -395,8 +395,8 @@ impl FishAudioClient {
         let voice = preset.voice_for(character)?;
         let request = serde_json::json!({
             "text": text, "reference_id": voice, "format": "pcm",
-            "sample_rate": 44100, "prosody": {"speed": f64::from(preset.speed_percent) / 100.0},
-            "normalize_loudness": true
+            "sample_rate": 44100,
+            "prosody": {"speed": f64::from(preset.speed_percent) / 100.0, "normalize_loudness": true}
         });
         let work = async {
             let mut response = self
@@ -428,17 +428,13 @@ impl FishAudioClient {
                 return Err(RemoteVoiceError::InvalidAudio);
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|error| {
-                    if error.is_timeout() {
-                        RemoteVoiceError::Timeout
-                    } else {
-                        RemoteVoiceError::Network
-                    }
-                })?
-            {
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    RemoteVoiceError::Timeout
+                } else {
+                    RemoteVoiceError::Network
+                }
+            })? {
                 if bytes.len().saturating_add(chunk.len()) > MAX_PCM {
                     return Err(RemoteVoiceError::TooLarge);
                 }
