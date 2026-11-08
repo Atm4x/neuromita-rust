@@ -787,6 +787,8 @@ async fn observe(
                             "План или исходник изменился во время проверки.".into(), false),
                         Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
                             "Для этого плана пока не поддерживается установка.".into(), false),
+                        Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),
+                            "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false),
                     };
                     publish(Update::AiHubInstallPreview { category, id, token, summary, error,
                         stage: "review".into(), can_install, operation_id: String::new() });
