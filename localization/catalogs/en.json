@@ -47,6 +47,10 @@
     "source": "Остановить",
     "translation": "Stop"
   },
+  "launcher.game.external-running": {
+    "source": "Игра запущена отдельно",
+    "translation": "Game running separately"
+  },
   "launcher.game.operation-error": {
     "source": "Не удалось запустить или остановить игру: {error}",
     "translation": "Failed to start or stop the game: {error}"

@@ -5,10 +5,10 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use super::{LauncherApi, LauncherConfig, OwnedProcessState};
+use super::{LauncherApi, LauncherConfig, OwnedProcessState, SessionStatus};
 
 #[derive(Debug, Clone, Copy)]
 pub enum LauncherCommand {
@@ -20,7 +20,20 @@ pub enum LauncherCommand {
 pub struct LauncherUpdate {
     pub state: OwnedProcessState,
     pub installed: bool,
+    pub external_running: bool,
     pub error: Option<String>,
+}
+
+fn has_external_game(status: &SessionStatus) -> bool {
+    if matches!(status.owned, OwnedProcessState::Running { .. }) {
+        return false;
+    }
+    let owned_pid = status.owned.pid();
+    status
+        .processes
+        .matching
+        .iter()
+        .any(|identity| Some(identity.pid) != owned_pid)
 }
 
 pub struct LauncherController {
@@ -43,8 +56,13 @@ impl LauncherController {
                 let mut session = LauncherApi::session(config);
                 let mut previous = None;
                 let mut previous_installation = None;
+                let mut previous_external = None;
+                let mut external_running = false;
+                let mut last_scan = Instant::now() - Duration::from_secs(2);
                 while !worker_stop.load(Ordering::Acquire) {
-                    let result = match receive.recv_timeout(Duration::from_millis(250)) {
+                    let command = receive.recv_timeout(Duration::from_millis(250));
+                    let force_scan = matches!(command, Ok(LauncherCommand::Toggle));
+                    let result = match command {
                         Ok(LauncherCommand::Toggle) => match session.owned_state() {
                             Ok(OwnedProcessState::Running { .. }) => session.stop().map(|_| ()),
                             Ok(_) => session.start().map(|_| ()),
@@ -54,19 +72,36 @@ impl LauncherController {
                         Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     };
-                    let error = result.err().map(|error| error.to_string());
+                    let mut error = result.err().map(|error| error.to_string());
                     let installed = session.service().install().is_ok();
+                    if !installed {
+                        external_running = false;
+                    } else if force_scan || last_scan.elapsed() >= Duration::from_secs(1) {
+                        last_scan = Instant::now();
+                        match session.status() {
+                            Ok(status) => external_running = has_external_game(&status),
+                            Err(scan_error) => {
+                                external_running = false;
+                                if error.is_none() {
+                                    error = Some(scan_error.to_string());
+                                }
+                            }
+                        }
+                    }
                     match session.owned_state() {
                         Ok(state) => {
                             if previous.as_ref() != Some(&state)
                                 || error.is_some()
                                 || previous_installation != Some(installed)
+                                || previous_external != Some(external_running)
                             {
                                 previous = Some(state.clone());
                                 previous_installation = Some(installed);
+                                previous_external = Some(external_running);
                                 publish(LauncherUpdate {
                                     state,
                                     installed,
+                                    external_running,
                                     error,
                                 });
                             }
@@ -74,6 +109,7 @@ impl LauncherController {
                         Err(error) => publish(LauncherUpdate {
                             state: previous.clone().unwrap_or(OwnedProcessState::Idle),
                             installed,
+                            external_running,
                             error: Some(error.to_string()),
                         }),
                     }
@@ -82,6 +118,7 @@ impl LauncherController {
                     publish(LauncherUpdate {
                         state: OwnedProcessState::Idle,
                         installed: session.service().install().is_ok(),
+                        external_running: false,
                         error: Some(error.to_string()),
                     });
                 }
