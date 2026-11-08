@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     in property <[GuideContentsEntry]> onboarding-guide-contents;
     callback onboarding-guide-select-step(int);
     callback onboarding-guide-navigate(int);
+    callback onboarding-guide-finish();
     callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
     in property <ComponentCard> client;
@@ -434,7 +435,7 @@ export component AppWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         activated => {
-                            if root.onboarding-guide-page + 1 >= root.onboarding-guide-count { root.onboarding-guide-visible = false; }
+                            if root.onboarding-guide-page + 1 >= root.onboarding-guide-count { root.onboarding-guide-finish(); }
                             else { root.onboarding-guide-navigate(root.onboarding-guide-page + 1); }
                         }
                     }

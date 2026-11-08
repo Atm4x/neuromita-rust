@@ -224,6 +224,8 @@ impl CharactersSettingsPresenter {
 
 pub struct OnboardingSettingsPresenter {
     pub guide_level: BoundProperty<GuideLevel>,
+    pub guide_page: BoundProperty<u8>,
+    pub guide_completed: BoundProperty<bool>,
 }
 
 pub struct InterfaceSettingsPresenter {
@@ -262,6 +264,26 @@ impl SettingsPresenter {
                     |owner, level| {
                         owner
                             .edit::<OnboardingSettings>(|settings| settings.guide_level = level)
+                            .map(|_| ())
+                    },
+                ),
+                guide_page: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_page,
+                    |owner, page| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| settings.guide_page = page)
+                            .map(|_| ())
+                    },
+                ),
+                guide_completed: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_completed,
+                    |owner, completed| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| {
+                                settings.guide_completed = completed
+                            })
                             .map(|_| ())
                     },
                 ),
@@ -448,6 +470,78 @@ mod tests {
                 .onboarding
                 .eula_accepted
         );
+    }
+
+    #[tokio::test]
+    async fn guide_page_and_completion_share_the_settings_owner() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        assert!(!presenter.onboarding.guide_completed.get());
+        assert_eq!(presenter.onboarding.guide_page.get(), 0);
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(7).unwrap();
+        let snapshot = owner.snapshot_all().unwrap();
+        assert_eq!(snapshot.values.onboarding.guide_page, 7);
+        assert!(!snapshot.values.onboarding.guide_completed);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        assert!(presenter.onboarding.guide_completed.get());
+        assert_eq!(owner.snapshot_all().unwrap().revision, 3);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, 3);
+    }
+
+    #[tokio::test]
+    async fn persisted_guide_completion_survives_real_settings_lifecycle_restart() {
+        use crate::{lifecycle::Lifecycle, onboarding, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-guide-progress-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(8).unwrap();
+        owner.flush().await.unwrap();
+        let resumed = onboarding::startup_state(&directory).unwrap();
+        assert!(resumed.requires_guide);
+        assert_eq!(resumed.guide_page, 8);
+        assert_eq!(resumed.guide_level, GuideLevel::Full);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        owner.flush().await.unwrap();
+        let completed = onboarding::startup_state(&directory).unwrap();
+        assert!(!completed.requires_guide);
+        assert!(!completed.requires_consent);
+        assert_eq!(completed.guide_page, 8);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(onboarding::startup_state(&directory).unwrap(), completed);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

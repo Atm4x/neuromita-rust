@@ -51,15 +51,16 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         .renderer_name("femtovg".into())
         .select()?;
     let window = AppWindow::new()?;
-    let requires_consent = neuromita::onboarding::pending(&options.data_directory)?;
+    let onboarding = neuromita::onboarding::startup_state(&options.data_directory)?;
+    let requires_consent = onboarding.requires_consent;
     window.set_onboarding_required(requires_consent);
+    window.set_onboarding_guide_visible(onboarding.requires_guide);
     let initial_code = options.locale.as_str();
     window.set_onboarding_language(initial_code.into());
     window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
-    window.set_onboarding_guide_level(
-        neuromita::onboarding::selected_guide_level(&options.data_directory)?.index(),
-    );
-    update_guide(&window, 0);
+    window.set_onboarding_guide_level(onboarding.guide_level.index());
+    window.set_onboarding_guide_page(i32::from(onboarding.guide_page));
+    update_guide(&window, i32::from(onboarding.guide_page));
     let wiki_history = Rc::new(RefCell::new(super::wiki::WikiHistory::new(initial_code)));
     super::wiki::render(&window, &wiki_history.borrow());
     let desktop = Rc::new(RefCell::new(None));
@@ -212,9 +213,38 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
         }
     });
     let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
     window.on_onboarding_guide_navigate(move |index| {
-        if let Some(window) = guide_window.upgrade() {
-            update_guide(&window, index);
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        update_guide(&window, index);
+        if let Some(runtime) = guide_runtime.borrow().as_ref() {
+            let page = window.get_onboarding_guide_page() as u8;
+            if let Err(error) = runtime
+                .commands
+                .try_send(super::runtime::Command::SetGuidePage(page))
+            {
+                window.set_notice(format!("Failed to save Guide position: {error}").into());
+            }
+        }
+    });
+    let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
+    window.on_onboarding_guide_finish(move || {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide completion requires a running Core".into());
+            return;
+        };
+        if let Err(error) = runtime
+            .commands
+            .try_send(super::runtime::Command::CompleteGuide)
+        {
+            window.set_notice(format!("Failed to save Guide completion: {error}").into());
         }
     });
     let guide_window = window.as_weak();

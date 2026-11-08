@@ -265,6 +265,7 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 .set_settings_error(error.into());
         }
         Update::AdminSaved => super::settings::saved(window, None),
+        Update::GuideCompleted => window.set_onboarding_guide_visible(false),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             let stopped = neuromita::ai_runtime::runtime_status::RuntimeSnapshot::default();

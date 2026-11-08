@@ -288,12 +288,31 @@ impl GuideLevel {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingSettings {
     pub eula_accepted: bool,
     #[serde(default)]
     pub guide_level: GuideLevel,
+    #[serde(default = "legacy_guide_completed")]
+    pub guide_completed: bool,
+    #[serde(default)]
+    pub guide_page: u8,
+}
+
+const fn legacy_guide_completed() -> bool {
+    true
+}
+
+impl Default for OnboardingSettings {
+    fn default() -> Self {
+        Self {
+            eula_accepted: false,
+            guide_level: GuideLevel::default(),
+            guide_completed: false,
+            guide_page: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +464,32 @@ mod structured_display_tests {
             let restored: AppSettings = serde_json::from_value(serialized).unwrap();
             assert_eq!(restored.onboarding.guide_level, level);
         }
+    }
+
+    #[test]
+    fn guide_progress_is_backward_compatible_but_fresh_profiles_start_unfinished() {
+        let fresh = AppSettings::initial_profile();
+        assert!(!fresh.onboarding.guide_completed);
+        assert_eq!(fresh.onboarding.guide_page, 0);
+        let mut legacy = serde_json::to_value(&fresh).unwrap();
+        legacy["onboarding"]["eula_accepted"] = serde_json::json!(true);
+        legacy["onboarding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_completed");
+        legacy["onboarding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guide_page");
+        let legacy: AppSettings = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.onboarding.eula_accepted);
+        assert!(legacy.onboarding.guide_completed);
+        let mut new = fresh;
+        new.onboarding.guide_completed = true;
+        new.onboarding.guide_page = 12;
+        let roundtrip: AppSettings =
+            serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
+        assert_eq!(new, roundtrip);
     }
 
     #[test]
