@@ -1,0 +1,39 @@
+name: Agent B58 source-only transport
+on:
+  push:
+    branches:
+      - bridge/agent-b58-source-20261108
+  workflow_dispatch:
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify pinned B57 parent and export source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "0b37fd54b93a093b2288737f014876cc383506c5"
+          test "$(git rev-parse HEAD^{tree})" != ""
+          test "$(git rev-parse HEAD^^{tree})" = "6ff5acbcdb695943840ad55e67945d738b6053b6"
+          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/artifacts"
+          git archive HEAD^ | tar -xf - -C "$RUNNER_TEMP/source"
+          cd "$RUNNER_TEMP/source"
+          git init -q
+          git config user.name "Source Transport"
+          git config user.email "source-transport@example.invalid"
+          git add -A
+          git commit -q -m "Synthetic source snapshot of B57 0b37fd54"
+          test "$(git rev-parse HEAD^{tree})" = "6ff5acbcdb695943840ad55e67945d738b6053b6"
+          git bundle create "$RUNNER_TEMP/artifacts/b57-source.bundle" HEAD
+          printf 'original_head=0b37fd54b93a093b2288737f014876cc383506c5\noriginal_tree=6ff5acbcdb695943840ad55e67945d738b6053b6\nsynthetic_head=%s\n' "$(git rev-parse HEAD)" > "$RUNNER_TEMP/artifacts/MANIFEST.txt"
+          sha256sum "$RUNNER_TEMP/artifacts/b57-source.bundle" >> "$RUNNER_TEMP/artifacts/MANIFEST.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-b58-source-bundle
+          path: ${{ runner.temp }}/artifacts/
+          if-no-files-found: error
