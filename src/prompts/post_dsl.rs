@@ -86,13 +86,13 @@ impl CustomParam {
         };
         if value.is_number() {
             value = bounded(value, self.change_min, self.change_max)?;
-            if self.op.as_deref() == Some("add") {
-                if let Some(max) = self.max_change {
-                    if !max.is_finite() || max < 0.0 {
-                        return Err(error("invalid max_change"));
-                    }
-                    value = bounded(value, Some(-max), Some(max))?;
+            if self.op.as_deref() == Some("add")
+                && let Some(max) = self.max_change
+            {
+                if !max.is_finite() || max < 0.0 {
+                    return Err(error("invalid max_change"));
                 }
+                value = bounded(value, Some(-max), Some(max))?;
             }
         }
         let current = vars.get(&self.name).cloned().unwrap_or(Value::from(0));
@@ -450,10 +450,11 @@ impl PostDslProgram {
                 }
             }
             for rule in &self.rules {
-                if let Matcher::Field(name) = &rule.matcher {
-                    if let Some(value) = fields.get(name) {
-                        matched.insert(name.as_str());
-                        run(
+                if let Matcher::Field(name) = &rule.matcher
+                    && let Some(value) = fields.get(name)
+                {
+                    matched.insert(name.as_str());
+                    run(
                             rule,
                             "",
                             BTreeMap::from([(name.clone(), value.clone())]),
@@ -464,7 +465,6 @@ impl PostDslProgram {
                             &mut logs,
                             &mut remaining_matches,
                         )?;
-                    }
                 }
             }
             if let Some(name) = fields.keys().find(|name| !matched.contains(name.as_str())) {
