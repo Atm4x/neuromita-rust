@@ -1,0 +1,35 @@
+name: Import exact native model registration commit
+on:
+  push:
+    branches: [bridge/agent-c-native-registry-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-registry-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-registry-20261109
+          fetch-depth: 0
+      - name: Verify exact Git bundle and fast-forward native model registration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-registry.part0{0,1,2,3,4} | base64 -d > /tmp/c3-native-registry.bundle.xz
+          test "$(sha256sum /tmp/c3-native-registry.bundle.xz | cut -d' ' -f1)" = "a8a8ec71168ac888da0f07ca5624f52d5bef4a3836f117d9c7cb4a17b77910ee"
+          xz -d -c /tmp/c3-native-registry.bundle.xz > /tmp/c3-native-registry.bundle
+          test "$(sha256sum /tmp/c3-native-registry.bundle | cut -d' ' -f1)" = "54f74c190d074ca8b40d6b5388e3f4eee0e089b1deeb12a073486d29103cd518"
+          git fetch origin refs/heads/codex/ai-native-executable-lifecycle-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "acf81167c8a1d55e9cd66a154622366803321a3a"
+          git fetch origin refs/heads/codex/ai-native-package-registration-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "acf81167c8a1d55e9cd66a154622366803321a3a"
+          git bundle verify /tmp/c3-native-registry.bundle
+          git fetch /tmp/c3-native-registry.bundle refs/heads/codex/ai-native-package-registration-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "8911c75d9d907aac710a0659f27baf001c52e8f5"
+          git checkout --detach "8911c75d9d907aac710a0659f27baf001c52e8f5"
+          test "$(git rev-parse HEAD^{tree})" = "c5ba0aa8a35f4b52512c9d9759d2afaafd463566"
+          test "$(git rev-list --parents -n1 HEAD)" = "8911c75d9d907aac710a0659f27baf001c52e8f5 acf81167c8a1d55e9cd66a154622366803321a3a"
+          git diff --check "acf81167c8a1d55e9cd66a154622366803321a3a" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-package-registration-20261109
