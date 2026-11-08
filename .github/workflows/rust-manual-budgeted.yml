@@ -103,9 +103,12 @@ jobs:
 
       - name: Install pinned Rust toolchain
         id: toolchain
+        # Core uses the crate's declared MSRV. GUI Slint 1.18.1 requires >=1.92.
+        env:
+          RUST_TOOLCHAIN: ${{ env.CHECK_SCOPE == 'full' && '1.92.0' || '1.89.0' }}
         run: |
-          rustup toolchain install 1.89.0 --profile minimal --component rustfmt,clippy
-          rustup default 1.89.0
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_TOOLCHAIN"
           rustc --version
           cargo --version
 
