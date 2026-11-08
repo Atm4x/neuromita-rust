@@ -18,6 +18,8 @@ jobs:
         run: |
           set -euo pipefail
           cat .github/bridge/c3-payload-part{1,2,3,4,5}.txt | base64 -d > /tmp/c3-source-pin.bundle
+          wc -c .github/bridge/c3-payload-part*.txt /tmp/c3-source-pin.bundle
+          sha256sum .github/bridge/c3-payload-part*.txt /tmp/c3-source-pin.bundle
           test "$(stat -c %s /tmp/c3-source-pin.bundle)" = '7261'
           test "$(sha256sum /tmp/c3-source-pin.bundle | cut -d' ' -f1)" = 'a667fce96e818cfd1756d16a0fa77d0ce74f8b411ebb918ced05dcae7a65fe3e'
           git fetch origin refs/heads/codex/ai-platform-hub-c3-source-pin-kill-recovery-20261108:refs/remotes/origin/candidate
