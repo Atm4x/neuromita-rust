@@ -194,6 +194,7 @@ fn valid_hex_id(value: &str) -> bool {
 }
 
 /// Separate from AppSettings/export. Secrets are not encrypted; Unix files use owner-only mode.
+#[derive(Clone)]
 pub struct RemoteVoiceStore { pub path: PathBuf }
 impl RemoteVoiceStore {
     pub fn load(&self) -> Result<RemoteVoiceConfig, RemoteVoiceError> {
@@ -322,6 +323,46 @@ impl FishAudioClient {
                 result.map_err(|_| RemoteVoiceError::Timeout)?
             }
         }
+    }
+}
+
+/// Routes production TTS to the active Fish Audio preset only when the user
+/// selected the API backend. Other backends retain their existing voice engine.
+pub(crate) struct RemoteVoiceRouter {
+    pub local: Arc<dyn crate::voice::VoiceProvider>,
+    pub settings: Arc<crate::settings::SettingsOwner>,
+    pub store: RemoteVoiceStore,
+    pub client: FishAudioClient,
+}
+
+impl crate::voice::VoiceProvider for RemoteVoiceRouter {
+    fn synthesize(
+        &self,
+        text: Arc<str>,
+        options: crate::voice::VoiceOptions,
+    ) -> crate::voice::VoiceFuture<'_> {
+        Box::pin(async move {
+            use crate::voice::VoiceError;
+            let current = self.settings.snapshot_all()
+                .map_err(|error| VoiceError::Generation(error.to_string()))?;
+            if current.values.speech.tts.backend != crate::settings::TtsBackend::Api {
+                return self.local.synthesize(text, options).await;
+            }
+            if !current.values.speech.tts.enabled {
+                return Err(VoiceError::Unavailable);
+            }
+            // Do not cache the credential or voice: every generation observes a
+            // complete atomic catalog revision, including after a character switch.
+            let store = self.store.clone();
+            let config = tokio::task::spawn_blocking(move || store.load())
+                .await.map_err(|_| VoiceError::Generation("voice catalog task stopped".into()))?
+                .map_err(|error| VoiceError::Generation(error.to_string()))?;
+            let preset = config.active()
+                .map_err(|error| VoiceError::Generation(error.to_string()))?;
+            let stop = CancellationToken::new();
+            self.client.synthesize(preset, &text, options.character, &stop)
+                .await.map_err(|error| VoiceError::Generation(error.to_string()))
+        })
     }
 }
 
