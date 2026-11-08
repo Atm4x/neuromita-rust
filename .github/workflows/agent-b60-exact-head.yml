@@ -1,0 +1,47 @@
+name: Agent B60 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b60-verify-20261108
+jobs:
+  exact-b60:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8085132b91a2126d034e7e5b7c20585cf369449a
+          fetch-depth: 2
+      - name: Verify exact B60 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "8085132b91a2126d034e7e5b7c20585cf369449a"
+          test "$(git rev-parse HEAD^{tree})" = "a73e88e79daf73db6308bcfc3afa614ac2e8f142"
+          test "$(git rev-parse HEAD^)" = "b07db8e2c9e02b50805784223e39f8b110d972e3"
+      - name: Install Rust 1.98.1 and native ALSA dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused owner provenance and historical input tests
+        run: cargo test --locked --offline --lib regenerate_owner_tests -- --test-threads=1
+      - name: Historical input fork and failure rollback
+        run: cargo test --locked --offline --lib historical_input -- --test-threads=1
+      - name: Selection failure injection test
+        run: cargo test --locked --offline --lib failed_selection_insert_rolls_back_fork_and_revision -- --test-threads=1
+      - name: Full Rust library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets offline check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
