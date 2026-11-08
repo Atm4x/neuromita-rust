@@ -804,6 +804,31 @@ mod tests {
     }
 
     #[test]
+    fn preview_replay_and_invalid_custom_fields_never_mutate_input_state() {
+        let program = PostDslProgram::parse(
+            "RULE change\n MATCH REGEX \"change: ([+-]?[0-9]+)\" CAPTURE (amount)\n ACTIONS\n SET LOCAL delta = int(amount)\n SET Love = Love + delta\n REMOVE_MATCH\n END_ACTIONS\nEND_RULE\n",
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let character_state = BTreeMap::from([("Love".into(), Value::from(7))]);
+        let source = StructuredResponse::spoken("change: +2");
+        let preview = program.apply(source.clone(), &character_state).unwrap();
+        let replay = program.apply(source.clone(), &character_state).unwrap();
+        assert_eq!(preview.variables, replay.variables);
+        assert_eq!(preview.response.full_text(), replay.response.full_text());
+        assert_eq!(preview.variables["Love"], Value::from(9.0));
+        assert_eq!(character_state["Love"], Value::from(7));
+
+        let mut invalid = source;
+        invalid.custom_fields = Some(serde_json::Map::from_iter([(
+            "unsupported_field".into(),
+            Value::Bool(true),
+        )]));
+        assert!(program.apply(invalid, &character_state).is_err());
+        assert_eq!(character_state["Love"], Value::from(7));
+    }
+
+    #[test]
     fn rejects_unsafe_or_unhandled_rules() {
         assert!(
             PostDslProgram::parse(
