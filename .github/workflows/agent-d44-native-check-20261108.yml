@@ -1,0 +1,70 @@
+name: Agent D44 exact native update-check import and Windows verification
+on:
+  push:
+    branches: [codex/bridge-agent-d44-native-check-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D44 original patch and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7e339281cec2e3987c2571e44e493d1b14aaa210
+          HEAD=ff61b08b2f704bebca71d42bdddb99d3057d0b2c
+          TREE=aa2961fadfdc80787302055edae3c17c91b86e60
+          BRANCH=codex/agent-d44-native-check-20261108
+          cat .git-bridge/d44.0{0..3} >/tmp/d44.patch.xz.b64
+          test "$(wc -c </tmp/d44.patch.xz.b64)" -eq 8156
+          base64 -d /tmp/d44.patch.xz.b64 >/tmp/d44.patch.xz
+          echo 'e0984dbb6288e6be8d0912390de8d7d1a36f06e626f48a308effde50a3385f5c  /tmp/d44.patch.xz' | sha256sum -c
+          xz -dc /tmp/d44.patch.xz >/tmp/d44.patch
+          echo '803b0b049a512720aa3481e0c4443bfe10dd1824ec8f63e2f149e88691f62af9  /tmp/d44.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/launcher-observed-game-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d44.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d44-native-check-20261108
+          fetch-depth: 0
+      - name: Pin original D44 SHA and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ff61b08b2f704bebca71d42bdddb99d3057d0b2c
+          test "$(git rev-parse HEAD^{tree})" = aa2961fadfdc80787302055edae3c17c91b86e60
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Native checked release classification and full GUI compilation
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib updater::check::tests -- --test-threads=2
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
