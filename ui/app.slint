@@ -6,7 +6,7 @@ import { Label, ActionSurface } from "components/controls.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
-import { HubModel, HubModelIdentity, HubInstallPreview } from "ai-hub/components.slint";
+import { HubModel, HubModelIdentity, HubInstallPreview, HubInstallOperation } from "ai-hub/components.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -71,6 +71,7 @@ export component AppWindow inherits Window {
     in property <string> ai-hub-loaded-asr-id: "";
     in-out property <int> ai-hub-review-token: 0;
     in property <HubInstallPreview> ai-hub-install-preview;
+    in property <HubInstallOperation> ai-hub-install-operation;
     callback ai-hub-preview-install(HubModelIdentity, int);
     callback ai-hub-confirm-install(HubModelIdentity, int);
     callback ai-hub-refresh();
@@ -122,6 +123,7 @@ export component AppWindow inherits Window {
                 loaded-asr-id: root.ai-hub-loaded-asr-id;
                 review-token <=> root.ai-hub-review-token;
                 install-preview: root.ai-hub-install-preview;
+                install-operation: root.ai-hub-install-operation;
                 preview-install-requested(identity, token) => { root.ai-hub-preview-install(identity, token); }
                 confirm-install-requested(identity, token) => { root.ai-hub-confirm-install(identity, token); }
                 refresh-requested => { root.ai-hub-refresh(); }

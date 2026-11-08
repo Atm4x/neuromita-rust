@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::{
     runtime::Command,
-    view::{AppWindow, HubInstallPreview, HubModel},
+    view::{AppWindow, HubInstallOperation, HubInstallPreview, HubModel},
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
@@ -116,6 +116,14 @@ pub fn runtime_status(window: &AppWindow, snapshot: &RuntimeSnapshot) {
 }
 
 pub fn stopped(window: &AppWindow) {
+    let current = window.get_ai_hub_install_operation();
+    if current.stage == "installing" {
+        window.set_ai_hub_install_operation(HubInstallOperation {
+            stage: "unknown".into(),
+            summary: "Core остановлен: результат публикации overlay не подтверждён. Проверьте установку после повторного запуска.".into(),
+            ..current
+        });
+    }
     window.set_ai_hub_install_preview(HubInstallPreview::default());
     window.set_ai_hub_can_refresh(false);
     window.set_ai_hub_loaded_tts_id("".into());
@@ -160,5 +168,22 @@ pub fn install_preview(
         stage: stage.into(),
         can_install,
         operation_id: operation_id.into(),
+    });
+}
+
+pub fn install_operation(
+    window: &AppWindow,
+    operation_id: String,
+    category: String,
+    id: String,
+    stage: String,
+    summary: String,
+) {
+    window.set_ai_hub_install_operation(HubInstallOperation {
+        operation_id: operation_id.into(),
+        category: category.into(),
+        id: id.into(),
+        stage: stage.into(),
+        summary: summary.into(),
     });
 }

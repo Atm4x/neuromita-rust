@@ -207,6 +207,13 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             super::ai_hub::runtime_status(window, &snapshot);
         }
         Update::CharacterCatalog(catalog) => render_catalog(window, catalog),
+        Update::AiHubInstallOperation {
+            operation_id,
+            category,
+            id,
+            stage,
+            summary,
+        } => super::ai_hub::install_operation(window, operation_id, category, id, stage, summary),
         Update::AiHubInstallPreview {
             category,
             id,

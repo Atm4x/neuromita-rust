@@ -1,6 +1,6 @@
 import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
-import { HubModelIdentity, HubInstallPreview, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
+import { HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component AiHubPage inherits Rectangle {
@@ -25,6 +25,8 @@ export component AiHubPage inherits Rectangle {
     in property <[int]> category-counts;
     in-out property <int> review-token: 0;
     in property <HubInstallPreview> install-preview;
+    in property <HubInstallOperation> install-operation;
+    private property <string> dismissed-operation-id: "";
     private property <bool> review-requested: false;
     private property <bool> confirm-install: false;
     private property <bool> install-submitted: false;
@@ -152,6 +154,44 @@ export component AiHubPage inherits Rectangle {
             }
         }
         Rectangle { height: 1px; background: Theme.divider; }
+        if root.install-operation.operation-id != ""
+            && (root.install-operation.stage == "installing"
+                || root.dismissed-operation-id != root.install-operation.operation-id): Rectangle {
+            height: 44px;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning.with-alpha(0.4) : Theme.accent-border;
+            background: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning.with-alpha(0.08) : Theme.accent.with-alpha(0.07);
+            HorizontalLayout {
+                padding-left: 12px; padding-right: 8px;
+                spacing: 10px; alignment: stretch;
+                VerticalLayout {
+                    spacing: 2px; alignment: center; horizontal-stretch: 1;
+                    Label {
+                        text: (root.install-operation.stage == "installing" ? "Установка выполняется"
+                            : root.install-operation.stage == "installed" ? "Overlay установлен"
+                            : root.install-operation.stage == "unknown" ? "Исход установки неизвестен" : "Установка не завершена")
+                            + " · " + root.install-operation.category.to-uppercase() + "/" + root.install-operation.id;
+                        font-size: 12px; font-weight: 700;
+                        color: root.install-operation.stage == "failed" || root.install-operation.stage == "unknown" ? Theme.warning : Theme.text;
+                        overflow: elide;
+                    }
+                    Label {
+                        text: root.install-operation.summary;
+                        font-size: 10px; color: Theme.muted; overflow: elide;
+                    }
+                }
+                Label {
+                    text: root.install-operation.operation-id;
+                    font-size: 10px; color: Theme.muted;
+                    overflow: elide; max-width: 90px;
+                }
+                if root.install-operation.stage != "installing": HubAction {
+                    caption: "Скрыть"; compact: true;
+                    activated => { root.dismissed-operation-id = root.install-operation.operation-id; }
+                }
+            }
+        }
         Rectangle {
             height: 60px;
             background: Theme.sidebar;

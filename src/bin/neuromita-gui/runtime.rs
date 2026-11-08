@@ -111,6 +111,13 @@ pub enum Update {
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
+    AiHubInstallOperation {
+        operation_id: String,
+        category: String,
+        id: String,
+        stage: String,
+        summary: String,
+    },
     AiHubInstallPreview {
         category: String,
         id: String,
@@ -648,6 +655,12 @@ async fn observe(
                     }
                     let operation = uuid::Uuid::new_v4();
                     active_install = Some(operation);
+                    publish(Update::AiHubInstallOperation {
+                        operation_id: operation.to_string(),
+                        category: category.clone(), id: id.clone(),
+                        stage: "installing".into(),
+                        summary: "Публикация проверенного plugin overlay".into(),
+                    });
                     publish(Update::AiHubInstallPreview { category: category.clone(), id: id.clone(), token,
                         summary: "Установка plugin overlay выполняется. Не завершайте приложение до получения результата.".into(),
                         error: String::new(), stage: "installing".into(), can_install: false,
@@ -724,12 +737,18 @@ async fn observe(
                     && active_install == Some(operation)
                 {
                     active_install = None;
-                    let (summary, error, stage) = match result {
+                    let (summary, error, stage): (String, String, String) = match result {
                         Ok(_) => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
                         Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
                         Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
                         Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
                     };
+                    publish(Update::AiHubInstallOperation {
+                        operation_id: operation.to_string(),
+                        category: category.clone(), id: id.clone(),
+                        stage: stage.clone(),
+                        summary: if error.is_empty() { summary.clone() } else { error.clone() },
+                    });
                     publish(Update::AiHubInstallPreview { category, id, token,
                         summary, error, stage, can_install: false, operation_id: operation.to_string() });
                 }
