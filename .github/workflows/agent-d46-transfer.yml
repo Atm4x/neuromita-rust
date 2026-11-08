@@ -1,0 +1,34 @@
+name: Agent D46 local git delta transfer
+on:
+  push:
+    branches: [codex/agent-d46-transfer-20261108]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d45-owned-launcher-notices-20261108
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bundle only commits after known local D43 base
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7e339281cec2e3987c2571e44e493d1b14aaa210
+          HEAD=3a365f63979ee1bdb924a072116d5e97e07282d3
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          git cat-file -e "$BASE^{commit}"
+          git bundle create /tmp/d46-product-delta.bundle "$BASE..HEAD"
+          git bundle verify /tmp/d46-product-delta.bundle
+          sha256sum /tmp/d46-product-delta.bundle
+          du -h /tmp/d46-product-delta.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d46-product-delta
+          path: /tmp/d46-product-delta.bundle
+          retention-days: 1
+          if-no-files-found: error
