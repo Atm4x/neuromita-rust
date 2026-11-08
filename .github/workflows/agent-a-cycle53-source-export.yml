@@ -1,0 +1,33 @@
+name: Agent A Cycle53 source bundle export
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle53-export-20261109
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7af68061150e663fb079fa0b152786a2bfd9675e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export verified pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | grep -Fx '7af68061150e663fb079fa0b152786a2bfd9675e'
+          git update-ref refs/heads/cycle53-source 7af68061150e663fb079fa0b152786a2bfd9675e
+          git bundle create cycle53-source.bundle refs/heads/cycle53-source
+          git bundle verify cycle53-source.bundle
+          sha256sum cycle53-source.bundle > cycle53-source.bundle.sha256
+          git bundle list-heads cycle53-source.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle53-source
+          path: |
+            cycle53-source.bundle
+            cycle53-source.bundle.sha256
+          retention-days: 1
