@@ -208,6 +208,47 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
     });
     let weak = window.as_weak();
     let send = dispatch.clone();
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_api_profile_save(move || {
+        if let Some(window) = weak.upgrade() {
+            match current_preset(&window.global::<VoiceUi>()) {
+                Ok(preset) => send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Save(preset))),
+                Err(error) => window.global::<SettingsUi>().set_settings_error(error.into()),
+            }
+        }
+    });
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_api_profile_select(move |label| {
+        let Some(window) = weak.upgrade() else { return; };
+        let ui = window.global::<VoiceUi>();
+        let ids = ui.get_api_preset_ids();
+        let index = ui.get_api_profiles().iter().position(|name| name == label);
+        if let Some(id) = index.and_then(|index| ids.row_data(index)) {
+            if let Ok(preset) = current_preset(&ui) {
+                send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Save(preset)));
+            }
+            send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Select(id.into())));
+        }
+    });
+    let send = dispatch.clone();
+    ui.on_api_profile_add(move || send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Add)));
+    let send = dispatch.clone();
+    ui.on_api_profile_delete(move || send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Delete)));
+    let weak = window.as_weak();
+    let send = dispatch.clone();
+    ui.on_voice_test(move |text, character| {
+        let Some(window) = weak.upgrade() else { return; };
+        if let Ok(preset) = current_preset(&window.global::<VoiceUi>()) {
+            send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Save(preset)));
+        }
+        let target = usize::try_from(character).ok()
+            .and_then(|index| neuromita::character::CharacterId::ALL.get(index)).copied();
+        send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Preview(text.into(), target)));
+    });
+    let send = dispatch.clone();
+    ui.on_voice_test_cancel(move || send(Command::RemoteVoice(super::runtime::RemoteVoiceAction::Cancel)));
     ui.on_refresh_models(move || {
         if weak.upgrade().is_some() {
             send(Command::RefreshSpeechInventory);
