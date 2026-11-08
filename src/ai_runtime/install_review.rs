@@ -2,7 +2,10 @@
 
 use ring::digest::{Context, SHA256, digest};
 use serde_json::Value;
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use thiserror::Error;
 
 use super::{
@@ -51,6 +54,10 @@ pub enum InstallPreviewError {
     Plan(String),
     #[error("неверный установочный план: {0}")]
     InvalidPlan(#[from] PluginInstallError),
+    #[error("план изменился после подтверждения")]
+    ReviewChanged,
+    #[error("для этого плана пока требуется отдельный установщик backend или моделей")]
+    UnsupportedInstall,
 }
 
 /// Request an actual Python plugin install plan using *only existing* SDK and Python.
@@ -63,6 +70,26 @@ pub async fn preview_installed_environment(
     plugin_id: &str,
     settings: &Value,
 ) -> Result<InstallPlanReview, InstallPreviewError> {
+    Ok(
+        inspect_installed_environment(data_directory, service, plugin_id, settings)
+            .await?
+            .review,
+    )
+}
+
+pub(super) struct EvaluatedInstall {
+    pub(super) review: InstallPlanReview,
+    pub(super) plan: PluginInstallPlan,
+    pub(super) uv: PathBuf,
+    pub(super) python: PathBuf,
+}
+
+pub(super) async fn inspect_installed_environment(
+    data_directory: &Path,
+    service: AiService,
+    plugin_id: &str,
+    settings: &Value,
+) -> Result<EvaluatedInstall, InstallPreviewError> {
     let service_name = match service {
         AiService::Tts => "tts",
         AiService::Asr => "asr",
@@ -104,8 +131,10 @@ pub async fn preview_installed_environment(
         plugin_directory.join("plugin.py")
     };
     let install_script = read_review_source(&script)?;
+    let entrypoint = plugin_directory.join("plugin.py");
+    let entrypoint_bytes = read_review_source(&entrypoint)?;
     let mut source = Context::new(&SHA256);
-    for bytes in [&manifest, &install_script] {
+    for bytes in [&manifest, &entrypoint_bytes, &install_script] {
         source.update(&bytes.len().to_le_bytes());
         source.update(bytes);
     }
@@ -124,7 +153,7 @@ pub async fn preview_installed_environment(
     let uv = environment
         .installed_uv()
         .map_err(|error| InstallPreviewError::Python(error.to_string()))?;
-    let mut bootstrap = PythonBootstrap::new(uv, ai_data.clone(), python_version.clone());
+    let mut bootstrap = PythonBootstrap::new(uv.clone(), ai_data.clone(), python_version.clone());
     bootstrap.command_timeout = Duration::from_secs(20);
     let python = match bootstrap
         .probe()
@@ -164,7 +193,7 @@ pub async fn preview_installed_environment(
         ));
     }
     let host = PythonHostConfig {
-        python_executable: python,
+        python_executable: python.clone(),
         sdk_root,
         plugins_directory: plugins,
         models_directory: Some(ai_data.join("models")),
@@ -173,7 +202,7 @@ pub async fn preview_installed_environment(
     let plan = fetch_install_plan_for(&host, plugin_id, settings.clone())
         .await
         .map_err(|error| InstallPreviewError::Plan(error.to_string()))?;
-    InstallPlanReview::new(
+    let review = InstallPlanReview::new(
         InstallReviewIdentity {
             service,
             plugin_id: plugin_id.to_owned(),
@@ -184,7 +213,19 @@ pub async fn preview_installed_environment(
         settings,
         &plan,
     )
-    .map_err(InstallPreviewError::from)
+    .map_err(InstallPreviewError::from)?;
+    if read_review_source(&plugin_directory.join("plugin.json"))? != manifest
+        || read_review_source(&entrypoint)? != entrypoint_bytes
+        || read_review_source(&script)? != install_script
+    {
+        return Err(InstallPreviewError::ReviewChanged);
+    }
+    Ok(EvaluatedInstall {
+        review,
+        plan,
+        uv,
+        python,
+    })
 }
 
 fn read_review_source(path: &Path) -> Result<Vec<u8>, InstallPreviewError> {
@@ -257,6 +298,19 @@ pub struct InstallPlanReview {
 }
 
 impl InstallPlanReview {
+    /// Only backend-independent, asset-free remote API overlays are admitted for
+    /// the initial Core-backed installation path. Other plans remain review-only.
+    pub fn eligible_overlay_install(&self) -> bool {
+        self.backend_options == ["remote-api"]
+            && self.packages.is_empty()
+            && self.requirements.is_empty()
+            && self.required_backends.is_empty()
+            && self.required_assets.is_empty()
+            && self.optional_assets.is_empty()
+            && self.actions.is_empty()
+            && self.asset_hooks.is_empty()
+    }
+
     pub fn new(
         identity: InstallReviewIdentity,
         settings: &Value,
@@ -347,6 +401,7 @@ impl InstallPlanReview {
 mod tests {
     use super::*;
     use crate::ai_runtime::install::{ModelAssetRequirement, PluginInstallPlan};
+    use crate::ai_runtime::install_admission::{InstallApprovalGate, install_reviewed_overlay};
     use serde_json::json;
 
     fn identity() -> InstallReviewIdentity {
@@ -481,6 +536,141 @@ class InstallContract:
         assert!(!root.join("AIData/overlays").exists());
         assert!(!root.join("AIData/backends").exists());
         assert!(!root.join("AIData/models").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_install_gate_is_one_use_and_scoped_to_model() {
+        let mut simple = plan();
+        simple.backend = Some("remote-api".into());
+        simple.assets.clear();
+        let review = InstallPlanReview::new(identity(), &json!({}), &simple).unwrap();
+        let mut gate = InstallApprovalGate::default();
+        assert!(gate.offer(23, review.clone()));
+        assert!(gate.consume(24, AiService::Tts, "demo_tts").is_none());
+        assert!(gate.consume(23, AiService::Tts, "demo_tts").is_none());
+        assert!(gate.offer(23, review.clone()));
+        assert!(gate.consume(23, AiService::Asr, "demo_tts").is_none());
+        assert!(gate.offer(23, review.clone()));
+        assert!(gate.consume(23, AiService::Tts, "other").is_none());
+        assert!(gate.offer(23, review.clone()));
+        assert_eq!(gate.consume(23, AiService::Tts, "demo_tts"), Some(review));
+        assert!(gate.consume(23, AiService::Tts, "demo_tts").is_none());
+        let mut no_assets = plan();
+        no_assets.backend = Some("onnx-cpu".into());
+        no_assets.assets.clear();
+        assert!(!gate.offer(
+            24,
+            InstallPlanReview::new(identity(), &json!({}), &no_assets).unwrap()
+        ));
+    }
+
+    #[test]
+    fn only_remote_api_no_assets_or_actions_can_install_from_review() {
+        let mut simple = plan();
+        simple.backend = Some("remote-api".into());
+        simple.assets.clear();
+        let review = InstallPlanReview::new(identity(), &json!({}), &simple).unwrap();
+        assert!(review.eligible_overlay_install());
+        simple.required_backends.push("torch-cpu".into());
+        assert!(
+            !InstallPlanReview::new(identity(), &json!({}), &simple)
+                .unwrap()
+                .eligible_overlay_install()
+        );
+        simple.required_backends.clear();
+        simple.packages.push(super::super::overlay::LockedPackage {
+            name: "somepkg".into(),
+            version: "1.0".into(),
+        });
+        assert!(
+            !InstallPlanReview::new(identity(), &json!({}), &simple)
+                .unwrap()
+                .eligible_overlay_install()
+        );
+        simple.packages.clear();
+        simple.assets.push(ModelAssetRequirement {
+            role: "weights".into(),
+            relative_path: "model.bin".into(),
+            required: false,
+            sha256: None,
+        });
+        assert!(
+            !InstallPlanReview::new(identity(), &json!({}), &simple)
+                .unwrap()
+                .eligible_overlay_install()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approved_builtin_remote_overlay_publishes_once_and_rejects_changed_plan() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("ai-install-approved-{}", uuid::Uuid::new_v4()));
+        let plugin = root.join("AIData/plugins/builtin/demo_asr");
+        let python_dir = root.join("AIData/bootstrap/python/cpython-3.12.10-fixture/bin");
+        let uv_dir = root.join("AIData/bootstrap/uv/rev-fixture");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir_all(&python_dir).unwrap();
+        std::fs::create_dir_all(&uv_dir).unwrap();
+        std::fs::write(plugin.join("plugin.json"), r#"{"id":"demo_asr","name":"Demo","kind":"asr","entrypoint":"plugin.py","api_version":1}"#).unwrap();
+        std::fs::write(plugin.join("plugin.py"), "class Plugin: pass\n").unwrap();
+        let script = plugin.join("installplan.py");
+        std::fs::write(
+            &script,
+            r#"
+from neuromita_ai_sdk import InstallPlan
+class InstallContract:
+    def install_plan(self): return InstallPlan(backend='remote-api')
+    def settings_schema(self): return {}
+    def probe_install(self): return {'installed': False, 'missing': []}
+"#,
+        )
+        .unwrap();
+        let wrapped_python = python_dir.join("python3");
+        std::fs::write(&wrapped_python, "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'Python 3.12.10'; exit 0; fi\nexec python3 \"$@\"\n").unwrap();
+        std::fs::set_permissions(&wrapped_python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let uv = uv_dir.join("uv");
+        std::fs::write(&uv, "#!/bin/sh\nif [ \"$1\" = 'python' ] && [ \"$2\" = 'find' ]; then printf '%s\\n' \"$UV_PYTHON_INSTALL_DIR/cpython-3.12.10-fixture/bin/python3\"; exit 0; fi\nexit 3\n").unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        SdkPublisher::new(root.join("AIData"))
+            .publish_embedded()
+            .unwrap();
+        let settings = json!({});
+        let review = preview_installed_environment(&root, AiService::Asr, "demo_asr", &settings)
+            .await
+            .unwrap();
+        assert!(review.eligible_overlay_install());
+        assert!(!root.join("AIData/overlays").exists());
+        let location = install_reviewed_overlay(&root, &review).await.unwrap();
+        assert!(location.join(".neuromita-overlay.json").is_file());
+        assert_eq!(
+            install_reviewed_overlay(&root, &review).await.unwrap(),
+            location
+        );
+        std::fs::write(
+            plugin.join("plugin.py"),
+            "class Plugin: pass\n# changed after approval\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            install_reviewed_overlay(&root, &review).await,
+            Err(InstallPreviewError::ReviewChanged)
+        ));
+        std::fs::write(plugin.join("plugin.py"), "class Plugin: pass\n").unwrap();
+        std::fs::write(&script, r#"
+from neuromita_ai_sdk import InstallPlan, AssetRequirement
+class InstallContract:
+    def install_plan(self): return InstallPlan(backend='remote-api', assets=(AssetRequirement(role='weights', relative_path='model.bin'),))
+    def settings_schema(self): return {}
+    def probe_install(self): return {'installed': False, 'missing': ['model.bin']}
+"#).unwrap();
+        assert!(matches!(
+            install_reviewed_overlay(&root, &review).await,
+            Err(InstallPreviewError::ReviewChanged)
+        ));
+        assert!(location.join(".neuromita-overlay.json").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

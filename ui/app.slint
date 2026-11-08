@@ -72,6 +72,7 @@ export component AppWindow inherits Window {
     in-out property <int> ai-hub-review-token: 0;
     in property <HubInstallPreview> ai-hub-install-preview;
     callback ai-hub-preview-install(HubModelIdentity, int);
+    callback ai-hub-confirm-install(HubModelIdentity, int);
     callback ai-hub-refresh();
     callback ai-hub-find-selection-index(HubModelIdentity) -> int;
     in property <string> chat-attitude: "—";
@@ -122,6 +123,7 @@ export component AppWindow inherits Window {
                 review-token <=> root.ai-hub-review-token;
                 install-preview: root.ai-hub-install-preview;
                 preview-install-requested(identity, token) => { root.ai-hub-preview-install(identity, token); }
+                confirm-install-requested(identity, token) => { root.ai-hub-confirm-install(identity, token); }
                 refresh-requested => { root.ai-hub-refresh(); }
                 find-selection-index(identity) => { root.ai-hub-find-selection-index(identity) }
             }

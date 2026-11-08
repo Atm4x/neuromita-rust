@@ -12,6 +12,7 @@ pub mod constraints;
 mod distribution;
 pub mod hardware;
 pub mod install;
+pub mod install_admission;
 pub mod install_review;
 pub mod installed_speech;
 mod layer;

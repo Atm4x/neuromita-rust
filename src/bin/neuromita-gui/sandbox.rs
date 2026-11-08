@@ -213,8 +213,21 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             token,
             summary,
             error,
+            stage,
+            can_install,
+            operation_id,
         } => {
-            super::ai_hub::install_preview(window, category, id, token, summary, error);
+            super::ai_hub::install_preview(
+                window,
+                category,
+                id,
+                token,
+                summary,
+                error,
+                stage,
+                can_install,
+                operation_id,
+            );
         }
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);

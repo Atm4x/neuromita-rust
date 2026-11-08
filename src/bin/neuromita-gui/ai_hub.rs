@@ -52,6 +52,35 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
                 token,
                 summary: "".into(),
                 error: "Модель отсутствует или неоднозначна".into(),
+                stage: "failed".into(),
+                can_install: false,
+                operation_id: "".into(),
+            });
+        }
+    });
+    let weak = window.as_weak();
+    let send_install = send.clone();
+    window.on_ai_hub_confirm_install(move |identity, token| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        let preview = window.get_ai_hub_install_preview();
+        let count = window
+            .get_ai_hub_entries()
+            .iter()
+            .filter(|entry| entry.category == identity.category && entry.id == identity.id)
+            .count();
+        if count == 1
+            && preview.can_install
+            && preview.stage == "review"
+            && preview.token == token
+            && preview.category == identity.category
+            && preview.id == identity.id
+        {
+            send_install(Command::ConfirmAiHubInstall {
+                category: identity.category.into(),
+                id: identity.id.into(),
+                token,
             });
         }
     });
@@ -118,6 +147,9 @@ pub fn install_preview(
     token: i32,
     summary: String,
     error: String,
+    stage: String,
+    can_install: bool,
+    operation_id: String,
 ) {
     window.set_ai_hub_install_preview(HubInstallPreview {
         category: category.into(),
@@ -125,5 +157,8 @@ pub fn install_preview(
         token,
         summary: summary.into(),
         error: error.into(),
+        stage: stage.into(),
+        can_install,
+        operation_id: operation_id.into(),
     });
 }
