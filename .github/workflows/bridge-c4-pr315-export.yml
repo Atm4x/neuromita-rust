@@ -1,0 +1,32 @@
+name: Agent C PR315 pinned source export
+on:
+  push:
+    branches: [bridge/c4-pr315-source-20261108]
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/ai-platform-hub-c4-declarative-build-stages-20261108
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify HEAD and export one self-contained branch bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "9a4a62f6a750d62b03dae83b57d1273f28b33828"
+          git update-ref refs/heads/agent-c-source "$(git rev-parse HEAD)"
+          mkdir -p /tmp/c4-source
+          git bundle create /tmp/c4-source/pr315.bundle refs/heads/agent-c-source
+          git bundle verify /tmp/c4-source/pr315.bundle
+          (cd /tmp/c4-source && sha256sum pr315.bundle > pr315.bundle.sha256)
+          printf 'head=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > /tmp/c4-source/source.manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: c4-pr315-source
+          path: /tmp/c4-source/
+          compression-level: 0
+          retention-days: 1
