@@ -38,7 +38,7 @@ here, **unverified** = cannot claim current Python parity or completed run.
 | Prompt sets, Default/fallback, character selection | Runtime Python resolver needs full request parity check | Existing catalog/settings and admission capture; `src/prompts/mod.rs` tests | Existing; GUI empty-set fallback corrected here |
 | RU/EN, missing/corrupt files | Source/file corpus examined in #93 | Existing corpus, missing-set/config rejection, bounded snapshot reads | Existing tests; live RU/EN UI **unverified** |
 | Snapshot during pending request | Request-scoped contract | `ChatApiState::send` captures settings/preset/pack at admission; source changes cannot affect captured files | Existing unit tests; concurrent live GUI run **unverified** |
-| Variables, includes, nested scripts, conditions | Python `DslInterpreter` at stated SHA; real corpus baseline at old SHA | Existing interpreter and 31-set corpus; this PR fixes case-insensitive `SET local` / `then` and invalid `ELSE` arguments | New deterministic regression (not executed here) |
+| Variables, includes, nested scripts, conditions | Python `DslInterpreter` at stated SHA; real corpus baseline at old SHA | Existing interpreter and 31-set corpus; this PR fixes case-insensitive `SET local` / `then` and invalid `ELSE` arguments | New deterministic regression (not executed here); nonlocal SET persistence **NOT PARITY** |
 | Safe expressions and erroneous inputs | Python `safe_eval_expression` with a bounded allow-list | Rust expression parser deliberately supports a subset and fails on unsupported inputs | 21/31 exact old-source corpus outcomes; **current parity unverified** |
 | `SET LOCAL` isolation | Python script invocation clears local map; redeclaration is first-write-only | Rust interpreter creates per-render state, clears locals per script; PostDSL locals are invocation-only | Existing + new tests; broader concurrency/error matrix **unverified** |
 | Seed initialization / Timeline | Python side effects not represented by corpus oracle | Existing typed declarations, single CharacterHandle/Timeline command, atomic idempotent batch | Existing unit + SQLite tests; Python seed-effects parity **unverified** |
@@ -78,6 +78,56 @@ No second parser, state store, or side-effect executor was introduced.
 parser and the existing Rust parser split inline `//` as comments. Treating
 URLs differently would change behavior without Python parity evidence.
 
+## Blocking nonlocal `SET` parity gap (minimal reproducer)
+
+This is a **source-confirmed behavioral difference**, not a missing parser
+construct. The active Python `DslInterpreter.process_script` invokes
+`self.character.set_variable(var, value)` for `SET` unless a `SET LOCAL`
+declaration shadows the name. Rust `dsl::Interpreter::script` currently
+updates `self.vars` in a render-scoped interpreter and returns only prompt
+blocks and memory-seeding declarations. The modified nonlocal variables are
+neither committed to Timeline nor made available to the later PostDSL through
+`GenerationRequest.context.variables`.
+
+The actual corpus demonstrates the feature:
+`Prompts/Crazy/Default/Scripts/init.script` uses `SET Love = 1`;
+`Scripts/personality_selector.script` updates `secretExposed`,
+`PlayingFirst` and `available_action_level`.
+
+Minimal deterministic scenario for a follow-up acceptance test:
+
+```text
+config.json: {"variables":{"Love":0}}
+main_template.txt: [<Scripts/init.script>]
+Scripts/init.script:
+  SET Love = 8
+  RETURN str(Love)
+PostScripts/main_rules.postscript:
+  RULE love
+    MATCH FIELD "love_change"
+    ACTIONS
+      SET Love = Love + love_change
+    END_ACTIONS
+  END_RULE
+model final custom_fields: {"love_change":1}
+```
+
+Source-level outcome prediction (not an executed Python/Rust golden result):
+Python persists `Love = 8` during prompt execution, then PostDSL proposes
+`Love = 9`. Rust renders the prompt using `8` but starts PostDSL from the
+unchanged `Love = 0`, proposing `Love = 1`. Future requests also lose the
+main-DSL `SET` mutation. The existing corpus compares rendered prompt blocks
+and therefore does **not** prove side-effect parity for this case.
+
+Closing this gap requires an explicit lifecycle decision: whether a nonlocal
+`SET` becomes an authorized Timeline mutation during initialization or a
+staged effect committed only with accepted generation. The existing
+CharacterHandle/Timeline writer must own that transition; extending the prompt
+interpreter with a second mutable state store is prohibited. Any new contract
+must cover cancellation, failure, retry, historical anchors, duplicate
+requests and character scoping. This PR deliberately does **not** guess at
+persistence semantics or broaden the Core boundary without review.
+
 ## Test and quality gate ledger
 
 The following new source-level tests were authored:
@@ -112,6 +162,9 @@ validation is recorded in that PR but is not a substitute for this new check.
 
 - Run the required quality gates on this branch, resolve any findings and
   attach their actual results.
+- Design and test authoritative nonlocal `SET` persistence/acceptance through
+  CharacterHandle/Timeline, including the minimal case above, without creating
+  another owner of character variables.
 - Regenerate and compare Python golden outputs at the pinned **current**
   Python source commit. The existing 10 semantic divergences must be explicitly
   accepted or resolved; they are not green Python parity.
