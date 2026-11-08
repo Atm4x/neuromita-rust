@@ -201,7 +201,9 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             }
         }
         Update::RemoteVoices(config) => super::voice::render_remote(window, &config),
-        Update::RemoteVoiceState(status, busy) => super::voice::remote_status(window, &status, busy),
+        Update::RemoteVoiceState(status, busy) => {
+            super::voice::remote_status(window, &status, busy)
+        }
         Update::RuntimeStatus(snapshot) => {
             super::voice::runtime_status(window, &snapshot);
             super::asr::runtime_status(window, &snapshot);
