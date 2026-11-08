@@ -1,0 +1,22 @@
+name: Agent D45 Windows GUI notice ownership
+on:
+  push:
+    branches:
+      - codex/agent-d45-owned-launcher-notices-20261108
+permissions:
+  contents: read
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+      - name: Check native GUI notice boundary
+        run: cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Check all project targets
+        run: cargo check --locked --offline --all-targets
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
