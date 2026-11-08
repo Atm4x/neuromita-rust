@@ -198,6 +198,7 @@ impl RequestRegistry {
         self.register_with_configuration(message, id, admission, None, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_with_configuration(
         &self,
         message: Box<dyn GenerationCommand>,
@@ -207,6 +208,21 @@ impl RequestRegistry {
         preset: Option<crate::generation::GenerationPreset>,
         prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
     ) -> RequestHandle {
+        self.register_with_regenerate_cancellation(
+            message, id, admission, settings, preset, prompt, None,
+        )
+    }
+
+    pub(crate) fn register_with_regenerate_cancellation(
+        &self,
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+        preset: Option<crate::generation::GenerationPreset>,
+        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    ) -> RequestHandle {
         let record = RequestRecord::new(
             message,
             id,
@@ -215,6 +231,7 @@ impl RequestRegistry {
             preset,
             prompt,
             Arc::downgrade(&self.inner),
+            cancel_ingress,
         );
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");
@@ -333,6 +350,7 @@ mod tests {
             None,
             None,
             std::sync::Weak::new(),
+            None,
         );
         registry
             .inner

@@ -678,3 +678,495 @@ async fn unrelated_request_on_regenerate_child_does_not_consume_dispatch_permit(
         crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
     ));
 }
+
+#[tokio::test]
+async fn handle_cancellation_persists_abandonment_before_volatile_retirement() {
+    let mut fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let id = handle.id();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Cancelled);
+    assert!(handle.snapshot().state.is_terminal());
+    let mut owner = fixture.timeline.lock().unwrap();
+    let outcome = owner.reconcile_regenerate(child, id).unwrap().outcome;
+    assert!(matches!(
+        outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    let pinned = owner
+        .capture_turn(
+            fixture.source.character,
+            Some(fixture.source.original_input),
+            owner.anchor(),
+        )
+        .unwrap();
+    let before = owner.anchor();
+    assert!(
+        owner
+            .append_reply(crate::timeline::GeneratedReply {
+                request: id,
+                intent: TurnIntent::Reply(fixture.source.original_input),
+                turn: pinned,
+                expected_revision: 0,
+                content: json!("late output"),
+                audience: crate::timeline::conversation::ConversationAudience::private_to(
+                    fixture.source.character
+                ),
+                effects: Vec::new(),
+            })
+            .is_err()
+    );
+    assert_eq!(owner.anchor(), before);
+    assert_eq!(fixture.queue.try_recv().unwrap(), id);
+}
+
+#[tokio::test]
+async fn cancellation_after_provider_gate_is_terminal_but_does_not_replay_provider() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let selected = owner.selection();
+        owner
+            .permit_regenerate_dispatch(child, handle.id(), selected)
+            .unwrap();
+    }
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Cancelled);
+    let owner = fixture.timeline.lock().unwrap();
+    assert!(matches!(
+        owner
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    assert_eq!(owner.selection().branch_id, child);
+}
+
+#[tokio::test]
+async fn already_accepted_reply_wins_over_handle_cancellation() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let accepted = {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let turn = owner
+            .capture_turn(
+                fixture.source.character,
+                Some(fixture.source.original_input),
+                owner.anchor(),
+            )
+            .unwrap();
+        owner
+            .append_reply(crate::timeline::GeneratedReply {
+                request: handle.id(),
+                intent: TurnIntent::Reply(fixture.source.original_input),
+                turn,
+                expected_revision: 0,
+                content: json!("accepted"),
+                audience: crate::timeline::conversation::ConversationAudience::private_to(
+                    fixture.source.character,
+                ),
+                effects: Vec::new(),
+            })
+            .unwrap()
+    };
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert!(!handle.record.cancellation.is_cancelled());
+    let owner = fixture.timeline.lock().unwrap();
+    assert_eq!(
+        owner
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+}
+
+#[tokio::test]
+async fn shutdown_cancel_all_persists_regenerate_and_leaves_regular_requests_unfenced() {
+    let fixture = fixture(TimelineConfig::Transient, 3, true).await;
+    let child = BranchId::new();
+    let regenerate = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let regular = fixture
+        .api
+        .send(crate::request::ReplyRequest::new(
+            fixture.source.character,
+            fixture.source.original_input,
+            crate::request::RequestSource::Presenter,
+        ))
+        .unwrap();
+    fixture.api.registry.cancel_all();
+    assert!(regenerate.snapshot().state.is_terminal());
+    assert!(regular.snapshot().state.is_terminal());
+    let owner = fixture.timeline.lock().unwrap();
+
+    assert!(matches!(
+        owner
+            .reconcile_regenerate(child, regenerate.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn failed_sqlite_abandonment_does_not_claim_volatile_cancellation() {
+    let db = std::env::temp_dir().join(format!("b66-abandon-abort-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let selection = fixture.timeline.lock().unwrap().selection();
+    let revision: i64 = connection
+        .query_row(
+            "SELECT revision FROM timeline_revision WHERE slot=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection.execute_batch("CREATE TRIGGER b66_fail BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected abandonment failure'); END;").unwrap();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert!(!handle.record.cancellation.is_cancelled());
+    assert_eq!(fixture.timeline.lock().unwrap().selection(), selection);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT revision FROM timeline_revision WHERE slot=1",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        revision
+    );
+    connection.execute_batch("DROP TRIGGER b66_fail;").unwrap();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Cancelled);
+    drop(connection);
+    drop(fixture);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[tokio::test]
+async fn accepting_phase_cannot_override_a_committed_handle_abandonment() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    assert!(record.text_ready(Arc::from("draft")));
+    assert!(record.begin_accepting());
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Requested);
+    record.finish_cancelled();
+    assert!(matches!(
+        handle.snapshot().state,
+        crate::request::RequestState::Cancelled
+    ));
+    let owner = fixture.timeline.lock().unwrap();
+    assert!(matches!(
+        owner
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn handle_cancel_vs_independent_sqlite_acceptance_has_one_durable_winner() {
+    let db = std::env::temp_dir().join(format!("b66-cancel-accept-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let mut opponent = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let turn = opponent
+        .capture_turn(
+            fixture.source.character,
+            Some(fixture.source.original_input),
+            opponent.anchor(),
+        )
+        .unwrap();
+    let gate = Arc::new(std::sync::Barrier::new(3));
+    let cancelling = handle.clone();
+    let source = fixture.source;
+    let request = handle.id();
+    let results = std::thread::scope(|scope| {
+        let started = Arc::clone(&gate);
+        let cancel = scope.spawn(move || {
+            started.wait();
+            cancelling.cancel()
+        });
+        let started = Arc::clone(&gate);
+        let accept = scope.spawn(move || {
+            started.wait();
+            opponent.append_reply(crate::timeline::GeneratedReply {
+                request,
+                intent: TurnIntent::Reply(source.original_input),
+                turn,
+                expected_revision: 0,
+                content: json!("racing reply"),
+                audience: crate::timeline::conversation::ConversationAudience::private_to(
+                    source.character,
+                ),
+                effects: Vec::new(),
+            })
+        });
+        gate.wait();
+        (cancel.join().unwrap(), accept.join().unwrap())
+    });
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    match reopened
+        .reconcile_regenerate(child, request)
+        .unwrap()
+        .outcome
+    {
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_) => {
+            assert!(matches!(
+                results.0,
+                crate::request::CancelResult::Cancelled | crate::request::CancelResult::Requested
+            ));
+            assert!(results.1.is_err());
+        }
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(id) => {
+            assert_eq!(results.0, crate::request::CancelResult::TooLate);
+            assert_eq!(results.1, Ok(id));
+            assert!(!handle.record.cancellation.is_cancelled());
+        }
+        other => panic!("incomplete cancellation/acceptance resolution: {other:?}"),
+    }
+    drop((reopened, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn handle_abandonment_reopens_and_survives_native_archive() {
+    use crate::timeline::storage::{SqliteTimelineRepository, archive, assets::TimelineAssetStore};
+    let db = std::env::temp_dir().join(format!("b66-archive-{}.db", uuid::Uuid::new_v4()));
+    let dst = std::env::temp_dir().join(format!("b66-archive-dst-{}.db", uuid::Uuid::new_v4()));
+    let asset_root =
+        std::env::temp_dir().join(format!("b66-archive-assets-{}", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Cancelled);
+    let saved = fixture
+        .timeline
+        .lock()
+        .unwrap()
+        .reconcile_regenerate(child, handle.id())
+        .unwrap()
+        .outcome;
+    drop(fixture);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        saved
+    );
+    drop(reopened);
+    let assets = TimelineAssetStore::new(&asset_root, 1024 * 1024).unwrap();
+    let source = SqliteTimelineRepository::open(&db).unwrap();
+    let bytes = archive::export_sqlite(&source, session, &assets).unwrap();
+    let mut target = SqliteTimelineRepository::open(&dst).unwrap();
+    archive::import_sqlite(&mut target, &bytes, &assets).unwrap();
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: dst.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        saved
+    );
+    drop((reopened, source, target));
+    for db in [&db, &dst] {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+        }
+    }
+    let _ = std::fs::remove_dir_all(asset_root);
+}
+
+#[tokio::test]
+async fn failed_regenerate_terminalizes_durable_request_before_volatile_finish() {
+    let fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    record.finish(crate::request::RequestOutcome::InternalError(
+        Arc::<str>::from("provider failed").into(),
+    ));
+    assert!(matches!(
+        handle.snapshot().state,
+        crate::request::RequestState::Finished(_)
+    ));
+    let owner = fixture.timeline.lock().unwrap();
+    assert!(matches!(
+        owner
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn handle_cancel_after_selection_invalidation_persists_on_original_child() {
+    let db = std::env::temp_dir().join(format!("b66-detached-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let selection = owner.selection();
+        owner.select_branch(root, selection).unwrap();
+    }
+    assert_eq!(handle.cancel(), crate::request::CancelResult::Cancelled);
+    let owner = fixture.timeline.lock().unwrap();
+    assert_eq!(owner.selection().branch_id, root);
+    assert!(matches!(
+        owner
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(owner);
+    drop(fixture);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.selection().branch_id, root);
+    assert!(matches!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}

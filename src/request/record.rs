@@ -17,6 +17,7 @@ pub(crate) struct RequestRecord {
     settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
     admitted_preset: Option<crate::generation::GenerationPreset>,
     admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+    cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
 }
 
 struct Execution {
@@ -106,6 +107,7 @@ impl RequestRecord {
         admitted_preset: Option<crate::generation::GenerationPreset>,
         admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
         registry: Weak<RegistryInner>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
     ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
             metadata: RequestMetadata {
@@ -150,6 +152,7 @@ impl RequestRecord {
             settings_snapshot,
             admitted_preset,
             admitted_prompt,
+            cancel_ingress,
         })
     }
 
@@ -235,11 +238,32 @@ impl RequestRecord {
     }
 
     pub(crate) fn cancel_with_reason(&self, reason: CancelReason) -> CancelResult {
+        if let Some(ingress) = &self.cancel_ingress {
+            {
+                let inner = self.inner.lock().expect("request mutex poisoned");
+                if inner.snapshot.state.is_terminal() {
+                    return CancelResult::AlreadyFinished;
+                }
+                if inner.phase == EffectPhase::Applied {
+                    return CancelResult::TooLate;
+                }
+            }
+            let request = self.snapshot().metadata.id;
+            if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                tracing::warn!(%request, %error, "durable regenerate abandonment refused");
+                return CancelResult::TooLate;
+            }
+        }
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal() {
             return CancelResult::AlreadyFinished;
         }
-        if matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied) {
+        if self.cancel_ingress.is_none()
+            && matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied)
+        {
+            return CancelResult::TooLate;
+        }
+        if inner.phase == EffectPhase::Applied {
             return CancelResult::TooLate;
         }
         inner.cancel_reason.get_or_insert(reason);
@@ -289,11 +313,27 @@ impl RequestRecord {
     }
 
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
+        if matches!(
+            outcome,
+            RequestOutcome::TextGenerationFailed(_) | RequestOutcome::InternalError(_)
+        ) && let Some(ingress) = &self.cancel_ingress
+        {
+            let should_abandon = {
+                let inner = self.inner.lock().expect("request mutex poisoned");
+                !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied
+            };
+            if should_abandon {
+                let request = self.snapshot().metadata.id;
+                if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                    tracing::warn!(%request, %error, "failed to persist terminal regenerate failure");
+                }
+            }
+        }
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal() {
             return;
         }
-        let cancelled = inner.phase == EffectPhase::Working && self.cancellation.is_cancelled();
+        let cancelled = inner.phase != EffectPhase::Applied && self.cancellation.is_cancelled();
         if inner.phase != EffectPhase::Applied {
             inner.phase = if matches!(
                 outcome,
@@ -325,7 +365,8 @@ impl RequestRecord {
     pub(crate) fn finish_cancelled(&self) {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.state.is_terminal()
-            || matches!(inner.phase, EffectPhase::Accepting | EffectPhase::Applied)
+            || inner.phase == EffectPhase::Applied
+            || (inner.phase == EffectPhase::Accepting && !self.cancellation.is_cancelled())
         {
             return;
         }

@@ -22,7 +22,15 @@ use crate::{
     },
 };
 
-pub(crate) trait RequestIngress: Send + Sync {
+pub(crate) trait RegenerateCancellation: Send + Sync {
+    fn abandon_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), String>;
+}
+
+pub(crate) trait RequestIngress: RegenerateCancellation {
     fn publish_conversation_message(
         &self,
         message: ConversationMessage,
@@ -195,13 +203,14 @@ impl ChatApiState {
                 request.timeline_fence(),
             )?
         };
-        let handle = self.registry.register_with_configuration(
+        let handle = self.registry.register_with_regenerate_cancellation(
             Box::new(request),
             id,
             admission,
             Some(settings),
             Some(preset),
             prompt,
+            regeneration.map(|_| Arc::clone(&self.ingress) as Arc<dyn RegenerateCancellation>),
         );
         permit.send(id);
         Ok(handle)

@@ -755,6 +755,52 @@ impl SessionTimeline {
         Ok(id)
     }
 
+    /// A request may be cancelled after its selected child becomes historical.
+    /// The admitted RequestId and native branch head CAS, rather than the
+    /// current UI selection, fence this terminal append.
+    pub(crate) fn abandon_regenerate_request(
+        &mut self,
+        child: BranchId,
+        request: RequestId,
+        admitted: TimelineSelection,
+    ) -> Result<EventId, domain::TimelineError> {
+        if child != admitted.branch_id {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let receipt =
+            self.regenerate_admission_receipt(child)?
+                .ok_or(domain::TimelineError::Invalid(
+                    "branch has no durable regenerate admission",
+                ))?;
+        if receipt.request != request {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let world = self.store.world(child)?;
+        if let Some(fact) = domain::abandoned_regenerate(&world, request.0)? {
+            return Ok(fact.draft.id);
+        }
+        if self
+            .store
+            .accepted_reply_at(child, receipt.character, request.0, None)?
+            .is_some()
+        {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let mut draft = EventDraft::new(EventKind::RegenerateAbandoned);
+        let id = draft.id;
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.0.to_string()));
+        self.store.append(
+            child,
+            self.store.branch(child)?.head_sequence,
+            &format!("regenerate-abandon:{}", request.0),
+            json!({"request_id": request.0.to_string()}),
+            vec![draft],
+        )?;
+        Ok(id)
+    }
+
     fn validate_regenerate_source(
         &self,
         source: RegenerateSource,

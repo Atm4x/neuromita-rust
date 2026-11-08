@@ -12,7 +12,7 @@ mod trace;
 pub use crate::character::AcceptedResponse;
 pub use crate::identity::RequestId;
 pub use crate::interaction::{InputError, TurnIntent, UserInput};
-pub(crate) use admission::{ChatApiState, RequestIngress};
+pub(crate) use admission::{ChatApiState, RegenerateCancellation, RequestIngress};
 pub use diagnostics::{
     ActualUsage, BoundedText, DiagnosticErrorSummary, DiagnosticLookupError, DiagnosticOutcome,
     DiagnosticRecord, DiagnosticScope, DiagnosticSection, DiagnosticSelection, DiagnosticState,

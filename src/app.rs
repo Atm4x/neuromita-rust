@@ -49,8 +49,8 @@ use crate::{
     prompts::PromptCatalog,
     reminders::{ReminderConfig, ReminderService},
     request::{
-        ChatApiState, MessageHandler, ProviderDispatchFence, RequestId, RequestIngress,
-        RequestRegistry, SubmitError,
+        ChatApiState, MessageHandler, ProviderDispatchFence, RegenerateCancellation, RequestId,
+        RequestIngress, RequestRegistry, SubmitError,
     },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
@@ -342,6 +342,21 @@ impl ProviderDispatchFence for TimelineRequestIngress {
         }
         timeline
             .permit_regenerate_dispatch(child, request, admission.selection)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl RegenerateCancellation for TimelineRequestIngress {
+    fn abandon_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), String> {
+        self.timeline
+            .lock()
+            .map_err(|_| "timeline mutex poisoned".to_owned())?
+            .abandon_regenerate_request(admission.selection.branch_id, request, admission.selection)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
