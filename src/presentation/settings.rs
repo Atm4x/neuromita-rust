@@ -5,7 +5,8 @@ use tokio::sync::watch;
 use crate::{
     character::CharacterId,
     settings::{
-        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, OperationPresets,
+        AppSettings, AsrPreferences, CharacterSettings, CharactersSettings, InterfaceSettings,
+        OperationPresets,
         PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError, SettingsOwner,
         SettingsSnapshot, SettingsTransfer, SpeechSettings, TtsPreferences, VoiceSettings, Volume,
     },
@@ -198,7 +199,31 @@ impl CharacterSettingsPresenter {
     }
 }
 
+/// A draft based on one authoritative Settings Owner revision and one stable identity.
+/// It is not a second profile store, and a successful edit is not a disk-save receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterProfileSnapshot {
+    character: CharacterId,
+    revision: u64,
+    settings: CharacterSettings,
+}
+
+impl CharacterProfileSnapshot {
+    pub fn character(&self) -> CharacterId {
+        self.character
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn settings(&self) -> &CharacterSettings {
+        &self.settings
+    }
+}
+
 pub struct CharactersSettingsPresenter {
+    owner: Arc<SettingsOwner>,
     characters: BTreeMap<CharacterId, CharacterSettingsPresenter>,
 }
 
@@ -209,10 +234,49 @@ impl CharactersSettingsPresenter {
                 .into_iter()
                 .map(|id| (id, CharacterSettingsPresenter::new(Arc::clone(&owner), id)))
                 .collect(),
+            owner,
         }
     }
+
     pub fn for_character(&self, character: CharacterId) -> &CharacterSettingsPresenter {
         &self.characters[&character]
+    }
+
+    /// Capture an editable per-character profile from the canonical settings snapshot.
+    pub fn profile(&self, character: CharacterId) -> Result<CharacterProfileSnapshot, SettingsError> {
+        let snapshot = self.owner.snapshot::<CharactersSettings>()?;
+        Ok(CharacterProfileSnapshot {
+            character,
+            revision: snapshot.revision,
+            settings: snapshot.value.for_character(character).clone(),
+        })
+    }
+
+    /// Commit all supported profile fields together, or none of them.
+    ///
+    /// A concurrent edit to any settings area yields Conflict instead of
+    /// overwriting it. Storage acknowledgement is observed separately through
+    /// SettingsPresenter::observe / PersistenceState.
+    pub fn save_profile(
+        &self,
+        expected: &CharacterProfileSnapshot,
+        edited: CharacterSettings,
+    ) -> Result<CharacterProfileSnapshot, SettingsError> {
+        let snapshot = self.owner.snapshot::<CharactersSettings>()?;
+        if snapshot.revision != expected.revision {
+            return Err(SettingsError::Conflict {
+                expected: expected.revision,
+                actual: snapshot.revision,
+            });
+        }
+        let mut values = snapshot.value;
+        *values.for_character_mut(expected.character) = edited;
+        let saved = self.owner.replace::<CharactersSettings>(expected.revision, values)?;
+        Ok(CharacterProfileSnapshot {
+            character: expected.character,
+            revision: saved.revision,
+            settings: saved.value.for_character(expected.character).clone(),
+        })
     }
 }
 
@@ -404,6 +468,78 @@ mod tests {
         assert_eq!(presenter.asr.preferences.get(), asr);
         assert_eq!(owner.snapshot_all().unwrap().values.speech.tts, tts);
         assert_eq!(owner.snapshot_all().unwrap().values.speech.asr, asr);
+    }
+
+    #[tokio::test]
+    async fn character_profile_edit_is_atomic_isolated_and_persistent() {
+        use crate::lifecycle::Lifecycle;
+        use tokio_util::sync::CancellationToken;
+
+        let repository = Arc::new(MemorySettingsRepository::new());
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: repository.clone(),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let original = presenter.characters.profile(CharacterId::Crazy).unwrap();
+
+        let mut edited = original.settings().clone();
+        edited.prompt_set = Some("Default".into());
+        edited.presets.react = PresetSelection::Specific(PresetId(42));
+        let accepted = presenter
+            .characters
+            .save_profile(&original, edited.clone())
+            .unwrap();
+        assert_eq!(accepted.revision(), original.revision() + 1);
+        assert_eq!(accepted.character(), CharacterId::Crazy);
+        assert_eq!(accepted.settings(), &edited);
+        assert_eq!(
+            presenter.characters.profile(CharacterId::Kind).unwrap().settings(),
+            &CharacterSettings::default()
+        );
+
+        let error = presenter
+            .characters
+            .save_profile(&original, CharacterSettings::default())
+            .unwrap_err();
+        assert!(matches!(error, SettingsError::Conflict { .. }));
+
+        let mut invalid = accepted.settings().clone();
+        invalid.prompt_set = Some("../invalid".into());
+        invalid.presets.reply = PresetSelection::Specific(PresetId(24));
+        assert!(matches!(
+            presenter.characters.save_profile(&accepted, invalid),
+            Err(SettingsError::Validation(_))
+        ));
+        assert_eq!(
+            presenter.characters.profile(CharacterId::Crazy).unwrap().settings(),
+            &edited
+        );
+
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(lifecycle.run(stop.clone()));
+        owner.flush().await.unwrap();
+        stop.cancel();
+        task.await.unwrap().unwrap();
+
+        let restored = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::Stored,
+            repository,
+        })
+        .await
+        .unwrap();
+        let restored = SettingsPresenter::new(restored.owner());
+        assert_eq!(
+            restored.characters.profile(CharacterId::Crazy).unwrap().settings(),
+            &edited
+        );
+        assert_eq!(
+            restored.characters.profile(CharacterId::Kind).unwrap().settings(),
+            &CharacterSettings::default()
+        );
     }
 
     #[tokio::test]
