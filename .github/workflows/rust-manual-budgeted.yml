@@ -23,8 +23,11 @@ on:
           - core
           - full
 
+# The runner may report only commit status (not push code or edit PRs).
+# The token is passed to the final status step only, never to Rust builds.
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   rust:
@@ -60,6 +63,7 @@ jobs:
       CHECK_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || startsWith(github.event.ref, 'ci/format/') && 'format' || startsWith(github.event.ref, 'ci/core/') && 'core' || 'full' }}
     steps:
       - name: Checkout exactly the snapshot selected by the trigger
+        id: checkout
         uses: actions/checkout@v4
         with:
           # create: immutable SHA from the branch-creation event.
@@ -71,6 +75,7 @@ jobs:
       # On automatic gates, verify that the agent created a CI-only child
       # commit from the ready revision, never a modified source snapshot.
       - name: Verify CI gate is a single workflow-only commit
+        id: gate
         if: ${{ github.event_name == 'create' }}
         shell: bash
         run: |
@@ -90,12 +95,14 @@ jobs:
           echo "Ready source commit: $(git rev-parse HEAD^)"
 
       - name: Show source snapshot and check scope
+        id: snapshot
         run: |
           echo "Scope: ${CHECK_SCOPE}"
           git log -1 --format='commit: %H%nsubject: %s'
           git status --short
 
       - name: Install pinned Rust toolchain
+        id: toolchain
         run: |
           rustup toolchain install 1.89.0 --profile minimal --component rustfmt,clippy
           rustup default 1.89.0
@@ -103,15 +110,18 @@ jobs:
           cargo --version
 
       - name: Formatting (cheap; fail before compilation)
+        id: format
         run: cargo fmt --all -- --check
 
       - name: Install minimal native dependencies
+        id: native
         if: ${{ env.CHECK_SCOPE != 'format' }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev
 
       - name: Install GUI native dependencies
+        id: gui_native
         if: ${{ env.CHECK_SCOPE == 'full' }}
         run: |
           sudo apt-get install -y --no-install-recommends \
@@ -119,25 +129,127 @@ jobs:
             libxi-dev libxcursor-dev libgl1-mesa-dev libudev-dev
 
       - name: Core cargo check
+        id: core_check
         if: ${{ env.CHECK_SCOPE == 'core' }}
         run: cargo check --locked --offline --all-targets
 
       - name: Core clippy
+        id: core_clippy
         if: ${{ env.CHECK_SCOPE == 'core' }}
         run: cargo clippy --locked --offline --all-targets -- -D warnings
 
       - name: Core library tests
+        id: core_test
         if: ${{ env.CHECK_SCOPE == 'core' }}
         run: cargo test --locked --offline --lib
 
       - name: Full cargo check (including GUI)
+        id: full_check
         if: ${{ env.CHECK_SCOPE == 'full' }}
         run: cargo check --locked --offline --all-features --all-targets
 
       - name: Full clippy (including GUI)
+        id: full_clippy
         if: ${{ env.CHECK_SCOPE == 'full' }}
         run: cargo clippy --locked --offline --all-features --all-targets -- -D warnings
 
       - name: Full tests (including GUI)
+        id: full_test
         if: ${{ env.CHECK_SCOPE == 'full' }}
         run: cargo test --locked --offline --all-features --all-targets
+
+      # GitHub connector can read commit statuses but cannot list create-event
+      # workflow runs. A status with target_url gives it the run ID for job logs.
+      # This runs on the SAME runner, with no extra job, cache or artifact.
+      - name: Publish searchable result for agents
+        id: report
+        if: ${{ always() }}
+        env:
+          GH_STATUS_TOKEN: ${{ github.token }}
+          GH_JOB_STATUS: ${{ job.status }}
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STEP_OUTCOMES: >-
+            checkout=${{ steps.checkout.outcome }};
+            gate=${{ steps.gate.outcome }};
+            snapshot=${{ steps.snapshot.outcome }};
+            toolchain=${{ steps.toolchain.outcome }};
+            format=${{ steps.format.outcome }};
+            native=${{ steps.native.outcome }};
+            gui-native=${{ steps.gui_native.outcome }};
+            core-check=${{ steps.core_check.outcome }};
+            core-clippy=${{ steps.core_clippy.outcome }};
+            core-test=${{ steps.core_test.outcome }};
+            full-check=${{ steps.full_check.outcome }};
+            full-clippy=${{ steps.full_clippy.outcome }};
+            full-test=${{ steps.full_test.outcome }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.error
+          import urllib.request
+
+          raw = os.environ["STEP_OUTCOMES"]
+          stages = [part.strip().split("=", 1) for part in raw.split(";") if "=" in part]
+          failed_stage = next((name for name, outcome in stages if outcome == "failure"), None)
+          job_status = os.environ["GH_JOB_STATUS"]
+          state = "success" if job_status == "success" else "failure"
+          detail = failed_stage or ("all checks passed" if state == "success" else job_status)
+          scope = os.environ["CHECK_SCOPE"]
+          run_url = os.environ["CI_RUN_URL"]
+          description = f"{state}: {detail} ({scope})"[:140]
+          context = f"ci/gate/{scope}"
+
+          def rev_parse(revision):
+              try:
+                  return subprocess.check_output(
+                      ["git", "rev-parse", "--verify", revision],
+                      text=True, stderr=subprocess.DEVNULL,
+                  ).strip()
+              except (OSError, subprocess.CalledProcessError):
+                  return None
+
+          # Post to gate SHA and, for automatic gates, to the original source
+          # SHA. Both are readable by the existing GitHub commit-status tool.
+          shas = [rev_parse("HEAD") or os.environ["GITHUB_SHA"]]
+          if os.environ["GITHUB_EVENT_NAME"] == "create":
+              parent = rev_parse("HEAD^")
+              if parent and parent not in shas:
+                  shas.append(parent)
+
+          payload = {
+              "state": state,
+              "context": context,
+              "description": description,
+              "target_url": run_url,
+          }
+          token = os.environ["GH_STATUS_TOKEN"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          for sha in shas:
+              url = f"https://api.github.com/repos/{repository}/statuses/{sha}"
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  print(f"Published {context} {state} to {sha}: HTTP {response.status}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as file:
+                  file.write(
+                      f"### {context}: {state}\\n\\n"
+                      f"- Source commit: \\x60{shas[-1]}\\x60\\n"
+                      f"- First failed stage: \\x60{detail}\\x60\\n"
+                      f"- [Complete job log]({run_url})\\n"
+                  )
+          PY
