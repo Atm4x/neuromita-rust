@@ -33,6 +33,21 @@ pub struct RegenerateConfigurationReference {
     pub prompt_set: Option<String>,
 }
 
+/// Durable evidence only. Unknown means the process may have crashed before,
+/// during, or after provider dispatch. It is never permission to requeue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegenerateRecoveryOutcome {
+    DispatchUnknown,
+    AcceptedReply(EventId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegenerateRecoverySnapshot {
+    pub admission: RegenerateAdmissionReceipt,
+    pub selection: super::selection::TimelineSelection,
+    pub outcome: RegenerateRecoveryOutcome,
+}
+
 impl RegenerateAdmissionReceipt {
     pub(crate) const KEY: &'static str = "regenerate_admission";
 

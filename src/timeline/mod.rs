@@ -28,7 +28,10 @@ mod memory_operations;
 mod regenerate_owner_tests;
 mod regenerate_receipt;
 #[doc(hidden)]
-pub use regenerate_receipt::{RegenerateAdmissionReceipt, RegenerateConfigurationReference};
+pub use regenerate_receipt::{
+    RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoveryOutcome,
+    RegenerateRecoverySnapshot,
+};
 
 // Administrative purge is not reachable from generation or runtime until an authorized UI exists.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -562,6 +565,72 @@ impl SessionTimeline {
             .find(|fact| fact.branch_id == branch && fact.draft.kind == EventKind::BranchCreated)
             .ok_or(domain::TimelineError::NotFound)?;
         RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)
+    }
+
+    /// Inspect one admitted historical fork after an uncertain shutdown.
+    /// This is a strictly read-only operation: an absent accepted reply means
+    /// dispatch is unknown, NOT cancelled, failed, or safe to repeat.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn reconcile_regenerate(
+        &self,
+        child: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoverySnapshot, domain::TimelineError> {
+        let info = self.store.branch(child)?;
+        if info.parent.is_none() {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate recovery requires a child branch",
+            ));
+        }
+        let admission =
+            self.regenerate_admission_receipt(child)?
+                .ok_or(domain::TimelineError::Invalid(
+                    "branch has no durable regenerate admission",
+                ))?;
+        if admission.request != request {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let outcome =
+            match self
+                .store
+                .accepted_reply_at(child, admission.character, request.0, None)?
+            {
+                None => RegenerateRecoveryOutcome::DispatchUnknown,
+                Some(accepted) => {
+                    if accepted.branch_id != child
+                        || accepted.sequence <= info.fork_sequence + 1
+                        || accepted.draft.links.len() != 1
+                        || accepted.draft.links[0].relation != CausalRelation::ReplyTo
+                        || accepted.draft.links[0].event_id != admission.original_input
+                        || accepted
+                            .draft
+                            .payload
+                            .get("reply_to")
+                            .and_then(|value| value.as_str())
+                            != Some(admission.original_input.0.to_string().as_str())
+                    {
+                        return Err(domain::TimelineError::Invalid(
+                            "regenerate acceptance has invalid causal source",
+                        ));
+                    }
+                    RegenerateRecoveryOutcome::AcceptedReply(accepted.draft.id)
+                }
+            };
+        #[cfg(feature = "sqlite-system")]
+        let selection = if let Some(repository) = &self.selection_repository {
+            repository
+                .selection()?
+                .ok_or(domain::TimelineError::NotFound)?
+        } else {
+            self.selection()
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        let selection = self.selection();
+        Ok(RegenerateRecoverySnapshot {
+            admission,
+            selection,
+            outcome,
+        })
     }
 
     fn validate_regenerate_source(
@@ -1445,6 +1514,29 @@ impl SessionTimeline {
         } = reply;
         let character = turn.character;
         self.assert_turn(turn)?;
+        // The durable fork receipt is authoritative for the new RequestId.
+        // Validate before constructing any reply/effect drafts and before the
+        // guarded append, so an unrelated callback cannot use that identity.
+        if self.store.branch(self.branch)?.parent.is_some()
+            && let Some(admitted) = self.regenerate_admission_receipt(self.branch)?
+            && admitted.request == request
+        {
+            if intent != TurnIntent::Reply(admitted.original_input)
+                || character != admitted.character
+                || turn.selection.branch_id != admitted.child_branch
+            {
+                return Err(domain::TimelineError::Invalid(
+                    "regenerate acceptance violates durable admission",
+                ));
+            }
+            if self
+                .store
+                .accepted_reply_at(self.branch, character, request.0, None)?
+                .is_some()
+            {
+                return Err(domain::TimelineError::Conflict);
+            }
+        }
         let context = ContextAnchor {
             branch_id: turn.selection.branch_id.0,
             through: turn.context_head,
