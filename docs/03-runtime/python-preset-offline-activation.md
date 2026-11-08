@@ -224,3 +224,46 @@ These tests exercise real process termination and Windows sharing rules, but
 do not certify system power-loss durability, arbitrary foreign writers,
 Windows ACL inheritance, or user-facing GUI confirmation. The offline
 stopped-application requirement remains mandatory.
+
+## D36 — Exact Python schema-source binding for offline activation
+
+The **current** `import_python_presets` CLI writes a bounded, value-free
+`python-source-schema-inventory.json` into its private reviewed directory.
+The `activate_python_presets` CLI must now receive the exact original Python
+`Settings/APIModelSchemas` directory **for every apply and settings preview**:
+
+```text
+cargo run --locked --offline --example activate_python_presets -- \
+  --review-imported-settings /absolute/review /absolute/UserData \
+  --confirm-stopped --python-schemas-dir /Python/Settings/APIModelSchemas
+
+cargo run --locked --offline --example activate_python_presets -- \
+  --apply-with-imported-settings /absolute/review /absolute/UserData \
+  --confirm-stopped --python-schemas-dir /Python/Settings/APIModelSchemas \
+  --expect-source-sha256 SOURCE_SHA256 --expect-target-sha256 TARGET_SHA256 \
+  --accept-skipped-key UNKNOWN_KEY
+```
+
+The same `--python-schemas-dir` flag is required for `--apply` (two-file)
+and `--apply-with-preferences` (three-file). The directory may be absent, but its
+**absence must have been recorded by staging** and must still hold. `--recover`
+uses only the Rust journal and requires no original Python source path.
+
+The activation boundary verifies the staged inventory bytes against a fresh
+read-only scan of the explicitly supplied source path, validates the exact
+recognized factory/ignored-g4f classifications and detects changes in file
+names, source bytes and directory presence. This happens under the existing
+Rust storage locks and again just before creating the transaction journal;
+no partial target publication occurs on a rejected review. A reviewed stage
+cannot be activated through the older `PresetActivation::apply*` APIs without
+an explicit schema review. Conversely, a legacy stage **without** the inventory
+cannot be upgraded merely by passing a newly scanned source directory; stage
+it again with the audited staging API first.
+
+For library compatibility, the old API can still activate **legacy unaudited
+stages that do not contain a schema inventory**, but that path does *not*
+certify model-schema parity. The operator CLI now uses only the source-bound
+APIs. The inventory is not a backup of custom schema definitions, and
+unsupported schemas remain blocked rather than being installed or silently
+replaced. Actual Python custom-schema conversion, GUI workflow, ACL inheritance,
+foreign writers and physical power-loss durability are outside this acceptance.

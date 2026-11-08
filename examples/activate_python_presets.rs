@@ -1,5 +1,7 @@
 //! Explicit offline activation and recovery of reviewed Python preset data.
-use neuromita::settings::{PresetActivation, PresetRecovery, PythonUnmappedPolicy};
+use neuromita::settings::{
+    PresetActivation, PresetRecovery, PythonSchemaDirectoryReview, PythonUnmappedPolicy,
+};
 use std::{path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
@@ -17,6 +19,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.iter().any(|a| a == "--allow-unmapped") {
         return Err("--allow-unmapped is unsafe for combined activation; use --review-imported-settings and exact --expect-source-sha256 / --accept-skipped-key confirmations".into());
     }
+    let schema_source = take_option(&mut args, "--python-schemas-dir")?;
+    let schemas = match schema_source {
+        Some(source) => Some(PythonSchemaDirectoryReview::inspect(&PathBuf::from(
+            source,
+        ))?),
+        None => None,
+    };
     let expected_source = take_option(&mut args, "--expect-source-sha256")?;
     let expected_target = take_option(&mut args, "--expect-target-sha256")?;
     let mut accepted_skipped = Vec::new();
@@ -48,19 +57,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "explicit --confirm-stopped required: close Python and Rust applications first".into(),
         );
     }
+    if !matches!(args.as_slice(), [action, _] if action == "--recover") && schemas.is_none() {
+        return Err("--python-schemas-dir must explicitly identify the original Python APIModelSchemas directory, including when absent".into());
+    }
+    if matches!(args.as_slice(), [action, _] if action == "--recover") && schemas.is_some() {
+        return Err(
+            "recovery reads only the Rust transaction journal; omit --python-schemas-dir".into(),
+        );
+    }
     match args.as_slice() {
         [action, review, active] if action == "--apply" => {
-            PresetActivation::apply(&PathBuf::from(review), &PathBuf::from(active))?;
+            PresetActivation::apply_with_schemas(&PathBuf::from(review), &PathBuf::from(active), schemas.as_ref().unwrap())?;
             println!("Both preset files activated; no live process was modified");
         }
         [action, review, active] if action == "--apply-with-preferences" => {
-            PresetActivation::apply_with_preferences(&PathBuf::from(review), &PathBuf::from(active))?;
+            PresetActivation::apply_with_preferences_and_schemas(&PathBuf::from(review), &PathBuf::from(active), schemas.as_ref().unwrap())?;
             println!("Presets, credentials and active user selection installed; no live process was modified");
         }
         [action, review, active] if action == "--review-imported-settings" => {
-            let inspected = PresetActivation::review_imported_settings(
+            let inspected = PresetActivation::review_imported_settings_with_schemas(
                 &PathBuf::from(review),
                 &PathBuf::from(active),
+                schemas.as_ref().unwrap(),
             )?;
             println!("Python settings source SHA-256: {}", inspected.source_sha256);
             println!("Rust target settings SHA-256: {}", inspected.target_settings_sha256);
@@ -72,19 +90,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let review_path = PathBuf::from(review);
             let active_path = PathBuf::from(active);
             if let (Some(expected_source), Some(expected_target)) = (expected_source, expected_target) {
-                let inspected = PresetActivation::review_imported_settings(&review_path, &active_path)?;
+                let inspected = PresetActivation::review_imported_settings_with_schemas(&review_path, &active_path, schemas.as_ref().unwrap())?;
                 if expected_source != inspected.source_sha256
                     || expected_target != inspected.target_settings_sha256
                     || accepted_skipped != inspected.skipped_keys
                 {
                     return Err("review no longer matches the exact Python source digest and skipped key names; run --review-imported-settings again".into());
                 }
-                PresetActivation::apply_with_reviewed_settings(&review_path, &active_path, &inspected)?;
+                PresetActivation::apply_with_reviewed_settings_and_schemas(&review_path, &active_path, &inspected, schemas.as_ref().unwrap())?;
             } else {
-                PresetActivation::apply_with_imported_settings(
+                PresetActivation::apply_with_imported_settings_and_schemas(
                     &review_path,
                     &active_path,
                     PythonUnmappedPolicy::Reject,
+                    schemas.as_ref().unwrap(),
                 )?;
             }
             println!("Presets, credentials and reviewed Python settings merged in one recoverable transaction");
@@ -98,7 +117,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 PresetRecovery::DiscardedUnprepared => println!("Removed incomplete pre-activation journal; existing presets unchanged"),
             }
         }
-        _ => return Err("usage: activate_python_presets --apply REVIEW ACTIVE --confirm-stopped | --apply-with-preferences REVIEW ACTIVE --confirm-stopped | --review-imported-settings REVIEW ACTIVE --confirm-stopped | --apply-with-imported-settings REVIEW ACTIVE --confirm-stopped [--expect-source-sha256 HEX --expect-target-sha256 HEX --accept-skipped-key NAME ...] | --recover ACTIVE --confirm-stopped".into()),
+        _ => return Err("usage: activate_python_presets --apply REVIEW ACTIVE --confirm-stopped --python-schemas-dir PYTHON_DIR | --apply-with-preferences REVIEW ACTIVE --confirm-stopped --python-schemas-dir PYTHON_DIR | --review-imported-settings REVIEW ACTIVE --confirm-stopped --python-schemas-dir PYTHON_DIR | --apply-with-imported-settings REVIEW ACTIVE --confirm-stopped --python-schemas-dir PYTHON_DIR [--expect-source-sha256 HEX --expect-target-sha256 HEX --accept-skipped-key NAME ...] | --recover ACTIVE --confirm-stopped".into()),
     }
     Ok(())
 }

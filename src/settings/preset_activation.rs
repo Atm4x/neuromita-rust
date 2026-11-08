@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use super::python_presets::{parse_credentials, parse_unique_json, sha256_hex};
 use super::{
-    PresetId, PythonPresetStage, PythonSettingsMigration, PythonSettingsPreview,
-    PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
+    PresetId, PythonPresetStage, PythonSchemaDirectoryReview, PythonSettingsMigration,
+    PythonSettingsPreview, PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
 };
 use crate::generation::StoredPresets;
 
@@ -25,6 +25,7 @@ const MAX_BYTES: [usize; 2] = [8 * 1024 * 1024, 1_048_576];
 const FULL_NAMES: [&str; 3] = ["presets.json", "preset-credentials.json", "settings.json"];
 const SETTINGS_LIMIT: usize = 8 * 1024 * 1024;
 const SETTINGS_MARKER: &str = "includes-settings";
+const SCHEMA_MANIFEST: &str = "python-source-schema-inventory.json";
 
 fn target_names(with_settings: bool) -> &'static [&'static str] {
     if with_settings { &FULL_NAMES } else { &NAMES }
@@ -121,6 +122,33 @@ fn imported_settings_preview(
         skipped_keys: preview.skipped_keys.clone(),
     };
     Ok((preview, review))
+}
+
+/// Match the private stage inventory with an explicit, still-current source
+/// review. A staged inventory cannot be silently ignored by old entrypoints.
+/// An explicit source review cannot silently authorize a stage without one.
+fn verify_staged_schemas(
+    stage: &Path,
+    schemas: Option<&PythonSchemaDirectoryReview>,
+) -> Result<(), PresetActivationError> {
+    let staged = read_file(&stage.join(SCHEMA_MANIFEST), SETTINGS_LIMIT)?;
+    match (staged, schemas) {
+        (None, None) => Ok(()),
+        (Some(manifest), Some(schemas)) => {
+            schemas
+                .require_representable()
+                .and_then(|()| schemas.verify_unchanged())
+                .map_err(|_| PresetActivationError::SnapshotConflict)?;
+            let expected = serde_json::to_vec_pretty(schemas)
+                .map_err(|_| PresetActivationError::SnapshotConflict)?;
+            if manifest == expected {
+                Ok(())
+            } else {
+                Err(PresetActivationError::SnapshotConflict)
+            }
+        }
+        _ => Err(PresetActivationError::SnapshotConflict),
+    }
 }
 
 fn verified_staged_catalog(
@@ -220,6 +248,22 @@ impl PresetActivation {
         Self::apply_inner(review, active, None, SettingsActivationMode::PresetsOnly)
     }
 
+    /// Activate only a staged snapshot whose Python schema inventory still
+    /// equals the explicitly inspected source directory (including absence).
+    pub fn apply_with_schemas(
+        review: &Path,
+        active: &Path,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner_bound(
+            review,
+            active,
+            None,
+            SettingsActivationMode::PresetsOnly,
+            Some(schemas),
+        )
+    }
+
     /// Activate the reviewed Python user selection in the same recoverable
     /// transaction as presets and credentials. A valid existing settings.json
     /// is required; no default profile is synthesized.
@@ -229,6 +273,21 @@ impl PresetActivation {
         active: &Path,
     ) -> Result<(), PresetActivationError> {
         Self::apply_inner(review, active, None, SettingsActivationMode::WithSelection)
+    }
+
+    /// Three-file activation with exact Python schema-source attestation.
+    pub fn apply_with_preferences_and_schemas(
+        review: &Path,
+        active: &Path,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner_bound(
+            review,
+            active,
+            None,
+            SettingsActivationMode::WithSelection,
+            Some(schemas),
+        )
     }
 
     /// Import supported Python settings alongside presets, credentials and the
@@ -250,11 +309,44 @@ impl PresetActivation {
         )
     }
 
+    /// Import supported settings with exact Python-schema-source attestation.
+    pub fn apply_with_imported_settings_and_schemas(
+        review: &Path,
+        active: &Path,
+        unmapped: PythonUnmappedPolicy,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner_bound(
+            review,
+            active,
+            None,
+            SettingsActivationMode::ImportSupported(unmapped),
+            Some(schemas),
+        )
+    }
+
     /// Read-only review of the exact staged Python bytes and the current Rust profile.
     /// No journal or active settings data is modified by the preview.
     pub fn review_imported_settings(
         review: &Path,
         active: &Path,
+    ) -> Result<PythonSettingsImportReview, PresetActivationError> {
+        Self::review_imported_settings_bound(review, active, None)
+    }
+
+    /// Read-only settings approval also bound to the original Python schemas.
+    pub fn review_imported_settings_with_schemas(
+        review: &Path,
+        active: &Path,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<PythonSettingsImportReview, PresetActivationError> {
+        Self::review_imported_settings_bound(review, active, Some(schemas))
+    }
+
+    fn review_imported_settings_bound(
+        review: &Path,
+        active: &Path,
+        schemas: Option<&PythonSchemaDirectoryReview>,
     ) -> Result<PythonSettingsImportReview, PresetActivationError> {
         check_dir(review)?;
         check_dir(active)?;
@@ -265,6 +357,7 @@ impl PresetActivation {
         if fs::canonicalize(review)? == fs::canonicalize(active)? {
             return Err(PresetActivationError::UnsafePath);
         }
+        verify_staged_schemas(review, schemas)?;
         let (_, _, plan) = verified_staged_catalog(review, active)?;
         let (source, _) = verified_staged_settings(review, &plan)?;
         let current = read_file(&active.join("settings.json"), SETTINGS_LIMIT)?
@@ -291,11 +384,38 @@ impl PresetActivation {
         )
     }
 
+    /// Exact staged inventory, current source directory, preset/credentials and
+    /// settings receipts must all match before any target file is installed.
+    pub fn apply_with_reviewed_settings_and_schemas(
+        review: &Path,
+        active: &Path,
+        approved: &PythonSettingsImportReview,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner_bound(
+            review,
+            active,
+            None,
+            SettingsActivationMode::ImportReviewed(approved),
+            Some(schemas),
+        )
+    }
+
     fn apply_inner(
         review: &Path,
         active: &Path,
         fail_after_install: Option<usize>,
         mode: SettingsActivationMode,
+    ) -> Result<(), PresetActivationError> {
+        Self::apply_inner_bound(review, active, fail_after_install, mode, None)
+    }
+
+    fn apply_inner_bound(
+        review: &Path,
+        active: &Path,
+        fail_after_install: Option<usize>,
+        mode: SettingsActivationMode,
+        schemas: Option<&PythonSchemaDirectoryReview>,
     ) -> Result<(), PresetActivationError> {
         let with_settings = !matches!(mode, SettingsActivationMode::PresetsOnly);
         check_dir(review)?;
@@ -315,6 +435,7 @@ impl PresetActivation {
         if fs::canonicalize(review)? == fs::canonicalize(active)? {
             return Err(PresetActivationError::UnsafePath);
         }
+        verify_staged_schemas(review, schemas)?;
         let (mut new, mut old, expected_plan) = verified_staged_catalog(review, active)?;
         if with_settings {
             let (python_settings, selected) = verified_staged_settings(review, &expected_plan)?;
@@ -371,6 +492,9 @@ impl PresetActivation {
             parse_credentials(old[1].as_deref())
                 .map_err(|_| PresetActivationError::SnapshotConflict)?;
         }
+        // The last source scan is inside both cooperating Rust locks and
+        // immediately before the first journal write.
+        verify_staged_schemas(review, schemas)?;
         let journal = active.join(JOURNAL);
         create_private_dir(&journal)?;
         let prepared = (|| -> Result<(), PresetActivationError> {

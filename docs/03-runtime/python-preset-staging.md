@@ -44,3 +44,13 @@ The reviewed directory must be passed explicitly, even if absent. The Rust inspe
 The stage re-scans the catalog before writing the private sibling directory and immediately before publishing it; any appearance, disappearance or byte-level change refuses publication. `python-source-schema-inventory.json` is a non-authoritative audit artifact; it does **not** back up the external schema bytes. Preserve the full Python `Settings/APIModelSchemas` directory separately for a complete backup. An unsupported file requires a future typed model-schema converter, not an implicit skip.
 
 The scan protects against ordinary stopped-app source drift, not malicious writers swapping symlinks between filesystem calls. No interprocess lock exists with Python; actual cross-filesystem CAS, ACL inheritance, GUI UX and physical power-loss remain uncertified. Existing lower-level `PythonPresetStage::stage_new_directory()` intentionally remains an unaudited API for older tests and internal staged flows; a migration using it **cannot** claim the external-schema inventory gate.
+
+## D36 — Combined activation requires the same schema-source receipt
+
+A stage containing `python-source-schema-inventory.json` must be activated using
+`PresetActivation::*_and_schemas` or the current `activate_python_presets`
+example with `--python-schemas-dir`. The source directory is inspected again
+under the active Rust storage lock and immediately before journal creation;
+source drift, modified manifest bytes and absent inventories fail closed.
+Legacy unaudited stages cannot be presented as reviewed schema migrations.
+See [python-preset-offline-activation.md](python-preset-offline-activation.md).

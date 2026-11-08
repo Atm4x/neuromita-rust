@@ -1,7 +1,7 @@
 use neuromita::generation::PresetId;
 use neuromita::settings::{
     AppSettings, PresetActivation, PresetActivationError, PresetRecovery, PythonPresetStage,
-    PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
+    PythonSchemaDirectoryReview, PythonUnmappedPolicy, SettingsTransfer, StoredSettings,
 };
 use serde_json::json;
 use std::{
@@ -449,4 +449,202 @@ fn windows_exclusive_settings_handle_rejects_apply_without_a_partial_transaction
         PresetActivation::recover(&active).unwrap(),
         PresetRecovery::NoJournal
     );
+}
+
+fn schema_bound_fixture(
+    root: &Temp,
+    python_settings: &[u8],
+) -> (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    Vec<u8>,
+    PythonSchemaDirectoryReview,
+) {
+    let (presets, templates) = python_inputs();
+    let stage = PythonPresetStage::prepare(&presets, &templates).unwrap();
+    let (stage, _) = stage.with_preferences(python_settings).unwrap();
+    let schemas_parent = root.path().join("Python").join("Settings");
+    fs::create_dir_all(&schemas_parent).unwrap();
+    let source = schemas_parent.join("APIModelSchemas");
+    let schemas = PythonSchemaDirectoryReview::inspect(&source).unwrap();
+    let staged = root.path().join("review");
+    stage
+        .stage_new_directory_with_schemas(&staged, &schemas)
+        .unwrap();
+    let active = root.path().join("UserData");
+    fs::create_dir(&active).unwrap();
+    let mut settings = AppSettings::initial_profile();
+    settings.interface.font_size = 28;
+    let old = SettingsTransfer::new(StoredSettings {
+        revision: 7,
+        settings,
+    })
+    .unwrap()
+    .encode()
+    .unwrap();
+    fs::write(active.join("settings.json"), &old).unwrap();
+    (staged, active, source, old, schemas)
+}
+
+fn assert_no_publication(active: &Path, before: &[u8]) {
+    assert!(!active.join("presets.json").exists());
+    assert!(!active.join("preset-credentials.json").exists());
+    assert!(!active.join(".preset-activation-journal").exists());
+    assert_eq!(fs::read(active.join("settings.json")).unwrap(), before);
+}
+
+#[test]
+fn schema_bound_three_file_activation_requires_matching_source_and_inventory() {
+    let root = Temp::new();
+    let (staged, active, source, before, schemas) =
+        schema_bound_fixture(&root, br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN"}"#);
+    assert!(!source.exists());
+    assert!(matches!(
+        PresetActivation::apply_with_preferences(&staged, &active),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+    PresetActivation::apply_with_preferences_and_schemas(&staged, &active, &schemas).unwrap();
+    assert_eq!(
+        PresetActivation::recover(&active).unwrap(),
+        PresetRecovery::NoJournal
+    );
+    let updated = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(updated.settings.presets.active, PresetId(18));
+    assert_eq!(updated.revision, 8);
+    assert!(!active.join("python-source-schema-inventory.json").exists());
+}
+
+#[test]
+fn schema_bound_reviewed_settings_uses_exact_three_file_receipt() {
+    let root = Temp::new();
+    let (staged, active, _, before, schemas) = schema_bound_fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","PRIVATE_UNKNOWN":"not-logged"}"#,
+    );
+    assert!(matches!(
+        PresetActivation::review_imported_settings(&staged, &active),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    let approved =
+        PresetActivation::review_imported_settings_with_schemas(&staged, &active, &schemas)
+            .unwrap();
+    assert_eq!(approved.skipped_keys, ["PRIVATE_UNKNOWN"]);
+    assert!(matches!(
+        PresetActivation::apply_with_reviewed_settings(&staged, &active, &approved),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+    PresetActivation::apply_with_reviewed_settings_and_schemas(
+        &staged, &active, &approved, &schemas,
+    )
+    .unwrap();
+    let updated = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(updated.settings.presets.active, PresetId(18));
+    assert_eq!(
+        updated.settings.interface.language,
+        neuromita::settings::Language::English
+    );
+}
+
+#[test]
+fn schema_source_changes_or_appears_after_staging_prevent_any_write() {
+    for value in [br#"{"dialect":"g4f","revision":1}"#.as_slice(), br#"{}"#] {
+        let root = Temp::new();
+        let (staged, active, source, before, schemas) =
+            schema_bound_fixture(&root, br#"{"LAST_API_PRESET_ID":18}"#);
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("changed.json"), value).unwrap();
+        assert!(matches!(
+            PresetActivation::apply_with_preferences_and_schemas(&staged, &active, &schemas),
+            Err(PresetActivationError::SnapshotConflict)
+        ));
+        assert_no_publication(&active, &before);
+    }
+}
+
+#[test]
+fn changed_staged_schema_manifest_prevents_activation() {
+    let root = Temp::new();
+    let (staged, active, _, before, schemas) =
+        schema_bound_fixture(&root, br#"{"LAST_API_PRESET_ID":18}"#);
+    let manifest = staged.join("python-source-schema-inventory.json");
+    let mut parsed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    parsed["directory_present"] = json!(true);
+    fs::write(&manifest, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_schemas(&staged, &active, &schemas),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+}
+
+#[test]
+fn unaudited_stage_cannot_be_upgraded_by_only_passing_a_schema_source() {
+    let root = Temp::new();
+    let (staged, active, before) = fixture(&root, br#"{"LAST_API_PRESET_ID":18}"#);
+    let schemas = PythonSchemaDirectoryReview::inspect(root.path()).unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_preferences_and_schemas(&staged, &active, &schemas),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+}
+
+#[test]
+fn schema_source_changed_after_settings_review_invalidates_approval() {
+    let root = Temp::new();
+    let (staged, active, source, before, schemas) =
+        schema_bound_fixture(&root, br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN"}"#);
+    let approved =
+        PresetActivation::review_imported_settings_with_schemas(&staged, &active, &schemas)
+            .unwrap();
+    fs::create_dir(&source).unwrap();
+    assert!(matches!(
+        PresetActivation::apply_with_reviewed_settings_and_schemas(
+            &staged, &active, &approved, &schemas
+        ),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+}
+
+#[test]
+fn schema_bound_import_of_supported_settings_succeeds_without_omission_receipt() {
+    let root = Temp::new();
+    let (staged, active, _, before, schemas) = schema_bound_fixture(
+        &root,
+        br#"{"LAST_API_PRESET_ID":18,"LANGUAGE":"EN","REMINDERS_ENABLED":true}"#,
+    );
+    assert!(matches!(
+        PresetActivation::apply_with_imported_settings(
+            &staged,
+            &active,
+            PythonUnmappedPolicy::Reject
+        ),
+        Err(PresetActivationError::SnapshotConflict)
+    ));
+    assert_no_publication(&active, &before);
+    PresetActivation::apply_with_imported_settings_and_schemas(
+        &staged,
+        &active,
+        PythonUnmappedPolicy::Reject,
+        &schemas,
+    )
+    .unwrap();
+    let after = SettingsTransfer::decode(&fs::read(active.join("settings.json")).unwrap())
+        .unwrap()
+        .into_stored();
+    assert_eq!(after.settings.presets.active, PresetId(18));
+    assert_eq!(
+        after.settings.interface.language,
+        neuromita::settings::Language::English
+    );
+    assert!(after.settings.reminders.enabled);
 }
