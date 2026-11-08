@@ -13,6 +13,7 @@ cargo run --locked --offline --example import_python_presets -- \
   /absolute/Rust/UserData/review-new \
   --python-settings /absolute/Python/Settings/settings.json \
   --existing-dir /absolute/Rust/UserData \
+  --python-schemas-dir /absolute/Python/Settings/APIModelSchemas \
   --dry-run
 ```
 

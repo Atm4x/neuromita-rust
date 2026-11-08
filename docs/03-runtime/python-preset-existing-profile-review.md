@@ -9,11 +9,13 @@ Stop Python NeuroMita and the Rust application before taking the source snapshot
 ```text
 cargo run --locked --offline --example import_python_presets -- \
   /old/Settings/api_presets.json /old/Settings/api_templates.json \
-  /portable/UserData-import-reviewed --existing-dir /portable/UserData --dry-run
+  /portable/UserData-import-reviewed --existing-dir /portable/UserData \
+  --python-schemas-dir /old/Settings/APIModelSchemas --dry-run
 
 cargo run --locked --offline --example import_python_presets -- \
   /old/Settings/api_presets.json /old/Settings/api_templates.json \
-  /portable/UserData-import-reviewed --existing-dir /portable/UserData
+  /portable/UserData-import-reviewed --existing-dir /portable/UserData \
+  --python-schemas-dir /old/Settings/APIModelSchemas
 ```
 
 `--dry-run` reads and validates current Rust profile snapshots without writing. The non-dry-run command creates a **new directory** containing merged `presets.json` and `preset-credentials.json`, the Python source snapshots and their old Rust counterparts (`existing-source-presets.json`, `existing-source-preset-credentials.json`, when present), plus template descriptors. Current and Python data remain unchanged. If neither existing Rust catalog nor credential store exists, the explicit `--existing-dir` option fails rather than treating an unknown folder as an empty profile.

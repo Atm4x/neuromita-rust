@@ -1,4 +1,4 @@
-use neuromita::settings::PythonPresetStage;
+use neuromita::settings::{PythonPresetStage, PythonSchemaDirectoryReview};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,9 +34,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    if arguments.len() != 3 {
-        return Err("usage: import_python_presets <api_presets.json> <api_templates.json> <new-output-directory> [--dry-run] [--existing-dir DIR] [--python-settings PYTHON_SETTINGS.json]".into());
+    let schema_dir = if let Some(index) = arguments
+        .iter()
+        .position(|arg| arg == "--python-schemas-dir")
+    {
+        if arguments.len() <= index + 1 {
+            return Err("--python-schemas-dir requires the Python APIModelSchemas path".into());
+        }
+        let path = PathBuf::from(arguments.remove(index + 1));
+        arguments.remove(index);
+        Some(path)
+    } else {
+        None
+    };
+    if schema_dir.is_none() {
+        return Err("--python-schemas-dir is required to attest the Python APIModelSchemas source (including its verified absence)".into());
     }
+    if arguments.len() != 3 {
+        return Err("usage: import_python_presets <api_presets.json> <api_templates.json> <new-output-directory> [--dry-run] [--existing-dir DIR] [--python-settings PYTHON_SETTINGS.json] --python-schemas-dir /Python/Settings/APIModelSchemas".into());
+    }
+    let schemas_path = schema_dir.expect("schema source required above");
+    let source_parent = PathBuf::from(&arguments[0]);
+    let expected_schemas = source_parent
+        .parent()
+        .ok_or("Python presets must have a containing Settings directory")?
+        .join("APIModelSchemas");
+    if schemas_path != expected_schemas {
+        return Err(
+            "--python-schemas-dir must be the APIModelSchemas sibling of the Python presets source"
+                .into(),
+        );
+    }
+    let schema_review = PythonSchemaDirectoryReview::inspect(&schemas_path)?;
+    println!(
+        "Python schemas: present={}, files={}, source SHA-256={}",
+        schema_review.directory_present,
+        schema_review.files.len(),
+        schema_review.source_sha256
+    );
+    if !schema_review.unrepresented_names().is_empty() {
+        println!(
+            "Python schema entries requiring separate migration: {:?}",
+            schema_review.unrepresented_names()
+        );
+    }
+    schema_review.require_representable()?;
     let plan = PythonPresetStage::prepare(
         &std::fs::read(&arguments[0])?,
         &std::fs::read(&arguments[1])?,
@@ -87,13 +129,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!(
-        "Scope: Python APIModelSchemas files and updater preferences are not transferred; preserve their original backups separately."
+        "Scope: Python APIModelSchemas factory copies are inventoried, not installed; Python schema source bytes and updater preferences require separate backup."
     );
     if dry_run {
         println!("Dry-run: no files written");
         return Ok(());
     }
-    plan.stage_new_directory(&PathBuf::from(&arguments[2]))?;
+    plan.stage_new_directory_with_schemas(&PathBuf::from(&arguments[2]), &schema_review)?;
     println!("Published verified import into a new directory; Python sources unchanged");
     Ok(())
 }

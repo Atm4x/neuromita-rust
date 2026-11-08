@@ -2,6 +2,7 @@ mod migration;
 mod model;
 mod preset_activation;
 mod python_presets;
+mod python_schemas;
 mod speech;
 mod storage;
 mod transfer;
@@ -17,6 +18,10 @@ pub use preset_activation::{
 pub use python_presets::{
     PythonPresetPreferencesReview, PythonPresetStage, PythonPresetStageError,
     PythonPresetStagePreview,
+};
+pub use python_schemas::{
+    PythonSchemaAuditError, PythonSchemaDirectoryReview, PythonSchemaFileKind,
+    PythonSchemaFileReview,
 };
 pub use speech::*;
 pub use storage::*;

@@ -14,6 +14,7 @@ use serde::{
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use super::python_schemas::{PythonSchemaAuditError, PythonSchemaDirectoryReview};
 use crate::generation::{PresetId, StoredPresets, python_import::PythonPresetImport};
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
@@ -37,6 +38,8 @@ pub enum PythonPresetStageError {
     UnsafeDestination,
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("Python schema directory audit: {0}")]
+    SchemaAudit(#[from] PythonSchemaAuditError),
     #[error("output published, but durability sync failed: {0}")]
     PublishedButNotSynced(io::Error),
 }
@@ -397,7 +400,27 @@ impl PythonPresetStage {
             .ok_or_else(|| PythonPresetStageError::Invalid("staged file missing".into()))
     }
 
+    /// Stage only after a read-only review of the original Python schema
+    /// directory. The review is checked twice, including just before rename.
+    pub fn stage_new_directory_with_schemas(
+        &self,
+        destination: &Path,
+        schemas: &PythonSchemaDirectoryReview,
+    ) -> Result<(), PythonPresetStageError> {
+        schemas.require_representable()?;
+        schemas.verify_unchanged()?;
+        self.stage_new_directory_inner(destination, Some(schemas))
+    }
+
     pub fn stage_new_directory(&self, destination: &Path) -> Result<(), PythonPresetStageError> {
+        self.stage_new_directory_inner(destination, None)
+    }
+
+    fn stage_new_directory_inner(
+        &self,
+        destination: &Path,
+        schema_review: Option<&PythonSchemaDirectoryReview>,
+    ) -> Result<(), PythonPresetStageError> {
         if self.preview.blocked_count() != 0 {
             return Err(PythonPresetStageError::Blocked(
                 self.preview.blocked_count(),
@@ -440,6 +463,22 @@ impl PythonPresetStage {
                 let mut file = options.open(sibling.join(name))?;
                 file.write_all(bytes)?;
                 file.sync_all()?;
+            }
+            if let Some(review) = schema_review {
+                let bytes = serde_json::to_vec_pretty(review).map_err(|_| {
+                    PythonPresetStageError::Invalid("cannot encode schema source inventory".into())
+                })?;
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let mut file = options.open(sibling.join("python-source-schema-inventory.json"))?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                review.verify_unchanged()?;
             }
             #[cfg(unix)]
             fs::File::open(&sibling)?.sync_all()?;
