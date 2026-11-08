@@ -50,13 +50,6 @@ fn model_id(label: &str) -> String {
         .to_owned()
 }
 
-fn api_profile_id(label: &str) -> &str {
-    REMOTE_TTS_TEMPLATES
-        .iter()
-        .find(|template| template.name == label)
-        .map_or(label, |template| template.id)
-}
-
 fn current_preset(ui: &VoiceUi) -> Result<RemoteVoicePreset, String> {
     let id: String = ui.get_api_preset_id().into();
     if id.is_empty() {
@@ -110,7 +103,7 @@ fn read(window: &AppWindow) -> Result<TtsPreferences, String> {
         local_language: ui.get_local_language().into(),
         local_auto_load: ui.get_local_auto_load(),
         local_lazy_init: ui.get_local_lazy_init(),
-        api_profile: api_profile_id(&ui.get_api_profile()).to_owned(),
+        api_profile: "fish_audio".into(),
         api_model: ui.get_api_model().into(),
         api_speed_percent: ui
             .get_api_speed()
