@@ -2,11 +2,13 @@
 
 use std::{
     fs::{File, OpenOptions},
+    io::Read,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
+use ring::digest::{Context, SHA256};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
@@ -36,6 +38,30 @@ pub enum LayerError {
     Install(String),
     #[error("installed package layer is incomplete or corrupted: {0}")]
     Corrupted(String),
+}
+
+pub(super) fn sha256_file(path: &Path) -> Result<String, LayerError> {
+    let mut file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(LayerError::Invalid(
+            "build input must be a regular file".into(),
+        ));
+    }
+    let mut digest = Context::new(&SHA256);
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 const STAGING_LOCK_SUFFIX: &str = ".lock";
@@ -501,7 +527,45 @@ impl LayerInstaller<'_> {
         packages: &[LockedPackage],
         actions: &[InstallerAction],
     ) -> Result<PathBuf, LayerError> {
+        self.publish_with_wheels(destination, marker, plan, packages, actions, None)
+            .await
+    }
+
+    pub(super) async fn publish_local_wheel<T: Serialize + DeserializeOwned + PartialEq>(
+        &self,
+        destination: &Path,
+        marker: &str,
+        plan: &T,
+        package: &LockedPackage,
+        wheel: &Path,
+        expected_sha256: &str,
+    ) -> Result<PathBuf, LayerError> {
+        self.publish_with_wheels(
+            destination,
+            marker,
+            plan,
+            std::slice::from_ref(package),
+            &[],
+            Some((wheel, expected_sha256)),
+        )
+        .await
+    }
+
+    async fn publish_with_wheels<T: Serialize + DeserializeOwned + PartialEq>(
+        &self,
+        destination: &Path,
+        marker: &str,
+        plan: &T,
+        packages: &[LockedPackage],
+        actions: &[InstallerAction],
+        wheel: Option<(&Path, &str)>,
+    ) -> Result<PathBuf, LayerError> {
         self.verify_paths(destination)?;
+        if let Some((path, expected)) = wheel
+            && !sha256_file(path)?.eq_ignore_ascii_case(expected)
+        {
+            return Err(LayerError::Invalid("source wheel checksum mismatch".into()));
+        }
         if self
             .installed(destination, marker, plan, packages, actions)
             .await?
@@ -542,8 +606,12 @@ impl LayerInstaller<'_> {
                 .env_remove("VIRTUAL_ENV")
                 .stdin(cleanup.child_stdin()?)
                 .kill_on_drop(true);
-                for package in packages {
-                    cmd.arg(format!("{}=={}", package.name, package.version));
+                if let Some((source, _)) = wheel {
+                    cmd.arg("--no-index").arg(source);
+                } else {
+                    for package in packages {
+                        cmd.arg(format!("{}=={}", package.name, package.version));
+                    }
                 }
                 #[cfg(not(windows))]
                 let outcome = timeout(self.timeout, cmd.output()).await;
@@ -584,6 +652,13 @@ impl LayerInstaller<'_> {
                             .chars()
                             .take(1200)
                             .collect(),
+                    ));
+                }
+                if let Some((path, expected)) = wheel
+                    && !sha256_file(path)?.eq_ignore_ascii_case(expected)
+                {
+                    return Err(LayerError::Invalid(
+                        "source wheel changed during installation".into(),
                     ));
                 }
             }

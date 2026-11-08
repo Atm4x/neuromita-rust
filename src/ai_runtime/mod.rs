@@ -7,6 +7,7 @@ pub mod application;
 pub mod assets;
 pub mod backend;
 pub mod bootstrap;
+pub mod build_stage;
 pub mod composition;
 pub mod constraints;
 mod distribution;
