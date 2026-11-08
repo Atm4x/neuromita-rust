@@ -1,12 +1,22 @@
 //! Fish Audio cloud voice presets. Credentials are stored separately from exported AppSettings.
 //! The storage file is access-restricted on Unix but is not encrypted at rest.
-use std::{collections::{BTreeMap, HashSet}, fs, io::{self, Write}, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{character::CharacterId, voice::{AudioArtifact, AudioFormat}};
+use crate::{
+    character::CharacterId,
+    voice::{AudioArtifact, AudioFormat},
+};
 
 const ENDPOINT: &str = "https://api.fish.audio/v1/tts";
 const MAX_PCM: usize = 64 * 1024 * 1024 - 44;
@@ -53,17 +63,22 @@ impl RemoteVoicePreset {
             return Err(RemoteVoiceError::InvalidPreset("invalid preset ID".into()));
         }
         if self.template_id != "fish_audio"
-            || self.name.trim().is_empty() || self.name.len() > 128
+            || self.name.trim().is_empty()
+            || self.name.len() > 128
             || !MODEL_IDS.contains(&self.model.as_str())
             || !(50..=200).contains(&self.speed_percent)
             || self.api_key.len() > 1024
             || !self.api_key.bytes().all(|b| b.is_ascii_graphic())
             || self.character_voice_ids.len() > CharacterId::ALL.len()
         {
-            return Err(RemoteVoiceError::InvalidPreset("invalid Fish Audio preset settings".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "invalid Fish Audio preset settings".into(),
+            ));
         }
         for id in std::iter::once(&self.default_voice_id).chain(self.character_voice_ids.values()) {
-            if !id.is_empty() { normalize_voice_id(id)?; }
+            if !id.is_empty() {
+                normalize_voice_id(id)?;
+            }
         }
         Ok(())
     }
@@ -80,28 +95,40 @@ impl Default for RemoteVoiceConfig {
     fn default() -> Self {
         let mut preset = RemoteVoicePreset::fresh();
         preset.id = "fish_audio_default".into();
-        Self { version: 1, active_id: preset.id.clone(), presets: vec![preset] }
+        Self {
+            version: 1,
+            active_id: preset.id.clone(),
+            presets: vec![preset],
+        }
     }
 }
 impl RemoteVoiceConfig {
     pub fn validate(&self) -> Result<(), RemoteVoiceError> {
         if self.version != 1 || self.presets.is_empty() || self.presets.len() > 32 {
-            return Err(RemoteVoiceError::InvalidPreset("invalid catalog version or size".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "invalid catalog version or size".into(),
+            ));
         }
         let mut seen = HashSet::new();
         for preset in &self.presets {
             preset.validate()?;
             if !seen.insert(&preset.id) {
-                return Err(RemoteVoiceError::InvalidPreset("duplicate preset ID".into()));
+                return Err(RemoteVoiceError::InvalidPreset(
+                    "duplicate preset ID".into(),
+                ));
             }
         }
         if !seen.contains(&self.active_id) {
-            return Err(RemoteVoiceError::InvalidPreset("active preset is missing".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "active preset is missing".into(),
+            ));
         }
         Ok(())
     }
     pub fn active(&self) -> Result<&RemoteVoicePreset, RemoteVoiceError> {
-        self.presets.iter().find(|p| p.id == self.active_id)
+        self.presets
+            .iter()
+            .find(|p| p.id == self.active_id)
             .ok_or_else(|| RemoteVoiceError::InvalidPreset("active preset is missing".into()))
     }
     pub fn add(&mut self) -> Result<(), RemoteVoiceError> {
@@ -121,21 +148,28 @@ impl RemoteVoiceConfig {
     }
     pub fn select(&mut self, id: &str) -> Result<(), RemoteVoiceError> {
         if !self.presets.iter().any(|p| p.id == id) {
-            return Err(RemoteVoiceError::InvalidPreset("preset does not exist".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "preset does not exist".into(),
+            ));
         }
         self.active_id = id.into();
         Ok(())
     }
     pub fn update(&mut self, preset: RemoteVoicePreset) -> Result<(), RemoteVoiceError> {
         preset.validate()?;
-        let old = self.presets.iter_mut().find(|p| p.id == preset.id)
+        let old = self
+            .presets
+            .iter_mut()
+            .find(|p| p.id == preset.id)
             .ok_or_else(|| RemoteVoiceError::InvalidPreset("preset does not exist".into()))?;
         *old = preset;
         Ok(())
     }
     pub fn delete_active(&mut self) -> Result<(), RemoteVoiceError> {
         if self.presets.len() == 1 {
-            return Err(RemoteVoiceError::InvalidPreset("cannot delete the last preset".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "cannot delete the last preset".into(),
+            ));
         }
         self.presets.retain(|p| p.id != self.active_id);
         self.active_id = self.presets[0].id.clone();
@@ -178,16 +212,27 @@ fn normalize_voice_id(value: &str) -> Result<String, RemoteVoiceError> {
         let url = reqwest::Url::parse(value)
             .map_err(|_| RemoteVoiceError::VoiceUnavailable("invalid voice URL".into()))?;
         if !matches!(url.host_str(), Some("fish.audio" | "www.fish.audio"))
-            || !url.username().is_empty() || url.password().is_some()
+            || !url.username().is_empty()
+            || url.password().is_some()
         {
-            return Err(RemoteVoiceError::VoiceUnavailable("only fish.audio voice URLs are allowed".into()));
+            return Err(RemoteVoiceError::VoiceUnavailable(
+                "only fish.audio voice URLs are allowed".into(),
+            ));
         }
-        url.path_segments().and_then(|mut parts| parts.find(|part| valid_hex_id(part)))
+        url.path_segments()
+            .and_then(|mut parts| parts.find(|part| valid_hex_id(part)))
             .ok_or_else(|| RemoteVoiceError::VoiceUnavailable("voice URL has no ID".into()))?
             .to_owned()
-    } else { value.to_owned() };
-    if valid_hex_id(&id) { Ok(id.to_ascii_lowercase()) }
-    else { Err(RemoteVoiceError::VoiceUnavailable("voice ID must be 32 hexadecimal characters".into())) }
+    } else {
+        value.to_owned()
+    };
+    if valid_hex_id(&id) {
+        Ok(id.to_ascii_lowercase())
+    } else {
+        Err(RemoteVoiceError::VoiceUnavailable(
+            "voice ID must be 32 hexadecimal characters".into(),
+        ))
+    }
 }
 fn valid_hex_id(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit())
@@ -195,16 +240,22 @@ fn valid_hex_id(value: &str) -> bool {
 
 /// Separate from AppSettings/export. Secrets are not encrypted; Unix files use owner-only mode.
 #[derive(Clone)]
-pub struct RemoteVoiceStore { pub path: PathBuf }
+pub struct RemoteVoiceStore {
+    pub path: PathBuf,
+}
 impl RemoteVoiceStore {
     pub fn load(&self) -> Result<RemoteVoiceConfig, RemoteVoiceError> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RemoteVoiceConfig::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(RemoteVoiceConfig::default());
+            }
             Err(error) => return Err(error.into()),
         };
         if bytes.len() > 128 * 1024 {
-            return Err(RemoteVoiceError::InvalidPreset("voice catalog too large".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "voice catalog too large".into(),
+            ));
         }
         let config: RemoteVoiceConfig = serde_json::from_slice(&bytes)
             .map_err(|_| RemoteVoiceError::InvalidPreset("invalid voice catalog JSON".into()))?;
@@ -213,23 +264,34 @@ impl RemoteVoiceStore {
     }
     pub fn save(&self, config: &RemoteVoiceConfig) -> Result<(), RemoteVoiceError> {
         config.validate()?;
-        let parent = self.path.parent().ok_or_else(|| RemoteVoiceError::InvalidPreset("no catalog directory".into()))?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| RemoteVoiceError::InvalidPreset("no catalog directory".into()))?;
         fs::create_dir_all(parent)?;
-        let temp = self.path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+        let temp = self
+            .path
+            .with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
         let result = (|| -> Result<(), RemoteVoiceError> {
             let mut options = fs::OpenOptions::new();
             options.create_new(true).write(true);
             #[cfg(unix)]
-            { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
             let mut file = options.open(&temp)?;
-            serde_json::to_writer(&mut file, config)
-                .map_err(|_| RemoteVoiceError::InvalidPreset("cannot serialize voice catalog".into()))?;
+            serde_json::to_writer(&mut file, config).map_err(|_| {
+                RemoteVoiceError::InvalidPreset("cannot serialize voice catalog".into())
+            })?;
             file.flush()?;
             file.sync_all()?;
             fs::rename(&temp, &self.path)?;
             Ok(())
         })();
-        if result.is_err() { let _ = fs::remove_file(&temp); }
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
         result
     }
 }
@@ -263,10 +325,16 @@ fn pcm_to_wav(pcm: &[u8]) -> Result<AudioArtifact, RemoteVoiceError> {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&len.to_le_bytes());
     wav.extend_from_slice(pcm);
-    Ok(AudioArtifact { format: AudioFormat::Wave, bytes: Arc::from(wav) })
+    Ok(AudioArtifact {
+        format: AudioFormat::Wave,
+        bytes: Arc::from(wav),
+    })
 }
 
-pub struct FishAudioClient { client: reqwest::Client, endpoint: String }
+pub struct FishAudioClient {
+    client: reqwest::Client,
+    endpoint: String,
+}
 impl FishAudioClient {
     pub fn new() -> Result<Self, RemoteVoiceError> {
         Self::endpoint(ENDPOINT)
@@ -276,19 +344,30 @@ impl FishAudioClient {
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(45))
             .redirect(reqwest::redirect::Policy::none())
-            .build().map_err(|_| RemoteVoiceError::Network)?;
-        Ok(Self { client, endpoint: endpoint.into() })
+            .build()
+            .map_err(|_| RemoteVoiceError::Network)?;
+        Ok(Self {
+            client,
+            endpoint: endpoint.into(),
+        })
     }
     pub async fn synthesize(
-        &self, preset: &RemoteVoicePreset, text: &str,
-        character: Option<CharacterId>, cancel: &CancellationToken,
+        &self,
+        preset: &RemoteVoicePreset,
+        text: &str,
+        character: Option<CharacterId>,
+        cancel: &CancellationToken,
     ) -> Result<AudioArtifact, RemoteVoiceError> {
         preset.validate()?;
         if preset.api_key.is_empty() {
-            return Err(RemoteVoiceError::InvalidPreset("API key is not configured".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "API key is not configured".into(),
+            ));
         }
         if text.trim().is_empty() || text.len() > 10_000 {
-            return Err(RemoteVoiceError::InvalidPreset("preview text must be 1..10000 bytes".into()));
+            return Err(RemoteVoiceError::InvalidPreset(
+                "preview text must be 1..10000 bytes".into(),
+            ));
         }
         let voice = preset.voice_for(character)?;
         let request = serde_json::json!({
@@ -297,21 +376,37 @@ impl FishAudioClient {
             "normalize_loudness": true
         });
         let work = async {
-            let mut response = self.client.post(&self.endpoint)
+            let mut response = self
+                .client
+                .post(&self.endpoint)
                 .header("Authorization", format!("Bearer {}", preset.api_key))
                 .header("model", &preset.model)
                 .json(&request)
-                .send().await.map_err(|_| RemoteVoiceError::Network)?;
-            if !response.status().is_success() { return Err(classify_http(response.status())); }
-            if response.headers().get(reqwest::header::CONTENT_TYPE)
+                .send()
+                .await
+                .map_err(|_| RemoteVoiceError::Network)?;
+            if !response.status().is_success() {
+                return Err(classify_http(response.status()));
+            }
+            if response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value.starts_with("application/json") || value.starts_with("text/"))
+                .is_some_and(|value| {
+                    value.starts_with("application/json") || value.starts_with("text/")
+                })
             {
                 return Err(RemoteVoiceError::InvalidAudio);
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|_| RemoteVoiceError::Network)? {
-                if bytes.len().saturating_add(chunk.len()) > MAX_PCM { return Err(RemoteVoiceError::TooLarge); }
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| RemoteVoiceError::Network)?
+            {
+                if bytes.len().saturating_add(chunk.len()) > MAX_PCM {
+                    return Err(RemoteVoiceError::TooLarge);
+                }
                 bytes.extend_from_slice(&chunk);
             }
             pcm_to_wav(&bytes)
@@ -343,7 +438,9 @@ impl crate::voice::VoiceProvider for RemoteVoiceRouter {
     ) -> crate::voice::VoiceFuture<'_> {
         Box::pin(async move {
             use crate::voice::VoiceError;
-            let current = self.settings.snapshot_all()
+            let current = self
+                .settings
+                .snapshot_all()
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
             if current.values.speech.tts.backend != crate::settings::TtsBackend::Api {
                 return self.local.synthesize(text, options).await;
@@ -355,13 +452,17 @@ impl crate::voice::VoiceProvider for RemoteVoiceRouter {
             // complete atomic catalog revision, including after a character switch.
             let store = self.store.clone();
             let config = tokio::task::spawn_blocking(move || store.load())
-                .await.map_err(|_| VoiceError::Generation("voice catalog task stopped".into()))?
+                .await
+                .map_err(|_| VoiceError::Generation("voice catalog task stopped".into()))?
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
-            let preset = config.active()
+            let preset = config
+                .active()
                 .map_err(|error| VoiceError::Generation(error.to_string()))?;
             let stop = CancellationToken::new();
-            self.client.synthesize(preset, &text, options.character, &stop)
-                .await.map_err(|error| VoiceError::Generation(error.to_string()))
+            self.client
+                .synthesize(preset, &text, options.character, &stop)
+                .await
+                .map_err(|error| VoiceError::Generation(error.to_string()))
         })
     }
 }
@@ -376,16 +477,26 @@ mod tests {
         let second = cfg.active().unwrap().id.clone();
         cfg.active_id = "fish_audio_default".into();
         cfg.presets[0].default_voice_id = "a".repeat(32);
-        cfg.presets[0].character_voice_ids.insert(CharacterId::Crazy, "b".repeat(32));
+        cfg.presets[0]
+            .character_voice_ids
+            .insert(CharacterId::Crazy, "b".repeat(32));
         cfg.select(&second).unwrap();
-        assert!(matches!(cfg.active().unwrap().voice_for(Some(CharacterId::Crazy)), Err(RemoteVoiceError::VoiceUnavailable(_))));
+        assert!(matches!(
+            cfg.active().unwrap().voice_for(Some(CharacterId::Crazy)),
+            Err(RemoteVoiceError::VoiceUnavailable(_))
+        ));
         assert!(cfg.delete_active().is_ok());
         assert!(cfg.delete_active().is_err());
     }
     #[test]
     fn validates_urls_and_pcm_header() {
-        assert_eq!(normalize_voice_id(&format!("https://fish.audio/model/{}", "A".repeat(32))).unwrap(), "a".repeat(32));
-        assert!(normalize_voice_id(&format!("https://evil.example/model/{}", "a".repeat(32))).is_err());
+        assert_eq!(
+            normalize_voice_id(&format!("https://fish.audio/model/{}", "A".repeat(32))).unwrap(),
+            "a".repeat(32)
+        );
+        assert!(
+            normalize_voice_id(&format!("https://evil.example/model/{}", "a".repeat(32))).is_err()
+        );
         assert!(normalize_voice_id("not-a-voice").is_err());
         assert!(pcm_to_wav(&[1]).is_err());
         let wav = pcm_to_wav(&[0, 1, 2, 3]).unwrap();
@@ -407,7 +518,10 @@ mod tests {
     }
     #[tokio::test]
     async fn mock_fish_pcm_and_auth_errors() {
-        use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/tts", listener.local_addr().unwrap());
         let handler = tokio::spawn(async move {
@@ -417,9 +531,19 @@ mod tests {
                 let size = stream.read(&mut buffer).await.unwrap();
                 let request = String::from_utf8_lossy(&buffer[..size]);
                 assert!(request.contains("POST /v1/tts"));
-                assert!(request.contains("authorization: Bearer test-key") || request.contains("Authorization: Bearer test-key"));
-                let content: &[u8] = if status.starts_with("200") { &[0, 1, 2, 3] } else { b"{}" };
-                let reply = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n", content.len());
+                assert!(
+                    request.contains("authorization: Bearer test-key")
+                        || request.contains("Authorization: Bearer test-key")
+                );
+                let content: &[u8] = if status.starts_with("200") {
+                    &[0, 1, 2, 3]
+                } else {
+                    b"{}"
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/octet-stream\r\n\r\n",
+                    content.len()
+                );
                 stream.write_all(reply.as_bytes()).await.unwrap();
                 stream.write_all(content).await.unwrap();
             }
@@ -431,7 +555,10 @@ mod tests {
         let stop = CancellationToken::new();
         let wav = client.synthesize(&preset, "hi", None, &stop).await.unwrap();
         assert_eq!(&wav.bytes[44..], &[0, 1, 2, 3]);
-        assert!(matches!(client.synthesize(&preset, "hi", None, &stop).await, Err(RemoteVoiceError::Authentication)));
+        assert!(matches!(
+            client.synthesize(&preset, "hi", None, &stop).await,
+            Err(RemoteVoiceError::Authentication)
+        ));
         handler.await.unwrap();
     }
 }
