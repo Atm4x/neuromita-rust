@@ -3,7 +3,8 @@
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
-use serde_json::Value;
+use ring::digest::{SHA256, digest};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use super::{
@@ -21,6 +22,7 @@ use super::{
         AssetState, ModelAssetStatus, PluginInstallError, PluginInstallHandler, PluginInstallPlan,
         PluginInstallRequest,
     },
+    install_operation::{InstallOperation, InstallOperationError, OperationStage, StageState},
     layer::valid_segment,
     managed::{ManagedRuntimeBootstrap, ManagedRuntimeError},
     overlay::OverlayInstaller,
@@ -94,6 +96,8 @@ pub enum AiProductionError {
     Unready(String),
     #[error(transparent)]
     Bootstrap(#[from] ManagedRuntimeError),
+    #[error(transparent)]
+    Operation(#[from] InstallOperationError),
     #[error("AI installation task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
     #[error(transparent)]
@@ -116,6 +120,103 @@ struct PreflightedModel<'a> {
     selected: &'a SelectedModel,
     plan: PluginInstallPlan,
     assets: ModelAssets,
+}
+
+fn operation_fingerprint(
+    preflighted: &[PreflightedModel<'_>],
+    python_version: &str,
+    python_executable: &std::path::Path,
+    uv_executable: &std::path::Path,
+    sdk_root: &std::path::Path,
+) -> Result<String, AiProductionError> {
+    let selected: Vec<Value> = preflighted
+        .iter()
+        .map(|model| {
+            let selection = model.selected;
+            let asset = match &model.assets {
+                ModelAssets::None => json!({"kind": "none"}),
+                ModelAssets::Installed { revision } => json!({"kind": "installed", "revision": revision}),
+                ModelAssets::Sources { revision, inputs } => json!({
+                    "kind": "sources", "revision": revision,
+                    "inputs": inputs.iter().map(|input| json!({
+                        "role": input.role,
+                        "path": input.relative_path,
+                        "sha256": input.sha256,
+                        "source": match &input.source {
+                            super::assets::AssetSource::LocalFile(path) => format!("local:{}", path.display()),
+                            super::assets::AssetSource::Https(url) => format!("https:{url}"),
+                        },
+                    })).collect::<Vec<_>>(),
+                }),
+                ModelAssets::Catalog { .. } => unreachable!("resolved by whole-selection preflight"),
+                ModelAssets::Generated {
+                    revision, hook_id, source_plugin_id, source_revision,
+                    settings, approved_hook_id,
+                } => json!({
+                    "kind": "generated", "revision": revision, "hook": hook_id,
+                    "source_plugin": source_plugin_id, "source_revision": source_revision,
+                    "settings": settings, "approved": approved_hook_id,
+                }),
+            };
+            let mut approved: Vec<_> = selection.approved_actions.iter().collect();
+            approved.sort_unstable();
+            json!({
+                "service": selection.service,
+                "plugin_id": selection.plugin_id,
+                "package_revision": selection.package_revision,
+                "backend": selection.backend,
+                "extra_backends": selection.extra_backends,
+                "settings": selection.settings,
+                "approved_actions": approved,
+                "plan": model.plan,
+                "assets": asset,
+            })
+        })
+        .collect();
+    let pinned = json!({
+        "version": 1,
+        "python_version": python_version,
+        "python_executable": python_executable,
+        "uv_executable": uv_executable,
+        "sdk_root": sdk_root,
+        "selected": selected,
+    });
+    let encoded = serde_json::to_vec(&pinned).map_err(|_| {
+        AiProductionError::Invalid("cannot fingerprint installation selection".into())
+    })?;
+    Ok(digest(&SHA256, &encoded)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn operation_stages(preflighted: &[PreflightedModel<'_>]) -> Vec<OperationStage> {
+    let mut stages = Vec::new();
+    for (index, model) in preflighted.iter().enumerate() {
+        stages.push(OperationStage {
+            id: format!(
+                "{index}:primary-backend:{}",
+                model.selected.backend.kind.as_str()
+            ),
+            repeatable: true,
+        });
+        for extra in &model.selected.extra_backends {
+            stages.push(OperationStage {
+                id: format!("{index}:extra-backend:{}", extra.kind.as_str()),
+                repeatable: true,
+            });
+        }
+        stages.push(OperationStage {
+            id: format!("{index}:overlay:{}", model.selected.plugin_id),
+            repeatable: true,
+        });
+        stages.push(OperationStage {
+            id: format!("{index}:assets:{}", model.selected.plugin_id),
+            repeatable: !matches!(model.assets, ModelAssets::Generated { .. }),
+        });
+    }
+    stages
 }
 
 struct AbortOnDrop(tokio::task::AbortHandle);
@@ -483,6 +584,16 @@ impl AiProductionInstaller {
             plan.validate(&self.bootstrap.python_version)?;
             preflighted.push(self.preflight_model(selection, plan, &store).await?);
         }
+        let fingerprint = operation_fingerprint(
+            &preflighted,
+            &self.bootstrap.python_version,
+            &host.python_executable,
+            &backends.uv_executable,
+            &host.sdk_root,
+        )?;
+        let stages = operation_stages(&preflighted);
+        let mut operation = InstallOperation::open(data, &fingerprint, stages)?;
+        let mut next_stage = 0;
         let mut layers = Vec::with_capacity(selections.len());
         let mut activation = Vec::with_capacity(selections.len());
         for preflighted_model in preflighted {
@@ -495,24 +606,41 @@ impl AiProductionInstaller {
             let mut dependencies = Vec::new();
             let backend = &selection.backend;
             let backend_id = backend_name(backend.kind);
+            operation.start(next_stage)?;
             let task_backend_installer = backends.clone();
             let task_backend = backend.clone();
             let task =
                 tokio::spawn(async move { task_backend_installer.install(&task_backend).await });
             let _abort_on_drop = AbortOnDrop(task.abort_handle());
             let path = task.await??;
+            if !backends.installed(backend).await? {
+                return Err(AiProductionError::Invalid(
+                    "backend receipt missing after installation".into(),
+                ));
+            }
+            operation.verified(next_stage)?;
+            next_stage += 1;
             dependencies.push(path);
             backend_layers.push(backend.clone());
             let mut backend_packages = backend.packages.clone();
             for extra in &selection.extra_backends {
+                operation.start(next_stage)?;
                 let worker = backends.clone();
                 let plan = extra.clone();
                 let task = tokio::spawn(async move { worker.install(&plan).await });
                 let _abort_on_drop = AbortOnDrop(task.abort_handle());
                 dependencies.push(task.await??);
+                if !backends.installed(extra).await? {
+                    return Err(AiProductionError::Invalid(
+                        "supplemental backend receipt missing".into(),
+                    ));
+                }
+                operation.verified(next_stage)?;
+                next_stage += 1;
                 backend_layers.push(extra.clone());
                 backend_packages.extend(extra.packages.iter().cloned());
             }
+            operation.start(next_stage)?;
             let task_installer = installer.clone();
             let task_plugin = selection.plugin_id.clone();
             let task_revision = selection.package_revision.clone();
@@ -538,30 +666,73 @@ impl AiProductionInstaller {
             });
             let _abort_on_drop = AbortOnDrop(task.abort_handle());
             let installed = task.await??;
+            if !installer.overlays.installed(&installed.overlay).await? {
+                return Err(AiProductionError::Invalid(
+                    "plugin overlay receipt missing".into(),
+                ));
+            }
+            operation.verified(next_stage)?;
+            next_stage += 1;
             dependencies.push(installed.overlay_path);
+            // Generated hooks may write outside the immutable asset layer. Never
+            // automatically re-execute an interrupted or already verified hook.
+            let recovered_generated = if let ModelAssets::Generated { revision, .. } = &assets {
+                match operation.stage_state(next_stage)? {
+                    StageState::Pending => {
+                        operation.start(next_stage)?;
+                        None
+                    }
+                    StageState::Started | StageState::Verified => {
+                        store
+                            .verified_revision(&selection.plugin_id, revision)
+                            .await
+                            .map_err(|_| {
+                                InstallOperationError::Invalid(
+                                    "interrupted model generation has no verified asset receipt",
+                                )
+                            })?;
+                        operation.verified(next_stage)?;
+                        Some(revision.clone())
+                    }
+                }
+            } else {
+                operation.start(next_stage)?;
+                None
+            };
             let task_store = store.clone();
             let task_installer = installer.clone();
             let task_host = host.clone();
             let task_plugin = selection.plugin_id.clone();
             let task_assets = assets;
             let task_python = self.bootstrap.python_version.clone();
-            let task = tokio::spawn(async move {
-                AssetPreparation {
-                    store: task_store,
-                    installer: task_installer,
-                    host: task_host,
-                    plugin_id: task_plugin,
-                    plan,
-                    selected: task_assets,
-                    default_assets: installed.assets,
-                    dependency_layers: dependencies,
-                    python_version: task_python,
-                }
-                .run()
-                .await
-            });
-            let _abort_on_drop = AbortOnDrop(task.abort_handle());
-            let asset_revision = task.await??;
+            let asset_revision = if let Some(revision) = recovered_generated {
+                Some(revision)
+            } else {
+                let task = tokio::spawn(async move {
+                    AssetPreparation {
+                        store: task_store,
+                        installer: task_installer,
+                        host: task_host,
+                        plugin_id: task_plugin,
+                        plan,
+                        selected: task_assets,
+                        default_assets: installed.assets,
+                        dependency_layers: dependencies,
+                        python_version: task_python,
+                    }
+                    .run()
+                    .await
+                });
+                let _abort_on_drop = AbortOnDrop(task.abort_handle());
+                task.await??
+            };
+            if let Some(revision) = &asset_revision {
+                store
+                    .verified_revision(&selection.plugin_id, revision)
+                    .await?;
+            }
+            operation.verified(next_stage)?;
+            next_stage += 1;
             layers.push(ServiceSelection {
                 service: selection.service,
                 backends: backend_layers,
@@ -605,6 +776,7 @@ impl AiProductionInstaller {
                 }
             }
         }
+        operation.finish()?;
         Ok(AiApplicationConfig {
             topology: self.topology,
             host,

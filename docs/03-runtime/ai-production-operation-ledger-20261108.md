@@ -1,0 +1,18 @@
+# C3 — production installation operation journal (2026-11-08)
+
+A whole-selection preflight now precedes a **Core-owned append-only operation journal** under portable `AIData/operations/production`. This journal is a derived progress witness, not a second inventory or a source of truth for installed model assets. Before starting any backend/overlay/model publication, Core fingerprints the complete preflighted selection (service, plugin/revision, exact backend locks, extra backends, dynamic Python install plan, resolved model source choices and checksums, user settings/approvals, managed Python/uv paths and SDK). **Only a SHA-256 fingerprint, bounded stage identifiers, operation UUID and stage transitions are written**. Raw settings and credentials are not written.
+
+An incomplete run is reopened using its original UUID when its fingerprint and exact ordered stages match. It holds a process-wide/OS file lock on a persistent inode so two installs for the same fingerprint cannot run simultaneously. New completed runs receive new UUIDs. Each stage moves `pending → started → verified`, and the operation completes only after every stage and `RuntimeComposition::resolve` succeed. Each event is `sync_data`-durable; a torn final JSONL event can be discarded, but malformed complete events, mismatched stages and oversized logs fail closed. Managed operation directories and journal paths reject symlinks and oversized files; the journal size is capped at 1 MiB (future compaction needed).
+
+**The journal is never accepted as an installation receipt.** During replay, repeatable backend/overlay/assets stages are run through their existing idempotent installers again and independently verified with immutable LayerInstaller/ModelAssetStore receipts before they may be acknowledged. Previously verified stages are likewise checked again. An interrupted generated-asset hook is **not automatically replayed**; a previously installed asset revision can be reused only after `verified_revision` validates its actual immutable receipt and its content, otherwise the operation returns a fail-closed manual-recovery error. No application activation occurs on a failed installation.
+
+### What this does NOT implement
+
+- No cross-layer rollback, atomic multi-layer commit, compensation after network/uv failure, or deletion of independently shared immutable layers.
+- No durable external operation API to display this UUID in the GUI; existing AI Hub status still tracks its own restricted operation. Journal snapshots need a read-model adapter.
+- No persistent work queue, cancellation API, resumable network downloads, or replay of arbitrary custom actions and generated hooks. A process interrupted mid-OS child may require that child's existing staging/lease cleanup before it can retry.
+- No certification of kill-during-uv, Windows power-loss, concurrent mutation of external Python scripts or native GPU/Triton inference. Python install-plan code is executable and **not** sandboxed.
+
+### Test evidence
+
+The exact `install_operation.rs` and the integration tests in `tests/ai_install_operation.rs` were compiled in a **separate minimal Cargo harness** with Rust 1.98.1 / vendored crates. 8/8 executed PASS: incomplete operation recovery, immutable ID, refusal to infer completion, fail-closed generated step, new ID after successful completion, concurrent lock refusal, malformed full event refusal, torn last-line repair, and symlinked directory refusal. Full Neuromita Cargo library tests did not execute during the cycle because the full test binary did not compile within command time limits; keep those checks open. Production library `cargo check --locked --offline --lib` PASS. These harness tests prove journal logic, not whole application E2E.
