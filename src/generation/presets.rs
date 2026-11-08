@@ -892,8 +892,15 @@ mod tests {
         let key = reopened.editor_key(id).unwrap().unwrap();
         assert_eq!(key.expose(), "replacement-fixture-key");
         assert!(!format!("{key:?}").contains("replacement-fixture-key"));
-        let saved = reopened.list().into_iter().find(|(key, _)| *key == id).unwrap().1;
-        let PresetDefinition::Gemini(saved) = saved.definition else { panic!() };
+        let saved = reopened
+            .list()
+            .into_iter()
+            .find(|(key, _)| *key == id)
+            .unwrap()
+            .1;
+        let PresetDefinition::Gemini(saved) = saved.definition else {
+            panic!()
+        };
         assert!(saved.options.stream);
         assert_eq!(saved.options.max_retries, 4);
         let json = std::fs::read_to_string(directory.join("presets.json")).unwrap();
