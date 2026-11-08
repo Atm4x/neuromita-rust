@@ -415,6 +415,30 @@
     "source": "Микрофон",
     "translation": "Microphone"
   },
+  "sandbox.mic.start": {
+    "source": "Начать голосовой ввод",
+    "translation": "Start voice input"
+  },
+  "sandbox.mic.stop": {
+    "source": "Остановить голосовой ввод",
+    "translation": "Stop voice input"
+  },
+  "sandbox.mic.wait": {
+    "source": "Микрофон переключается…",
+    "translation": "Switching microphone…"
+  },
+  "sandbox.mic.listening": {
+    "source": "Слушаю микрофон…",
+    "translation": "Listening to microphone…"
+  },
+  "sandbox.mita-thinking": {
+    "source": "Мита думает…",
+    "translation": "Mita is thinking…"
+  },
+  "sandbox.stop": {
+    "source": "Отменить ответ",
+    "translation": "Cancel response"
+  },
   "sandbox.no-link": {
     "source": "Нет связи",
     "translation": "No connection"

@@ -53,6 +53,8 @@ export component AppWindow inherits Window {
     in property <string> chat-generation-error;
     in property <bool> core-connecting;
     in property <bool> chat-sending;
+    in property <string> chat-active-request-id;
+    in property <int> chat-microphone-phase;
     in property <int> chat-character;
     in property <string> chat-model;
     in property <string> chat-preset;
@@ -73,6 +75,7 @@ export component AppWindow inherits Window {
     callback chat-send(string);
     callback chat-attach(string, string);
     callback chat-cancel(string);
+    callback chat-microphone-toggle(bool);
     callback chat-hide-message(string);
     callback chat-copy-message(string);
     callback chat-select-character(int);
@@ -119,6 +122,7 @@ export component AppWindow inherits Window {
                 clients: root.chat-clients; server-running: root.chat-server-running;
                 messages: root.chat-messages; has-older: root.chat-has-older; older-loading: root.chat-older-loading; connected: root.core-connected; connecting: root.core-connecting;
                 sending: root.chat-sending; character: root.chat-character;
+                active-request-id: root.chat-active-request-id; microphone-phase: root.chat-microphone-phase;
                 generation-ready: root.chat-generation-ready; generation-error: root.chat-generation-error;
                 model: root.chat-model; preset: root.chat-preset; address: root.chat-address;
                 error: root.chat-error; anchor: root.chat-anchor; active: root.chat-active;
@@ -129,6 +133,7 @@ export component AppWindow inherits Window {
                 send(text) => { root.chat-send(text); }
                 attach(text, path) => { root.chat-attach(text, path); }
                 cancel(id) => { root.chat-cancel(id); }
+                microphone-toggle(enabled) => { root.chat-microphone-toggle(enabled); }
                 hide-message(id) => { root.chat-hide-message(id); }
                 copy-message(text) => { root.chat-copy-message(text); }
                 select-character(id) => { root.chat-select-character(id); }

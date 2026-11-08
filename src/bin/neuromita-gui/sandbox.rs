@@ -9,6 +9,7 @@ use std::{
 };
 
 use neuromita::{
+    audio::controller::SpeechSessionPhase,
     character::CharacterId,
     presentation::{ConversationHistoryPage, ConversationSnapshot},
     request::{ProcessingStage, RequestId, RequestOutcome, RequestState},
@@ -382,6 +383,7 @@ pub(super) fn bind_chat_actions(
         conversation.set_copy_open(false);
         conversation.set_copy_text("".into());
         window.set_chat_sending(false);
+        window.set_chat_active_request_id("".into());
         window.set_chat_error("".into());
         send(Command::Select(ChatOrigin {
             character,
@@ -407,6 +409,18 @@ pub(super) fn bind_chat_actions(
             )),
             (None, _) => window.set_chat_error("Unknown chat character selection".into()),
             (_, Err(error)) => window.set_chat_error(error.to_string().into()),
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
+    window.on_chat_microphone_toggle(move |enabled| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        match current_origin(&window, &revision) {
+            Some(origin) => send(Command::ChatSpeechToggle(origin, enabled)),
+            None => window.set_chat_error("Unknown chat character selection".into()),
         }
     });
     let send = dispatch.clone();
@@ -522,7 +536,16 @@ pub(super) fn apply_with_pager(
                 }
             }
         }
-        Update::SpeechSessionStatus(snapshot) => super::asr::session_status(window, &snapshot),
+        Update::SpeechSessionStatus(snapshot) => {
+            window.set_chat_microphone_phase(match snapshot.phase {
+                SpeechSessionPhase::Stopped => 0,
+                SpeechSessionPhase::Starting => 1,
+                SpeechSessionPhase::Listening => 2,
+                SpeechSessionPhase::Stopping => 3,
+                SpeechSessionPhase::Failed => 4,
+            });
+            super::asr::session_status(window, &snapshot);
+        }
         Update::MicrophoneTestStatus(snapshot) => {
             let ui = window.global::<super::view::AsrUi>();
             ui.set_testing(snapshot.running);
@@ -625,6 +648,8 @@ pub(super) fn apply_with_pager(
             window.set_core_connected(false);
             window.set_core_connecting(false);
             window.set_chat_sending(false);
+            window.set_chat_active_request_id("".into());
+            window.set_chat_microphone_phase(0);
         }
         Update::Connecting => {
             window.set_core_connecting(true);
@@ -759,13 +784,17 @@ fn render(window: &AppWindow, snapshot: &ConversationSnapshot, visible: usize) {
     window.set_chat_boredom(format!("{:.1}", snapshot.state.boredom).into());
     window.set_chat_stress(format!("{:.1}", snapshot.state.stress).into());
     window.set_chat_accepted(snapshot.state.accepted_replies.to_string().into());
-    window.set_chat_active(
-        snapshot
-            .requests
-            .requests
-            .iter()
-            .filter(|r| !r.snapshot.state.is_terminal())
-            .count() as i32,
+    let ongoing = snapshot.requests.requests.iter().filter(|request| {
+        request.metadata.character_id == snapshot.character && !request.snapshot.state.is_terminal()
+    });
+    window.set_chat_active(ongoing.clone().count() as i32);
+    window.set_chat_active_request_id(
+        ongoing
+            .filter(|request| request.snapshot.can_cancel())
+            .last()
+            .map(|request| request.metadata.id.to_string())
+            .unwrap_or_default()
+            .into(),
     );
     reconcile_rows(window, rows(snapshot, visible));
     if let Some(error) = &snapshot.requests.discovery_error {

@@ -64,3 +64,29 @@ The native `ConversationUi` commands `Preview`, `Confirm`, `Abort` and `Diagnost
 Confirmation, diagnostics and errors returned to Slint are tagged with the captured origin and ignored after character reselection. Selecting A→B or A→B→A also closes the visible confirmation, history dialog and diagnostics immediately; returning to A does not reinstate the obsolete A overlay. This is **UI owner fencing**, not an additional Timeline authority or a new persistence store. An isolated headless Slint callback test verifies stale and current updates separately.
 
 The current Rust GUI `Refresh` command does not load a separately paginated historical page. Each runtime observation reconstructs up to 200 projected messages plus live request rows from an authoritative `ConversationSnapshot`; the `VecModel` is replaced rather than append-only. Do not claim that PyQt's `HistoryLoadTicket`/late older-page reconciliation, per-message edit/regenerate menu, or staged-image thumbnails are implemented in Rust merely because the Python parity documentation describes them. Those are outstanding #36 product scope, not regressions to patch with a second history cache.
+
+## B55 — отправка, отмена и голосовой ввод
+
+Основной контрол компоновщика переключается с Send на Stop на основе текущего
+`ConversationSnapshot`: выбранный персонаж имеет незавершённый запрос. Stop
+передаёт исходный `RequestId` через `ChatOrigin` и не создаёт новый запрос; при
+неканцелируемой стадии принятия ответов Stop остаётся неактивным. Под
+компоновщиком показывается «Мита думает…», пока запрос находится в работе.
+Кнопка микрофона отображает фактическое состояние `SpeechSessionPhase` и
+включает существующую ASR-сессию. Для `radio`/`push_to_talk` она также
+включает PTT; при выключении отпускает PTT и останавливает запись.
+Анимированные полосы рядом с микрофоном обозначают активную запись, но не
+претендуют на показ измеренной амплитуды (такого поля нет в `SpeechSessionSnapshot`).
+
+Каждый `DesktopTranscriptSink` получает неизменяемый `ChatOrigin` при старте
+конкретной speech-сессии. Transcript из старой сессии не приписывается новому
+персонажу: очередь несёт исходный токен и отклоняется на границе runtime. При
+смене выбора персонажа текущая session-bound запись останавливается, токен
+нового выбора не наследует старую ASR-сессию. Дополнительное требование к
+проверке — реальный аудио-девайс и полный Python/PyQt visual parity; без него
+не утверждается аппаратная проверка записи.
+
+Retry и Regenerate не подменяются новым `reply(text)` — такое действие создало
+бы второй пользовательский Timeline event и нарушило бы смысл повторной
+генерации. Для них необходим отдельный контракт на исходный `EventId`,
+`RequestId`, observer scope и атомарную проверку Timeline head.

@@ -31,7 +31,14 @@ component ChatComposer inherits VerticalLayout {
     in property <bool> connected;
     in property <bool> storage-connected;
     in property <bool> sending;
+    in property <string> active-request-id;
+    in property <int> microphone-phase;
+    in property <bool> generation-active;
+    private property <bool> activity-pulse;
+    callback cancel(string);
+    callback microphone-toggle(bool);
     in property <int> character;
+    Timer { interval: 340ms; running: root.microphone-phase == 2 || root.generation-active; triggered => { root.activity-pulse = !root.activity-pulse; } }
     in-out property <string> attachment-path;
     private property <bool> attachment-open;
     callback send(string);
@@ -58,7 +65,7 @@ component ChatComposer inherits VerticalLayout {
                         selection-foreground-color: white;
                         single-line: false; wrap: word-wrap; vertical-alignment: center;
                         key-pressed(event) => {
-                            if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.draft != "" {
+                            if event.text == "\n" && !event.modifiers.shift && root.connected && !root.sending && root.active-request-id == "" && root.draft != "" {
                                 root.send(root.draft); return accept;
                             }
                             return reject;
@@ -80,19 +87,44 @@ component ChatComposer inherits VerticalLayout {
                 enabled: false; border-radius: 9px;
                 Glyph { text: Fa.camera; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 12px; }
             } }
-            Centered { width: 32px; ActionSurface {
-                width: 32px; height: 32px; label: I18n.i18n("sandbox.mic", "Микрофон");
-                enabled: false; border-radius: 13px;
-                Glyph { text: Fa.microphone; color: SandboxTheme.muted; width: parent.width; height: parent.height; font-size: 14px; }
-            } }
             Centered { width: 42px; ActionSurface {
                 width: 42px; height: 42px;
-                label: I18n.i18n("sandbox.send", "Отправить сообщение");
-                enabled: root.connected && !root.sending && root.draft != "";
+                label: root.microphone-phase == 2 ? I18n.i18n("sandbox.mic.stop", "Остановить голосовой ввод")
+                    : root.microphone-phase == 1 || root.microphone-phase == 3 ? I18n.i18n("sandbox.mic.wait", "Микрофон переключается…")
+                    : I18n.i18n("sandbox.mic.start", "Начать голосовой ввод");
+                enabled: root.storage-connected && root.microphone-phase != 1 && root.microphone-phase != 3;
+                border-radius: 14px; border-width: 1px;
+                border-color: root.microphone-phase == 2 ? SandboxTheme.accent-alt : SandboxTheme.border;
+                background: root.microphone-phase == 2 ? #612b50 : root.microphone-phase == 4 ? #4d2237 : #1d1929;
+                Glyph { text: root.microphone-phase == 2 ? Fa.stop : Fa.microphone;
+                    color: parent.enabled ? SandboxTheme.icon : SandboxTheme.muted;
+                    width: parent.width; height: parent.height; font-size: root.microphone-phase == 2 ? 12px : 16px;
+                }
+                activated => { root.microphone-toggle(root.microphone-phase != 2); }
+            } }
+            if root.microphone-phase == 2: HorizontalLayout {
+                width: 22px; height: 30px; spacing: 2px; alignment: center;
+                for n in 3: Rectangle {
+                    width: 4px; height: root.activity-pulse ? (8px + n * 5px) : (22px - n * 5px);
+                    background: #ff86c1; border-radius: 2px;
+                    animate height { duration: 240ms; }
+                }
+            }
+            Centered { width: 42px; ActionSurface {
+                width: 42px; height: 42px;
+                label: root.generation-active ? I18n.i18n("sandbox.stop", "Отменить ответ") : I18n.i18n("sandbox.send", "Отправить сообщение");
+                enabled: root.active-request-id != "" || (root.connected && !root.generation-active && root.draft != "");
                 border-radius: 14px; border-width: 0px;
                 background: self.enabled ? (self.pressed ? #bc3981 : self.hovered ? #e6539e : SandboxTheme.accent-alt) : #39303f;
-                Glyph { text: Fa.send; color: parent.enabled ? white : #aaaaaf; font-size: 18px; width: parent.width; height: parent.height; }
-                activated => { root.send(root.draft); }
+                Glyph { text: root.generation-active ? Fa.stop : Fa.send;
+                    color: parent.enabled ? white : #aaaaaf;
+                    font-size: root.generation-active ? 15px : 18px;
+                    width: parent.width; height: parent.height;
+                }
+                activated => {
+                    if root.active-request-id != "" { root.cancel(root.active-request-id); }
+                    else if !root.sending { root.send(root.draft); }
+                }
             } }
         }
     }
@@ -121,6 +153,12 @@ component ChatComposer inherits VerticalLayout {
     }
     HorizontalLayout {
         padding-left: 6px; padding-right: 8px; spacing: 4px; height: 17px;
+        if root.generation-active: HorizontalLayout {
+            spacing: 6px;
+            Rectangle { width: 6px; height: 6px; border-radius: 3px; background: root.activity-pulse ? #ff8dbf : #795169; }
+            Caption { text: I18n.i18n("sandbox.mita-thinking", "Мита думает…"); color: #e2accd; font-size: 11px; }
+        }
+        if root.microphone-phase == 2: Caption { text: I18n.i18n("sandbox.mic.listening", "Слушаю микрофон…"); color: #ff9ccc; font-size: 10.6667px; }
         Rectangle { horizontal-stretch: 1; }
         Caption { text: I18n.i18n("sandbox.context-unavailable", "Контекст: —"); font-size: 10.6667px; color: SandboxTheme.muted; }
     }
@@ -134,12 +172,16 @@ export component SandboxChat inherits Rectangle {
     in property <bool> connected;
     in property <bool> storage-connected;
     in property <bool> sending;
+    in property <string> active-request-id;
+    in property <int> microphone-phase;
+    in property <bool> generation-active;
     in-out property <string> draft;
     in-out property <string> attachment-path;
     in-out property <bool> follow-tail;
     callback send(string);
     callback attach(string, string);
     callback cancel(string);
+    callback microphone-toggle(bool);
     callback hide-message(string);
     callback copy-message(string);
     callback refresh();
@@ -179,9 +221,13 @@ export component SandboxChat inherits Rectangle {
         ChatComposer {
             connected: root.connected; storage-connected: root.storage-connected;
             sending: root.sending; character: root.character;
+            active-request-id: root.active-request-id; microphone-phase: root.microphone-phase;
+            generation-active: root.generation-active;
             draft <=> root.draft; attachment-path <=> root.attachment-path;
             send(text) => { root.send(text); }
             attach(text, path) => { root.attach(text, path); }
+            cancel(id) => { root.cancel(id); }
+            microphone-toggle(enabled) => { root.microphone-toggle(enabled); }
         }
     }
 }

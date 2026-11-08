@@ -1599,3 +1599,85 @@ fn chat_copy_selection_dialog_scopes_text_to_active_character() {
     assert_eq!(commands.borrow().len(), 2, "copy must not mutate Timeline");
     window.hide().unwrap();
 }
+
+#[test]
+fn chat_composer_cancel_and_microphone_actions_follow_selection_and_speech_state() {
+    use super::super::{
+        runtime::{ChatOrigin, Command, Update},
+        sandbox,
+        view::AppWindow,
+    };
+    use neuromita::{
+        audio::controller::{SpeechSessionPhase, SpeechSessionSnapshot},
+        character::CharacterId,
+    };
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    window.set_core_connected(true);
+    window.set_chat_generation_ready(true);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let commands = Rc::new(RefCell::new(Vec::new()));
+    let collected = commands.clone();
+    sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |command| collected.borrow_mut().push(command)),
+        revision.clone(),
+    );
+
+    let request_id = uuid::Uuid::new_v4();
+    window.set_chat_active_request_id(request_id.to_string().into());
+    window.invoke_chat_cancel(request_id.to_string().into());
+    window.invoke_chat_microphone_toggle(true);
+    let owner = ChatOrigin {
+        character: CharacterId::Crazy,
+        selection_revision: 0,
+    };
+    assert!(
+        matches!(&commands.borrow()[0], Command::Cancel(origin, id) if *origin == owner && id.0 == request_id)
+    );
+    assert!(
+        matches!(&commands.borrow()[1], Command::ChatSpeechToggle(origin, true) if *origin == owner)
+    );
+
+    let editor = std::sync::Arc::new(std::sync::Mutex::new(
+        super::super::memory::MemoryEditor::default(),
+    ));
+    sandbox::apply(
+        &window,
+        Update::SpeechSessionStatus(SpeechSessionSnapshot {
+            phase: SpeechSessionPhase::Starting,
+            last_error: None,
+        }),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_microphone_phase(), 1);
+    sandbox::apply(
+        &window,
+        Update::SpeechSessionStatus(SpeechSessionSnapshot {
+            phase: SpeechSessionPhase::Listening,
+            last_error: None,
+        }),
+        &editor,
+        &revision,
+    );
+    assert_eq!(window.get_chat_microphone_phase(), 2);
+    window.invoke_chat_microphone_toggle(false);
+    assert!(
+        matches!(&commands.borrow()[2], Command::ChatSpeechToggle(origin, false) if *origin == owner)
+    );
+
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    assert_eq!(window.get_chat_active_request_id(), "");
+    assert!(
+        matches!(&commands.borrow()[3], Command::Select(origin) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    window.invoke_chat_microphone_toggle(true);
+    assert!(
+        matches!(&commands.borrow()[4], Command::ChatSpeechToggle(origin, true) if origin.character == CharacterId::Kind && origin.selection_revision == 1)
+    );
+    window.hide().unwrap();
+}
