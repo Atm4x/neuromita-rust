@@ -1,0 +1,33 @@
+name: Import exact Agent C native executable lifecycle commit
+on:
+  push:
+    branches: [bridge/agent-c-native-lifecycle-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-lifecycle-20261109
+          fetch-depth: 0
+      - name: Verify pinned Git bundle and publish exact commit without force
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native.part0{0,1,2,3,4} | base64 -d > /tmp/native-lifecycle.bundle
+          test "$(sha256sum /tmp/native-lifecycle.bundle | cut -d' ' -f1)" = "433fa95f10d022c86b01bd95eaf5bb0ba17d737dc5249fcdce5a234dc372cef8"
+          git fetch origin refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "7e12464181355c79179afd61f26d2d1839a6508e"
+          git fetch origin refs/heads/codex/ai-native-executable-lifecycle-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "7e12464181355c79179afd61f26d2d1839a6508e"
+          git bundle verify /tmp/native-lifecycle.bundle
+          git fetch /tmp/native-lifecycle.bundle refs/heads/codex/ai-native-executable-lifecycle-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "acf81167c8a1d55e9cd66a154622366803321a3a"
+          git checkout --detach "acf81167c8a1d55e9cd66a154622366803321a3a"
+          test "$(git rev-parse HEAD^{tree})" = "310ef20ada73b5f8a985fde7d1d033d0b2defaa4"
+          test "$(git rev-list --parents -n1 HEAD)" = "acf81167c8a1d55e9cd66a154622366803321a3a 7e12464181355c79179afd61f26d2d1839a6508e"
+          git diff --check "7e12464181355c79179afd61f26d2d1839a6508e" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-executable-lifecycle-20261109
