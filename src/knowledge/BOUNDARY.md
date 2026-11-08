@@ -176,3 +176,9 @@ records are no-ops, incompatible IDs fail closed, and SQLite reopen is tested.
 **This is not a complete World.db or SessionArchive transfer:** history,
 variables, graph relations, settings and assets are excluded by format.
 Details and remaining D4/D5 requirements: [`MEMORY_TRANSFER.md`](MEMORY_TRANSFER.md).
+
+## Verified History evidence boundary (Agent A Cycle39; R7 engineering slice)
+
+`history_generation::render_history_evidence_with_window` now compares every selected History hit against its authoritative `MitaView` message rather than merely accepting any matching content prefix. It requires the exact Unicode character-budgeted quote, canonical metadata from `history_retrieval::hit`, the original archived EventId, User/Assistant role, matching prefix/window, a consistent selected status, unique IDs, distinct authorized retrieval methods and finite scores. Failure is explicit `InvalidEvidence`/`StaleSelection` before producing prompt text; no lexical or other-source fallback. The pure renderer performs no index write, provider request or Timeline mutation. New direct tests verify metadata tampering, duplicated IDs, partial quotations, score failure and legitimate Unicode truncation.
+
+The finite `R7` evidence/gap map is in [`R7_FAILURE_MATRIX_20261108.md`](R7_FAILURE_MATRIX_20261108.md). **Formal R7 remains OPEN** pending Documents/index owner, real timeout and partial-source policy, and user-visible recovery/failure acceptance. This does not close R5 Python parity or D4 History transfer.

@@ -663,6 +663,149 @@ fn archived_history_is_absent_from_active_window_and_retrievable_once() {
 }
 
 #[test]
+fn archived_history_renderer_rejects_partial_quotes_and_forged_provenance() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let archived = append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Archived instructions say the first dose is never the last"),
+    );
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Current live message"),
+    );
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let window = HistoryWindow::capture(&view, None, 1);
+    let mut result = search_archived_history(
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "instructions dose",
+        HistorySearchConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(result.hits[0].key.id, archived.0.to_string());
+    let render = |result: &_| {
+        render_archived_history_evidence(CharacterId::Crazy, &view, &window, result, 4, 1200)
+    };
+    assert!(
+        render(&result)
+            .unwrap()
+            .unwrap()
+            .contains("first dose is never the last")
+    );
+
+    let valid_content = result.hits[0].content.clone();
+    result.hits[0].content = "Archived instructions say the first dose".into();
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].content = valid_content;
+
+    for key in [
+        "message_id",
+        "sequence",
+        "learned_at",
+        "role",
+        "branch_id",
+        "through",
+    ] {
+        let actual = result.hits[0].metadata[key].clone();
+        result.hits[0].metadata.insert(key.into(), "forged".into());
+        assert_eq!(
+            render(&result),
+            Err(HistoryEvidenceError::InvalidEvidence),
+            "{key}"
+        );
+        result.hits[0].metadata.insert(key.into(), actual);
+    }
+    result.hits[0]
+        .metadata
+        .insert("extra_field".into(), "forged".into());
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].metadata.remove("extra_field");
+
+    let valid_status = result.status;
+    result.status = HistorySearchStatus::NoMatches;
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.status = valid_status;
+
+    result.hits.push(result.hits[0].clone());
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits.pop();
+    let valid_evidence = result.hits[0].evidence.clone();
+    result.hits[0].evidence.clear();
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].evidence = valid_evidence;
+    let valid_score = result.hits[0].score;
+    result.hits[0].score = f64::NAN;
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].score = valid_score;
+    result.hits[0].evidence[0].raw_score = Some(f64::INFINITY);
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].evidence[0].raw_score = None;
+    result.hits[0].evidence[0].method = RetrievalMethod::Graph;
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+    result.hits[0].evidence[0].method = RetrievalMethod::Keyword;
+    let duplicate_method = result.hits[0].evidence[0].clone();
+    result.hits[0].evidence.push(duplicate_method);
+    assert_eq!(render(&result), Err(HistoryEvidenceError::InvalidEvidence));
+}
+
+#[test]
+fn archived_history_renderer_requires_exact_unicode_character_budget() {
+    let mut repo = TimelineStore::new();
+    let branch = BranchId::new();
+    repo.create_session(SessionId::new(), branch).unwrap();
+    let source = format!("Notebook café ☕ {}", "x".repeat(140));
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!(source),
+    );
+    append(
+        &mut repo,
+        branch,
+        EventKind::PlayerMessage,
+        &[CharacterId::Crazy],
+        json!("Current live message"),
+    );
+    let view = TimelineMessageQueries::capture(&repo, branch, CharacterId::Crazy, None).unwrap();
+    let window = HistoryWindow::capture(&view, None, 1);
+    let result = search_archived_history(
+        CharacterId::Crazy,
+        &view,
+        &window,
+        "notebook",
+        HistorySearchConfig {
+            limit: 4,
+            max_content_chars: 64,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        result.hits[0].content,
+        source.chars().take(64).collect::<String>()
+    );
+    assert!(
+        render_archived_history_evidence(CharacterId::Crazy, &view, &window, &result, 4, 64)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        render_archived_history_evidence(CharacterId::Crazy, &view, &window, &result, 4, 65),
+        Err(HistoryEvidenceError::InvalidEvidence)
+    );
+}
+
+#[test]
 fn archived_history_scope_is_invalidated_by_revision_and_privacy() {
     let mut repo = TimelineStore::new();
     let branch = BranchId::new();
