@@ -67,6 +67,23 @@ impl WikiHistory {
     }
 }
 
+fn slint_wiki_markdown(markdown: &str) -> String {
+    markdown
+        .lines()
+        .map(|line| {
+            let heading = line.trim_start_matches('#');
+            if heading.len() < line.len() && heading.starts_with(' ') {
+                format!("**{}**", heading.trim())
+            } else if let Some(quote) = line.strip_prefix("> ") {
+                format!("│ {quote}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn render(window: &AppWindow, history: &WikiHistory) {
     let page =
         wiki::article(history.current()).expect("Wiki history contains only registered pages");
@@ -76,7 +93,7 @@ pub fn render(window: &AppWindow, history: &WikiHistory) {
     window.set_wiki_can_back(history.can_back());
     window.set_wiki_can_forward(history.can_forward());
     window.set_wiki_article_text(
-        StyledText::from_markdown(page.markdown(history.language()))
+        StyledText::from_markdown(&slint_wiki_markdown(page.markdown(history.language())))
             .expect("bundled Wiki Markdown is valid"),
     );
     window.set_wiki_articles(ModelRc::new(VecModel::from(
@@ -104,10 +121,21 @@ mod tests {
         }
         for page in wiki::ARTICLES {
             for language in ["ru", "en"] {
-                StyledText::from_markdown(page.markdown(language))
+                StyledText::from_markdown(&slint_wiki_markdown(page.markdown(language)))
                     .unwrap_or_else(|error| panic!("Wiki {} {language}: {error}", page.id));
             }
         }
+    }
+
+    #[test]
+    fn wiki_projection_preserves_links_and_rewrites_unsupported_blocks() {
+        let source = "# Title\n\n> **New?** [Start](./getting-started.md)\n\n## Section\n\n- [Settings](app:settings)";
+        let projected = slint_wiki_markdown(source);
+        assert!(projected.contains("**Title**"));
+        assert!(projected.contains("│ **New?** [Start](./getting-started.md)"));
+        assert!(projected.contains("**Section**"));
+        assert!(projected.contains("- [Settings](app:settings)"));
+        StyledText::from_markdown(&projected).unwrap();
     }
 
     #[test]
