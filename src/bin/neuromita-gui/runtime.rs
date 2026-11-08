@@ -87,6 +87,7 @@ pub enum Command {
     Send(ChatOrigin, String),
     AttachFile(ChatOrigin, String, String),
     Cancel(ChatOrigin, RequestId),
+    Retry(ChatOrigin, RequestId),
     Refresh,
     LoadOlder(
         ChatOrigin,
@@ -750,6 +751,19 @@ async fn observe(
                         Ok(CancelResult::TooLate | CancelResult::AlreadyFinished) =>
                             publish(Update::ChatError(origin, "The result has already been accepted; cancellation is too late".into())),
                         Err(error) => publish(Update::ChatError(origin, error.to_string())),
+                    }
+                },
+                Some(Command::Retry(origin, id)) => {
+                    if !chat_fence::accepts(
+                        origin.character.index() as i32,
+                        origin.selection_revision,
+                        character.index() as i32,
+                        selection_revision,
+                    ) {
+                        continue;
+                    }
+                    if let Err(error) = presenter.retry_failed(origin.character, id).await {
+                        publish(Update::ChatError(origin, error.to_string()));
                     }
                 },
                 Some(Command::Volume(value)) => match Volume::new(value).and_then(|v| presenter.set_volume(v)) {

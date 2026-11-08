@@ -42,6 +42,7 @@ export component SandboxPage inherits Rectangle {
     callback send(string);
     callback attach(string, string);
     callback cancel(string);
+    callback retry(string);
     callback microphone-toggle(bool);
     callback hide-message(string);
     callback copy-message(string);
@@ -92,6 +93,7 @@ export component SandboxPage inherits Rectangle {
                     send(text) => { root.send(text); }
                     attach(text, path) => { root.attach(text, path); }
                     cancel(id) => { root.cancel(id); }
+                    retry(id) => { root.retry(id); }
                     microphone-toggle(enabled) => { root.microphone-toggle(enabled); }
                     hide-message(id) => { root.hide-message(id); }
                     copy-message(text) => { root.copy-message(text); }

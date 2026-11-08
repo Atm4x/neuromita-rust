@@ -557,6 +557,127 @@ fn user_texts(body: &Value) -> Vec<&str> {
         .collect()
 }
 
+#[tokio::test]
+async fn conversation_retry_reuses_input_event_and_rejects_duplicate_or_stale_attempts() {
+    use neuromita::{
+        presentation::{ConversationError, PresenterError},
+        request::TurnIntent,
+        timeline::domain::EventKind,
+    };
+
+    let _serial = CORE_TEST_MUTEX.lock().await;
+    let mut server = GeminiServer::start().await;
+    let app = ApplicationLifecycle::start(ApplicationConfig::minimal(
+        preset(&server.endpoint),
+        ResponseGenerator::new([
+            Arc::new(GeminiProvider::new().unwrap()) as Arc<dyn GenerationProvider>
+        ])
+        .unwrap(),
+        limits(),
+        "127.0.0.1:0".parse().unwrap(),
+    ))
+    .await
+    .unwrap();
+    let conversation = &app.presenter().conversation;
+    let source = conversation
+        .reply(CharacterId::Crazy, "Retry me".into())
+        .unwrap();
+    let original = source.snapshot().metadata.intent;
+    let call = server.next().await;
+    call.respond.send(Reply::Status(400)).unwrap();
+    assert!(matches!(
+        finished(&source).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    shown(&app.presenter().chat, source.id(), true).await;
+    let before = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let user_ids = before
+        .messages
+        .iter()
+        .filter(|message| message.kind == EventKind::PlayerMessage)
+        .map(|message| message.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(user_ids.len(), 1);
+    assert_eq!(original, TurnIntent::Reply(user_ids[0]));
+
+    let retry = conversation
+        .retry_failed(CharacterId::Crazy, source.id())
+        .await
+        .unwrap();
+    assert_ne!(retry.id(), source.id());
+    assert_eq!(retry.snapshot().metadata.intent, original);
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, source.id())
+            .await,
+        Err(ConversationError::Presenter(
+            PresenterError::RetryAlreadyUsed
+        ))
+    ));
+    let call = server.next().await;
+    assert_eq!(user_texts(&call.body), ["Retry me"]);
+    call.respond.send(Reply::Text("Recovered reply")).unwrap();
+    assert!(matches!(
+        finished(&retry).await.state,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    shown(&app.presenter().chat, retry.id(), true).await;
+    let after = conversation.snapshot(CharacterId::Crazy).await.unwrap();
+    let after_ids = after
+        .messages
+        .iter()
+        .filter(|message| message.kind == EventKind::PlayerMessage)
+        .map(|message| message.event_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        after_ids, user_ids,
+        "retry must not append another user event"
+    );
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, retry.id())
+            .await,
+        Err(ConversationError::Presenter(
+            PresenterError::RetryUnavailable
+        ))
+    ));
+
+    let other = conversation
+        .reply(CharacterId::Crazy, "Will be superseded".into())
+        .unwrap();
+    let call = server.next().await;
+    call.respond.send(Reply::Status(400)).unwrap();
+    assert!(matches!(
+        finished(&other).await.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    shown(&app.presenter().chat, other.id(), true).await;
+    let old_head = app.at();
+    let old_selection = *conversation.observe_selection().unwrap().borrow();
+    ChatApi::publish_message(
+        CharacterId::Crazy,
+        UserInput::new("newer input".into()).unwrap(),
+    )
+    .unwrap();
+    let guarded = ChatApi::reply(
+        ReplyRequest::new(CharacterId::Crazy, user_ids[0], RequestSource::Presenter)
+            .expect_timeline(neuromita::request::TimelineFence {
+                at: old_head,
+                selection: old_selection,
+            }),
+    );
+    assert!(matches!(guarded, Err(SubmitError::StaleTimeline)));
+
+    assert!(matches!(
+        conversation
+            .retry_failed(CharacterId::Crazy, other.id())
+            .await,
+        Err(ConversationError::RetrySuperseded)
+    ));
+    app.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn presenter_to_provider_observation_cancellation_and_commit() {
     let _serial = CORE_TEST_MUTEX.lock().await;

@@ -49,6 +49,7 @@ export component MessageRow inherits VerticalLayout {
     in property <string> character-name;
     in property <length> bubble-width;
     callback cancel(string);
+    callback retry(string);
     callback hide-message(string);
     callback edit-message(string, string);
     callback copy-message(string);
@@ -149,6 +150,7 @@ export component MessageRow inherits VerticalLayout {
         padding-left: root.item.user ? 0px : 52px; padding-right: 44px; spacing: 6px; height: 25px;
         StatusText { status: root.item.status; streaming-preview: root.item.status == ChatStatus.text && root.item.text != ""; tool-name: root.item.tool-name; tool-executing: root.item.tool-executing; horizontal-stretch: 1; min-width: 0px; }
         if root.item.can-cancel: GhostButton { text: I18n.i18n("sandbox.cancel", "Отменить"); height: 25px; activated => { root.cancel(root.item.request-id); } }
+        if root.item.can-retry: GhostButton { text: I18n.i18n("sandbox.retry", "Повторить запрос"); height: 25px; activated => { root.retry(root.item.request-id); } }
     }
     if root.item.detail != "": Text { text: root.item.detail; color: #ff9baf; font-family: SandboxTheme.font-family; font-size: 12px; wrap: word-wrap; }
 }

@@ -7,10 +7,12 @@ use super::{BoundProperty, CharactersPresenter, ChatModel, ChatPresenter, Presen
 use crate::{
     character::{CharacterError, CharacterId, CharacterState},
     generation::{PresetCatalog, PresetCatalogError, PresetCatalogSnapshot, PresetId},
-    request::{CancelResult, RequestHandle, RequestId},
+    request::{CancelResult, RequestHandle, RequestId, TimelineFence},
     settings::{PresetSelection, SettingsError, SettingsOwner, SettingsSnapshot, Volume},
     timeline::{
-        ContextAnchor, SessionTimeline, domain::ProjectedMessage, selection::TimelineSelection,
+        ContextAnchor, SessionTimeline,
+        domain::{MessageRole, ProjectedMessage},
+        selection::TimelineSelection,
     },
 };
 
@@ -32,6 +34,10 @@ pub enum ConversationError {
     MessageNotVisible,
     #[error("only non-empty text-only visible messages can be revised")]
     InvalidMessageEdit,
+    #[error("failed input is no longer the last visible player message")]
+    RetrySuperseded,
+    #[error(transparent)]
+    Presenter(#[from] PresenterError),
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +229,35 @@ impl ConversationPresenter {
         text: String,
     ) -> Result<RequestHandle, PresenterError> {
         self.chat.reply(character, text)
+    }
+
+    /// Re-admits the original player EventId without appending another user message.
+    /// The immutable view is checked before admission and the same exact branch,
+    /// generation, and head are asserted again inside the admission lock.
+    pub async fn retry_failed(
+        &self,
+        character: CharacterId,
+        source: RequestId,
+    ) -> Result<RequestHandle, ConversationError> {
+        let event = self.chat.retry_target(character, source)?;
+        let (at, selection) = {
+            let timeline = self
+                .timeline
+                .lock()
+                .map_err(|_| ConversationError::TimelineUnavailable)?;
+            (timeline.anchor(), timeline.selection())
+        };
+        let context = self.characters.context(character, at).await?;
+        if !context.view.messages().last().is_some_and(|message| {
+            message.event_id == event
+                && message.role == MessageRole::User
+                && message.speaker.as_deref() == Some("player")
+        }) {
+            return Err(ConversationError::RetrySuperseded);
+        }
+        Ok(self
+            .chat
+            .retry_failed_at(character, source, TimelineFence { at, selection })?)
     }
 
     pub fn cancel(&self, request: RequestId) -> Result<CancelResult, PresenterError> {

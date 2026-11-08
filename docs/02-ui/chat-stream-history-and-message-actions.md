@@ -90,3 +90,39 @@ copy surface, **not** an instantaneous platform clipboard write and not a claim
 that attached binary media or request diagnostics are copied. It has no backend
 command and cannot append Timeline facts. Switching characters closes the
 copy surface and discards its text; it is never stored as independent history.
+
+## Rust Slint B56: retry failed reply without a second user event
+
+The persistent Rust Timeline records the **player message before generation**, unlike
+some legacy PyQt failure paths where unsuccessful messages were not committed.
+Consequently, the Python `RetryLastChat` wording cannot be translated into a new
+`reply(text)` call: that would persist a duplicate player event. The real Rust
+**Retry** control is shown only on the latest failed or cancelled presenter-owned
+reply, and it sends the original request's `RequestId` as an operation token.
+`ConversationPresenter::retry_failed` resolves its `TurnIntent::Reply(EventId)`,
+requires that event to still be the most recent visible player message, and
+re-admits that same EventId with a **new** RequestId. The retry path never calls
+`publish_message` and never hides/revises historical messages.
+
+Retries are limited to one submission per failed attempt (with the new attempt's
+ID eligible for its own retry if it subsequently fails), and cannot be used for
+accepted responses, voice-only failures after text acceptance, foreign-character
+requests, older superseded requests, or non-reply intents. A typed
+`TimelineFence { at: ContextAnchor, selection: TimelineSelection }` is validated
+under the *actual request-admission Timeline lock* so branch changes, same-branch
+reselection and a new head are rejected without creating a queued request.
+An admission failure releases the retry claim; a successful registration claims
+only the previous request identity, not its user event. Backend acceptance and
+streaming continue to use existing request lifecycle ownership and cancellation.
+
+**PyQt evidence, not inferred UI parity:** `src/ui/widgets/chat_panel.py` on
+`Atm4x/NeuroMita/main` confirms the same fixed 42×42 Send/Stop button, a white
+rounded-square stop glyph and cancellation on click. The PyQt widget keeps the
+"typing" bar at the bottom of the *message scroll*, whereas the B55 Slint
+status is below the composer. The PyQt composer currently contains attach,
+text input, camera and Send/Stop; the microphone control is on the separate
+session panel. Slint B55 added a composer microphone by request, but this is
+**not** pixel-perfect PyQt composer parity. Actual capture amplitude and a
+hardware/Windows screenshot comparison remain unverified. Regenerate-from-here
+is **not** implemented by retry; its downstream history semantics must be
+handled in a separate atomic Timeline operation.

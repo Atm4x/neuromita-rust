@@ -1681,3 +1681,37 @@ fn chat_composer_cancel_and_microphone_actions_follow_selection_and_speech_state
     );
     window.hide().unwrap();
 }
+
+#[test]
+fn chat_retry_callback_preserves_original_request_identity_and_selection() {
+    use super::super::{
+        runtime::{ChatOrigin, Command},
+        sandbox,
+        view::AppWindow,
+    };
+    use neuromita::character::CharacterId;
+
+    slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
+    let window = AppWindow::new().unwrap();
+    window.show().unwrap();
+    window.set_chat_character(CharacterId::Crazy.index() as i32);
+    let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let recorded = Rc::new(RefCell::new(Vec::new()));
+    let commands = recorded.clone();
+    sandbox::bind_chat_actions(
+        &window,
+        Rc::new(move |cmd| commands.borrow_mut().push(cmd)),
+        revision.clone(),
+    );
+    let first = uuid::Uuid::new_v4();
+    window.invoke_chat_retry(first.to_string().into());
+    assert!(matches!(&recorded.borrow()[0], Command::Retry(origin, id)
+        if *origin == ChatOrigin{ character: CharacterId::Crazy, selection_revision: 0 } && id.0 == first));
+    window.invoke_chat_select_character(CharacterId::Kind.index() as i32);
+    window.invoke_chat_select_character(CharacterId::Crazy.index() as i32);
+    let new_attempt = uuid::Uuid::new_v4();
+    window.invoke_chat_retry(new_attempt.to_string().into());
+    assert!(matches!(&recorded.borrow()[3], Command::Retry(origin, id)
+        if *origin == ChatOrigin { character: CharacterId::Crazy, selection_revision: 2 } && id.0 == new_attempt));
+    window.hide().unwrap();
+}

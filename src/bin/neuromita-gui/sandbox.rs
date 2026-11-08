@@ -426,6 +426,22 @@ pub(super) fn bind_chat_actions(
     let send = dispatch.clone();
     let weak = window.as_weak();
     let revision = selection_revision.clone();
+    window.on_chat_retry(move |id| {
+        let Some(window) = weak.upgrade() else {
+            return;
+        };
+        match (
+            current_origin(&window, &revision),
+            uuid::Uuid::parse_str(&id),
+        ) {
+            (Some(origin), Ok(id)) => send(Command::Retry(origin, RequestId(id))),
+            (None, _) => window.set_chat_error("Unknown chat character selection".into()),
+            (_, Err(error)) => window.set_chat_error(error.to_string().into()),
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    let revision = selection_revision.clone();
     window.on_chat_cancel(move |id| {
         let Some(window) = weak.upgrade() else {
             return;
@@ -897,6 +913,12 @@ fn rows(snapshot: &ConversationSnapshot, visible: usize) -> Vec<ChatRow> {
         .iter()
         .filter(|row| row.metadata.character_id == snapshot.character)
         .collect::<Vec<_>>();
+    let latest = requests.last().map(|request| request.metadata.id);
+    let latest_visible_player = snapshot
+        .messages
+        .last()
+        .filter(|message| message.kind == neuromita::timeline::domain::EventKind::PlayerMessage)
+        .map(|message| message.event_id);
     let accepted = requests
         .iter()
         .filter_map(|request| match &request.snapshot.state {
@@ -936,6 +958,15 @@ fn rows(snapshot: &ConversationSnapshot, visible: usize) -> Vec<ChatRow> {
             request_id: request.metadata.id.to_string().into(),
             character_index: request.metadata.character_id.index() as i32,
             can_cancel: request.snapshot.can_cancel(),
+            can_retry: latest == Some(request.metadata.id)
+                && request.metadata.source == neuromita::request::RequestSource::Presenter
+                && matches!(request.metadata.intent, neuromita::request::TurnIntent::Reply(target) if Some(target) == latest_visible_player)
+                && matches!(
+                    request.snapshot.state,
+                    RequestState::Cancelled
+                        | RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+                        | RequestState::Finished(RequestOutcome::InternalError(_))
+                ),
             ..Default::default()
         };
         if let Some(tool) = &request.snapshot.tool_activity {

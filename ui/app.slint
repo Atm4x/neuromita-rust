@@ -75,6 +75,7 @@ export component AppWindow inherits Window {
     callback chat-send(string);
     callback chat-attach(string, string);
     callback chat-cancel(string);
+    callback chat-retry(string);
     callback chat-microphone-toggle(bool);
     callback chat-hide-message(string);
     callback chat-copy-message(string);
@@ -133,6 +134,7 @@ export component AppWindow inherits Window {
                 send(text) => { root.chat-send(text); }
                 attach(text, path) => { root.chat-attach(text, path); }
                 cancel(id) => { root.chat-cancel(id); }
+                retry(id) => { root.chat-retry(id); }
                 microphone-toggle(enabled) => { root.chat-microphone-toggle(enabled); }
                 hide-message(id) => { root.chat-hide-message(id); }
                 copy-message(text) => { root.chat-copy-message(text); }

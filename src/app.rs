@@ -358,6 +358,7 @@ impl RequestIngress for TimelineRequestIngress {
         &self,
         character: CharacterId,
         intent: TurnIntent,
+        fence: Option<crate::request::TimelineFence>,
     ) -> Result<TimelineAdmission, SubmitError> {
         let timeline = self
             .timeline
@@ -367,6 +368,11 @@ impl RequestIngress for TimelineRequestIngress {
         timeline
             .assert_selection(selection)
             .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.is_some_and(|expected| {
+            expected.selection != selection || expected.at != timeline.anchor()
+        }) {
+            return Err(SubmitError::StaleTimeline);
+        }
         if let TurnIntent::Reply(_) | TurnIntent::React(_) = intent {
             timeline
                 .reaction_cause_at(character, intent, timeline.anchor())

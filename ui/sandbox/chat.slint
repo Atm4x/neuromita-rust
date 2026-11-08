@@ -36,6 +36,7 @@ component ChatComposer inherits VerticalLayout {
     in property <bool> generation-active;
     private property <bool> activity-pulse;
     callback cancel(string);
+    callback retry(string);
     callback microphone-toggle(bool);
     in property <int> character;
     Timer { interval: 340ms; running: root.microphone-phase == 2 || root.generation-active; triggered => { root.activity-pulse = !root.activity-pulse; } }
@@ -181,6 +182,7 @@ export component SandboxChat inherits Rectangle {
     callback send(string);
     callback attach(string, string);
     callback cancel(string);
+    callback retry(string);
     callback microphone-toggle(bool);
     callback hide-message(string);
     callback copy-message(string);
@@ -211,6 +213,7 @@ export component SandboxChat inherits Rectangle {
                         bubble-width: min(SandboxTheme.max-bubble-width, max(240px, (root.width - 98px) / 2));
                         character-name: CharacterCatalog.name(CharacterCatalog.entries[root.character]);
                         cancel(id) => { root.cancel(id); }
+                        retry(id) => { root.retry(id); }
                         hide-message(id) => { root.hide-message(id); }
                         copy-message(text) => { root.copy-message(text); }
                         edit-message(id, text) => { ConversationUi.edit-target = id; ConversationUi.edit-draft = text; }

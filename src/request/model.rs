@@ -11,7 +11,10 @@ use crate::{
     generation::GenerationError,
     identity::RequestId,
     interaction::TurnIntent,
-    timeline::{ContextPosition, EventId, conversation::ConversationAudience},
+    timeline::{
+        ContextAnchor, ContextPosition, EventId, conversation::ConversationAudience,
+        selection::TimelineSelection,
+    },
     voice::VoiceError,
 };
 
@@ -39,15 +42,25 @@ pub trait GenerationCommand: Send + Sync + fmt::Debug {
     fn intent(&self) -> TurnIntent;
     fn at(&self) -> ContextPosition;
     fn audience(&self) -> &ConversationAudience;
+    fn timeline_fence(&self) -> Option<TimelineFence> {
+        None
+    }
     fn game_context(&self) -> Option<&GameRuntimeContext> {
         None
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineFence {
+    pub at: ContextAnchor,
+    pub selection: TimelineSelection,
 }
 
 #[derive(Debug)]
 pub struct ReplyRequest {
     character_id: CharacterId,
     message: EventId,
+    fence: Option<TimelineFence>,
     source: RequestSource,
     at: ContextPosition,
     audience: ConversationAudience,
@@ -59,6 +72,7 @@ impl ReplyRequest {
         Self {
             character_id,
             message,
+            fence: None,
             source,
             at: ContextPosition::Latest,
             audience: ConversationAudience::private_to(character_id),
@@ -67,6 +81,11 @@ impl ReplyRequest {
     }
     pub fn at(mut self, at: ContextPosition) -> Self {
         self.at = at;
+        self
+    }
+    pub fn expect_timeline(mut self, fence: TimelineFence) -> Self {
+        self.at = ContextPosition::At(fence.at);
+        self.fence = Some(fence);
         self
     }
     pub fn with_audience(mut self, audience: ConversationAudience) -> Self {
@@ -85,6 +104,9 @@ impl GenerationCommand for ReplyRequest {
     }
     fn guidance(&self) -> &str {
         ""
+    }
+    fn timeline_fence(&self) -> Option<TimelineFence> {
+        self.fence
     }
     fn source(&self) -> RequestSource {
         self.source
@@ -378,6 +400,8 @@ pub enum SubmitError {
     PromptUnavailable(String),
     #[error("target event is not observable or not a message when replying")]
     InvalidTargetEvent,
+    #[error("timeline changed before retry could be admitted")]
+    StaleTimeline,
 }
 
 #[derive(Debug, Error)]

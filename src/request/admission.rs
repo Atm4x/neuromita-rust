@@ -14,6 +14,7 @@ use crate::{
     identity::{CharacterId, EventId, RequestId},
     interaction::{TurnIntent, UserInput},
     prompts::PromptCatalog,
+    request::TimelineFence,
     settings::SettingsOwner,
     timeline::{conversation::ConversationMessage, selection::TimelineAdmission},
 };
@@ -33,6 +34,7 @@ pub(crate) trait RequestIngress: Send + Sync {
         &self,
         character: CharacterId,
         intent: TurnIntent,
+        fence: Option<TimelineFence>,
     ) -> Result<TimelineAdmission, SubmitError>;
 }
 
@@ -124,9 +126,11 @@ impl ChatApiState {
         if !*accepting {
             return Err(SubmitError::Stopped);
         }
-        let admission = self
-            .ingress
-            .admit(request.character_id(), request.intent())?;
+        let admission = self.ingress.admit(
+            request.character_id(),
+            request.intent(),
+            request.timeline_fence(),
+        )?;
         let id = RequestId::new();
         let handle = self.registry.register_with_configuration(
             Box::new(request),
