@@ -23,7 +23,7 @@ pub use diagnostics::{
 pub(crate) use diagnostics::{DiagnosticsLookup, DiagnosticsStore};
 pub(crate) use handler::{MessageHandler, ProviderDispatchFence};
 pub use model::*;
-pub(crate) use record::RequestRecord;
+pub(crate) use record::{RegenerateTerminalReconciliation, RequestRecord};
 pub use record::{RequestHandle, RequestObserver};
 pub(crate) use registry::RequestRegistry;
 pub use registry::{DiscoveryError, RequestDiscovery};

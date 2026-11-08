@@ -1468,3 +1468,339 @@ async fn failed_shutdown_cancel_stays_registered_and_can_be_reconciled_after_sto
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
 }
+
+#[cfg(feature = "sqlite-system")]
+fn b68_external_acceptance(
+    db: &std::path::Path,
+    session: crate::timeline::domain::SessionId,
+    root: BranchId,
+    source: RegenerateSource,
+    request: RequestId,
+) -> EventId {
+    let mut other = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.to_owned(),
+        session,
+        root,
+    })
+    .unwrap();
+    let turn = other
+        .capture_turn(
+            source.character,
+            Some(source.original_input),
+            other.anchor(),
+        )
+        .unwrap();
+    other
+        .append_reply(crate::timeline::GeneratedReply {
+            request,
+            intent: TurnIntent::Reply(source.original_input),
+            turn,
+            expected_revision: 0,
+            content: json!("accepted by another SQLite writer"),
+            audience: crate::timeline::conversation::ConversationAudience::private_to(
+                source.character,
+            ),
+            effects: vec![
+                crate::timeline::domain::AppliedEffect::CharacterStateChanged(
+                    crate::timeline::domain::CharacterBehavior {
+                        attitude: 82.0,
+                        boredom: 1.0,
+                        stress: 3.0,
+                    },
+                ),
+            ],
+        })
+        .unwrap()
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn external_accepted_reply_overrides_late_provider_error_without_false_failure() {
+    let db = std::env::temp_dir().join(format!("b68-other-owner-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    let accepted = b68_external_acceptance(&db, session, root, fixture.source, handle.id());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    let count = || {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM timeline_events WHERE branch_id=?1",
+                [child.0.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let original_count = count();
+    assert!(original_count >= 3);
+    record.finish(crate::request::RequestOutcome::InternalError(
+        Arc::<str>::from("provider failed after foreign acceptance").into(),
+    ));
+    assert!(!handle.snapshot().state.is_terminal());
+    assert_eq!(record.externally_accepted(), Some(accepted));
+    assert_eq!(fixture.api.registry.active_count(), 1);
+    assert_eq!(count(), original_count);
+    for _ in 0..2 {
+        let status = fixture.api.reconcile_pending_terminals();
+        assert_eq!(status.len(), 1);
+        assert!(matches!(status[0].1,
+            Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
+        ));
+        assert_eq!(count(), original_count);
+        assert_eq!(record.externally_accepted(), Some(accepted));
+    }
+    drop((fixture, connection, record));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn foreign_accepted_reply_rejects_shutdown_cancel_without_removing_effects() {
+    let db = std::env::temp_dir().join(format!("b68-shutdown-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let accepted = b68_external_acceptance(&db, session, root, fixture.source, handle.id());
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert_eq!(handle.record.externally_accepted(), Some(accepted));
+    fixture.api.close();
+    assert!(!handle.snapshot().state.is_terminal());
+    assert!(!handle.record.cancellation.is_cancelled());
+    assert_eq!(handle.record.externally_accepted(), Some(accepted));
+    assert!(fixture.api.registry.get(handle.id()).is_some());
+    assert_eq!(fixture.api.registry.active_count(), 1);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    drop((fixture, reopened));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn storage_failure_then_other_owner_acceptance_is_recognized_on_retry() {
+    let db = std::env::temp_dir().join(format!("b68-storage-race-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert!(record.try_start().is_some());
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection.execute_batch("CREATE TRIGGER b68_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'b68 storage injection'); END;").unwrap();
+    record.finish(crate::request::RequestOutcome::InternalError(
+        Arc::<str>::from("provider failed").into(),
+    ));
+    assert!(!handle.snapshot().state.is_terminal());
+    assert_eq!(record.externally_accepted(), None);
+    let accepted = b68_external_acceptance(&db, session, root, fixture.source, handle.id());
+    let statuses = fixture.api.reconcile_pending_terminals();
+    assert_eq!(statuses.len(), 1);
+    assert!(matches!(statuses[0].1,
+        Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
+    ));
+    assert_eq!(record.externally_accepted(), Some(accepted));
+    assert!(!handle.snapshot().state.is_terminal());
+    connection.execute_batch("DROP TRIGGER b68_abort;").unwrap();
+    assert!(matches!(fixture.api.reconcile_pending_terminals()[0].1,
+        Ok(crate::request::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) if event == accepted
+    ));
+    assert_eq!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_regenerate(child, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    drop((fixture, connection, record));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn orphaned_external_acceptance_survives_aba_reopen_and_archive_without_duplicate_effect() {
+    use crate::timeline::storage::{SqliteTimelineRepository, archive, assets::TimelineAssetStore};
+
+    let db = std::env::temp_dir().join(format!("b68-orphan-{}.db", uuid::Uuid::new_v4()));
+    let assets_root =
+        std::env::temp_dir().join(format!("b68-orphan-assets-{}", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let child = BranchId::new();
+    let handle = fixture
+        .api
+        .regenerate(fixture.source, fixture.fence, child)
+        .unwrap();
+    let accepted = b68_external_acceptance(&db, session, root, fixture.source, handle.id());
+    let original = fixture
+        .api
+        .inspect_orphaned_regenerate(child, handle.id())
+        .unwrap();
+    assert_eq!(
+        original.outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)
+    );
+    let first = original.selection;
+    {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let back = owner.select_branch(root, first).unwrap();
+        owner.select_branch(child, back).unwrap();
+    }
+    let current = fixture
+        .api
+        .inspect_orphaned_regenerate(child, handle.id())
+        .unwrap();
+    assert!(current.selection.generation > first.generation);
+    assert_eq!(current.outcome, original.outcome);
+    drop(fixture);
+    let reopened = Arc::new(Mutex::new(
+        SessionTimeline::from_config(TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        })
+        .unwrap(),
+    ));
+    let ingress = TimelineRequestIngress {
+        timeline: Arc::clone(&reopened),
+    };
+    let after =
+        crate::request::RegenerateCancellation::inspect_regenerate(&ingress, child, handle.id())
+            .unwrap();
+    assert_eq!(after.outcome, original.outcome);
+    assert_eq!(after.admission, original.admission);
+    assert_eq!(after.selection, current.selection);
+    drop((ingress, reopened));
+    let assets = TimelineAssetStore::new(&assets_root, 1024 * 1024).unwrap();
+    let source = SqliteTimelineRepository::open(&db).unwrap();
+    let archive_bytes = archive::export_sqlite(&source, session, &assets).unwrap();
+    let mut restored = crate::timeline::domain::TimelineStore::new();
+    archive::import_memory(&mut restored, &archive_bytes, &assets).unwrap();
+    let world = restored.world(child).unwrap();
+    assert_eq!(
+        world
+            .iter()
+            .filter(|fact| fact.draft.id == accepted)
+            .count(),
+        1
+    );
+    assert_eq!(
+        world
+            .iter()
+            .filter(
+                |fact| fact.draft.kind == crate::timeline::domain::EventKind::CharacterStateChanged
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        world
+            .iter()
+            .filter(
+                |fact| fact.draft.kind == crate::timeline::domain::EventKind::RegenerateAbandoned
+            )
+            .count(),
+        0
+    );
+    assert_eq!(
+        world
+            .iter()
+            .find(|fact| fact.draft.id == accepted)
+            .unwrap()
+            .draft
+            .observers
+            .len(),
+        1
+    );
+    drop(source);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+    let _ = std::fs::remove_dir_all(assets_root);
+}

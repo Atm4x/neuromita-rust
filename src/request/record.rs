@@ -4,9 +4,10 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{registry::RegistryInner, *};
-use crate::timeline::selection::TimelineAdmission;
+use crate::identity::EventId;
 #[cfg(test)]
 use crate::timeline::selection::TimelineSelection;
+use crate::timeline::{RegenerateRecoveryOutcome, selection::TimelineAdmission};
 
 pub(crate) struct RequestRecord {
     inner: Mutex<Execution>,
@@ -35,6 +36,13 @@ struct Execution {
 enum PendingTerminal {
     Failure(RequestOutcome),
     Cancelled,
+    AcceptedElsewhere(EventId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegenerateTerminalReconciliation {
+    Abandoned,
+    AcceptedElsewhere(EventId),
 }
 
 #[derive(Clone)]
@@ -268,6 +276,9 @@ impl RequestRecord {
                         inner.pending_terminal = Some(PendingTerminal::Cancelled);
                     }
                 }
+                if matches!(error, crate::timeline::domain::TimelineError::Conflict) {
+                    self.observe_external_acceptance(ingress.as_ref(), request);
+                }
                 tracing::warn!(%request, %error, "durable regenerate abandonment refused");
                 return CancelResult::TooLate;
             }
@@ -332,28 +343,71 @@ impl RequestRecord {
         }
     }
 
-    /// Repair the volatile outcome only after its terminal fact is durable.
-    /// The pending outcome is request-local and cannot authorize a replay.
-    pub(crate) fn reconcile_pending_terminal(&self) -> Result<bool, String> {
+    fn observe_external_acceptance(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Option<EventId> {
+        let RegenerateRecoveryOutcome::AcceptedReply(event) = ingress
+            .inspect_regenerate(self.admission.selection.branch_id, request)
+            .ok()?
+            .outcome
+        else {
+            return None;
+        };
+        let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if !inner.snapshot.state.is_terminal() {
+            inner.pending_terminal = Some(PendingTerminal::AcceptedElsewhere(event));
+        }
+        Some(event)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn externally_accepted(&self) -> Option<EventId> {
+        let inner = self.inner.lock().expect("request mutex poisoned");
+        match inner.pending_terminal {
+            Some(PendingTerminal::AcceptedElsewhere(event)) => Some(event),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reconcile_pending_terminal(
+        &self,
+    ) -> Result<Option<RegenerateTerminalReconciliation>, String> {
         let pending = {
             let inner = self.inner.lock().expect("request mutex poisoned");
             inner.pending_terminal.clone()
         };
         let Some(pending) = pending else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(ingress) = &self.cancel_ingress else {
-            return Ok(false);
+            return Ok(None);
         };
         let request = self.snapshot().metadata.id;
-        ingress
-            .abandon_regenerate(request, self.admission)
-            .map_err(|error| error.to_string())?;
-        match pending {
-            PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
-            PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
+        if let PendingTerminal::AcceptedElsewhere(event) = pending {
+            return Ok(Some(RegenerateTerminalReconciliation::AcceptedElsewhere(
+                event,
+            )));
         }
-        Ok(true)
+        match ingress.abandon_regenerate(request, self.admission) {
+            Ok(()) => {
+                match pending {
+                    PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
+                    PendingTerminal::Cancelled => self.finish_cancelled_volatile(),
+                    PendingTerminal::AcceptedElsewhere(_) => unreachable!(),
+                }
+                Ok(Some(RegenerateTerminalReconciliation::Abandoned))
+            }
+            Err(error) => {
+                if let Some(event) = self.observe_external_acceptance(ingress.as_ref(), request) {
+                    return Ok(Some(RegenerateTerminalReconciliation::AcceptedElsewhere(
+                        event,
+                    )));
+                }
+                Err(error.to_string())
+            }
+        }
     }
 
     pub(crate) fn finish(&self, outcome: RequestOutcome) {
@@ -374,20 +428,31 @@ impl RequestRecord {
             RequestOutcome::TextGenerationFailed(_) | RequestOutcome::InternalError(_)
         ) && let Some(ingress) = &self.cancel_ingress
         {
+            let request = self.snapshot().metadata.id;
             let should_abandon = {
                 let inner = self.inner.lock().expect("request mutex poisoned");
                 !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied
             };
-            if should_abandon {
-                let request = self.snapshot().metadata.id;
-                if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
-                    let mut inner = self.inner.lock().expect("request mutex poisoned");
-                    if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
-                        inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
-                    }
-                    tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
+            if !should_abandon {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
                     return;
                 }
+            } else if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
+                    return;
+                }
+                let mut inner = self.inner.lock().expect("request mutex poisoned");
+                if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
+                    inner.pending_terminal = Some(PendingTerminal::Failure(outcome));
+                }
+                tracing::warn!(%request, %error, "regenerate failure remains pending durable reconciliation");
+                return;
             }
         }
         self.finish_volatile(outcome);
@@ -441,6 +506,12 @@ impl RequestRecord {
         if let Some(ingress) = &self.cancel_ingress {
             let request = self.snapshot().metadata.id;
             if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+                if self
+                    .observe_external_acceptance(ingress.as_ref(), request)
+                    .is_some()
+                {
+                    return;
+                }
                 let mut inner = self.inner.lock().expect("request mutex poisoned");
                 if !inner.snapshot.state.is_terminal() && inner.phase != EffectPhase::Applied {
                     inner.pending_terminal = Some(PendingTerminal::Cancelled);

@@ -300,7 +300,12 @@ impl RequestRegistry {
 
     /// Explicit repair pass for records whose terminal Timeline append failed.
     /// Only a copied set of records is held while entering the Timeline owner.
-    pub(crate) fn reconcile_pending_terminals(&self) -> Vec<(RequestId, Result<(), String>)> {
+    pub(crate) fn reconcile_pending_terminals(
+        &self,
+    ) -> Vec<(
+        RequestId,
+        Result<super::RegenerateTerminalReconciliation, String>,
+    )> {
         let records: Vec<_> = self
             .inner
             .records
@@ -314,8 +319,8 @@ impl RequestRegistry {
             .filter_map(|record| {
                 let request = record.snapshot().metadata.id;
                 match record.reconcile_pending_terminal() {
-                    Ok(false) => None,
-                    Ok(true) => Some((request, Ok(()))),
+                    Ok(None) => None,
+                    Ok(Some(status)) => Some((request, Ok(status))),
                     Err(error) => Some((request, Err(error))),
                 }
             })

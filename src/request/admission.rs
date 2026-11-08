@@ -17,7 +17,8 @@ use crate::{
     request::TimelineFence,
     settings::SettingsOwner,
     timeline::{
-        RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateSource,
+        RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoverySnapshot,
+        RegenerateSource,
         conversation::ConversationMessage,
         domain::{BranchId, TimelineError},
         selection::TimelineAdmission,
@@ -30,6 +31,12 @@ pub(crate) trait RegenerateCancellation: Send + Sync {
         request: RequestId,
         admission: TimelineAdmission,
     ) -> Result<(), TimelineError>;
+
+    fn inspect_regenerate(
+        &self,
+        child: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoverySnapshot, TimelineError>;
 }
 
 pub(crate) trait RequestIngress: RegenerateCancellation {
@@ -93,13 +100,34 @@ impl ChatApiState {
         *self.accepting.lock().expect("admission mutex poisoned") = false;
         self.registry.cancel_all();
         for (request, result) in self.reconcile_pending_terminals() {
-            if let Err(error) = result {
-                tracing::warn!(%request, %error, "regenerate terminal remains unresolved at shutdown");
+            match result {
+                Ok(super::RegenerateTerminalReconciliation::Abandoned) => {}
+                Ok(super::RegenerateTerminalReconciliation::AcceptedElsewhere(event)) => {
+                    tracing::warn!(%request, event = %event.0, "regenerate accepted by another owner; volatile completion requires explicit terminal projection");
+                }
+                Err(error) => {
+                    tracing::warn!(%request, %error, "regenerate terminal remains unresolved at shutdown");
+                }
             }
         }
     }
+    /// Read-only orphan inspection; does not recreate a request or dispatch a provider.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn inspect_orphaned_regenerate(
+        &self,
+        child: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoverySnapshot, TimelineError> {
+        self.ingress.inspect_regenerate(child, request)
+    }
+
     /// Operations-level retry, never re-enqueues or invokes a provider.
-    pub(crate) fn reconcile_pending_terminals(&self) -> Vec<(RequestId, Result<(), String>)> {
+    pub(crate) fn reconcile_pending_terminals(
+        &self,
+    ) -> Vec<(
+        RequestId,
+        Result<super::RegenerateTerminalReconciliation, String>,
+    )> {
         self.registry.reconcile_pending_terminals()
     }
 
