@@ -2641,11 +2641,11 @@ async fn preset_is_resolved_only_when_queued_generation_begins() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn profile_change_during_generation_preserves_request_character_and_next_preset() {
-    use std::collections::BTreeMap;
     use neuromita::{
         generation::PresetCatalog,
         settings::{PresetId, PresetSelection},
     };
+    use std::collections::BTreeMap;
 
     let _serial = CORE_TEST_MUTEX.lock().await;
     let mut server = GeminiServer::start().await;
