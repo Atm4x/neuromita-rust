@@ -26,11 +26,6 @@ on:
 permissions:
   contents: read
 
-# Strictly one active run in this fork. New checks cancel older checks.
-concurrency:
-  group: budgeted-rust-gates-${{ github.repository }}
-  cancel-in-progress: true
-
 jobs:
   rust:
     # A create event is emitted for every branch/tag. Only these three prefixes
@@ -52,6 +47,11 @@ jobs:
         )
       }}
     name: "${{ github.event_name == 'create' && github.event.ref || inputs.scope }}"
+    # Only accepted gate jobs take the single-run concurrency slot.
+    # Unrelated branch/tag creations must never cancel an active check.
+    concurrency:
+      group: budgeted-rust-gates-${{ github.repository }}
+      cancel-in-progress: true
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ (inputs.scope == 'format' || startsWith(github.event.ref, 'ci/format/')) && 8 || (inputs.scope == 'core' || startsWith(github.event.ref, 'ci/core/')) && 25 || 40 }}
     env:
