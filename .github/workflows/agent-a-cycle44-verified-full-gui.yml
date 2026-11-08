@@ -1,0 +1,59 @@
+name: agent-a-cycle44-verified-full-gui
+on:
+  push:
+    branches: [bridge/agent-a-cycle44-publish]
+    paths: [.gitbridge/agent-a-cycle44.payload.b64]
+permissions:
+  contents: write
+jobs:
+  verify-test-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      SLINT_BACKEND: "software"
+      NEUROMITA_GUI_CAPTURE_DIR: /tmp/neuromita-cycle44-captures
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact original Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186
+          base64 --decode .gitbridge/agent-a-cycle44.payload.b64 > /tmp/agent-a-cycle44.bundle
+          echo "94cb921404778554c0b97f5e965249b789f770f9939036a1173036a493958c4e  /tmp/agent-a-cycle44.bundle" | sha256sum -c -
+          git bundle verify /tmp/agent-a-cycle44.bundle
+          git fetch /tmp/agent-a-cycle44.bundle refs/heads/agent-a-cycle44:refs/heads/bridge/agent-a-cycle44-candidate
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate)" = "43894a8e766815605232cb0f763b2ee1d5dfda0a"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate^{tree})" = "26f4a669c98c0bb1a7f94fb054064a02331ef984"
+          test "$(git rev-parse refs/heads/bridge/agent-a-cycle44-candidate^)" = "1f3c724ae6dfab45ff1c974a7f3c9c8b2bc7f186"
+          git checkout --detach 43894a8e766815605232cb0f763b2ee1d5dfda0a
+          git fsck --full
+      - name: Native GUI build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libasound2-dev libfontconfig1-dev libudev-dev libxkbcommon-dev libwayland-dev pkg-config
+      - name: Rust 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Run full AppWindow RuntimeStatus binding test
+        run: |
+          mkdir -p "$NEUROMITA_GUI_CAPTURE_DIR"
+          cargo +1.98.1 test --locked --offline --features gui --bin neuromita-gui existing_slint_bindings_retranslate_on_locale_change_and_catalog_revision -j 2 -- --nocapture --test-threads=1
+      - name: Publish isolated candidate only after successful full GUI test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 43894a8e766815605232cb0f763b2ee1d5dfda0a
+          git push origin refs/heads/bridge/agent-a-cycle44-candidate:refs/heads/bridge/agent-a-cycle44-candidate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-a-cycle44-appwindow-snapshots
+          path: /tmp/neuromita-cycle44-captures
+          if-no-files-found: ignore
+          retention-days: 2
