@@ -141,7 +141,7 @@ impl WheelStageInstaller {
             .join(&approved.build_stage.id))
     }
 
-    pub async fn install(&self, approved: &ApprovedWheelStage) -> Result<PathBuf, LayerError> {
+    pub fn verify_inputs(&self, approved: &ApprovedWheelStage) -> Result<(), LayerError> {
         let destination = self.destination(approved)?;
         let wheel = self
             .data_directory
@@ -159,6 +159,18 @@ impl WheelStageInstaller {
                 "wheel or toolchain checksum mismatch".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub async fn install(&self, approved: &ApprovedWheelStage) -> Result<PathBuf, LayerError> {
+        self.verify_inputs(approved)?;
+        let destination = self.destination(approved)?;
+        let wheel = self
+            .data_directory
+            .join("cache")
+            .join("wheels")
+            .join(&approved.wheel_sha256)
+            .join(&approved.wheel_file);
         let output = tokio::time::timeout(
             Duration::from_secs(10),
             tokio::process::Command::new(&self.python_executable)

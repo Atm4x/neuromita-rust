@@ -170,6 +170,7 @@ export component AiHubPage inherits Rectangle {
                     Label {
                         text: (root.install-operation.stage == "installing" ? "Установка выполняется"
                             : root.install-operation.stage == "installed" ? "Overlay установлен"
+                            : root.install-operation.stage == "wheel-installed" ? "Wheel-stage установлен"
                             : root.install-operation.stage == "unknown" ? "Исход установки неизвестен" : "Установка не завершена")
                             + " · " + root.install-operation.category.to-uppercase() + "/" + root.install-operation.id;
                         font-size: 12px; font-weight: 700;
@@ -567,10 +568,10 @@ export component AiHubPage inherits Rectangle {
                                 if root.review-requested && root.install-preview.token == root.review-token
                                     && root.install-preview.category == root.selected-key.category
                                     && root.install-preview.id == root.selected-key.id
-                                    && root.install-preview.stage == "review" && root.install-preview.can-install && !root.install-submitted: HorizontalLayout {
+                                    && (root.install-preview.stage == "review" || root.install-preview.stage == "wheel-review") && root.install-preview.can-install && !root.install-submitted: HorizontalLayout {
                                     height: 35px; spacing: 10px;
                                     if !root.confirm-install: HubAction {
-                                        caption: "Установить overlay"; primary: true; compact: true;
+                                        caption: root.install-preview.stage == "wheel-review" ? "Установить wheel" : "Установить overlay"; primary: true; compact: true;
                                         activated => { root.confirm-install = true; }
                                     }
                                     if root.confirm-install: HubAction {
@@ -586,9 +587,11 @@ export component AiHubPage inherits Rectangle {
                                         activated => { root.confirm-install = false; }
                                     }
                                     Text {
-                                        text: root.confirm-install
-                                            ? "Будет установлен только plugin overlay. Worker не запускается."
-                                            : "Только remote-api overlay без зависимостей, моделей и действий.";
+                                        text: root.install-preview.stage == "wheel-review"
+                                            ? "Только один проверенный wheel-stage. Модель, зависимости и worker не устанавливаются."
+                                            : root.confirm-install
+                                                ? "Будет установлен только plugin overlay. Worker не запускается."
+                                                : "Только remote-api overlay без зависимостей, моделей и действий.";
                                         font-size: 10px; color: Theme.muted; wrap: word-wrap;
                                         horizontal-stretch: 1;
                                     }

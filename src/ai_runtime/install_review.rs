@@ -87,6 +87,7 @@ pub(super) struct EvaluatedInstall {
     pub(super) uv: PathBuf,
     pub(super) python: PathBuf,
     pub(super) wheel_lock: Option<Vec<u8>>,
+    pub(super) trusted_builtin: bool,
 }
 
 pub(super) async fn inspect_installed_environment(
@@ -207,6 +208,7 @@ pub(super) async fn inspect_installed_environment(
             "unexpected managed interpreter version".into(),
         ));
     }
+    let trusted_builtin = plugin_directory == plugins.join("builtin").join(plugin_id);
     let host = PythonHostConfig {
         python_executable: python.clone(),
         sdk_root,
@@ -247,6 +249,7 @@ pub(super) async fn inspect_installed_environment(
         uv,
         python,
         wheel_lock,
+        trusted_builtin,
     })
 }
 

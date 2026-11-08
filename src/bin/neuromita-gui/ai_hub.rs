@@ -72,7 +72,7 @@ pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
             .count();
         if count == 1
             && preview.can_install
-            && preview.stage == "review"
+            && (preview.stage == "review" || preview.stage == "wheel-review")
             && preview.token == token
             && preview.category == identity.category
             && preview.id == identity.id

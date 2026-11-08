@@ -2,11 +2,11 @@ use std::{num::NonZeroUsize, path::PathBuf, sync::Arc, thread, time::Duration};
 
 use neuromita::{
     ai_runtime::{
-        install_admission::{InstallApprovalGate, install_reviewed_overlay},
-        install_review::{
-            InstallPlanReview, InstallPreviewError, InstallReviewFence,
-            preview_installed_environment,
+        install_admission::{
+            ApprovedInstall, InstallAction, InstallActionReview, InstallApprovalGate,
+            install_reviewed_overlay, install_reviewed_wheel_stage, preview_install_action,
         },
+        install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
@@ -457,7 +457,7 @@ async fn observe(
         String,
         String,
         i32,
-        Result<InstallPlanReview, InstallPreviewError>,
+        Result<InstallActionReview, InstallPreviewError>,
     )>();
     let mut plan_fence = InstallReviewFence::default();
     let mut active_install_preview: Option<tokio::task::AbortHandle> = None;
@@ -467,6 +467,7 @@ async fn observe(
         String,
         String,
         i32,
+        InstallAction,
         Result<std::path::PathBuf, InstallPreviewError>,
     )>();
     let mut active_install: Option<uuid::Uuid> = None;
@@ -606,9 +607,7 @@ async fn observe(
                         let data_directory = directory.to_path_buf();
                         let model_id = id.clone();
                         let task = tokio::spawn(async move {
-                            let result = preview_installed_environment(
-                                &data_directory, service, &model_id, &serde_json::json!({})
-                            ).await;
+                            let result = preview_install_action(&data_directory, service, &model_id).await;
                             let _ = send.send((request, generation, category, id, token, result));
                         });
                         active_install_preview = Some(task.abort_handle());
@@ -632,13 +631,14 @@ async fn observe(
                         "asr" => Some(neuromita::ai_runtime::AiService::Asr),
                         _ => None,
                     };
-                    let Some(review) = service.and_then(|service| approvals.consume(token, service, &id)) else {
+                    let Some(ApprovedInstall { review, action }) =
+                        service.and_then(|service| approvals.consume_action(token, service, &id)) else {
                         publish(Update::AiHubInstallPreview { category, id, token,
                             summary: String::new(), error: "План не подтверждён или устарел".into(),
                             stage: "failed".into(), can_install: false, operation_id: String::new() });
                         continue;
                     };
-                    if !review.eligible_overlay_install() {
+                    if matches!(action, InstallAction::Overlay) && !review.eligible_overlay_install() {
                         publish(Update::AiHubInstallPreview { category, id, token,
                             summary: String::new(), error: "Выбранная модель или план изменились".into(),
                             stage: "failed".into(), can_install: false, operation_id: String::new() });
@@ -659,21 +659,34 @@ async fn observe(
                     }
                     let operation = uuid::Uuid::new_v4();
                     active_install = Some(operation);
+                    let (operation_summary, preview_summary) = match &action {
+                        InstallAction::Overlay => (
+                            "Публикация проверенного plugin overlay",
+                            "Установка plugin overlay выполняется. Worker не запускается.",
+                        ),
+                        InstallAction::Wheel { .. } => (
+                            "Установка одного проверенного wheel-stage",
+                            "Устанавливается один wheel-stage. Модель и worker не активируются.",
+                        ),
+                    };
                     publish(Update::AiHubInstallOperation {
                         operation_id: operation.to_string(),
                         category: category.clone(), id: id.clone(),
-                        stage: "installing".into(),
-                        summary: "Публикация проверенного plugin overlay".into(),
+                        stage: "installing".into(), summary: operation_summary.into(),
                     });
                     publish(Update::AiHubInstallPreview { category: category.clone(), id: id.clone(), token,
-                        summary: "Установка plugin overlay выполняется. Не завершайте приложение до получения результата.".into(),
-                        error: String::new(), stage: "installing".into(), can_install: false,
+                        summary: preview_summary.into(), error: String::new(),
+                        stage: "installing".into(), can_install: false,
                         operation_id: operation.to_string() });
                     let sender = install_results.clone();
                     let path = directory.to_path_buf();
                     tokio::spawn(async move {
-                        let result = install_reviewed_overlay(&path, &review).await;
-                        let _ = sender.send((operation, category, id, token, result));
+                        let result = match &action {
+                            InstallAction::Overlay => install_reviewed_overlay(&path, &review).await,
+                            InstallAction::Wheel { stage_id, backend } =>
+                                install_reviewed_wheel_stage(&path, &review, stage_id, backend).await,
+                        };
+                        let _ = sender.send((operation, category, id, token, action, result));
                     });
                 },
                 Some(Command::RefreshSpeechInventory) => {
@@ -737,12 +750,15 @@ async fn observe(
                 },
             },
             installed = install_updates.recv() => {
-                if let Some((operation, category, id, token, result)) = installed
+                if let Some((operation, category, id, token, action, result)) = installed
                     && active_install == Some(operation)
                 {
                     active_install = None;
                     let (summary, error, stage): (String, String, String) = match result {
-                        Ok(_) => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
+                        Ok(_) => match action {
+                            InstallAction::Overlay => ("Plugin overlay установлен и проверен. Worker не запущен, model assets не установлены.".into(), String::new(), "installed".into()),
+                            InstallAction::Wheel { .. } => ("Один wheel-stage установлен и проверен. Это не готовность backend, модели или worker.".into(), String::new(), "wheel-installed".into()),
+                        },
                         Err(InstallPreviewError::ReviewChanged) => (String::new(), "Исходный план изменился после подтверждения — установка остановлена.".into(), "failed".into()),
                         Err(InstallPreviewError::UnsupportedInstall) => (String::new(), "Этот план требует дополнительного подтверждения backend или файлов модели.".into(), "failed".into()),
                         Err(_) => (String::new(), "Core не смог завершить установку. Подробности доступны в диагностике установщика.".into(), "failed".into()),
@@ -762,36 +778,44 @@ async fn observe(
                     && plan_fence.accepts(request, generation)
                 {
                     active_install_preview = None;
-                    let (summary, error, can_install) = match result {
-                        Ok(review) => {
-                            let permitted = review.eligible_overlay_install();
+                    let (summary, error, can_install, stage) = match result {
+                        Ok(InstallActionReview { review, action }) => {
                             let mut summary = summarize_ai_hub_review(&review);
-                            if !permitted {
-                                summary.push_str("\nДля установки пакетов, backend, ассетов или действий нужен отдельный процесс выбора и подтверждения.");
-                            } else if active_install.is_none() {
-                                approvals.offer(token, review);
-                            }
-                            (summary, String::new(), permitted && active_install.is_none())
+                            let (permitted, review_stage) = match action {
+                                Some(InstallAction::Overlay) if active_install.is_none() =>
+                                    (approvals.offer(token, review), "review"),
+                                Some(InstallAction::Wheel { stage_id, backend }) if active_install.is_none() => {
+                                    summary.push_str(&format!(
+                                        "\nДоступен проверенный wheel-stage: {stage_id} · {backend}. Установится только этот пакет, не модель.",
+                                    ));
+                                    (approvals.offer_wheel(token, review, &stage_id, &backend), "wheel-review")
+                                },
+                                _ => {
+                                    summary.push_str("\nИсполнение недоступно: нет единственного проверенного и локально доступного wheel-stage либо необходимы другие установочные этапы.");
+                                    (false, "review")
+                                },
+                            };
+                            (summary, String::new(), permitted, review_stage.to_owned())
                         },
                         Err(InstallPreviewError::InvalidSelection) => (String::new(),
-                            "Модель недоступна или исходник не прошёл проверку безопасности.".into(), false),
+                            "Модель недоступна или исходник не прошёл проверку безопасности.".into(), false, "failed".into()),
                         Err(InstallPreviewError::Sdk(_)) => (String::new(),
-                            "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into(), false),
+                            "Для проверки необходимы установленные в UserData проверенный SDK и код плагина.".into(), false, "failed".into()),
                         Err(InstallPreviewError::PythonVersion | InstallPreviewError::Python(_)) => (String::new(),
-                            "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into(), false),
+                            "Managed CPython 3.12.x ещё не подготовлен либо не прошёл проверку версии.".into(), false, "failed".into()),
                         Err(InstallPreviewError::Plan(_)) => (String::new(),
-                            "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into(), false),
+                            "Установочный скрипт не предоставил допустимый план. Установка не запускалась.".into(), false, "failed".into()),
                         Err(InstallPreviewError::InvalidPlan(_)) => (String::new(),
-                            "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false),
+                            "Полученный план не прошёл проверку зависимостей, backend или путей.".into(), false, "failed".into()),
                         Err(InstallPreviewError::ReviewChanged) => (String::new(),
-                            "План или исходник изменился во время проверки.".into(), false),
+                            "План или исходник изменился во время проверки.".into(), false, "failed".into()),
                         Err(InstallPreviewError::UnsupportedInstall) => (String::new(),
-                            "Для этого плана пока не поддерживается установка.".into(), false),
+                            "Для этого плана пока не поддерживается установка.".into(), false, "failed".into()),
                         Err(InstallPreviewError::WheelPin | InstallPreviewError::WheelExecution) => (String::new(),
-                            "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false),
+                            "Проверенный wheel-stage недоступен или не смог завершиться; установка модели не запускалась.".into(), false, "failed".into()),
                     };
                     publish(Update::AiHubInstallPreview { category, id, token, summary, error,
-                        stage: "review".into(), can_install, operation_id: String::new() });
+                        stage, can_install, operation_id: String::new() });
                 }
             },
             transcript = transcript_updates.recv() => {

@@ -12,24 +12,38 @@ use super::{
     AiService,
     build_stage::{ApprovedWheelStage, WheelStageInstaller},
     install::{BuildStageKind, PluginInstallHandler, PluginInstallPlan, PluginInstallRequest},
-    install_review::{InstallPlanReview, InstallPreviewError, inspect_installed_environment},
+    install_review::{
+        EvaluatedInstall, InstallPlanReview, InstallPreviewError, inspect_installed_environment,
+    },
     layer::{sha256_file, valid_segment},
     overlay::LockedPackage,
     overlay::OverlayInstaller,
     resolver::DependencyResolver,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallAction {
+    Overlay,
+    Wheel { stage_id: String, backend: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallActionReview {
+    pub review: InstallPlanReview,
+    pub action: Option<InstallAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedInstall {
+    pub review: InstallPlanReview,
+    pub action: InstallAction,
+}
+
 /// One-use Core admission gate. The UI never transports a serialized plan or
 /// retains permission to install after navigation, refresh, or another review.
 #[derive(Default)]
 pub struct InstallApprovalGate {
-    pending: Option<(i32, InstallPlanReview, InstallIntent)>,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum InstallIntent {
-    Overlay,
-    Wheel { stage_id: String, backend: String },
+    pending: Option<(i32, InstallPlanReview, InstallAction)>,
 }
 
 impl InstallApprovalGate {
@@ -37,7 +51,7 @@ impl InstallApprovalGate {
         self.pending =
             review
                 .eligible_overlay_install()
-                .then_some((token, review, InstallIntent::Overlay));
+                .then_some((token, review, InstallAction::Overlay));
         self.pending.is_some()
     }
 
@@ -48,7 +62,7 @@ impl InstallApprovalGate {
         plugin_id: &str,
     ) -> Option<InstallPlanReview> {
         let (issued_token, review, intent) = self.pending.take()?;
-        (intent == InstallIntent::Overlay
+        (intent == InstallAction::Overlay
             && issued_token == token
             && review.identity.service == service
             && review.identity.plugin_id == plugin_id)
@@ -69,7 +83,7 @@ impl InstallApprovalGate {
         self.pending = Some((
             token,
             review,
-            InstallIntent::Wheel {
+            InstallAction::Wheel {
                 stage_id: stage_id.to_owned(),
                 backend: backend.to_owned(),
             },
@@ -90,11 +104,30 @@ impl InstallApprovalGate {
             && review.identity.service == service
             && review.identity.plugin_id == plugin_id
             && intent
-                == InstallIntent::Wheel {
+                == InstallAction::Wheel {
                     stage_id: stage_id.to_owned(),
                     backend: backend.to_owned(),
                 })
         .then_some(review)
+    }
+
+    pub fn consume_action(
+        &mut self,
+        token: i32,
+        service: AiService,
+        plugin_id: &str,
+    ) -> Option<ApprovedInstall> {
+        let (issued_token, review, intent) = self.pending.take()?;
+        if issued_token != token
+            || review.identity.service != service
+            || review.identity.plugin_id != plugin_id
+        {
+            return None;
+        }
+        Some(ApprovedInstall {
+            review,
+            action: intent,
+        })
     }
 
     pub fn invalidate(&mut self) {
@@ -190,27 +223,13 @@ struct BuiltinWheelPin {
     wheel_sha256: String,
 }
 
-/// Execute one independently verified wheel stage. This publishes only an immutable
-/// build-stage layer, not a plugin overlay, backend activation, or a ready worker.
-/// All wheel pins are loaded from the reviewed builtin plugin source, never from UI.
-pub async fn install_reviewed_wheel_stage(
-    data_directory: &Path,
-    expected: &InstallPlanReview,
+fn pinned_wheel_approval(
+    evaluated: &EvaluatedInstall,
     stage_id: &str,
     backend: &str,
-) -> Result<PathBuf, InstallPreviewError> {
-    if !valid_segment(stage_id) || !valid_segment(backend) {
+) -> Result<ApprovedWheelStage, InstallPreviewError> {
+    if !evaluated.trusted_builtin {
         return Err(InstallPreviewError::WheelPin);
-    }
-    let evaluated = inspect_installed_environment(
-        data_directory,
-        expected.identity.service,
-        &expected.identity.plugin_id,
-        &Value::Object(Default::default()),
-    )
-    .await?;
-    if evaluated.review != *expected {
-        return Err(InstallPreviewError::ReviewChanged);
     }
     let mut stages = evaluated
         .plan
@@ -248,22 +267,107 @@ pub async fn install_reviewed_wheel_stage(
     {
         return Err(InstallPreviewError::WheelPin);
     }
-    let ai_data = data_directory.join("AIData");
     let approved = ApprovedWheelStage {
-        plugin_id: expected.identity.plugin_id.clone(),
-        plugin_revision: expected.identity.plugin_revision.clone(),
-        python_version: expected.identity.python_version.clone(),
+        plugin_id: evaluated.review.identity.plugin_id.clone(),
+        plugin_revision: evaluated.review.identity.plugin_revision.clone(),
+        python_version: evaluated.review.identity.python_version.clone(),
         build_stage: stage.clone(),
         package: pin.package.clone(),
         wheel_file: pin.wheel_file.clone(),
         wheel_sha256: pin.wheel_sha256.clone(),
-        install_plan_sha256: expected.fingerprint.clone(),
+        install_plan_sha256: evaluated.review.fingerprint.clone(),
         uv_sha256: sha256_file(&evaluated.uv).map_err(|_| InstallPreviewError::WheelPin)?,
         python_sha256: sha256_file(&evaluated.python).map_err(|_| InstallPreviewError::WheelPin)?,
     };
     approved
         .validate()
         .map_err(|_| InstallPreviewError::WheelPin)?;
+    Ok(approved)
+}
+
+pub async fn preview_install_action(
+    data_directory: &Path,
+    service: AiService,
+    plugin_id: &str,
+) -> Result<InstallActionReview, InstallPreviewError> {
+    let evaluated = inspect_installed_environment(
+        data_directory,
+        service,
+        plugin_id,
+        &Value::Object(Default::default()),
+    )
+    .await?;
+    let action = if evaluated.review.eligible_overlay_install() {
+        Some(InstallAction::Overlay)
+    } else {
+        let plan = &evaluated.plan;
+        if plan.build_stages.len() != 1
+            || plan.requirements.len() != 1
+            || !plan.packages.is_empty()
+            || !plan.assets.is_empty()
+            || !plan.actions.is_empty()
+            || !plan.asset_hooks.is_empty()
+            || !plan.required_backends.is_empty()
+        {
+            None
+        } else {
+            let stage = &plan.build_stages[0];
+            let matches_backend = plan.backend.as_deref() == Some(stage.backend.as_str())
+                || (plan.backend.is_none()
+                    && plan.supported_backends.len() == 1
+                    && plan.supported_backends[0] == stage.backend);
+            if stage.kind != BuildStageKind::PythonWheel || !matches_backend {
+                None
+            } else {
+                let approved = pinned_wheel_approval(&evaluated, &stage.id, &stage.backend);
+                approved.ok().and_then(|approved| {
+                    let installer = WheelStageInstaller {
+                        uv_executable: evaluated.uv.clone(),
+                        python_executable: evaluated.python.clone(),
+                        data_directory: data_directory.join("AIData"),
+                        timeout: Duration::from_secs(300),
+                    };
+                    installer
+                        .verify_inputs(&approved)
+                        .ok()
+                        .map(|()| InstallAction::Wheel {
+                            stage_id: stage.id.clone(),
+                            backend: stage.backend.clone(),
+                        })
+                })
+            }
+        }
+    };
+    Ok(InstallActionReview {
+        review: evaluated.review,
+        action,
+    })
+}
+
+/// Execute one independently verified wheel stage. This publishes only an immutable
+/// build-stage layer, not a plugin overlay, backend activation, or a ready worker.
+/// All wheel pins are loaded from the reviewed builtin plugin source, never from UI.
+pub async fn install_reviewed_wheel_stage(
+    data_directory: &Path,
+    expected: &InstallPlanReview,
+    stage_id: &str,
+    backend: &str,
+) -> Result<PathBuf, InstallPreviewError> {
+    if !valid_segment(stage_id) || !valid_segment(backend) {
+        return Err(InstallPreviewError::WheelPin);
+    }
+    let evaluated = inspect_installed_environment(
+        data_directory,
+        expected.identity.service,
+        &expected.identity.plugin_id,
+        &Value::Object(Default::default()),
+    )
+    .await?;
+    if evaluated.review != *expected {
+        return Err(InstallPreviewError::ReviewChanged);
+    }
+    let approved = pinned_wheel_approval(&evaluated, stage_id, backend)?;
+    let ai_data = data_directory.join("AIData");
     WheelStageInstaller {
         uv_executable: evaluated.uv,
         python_executable: evaluated.python,
@@ -397,6 +501,55 @@ class InstallContract:
         ));
         assert!(!root.join("AIData/build-stages").exists());
         assert!(!root.join("AIData/overlays").exists());
+        assert!(
+            preview_install_action(&root, AiService::Asr, "fixture_asr")
+                .await
+                .unwrap()
+                .action
+                .is_none()
+        );
+        let wheel_data = b"test wheel fixture bytes";
+        let wheel_hash = ring::digest::digest(&ring::digest::SHA256, wheel_data)
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let wheel_path = root
+            .join("AIData/cache/wheels")
+            .join(&wheel_hash)
+            .join("sample_pkg-1.2.3-py3-none-any.whl");
+        std::fs::create_dir_all(wheel_path.parent().unwrap()).unwrap();
+        std::fs::write(&wheel_path, wheel_data).unwrap();
+        std::fs::write(&lock_path, lock.replace(&"a".repeat(64), &wheel_hash)).unwrap();
+        let ready = preview_install_action(&root, AiService::Asr, "fixture_asr")
+            .await
+            .unwrap();
+        assert_eq!(
+            ready.action,
+            Some(InstallAction::Wheel {
+                stage_id: "locked".into(),
+                backend: "onnx-cpu".into(),
+            })
+        );
+        let mut gate = InstallApprovalGate::default();
+        assert!(gate.offer_wheel(81, ready.review.clone(), "locked", "onnx-cpu"));
+        let approved = gate
+            .consume_action(81, AiService::Asr, "fixture_asr")
+            .unwrap();
+        assert_eq!(approved.review, ready.review);
+        assert_eq!(approved.action, ready.action.unwrap());
+        assert!(
+            gate.consume_action(81, AiService::Asr, "fixture_asr")
+                .is_none()
+        );
+        std::fs::write(&wheel_path, b"corrupted source").unwrap();
+        assert!(
+            preview_install_action(&root, AiService::Asr, "fixture_asr")
+                .await
+                .unwrap()
+                .action
+                .is_none()
+        );
         std::fs::write(&lock_path, lock.replace(&"a".repeat(64), &"b".repeat(64))).unwrap();
         assert!(matches!(
             install_reviewed_wheel_stage(&root, &review, "locked", "onnx-cpu").await,
