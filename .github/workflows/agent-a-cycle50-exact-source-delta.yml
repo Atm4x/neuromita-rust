@@ -1,0 +1,32 @@
+name: agent-a-cycle50-exact-source-delta
+on:
+  push:
+    branches: [bridge/agent-a-cycle50-export]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact PR338 delta over available PR276 bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin f55e96cea5db2976308612e598b0841b2622e9f8
+          git fetch origin 4a4d1f2ca582ef5e0ca91af116e8be9216369b8b
+          git branch agent-a-cycle50-pr338 4a4d1f2ca582ef5e0ca91af116e8be9216369b8b
+          git merge-base --is-ancestor f55e96cea5db2976308612e598b0841b2622e9f8 agent-a-cycle50-pr338
+          git bundle create cycle50-pr338.bundle refs/heads/agent-a-cycle50-pr338 '^f55e96cea5db2976308612e598b0841b2622e9f8'
+          git bundle verify cycle50-pr338.bundle
+          sha256sum cycle50-pr338.bundle > cycle50-pr338.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle50-pr338
+          path: |
+            cycle50-pr338.bundle
+            cycle50-pr338.bundle.sha256
+          retention-days: 2
