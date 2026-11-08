@@ -1,0 +1,44 @@
+name: Agent B58 exact-head tests
+on:
+  push:
+    branches:
+      - bridge/agent-b58-verify-20261108
+jobs:
+  exact-b58:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify exact B58 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "89700e0f0708df8d81dd7a2a8366f2a96f0ef9a0"
+          test "$(git rev-parse HEAD^^{tree})" = "2f8551c39fb13264110045f95a51c2a10deafb25"
+          test "$(git rev-parse HEAD^^)" = "0b37fd54b93a093b2288737f014876cc383506c5"
+      - name: Install Rust 1.98.1 and native ALSA dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused checkpoint and rollback tests
+        run: cargo test --locked --offline --lib checkpoint_fork -- --test-threads=1
+      - name: Selection failure injection test
+        run: cargo test --locked --offline --lib failed_selection_insert_rolls_back_fork_and_revision -- --test-threads=1
+      - name: Full Rust library except Python 3.12-only fixture
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets offline check
+        run: cargo check --locked --offline --all-targets
+      - name: Format and cleanliness
+        shell: bash
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
