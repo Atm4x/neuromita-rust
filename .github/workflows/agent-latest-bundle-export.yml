@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/ai-platform-hub-c3-durable-operation-ledger-20261108
+          ref: codex/ai-platform-hub-c3-operation-readmodel-20261108
           fetch-depth: 0
           persist-credentials: false
       - name: Export latest branch only
@@ -19,12 +19,12 @@ jobs:
         run: |
           set -euo pipefail
           HEAD="$(git rev-parse HEAD)"
-          TARGET="refs/heads/codex/ai-platform-hub-c3-durable-operation-ledger-20261108"
+          TARGET="refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108"
           git update-ref "$TARGET" "$HEAD"
           git bundle create neuromita-rust-latest.bundle "$TARGET"
           git bundle verify neuromita-rust-latest.bundle
           sha256sum neuromita-rust-latest.bundle > neuromita-rust-latest.bundle.sha256
-          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-platform-hub-c3-durable-operation-ledger-20261108\nhead=%s\n' "$HEAD" > neuromita-rust-latest.manifest
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-platform-hub-c3-operation-readmodel-20261108\nhead=%s\n' "$HEAD" > neuromita-rust-latest.manifest
       - uses: actions/upload-artifact@v4
         with:
           name: neuromita-rust-latest-source
