@@ -1,4 +1,7 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use uuid::Uuid;
 
@@ -20,13 +23,42 @@ pub struct VerifiedTimelineRestore {
     pub backup_fingerprint: String,
 }
 
-struct StagedBackup(std::path::PathBuf);
+struct StagedBackup(PathBuf);
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct SourceIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl SourceIdentity {
+    fn capture(path: &Path) -> Result<Self, TimelineError> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path).map_err(io_error)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn verify(&self, path: &Path) -> Result<(), TimelineError> {
+        let current = Self::capture(path)?;
+        if current.device != self.device || current.inode != self.inode {
+            return Err(TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+}
 
 impl Drop for StagedBackup {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
         for suffix in ["-wal", "-shm"] {
-            let _ = fs::remove_file(format!("{}{}", self.0.display(), suffix));
+            let mut path = self.0.as_os_str().to_os_string();
+            path.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(path));
         }
     }
 }
@@ -107,6 +139,15 @@ impl SqliteTimelineRepository {
         destination: &Path,
         expected_fingerprint: Option<&str>,
     ) -> Result<VerifiedTimelineBackup, TimelineError> {
+        Self::publish_verified_snapshot_with(source, destination, expected_fingerprint, || Ok(()))
+    }
+
+    fn publish_verified_snapshot_with(
+        source: &Path,
+        destination: &Path,
+        expected_fingerprint: Option<&str>,
+        after_stage_verified: impl FnOnce() -> Result<(), TimelineError>,
+    ) -> Result<VerifiedTimelineBackup, TimelineError> {
         if !source.is_absolute() || !source.is_file() {
             return Err(storage(
                 "backup source must be an existing absolute SQLite file",
@@ -124,6 +165,8 @@ impl SqliteTimelineRepository {
             .parent()
             .filter(|parent| parent.is_dir())
             .ok_or_else(|| storage("backup destination directory must already exist"))?;
+        #[cfg(unix)]
+        let source_identity = SourceIdentity::capture(source)?;
         let source_preview = Self::inspect_derived_indexes(source)?;
         if source_preview.requires_repair() {
             return Err(storage("source derived indexes need repair before backup"));
@@ -153,10 +196,13 @@ impl SqliteTimelineRepository {
         {
             return Err(TimelineError::ConcurrentWrite);
         }
+        after_stage_verified()?;
         let current_preview = Self::inspect_derived_indexes(source)?;
         if current_preview.confirmation != source_preview.confirmation {
             return Err(TimelineError::ConcurrentWrite);
         }
+        #[cfg(unix)]
+        source_identity.verify(source)?;
 
         fs::File::open(&staged.0)
             .and_then(|file| file.sync_all())
@@ -171,5 +217,158 @@ impl SqliteTimelineRepository {
             canonical_events: staged_preview.canonical_events,
             source_fingerprint: staged_preview.confirmation,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timeline::domain::{BranchId, SessionId, TimelineRepository};
+
+    struct Fixture {
+        directory: PathBuf,
+        source: PathBuf,
+        destination: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("neuromita-snapshot-publish-{}", Uuid::new_v4()));
+            fs::create_dir(&directory).unwrap();
+            let source = directory.join("source.sqlite3");
+            let destination = directory.join("destination.sqlite3");
+            let mut repo = SqliteTimelineRepository::open(&source).unwrap();
+            repo.create_session(SessionId::new(), BranchId::new())
+                .unwrap();
+            Self {
+                directory,
+                source,
+                destination,
+            }
+        }
+
+        fn assert_no_stage(&self) {
+            assert!(
+                fs::read_dir(&self.directory)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .all(|entry| !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".neuromita-timeline-backup-"))
+            );
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn failure_after_verified_stage_never_publishes_and_cleans_stage() {
+        let fixture = Fixture::new();
+        let fingerprint =
+            SqliteTimelineRepository::inspect_derived_indexes(&fixture.source).unwrap();
+        let result = SqliteTimelineRepository::publish_verified_snapshot_with(
+            &fixture.source,
+            &fixture.destination,
+            None,
+            || {
+                let stage = fs::read_dir(&fixture.directory)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".neuromita-timeline-backup-")
+                    })
+                    .expect("verified snapshot must exist before publication")
+                    .path();
+                let preview = SqliteTimelineRepository::inspect_derived_indexes(stage).unwrap();
+                assert_eq!(preview.confirmation, fingerprint.confirmation);
+                Err(TimelineError::Invalid("injected prepublication failure"))
+            },
+        );
+        assert!(matches!(result, Err(TimelineError::Invalid(_))));
+        assert!(!fixture.destination.exists());
+        fixture.assert_no_stage();
+        assert_eq!(
+            SqliteTimelineRepository::inspect_derived_indexes(&fixture.source)
+                .unwrap()
+                .confirmation,
+            fingerprint.confirmation
+        );
+    }
+
+    #[test]
+    fn destination_race_does_not_clobber_new_foreign_file() {
+        let fixture = Fixture::new();
+        let result = SqliteTimelineRepository::publish_verified_snapshot_with(
+            &fixture.source,
+            &fixture.destination,
+            None,
+            || {
+                fs::write(&fixture.destination, b"winner of destination race").unwrap();
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&fixture.destination).unwrap(),
+            b"winner of destination race"
+        );
+        fixture.assert_no_stage();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_source_with_identical_bytes_during_snapshot_is_rejected() {
+        let fixture = Fixture::new();
+        let original = SqliteTimelineRepository::inspect_derived_indexes(&fixture.source).unwrap();
+        let replacement = fixture.directory.join("replacement.sqlite3");
+        fs::copy(&fixture.source, &replacement).unwrap();
+        let result = SqliteTimelineRepository::publish_verified_snapshot_with(
+            &fixture.source,
+            &fixture.destination,
+            None,
+            || {
+                fs::rename(&replacement, &fixture.source).unwrap();
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(TimelineError::ConcurrentWrite)));
+        assert!(!fixture.destination.exists());
+        fixture.assert_no_stage();
+        assert_eq!(
+            SqliteTimelineRepository::inspect_derived_indexes(&fixture.source)
+                .unwrap()
+                .confirmation,
+            original.confirmation
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_sidecar_cleanup_preserves_non_utf8_filename_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = Fixture::new();
+        let mut file_name = std::ffi::OsString::from_vec(b".snapshot-\xff.tmp".to_vec());
+        let stage = fixture.directory.join(&file_name);
+        fs::write(&stage, b"staged").unwrap();
+        file_name.push("-wal");
+        let wal = fixture.directory.join(&file_name);
+        fs::write(&wal, b"wal").unwrap();
+        file_name = std::ffi::OsString::from_vec(b".snapshot-\xff.tmp-shm".to_vec());
+        let shm = fixture.directory.join(&file_name);
+        fs::write(&shm, b"shm").unwrap();
+        drop(StagedBackup(stage.clone()));
+        assert!(!stage.exists());
+        assert!(!wal.exists());
+        assert!(!shm.exists());
     }
 }
