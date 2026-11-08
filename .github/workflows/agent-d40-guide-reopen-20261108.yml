@@ -1,0 +1,70 @@
+name: Agent D40 verify original Guide reopen patch and native Windows tests
+on:
+  push:
+    branches: [codex/bridge-agent-d40-20261108]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact parent tree and publish local D40 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=358056e7060d302f83199f2b71e69e24c5e05ec1
+          HEAD=ed3841da85f9b0efdb2d008e25d7501ed4a6a033
+          TREE=caf1743cdfd671038130fd9b6dde62af41a9a9f1
+          BRANCH=codex/onboarding-guide-reopen-resume-20261108
+          base64 -d .git-bridge/agent-d40.patch.xz.b64 > /tmp/d40.patch.xz
+          echo 'ad062aebf0e99cf07d0a241786a6bce784bdf11f5fc30736c5f43f1192621120  /tmp/d40.patch.xz' | sha256sum -c
+          xz -dc /tmp/d40.patch.xz > /tmp/d40.patch
+          echo '4f6d89dc436fec2cc788a3bbb198c49ef2a61365973b9bf207f5a650f7a74fe0  /tmp/d40.patch' | sha256sum -c
+          git fetch --no-tags origin refs/heads/codex/onboarding-guide-durable-language-20261108
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE"
+          test -z "$(git ls-remote --heads origin "refs/heads/$BRANCH")"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d40.patch
+          test "$(git rev-parse HEAD)" = "$HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE..$HEAD")" -eq 1
+          git diff --check "$BASE" "$HEAD"
+          git fsck --full
+          git push origin "HEAD:refs/heads/$BRANCH"
+          test "$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)" = "$HEAD"
+  windows-native:
+    needs: import
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/onboarding-guide-reopen-resume-20261108
+          fetch-depth: 0
+      - name: Verify D40 exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ed3841da85f9b0efdb2d008e25d7501ed4a6a033
+          test "$(git rev-parse HEAD^{tree})" = caf1743cdfd671038130fd9b6dde62af41a9a9f1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Windows Guide reopening and Slint compilation
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: '2'
+        run: |
+          set -euo pipefail
+          cargo test --locked --offline --lib onboarding::tests -- --test-threads=2
+          cargo test --locked --offline --lib presentation::settings::tests -- --test-threads=2
+          cargo test --locked --offline --test onboarding_consent -- --test-threads=2
+          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo check --locked --offline --all-targets
