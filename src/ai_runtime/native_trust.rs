@@ -101,6 +101,15 @@ impl NativeReleaseTrust {
         }
     }
 
+    /// Treats a user-supplied digest only as a lookup key, never as approval.
+    pub fn verify_hex(
+        &self,
+        model_id: &str,
+        digest_hex: &str,
+    ) -> Result<VerifiedNativeRelease, NativeTrustError> {
+        self.verify(model_id, &parse_sha256(digest_hex)?)
+    }
+
     pub fn verify(
         &self,
         model_id: &str,

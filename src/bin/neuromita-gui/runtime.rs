@@ -7,6 +7,10 @@ use neuromita::{
             install_reviewed_overlay, install_reviewed_wheel_stage, preview_install_action,
         },
         install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
+        native_download_operation::{
+            NativeDownloadEvent, NativeDownloadOperation, NativeDownloadSelection,
+        },
+        native_https::{NativeHttpsOrigin, NativeTransferPhase},
         native_model::NativeBackend,
         native_revisions::{NativeRevisionOverview, NativeRevisionStore},
         native_trust::{NativePolicyPin, NativeReleaseTrust},
@@ -30,7 +34,7 @@ use neuromita::{
     },
     presentation::{
         ConversationChange, ConversationChangePreview, ConversationSnapshot, GuiPresenter,
-        PresetSlot,
+        PresetSlot, native_download::NativeDownloadPresenter,
     },
     request::{CancelResult, RequestId},
     settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
@@ -87,6 +91,12 @@ pub enum Command {
         model_id: String,
     },
     StopNativeModel,
+    InstallNativePackage {
+        model_id: String,
+        manifest_sha256: String,
+        backend: String,
+    },
+    CancelNativePackageInstall,
     PreviewAiHubInstall {
         category: String,
         id: String,
@@ -127,6 +137,11 @@ pub enum Update {
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     NativeModels(Box<NativeWorkflowSnapshot>),
     NativeError(String),
+    NativeDownloadStatus {
+        summary: String,
+        percent: i32,
+        active: bool,
+    },
     AiHubInstallOperation {
         operation_id: String,
         category: String,
@@ -444,6 +459,65 @@ async fn run(
     publish(Update::Stopped);
 }
 
+fn native_policy_pin() -> Result<Option<NativePolicyPin>, String> {
+    option_env!("NEUROMITA_NATIVE_PUBLISHER_POLICY_SHA256")
+        .map(NativePolicyPin::from_sha256_hex)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
+pub fn native_download_configured() -> bool {
+    native_policy_pin().is_ok_and(|pin| pin.is_some())
+        && option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+            .is_some_and(|origin| NativeHttpsOrigin::parse(origin).is_ok())
+}
+
+fn ensure_native_storage(path: &std::path::Path) -> Result<(), String> {
+    for part in path.ancestors() {
+        if let Ok(meta) = std::fs::symlink_metadata(part) {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err("Нативное хранилище содержит небезопасный каталог".into());
+            }
+        }
+    }
+    std::fs::create_dir_all(path).map_err(|error| error.to_string())
+}
+
+fn start_native_download(
+    directory: &std::path::Path,
+    request: NativeDownloadSelection,
+    events: mpsc::UnboundedSender<NativeDownloadEvent>,
+) -> Result<NativeDownloadOperation, String> {
+    let origin = option_env!("NEUROMITA_NATIVE_PACKAGE_ORIGIN")
+        .ok_or_else(|| "Источник нативных пакетов не закреплён в сборке".to_owned())
+        .and_then(|value| NativeHttpsOrigin::parse(value).map_err(|error| error.to_string()))?;
+    let pin = native_policy_pin()?.ok_or("В сборке отсутствует доверенная политика издателей")?;
+    let trust = NativeReleaseTrust::new(
+        directory.join("Config/native-publisher-keys.json"),
+        directory.join("AIData/NativeApprovals"),
+        Some(pin),
+    );
+    trust
+        .verify_hex(&request.model_id, &request.manifest_sha256)
+        .map_err(|error| error.to_string())?;
+    let revisions = directory.join("AIData/NativeModels/revisions");
+    let runtime = directory.join("AIData/NativeRuntime");
+    let staging = directory.join("AIData/NativeDownloads");
+    for path in [&revisions, &runtime, &staging] {
+        ensure_native_storage(path)?;
+    }
+    NativeDownloadOperation::start(
+        NativeRevisionStore::new(revisions, runtime),
+        trust,
+        origin,
+        request,
+        staging,
+        Duration::from_secs(3600),
+        events,
+    )
+    .map_err(|error| error.to_string())
+}
+
 fn open_native_workflow(
     directory: &std::path::Path,
 ) -> Result<Option<NativeModelWorkflow>, String> {
@@ -457,10 +531,7 @@ fn open_native_workflow(
     if !native_exists || !runtime_exists {
         return Err("Нативное хранилище установлено не полностью".into());
     }
-    let policy_pin = option_env!("NEUROMITA_NATIVE_PUBLISHER_POLICY_SHA256")
-        .map(NativePolicyPin::from_sha256_hex)
-        .transpose()
-        .map_err(|error| error.to_string())?;
+    let policy_pin = native_policy_pin()?;
     let workflow = NativeModelWorkflow::with_trust(
         NativeRevisionStore::new(native, runtime),
         NativeReleaseTrust::new(
@@ -547,6 +618,9 @@ async fn observe(
         Result<std::path::PathBuf, InstallPreviewError>,
     )>();
     let mut active_install: Option<uuid::Uuid> = None;
+    let (native_download_events, mut native_download_updates) =
+        mpsc::unbounded_channel::<NativeDownloadEvent>();
+    let mut active_native_download: Option<NativeDownloadOperation> = None;
     let (transcripts, mut transcript_updates) = mpsc::unbounded_channel();
     let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
@@ -602,6 +676,10 @@ async fn observe(
         tokio::select! {
             biased;
             _ = stop.cancelled() => {
+                if let Some(mut download) = active_native_download.take() {
+                    download.cancel();
+                    download.join().await;
+                }
                 if let Some(workflow) = native_workflow.as_mut() {
                     if workflow.snapshot().ok().and_then(|snapshot| snapshot.worker).is_some() {
                         let _ = workflow.deactivate().await;
@@ -688,6 +766,53 @@ async fn observe(
                     };
                     publish_native(&native_workflow, publish);
                     if result.is_err() { publish(Update::NativeError("Завершение нативного worker не подтверждено".into())); }
+                    refresh_views = false;
+                },
+                Some(Command::InstallNativePackage { model_id, manifest_sha256, backend }) => {
+                    if active_native_download.is_some() {
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Установка уже выполняется; сначала завершите или отмените её".into(),
+                            percent: -1,
+                            active: true,
+                        });
+                    } else if let Some(backend) = native_backend(&backend) {
+                        match start_native_download(
+                            directory,
+                            NativeDownloadSelection { model_id, manifest_sha256, backend },
+                            native_download_events.clone(),
+                        ) {
+                            Ok(operation) => {
+                                active_native_download = Some(operation);
+                                publish(Update::NativeDownloadStatus {
+                                    summary: "Проверка подписи пройдена. Подключение к доверенному HTTPS-источнику…".into(),
+                                    percent: -1,
+                                    active: true,
+                                });
+                            },
+                            Err(error) => publish(Update::NativeDownloadStatus {
+                                summary: format!("Установка отклонена: {error}"),
+                                percent: -1,
+                                active: false,
+                            }),
+                        }
+                    } else {
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Неизвестный native backend".into(),
+                            percent: -1,
+                            active: false,
+                        });
+                    }
+                    refresh_views = false;
+                },
+                Some(Command::CancelNativePackageInstall) => {
+                    if let Some(operation) = active_native_download.as_ref() {
+                        operation.cancel();
+                        publish(Update::NativeDownloadStatus {
+                            summary: "Отмена запрошена. Начатая атомарная публикация может завершиться целиком".into(),
+                            percent: -1,
+                            active: true,
+                        });
+                    }
                     refresh_views = false;
                 },
                 Some(Command::RefreshPromptCatalog) => {},
@@ -987,6 +1112,60 @@ async fn observe(
                 }
             } => {
                 if result.is_err() { runtime_status = None; }
+            },
+            event = native_download_updates.recv() => {
+                if let Some(event) = event {
+                    let matching = active_native_download.as_ref().is_some_and(|op| op.id() == event.id());
+                    if matching {
+                        match event {
+                            NativeDownloadEvent::Progress { progress, .. } => {
+                                let view = NativeDownloadPresenter::project(progress);
+                                let summary = match view.phase {
+                                    NativeTransferPhase::Manifest => "Загрузка подписанного manifest…".to_owned(),
+                                    NativeTransferPhase::Downloading => format!(
+                                        "Загружено {} / {} МиБ. Пакет пока не установлен",
+                                        view.transferred_bytes / (1024 * 1024),
+                                        view.planned_bytes.unwrap_or(0) / (1024 * 1024),
+                                    ),
+                                    NativeTransferPhase::Publishing => "Повторная проверка и атомарная публикация…".to_owned(),
+                                };
+                                publish(Update::NativeDownloadStatus {
+                                    summary,
+                                    percent: view.percent.map_or(-1, i32::from),
+                                    active: true,
+                                });
+                            },
+                            NativeDownloadEvent::Finished { result, .. } => {
+                                if let Some(mut operation) = active_native_download.take() {
+                                    operation.join().await;
+                                }
+                                match result {
+                                    Ok(installed) => {
+                                        if native_workflow.is_none() {
+                                            match open_native_workflow(directory) {
+                                                Ok(workflow) => native_workflow = workflow,
+                                                Err(error) => publish(Update::NativeError(error)),
+                                            }
+                                        }
+                                        publish_native(&native_workflow, publish);
+                                        publish(Update::NativeDownloadStatus {
+                                            summary: format!("Пакет {} опубликован (повторное использование: {})",
+                                                installed.model_id, installed.reused_package),
+                                            percent: 100,
+                                            active: false,
+                                        });
+                                    },
+                                    Err(error) => publish(Update::NativeDownloadStatus {
+                                        summary: format!("Установка не выполнена: {error}"),
+                                        percent: -1,
+                                        active: false,
+                                    }),
+                                }
+                            },
+                        }
+                    }
+                }
+                refresh_views = false;
             },
             _ = liveness.tick() => {
                 let status = administration.ai_runtime.refresh_status().await;

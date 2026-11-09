@@ -69,6 +69,12 @@ export component AppWindow inherits Window {
     in property <bool> native-has-active: false;
     in property <string> native-status;
     in property <string> native-error;
+    in property <bool> native-download-configured: false;
+    in property <bool> native-download-active: false;
+    in property <string> native-download-summary;
+    in property <int> native-download-progress: -1;
+    callback native-download(string, string, string);
+    callback native-cancel-download();
     callback native-refresh();
     callback native-select(string, string, string);
     callback native-activate(string);
@@ -130,6 +136,12 @@ export component AppWindow inherits Window {
                 native-has-active: root.native-has-active;
                 native-status: root.native-status;
                 native-error: root.native-error;
+                native-download-configured: root.native-download-configured;
+                native-download-active: root.native-download-active;
+                native-download-summary: root.native-download-summary;
+                native-download-progress: root.native-download-progress;
+                native-download-requested(id, sha, backend) => { root.native-download(id, sha, backend); }
+                native-cancel-download-requested => { root.native-cancel-download(); }
                 native-refresh-requested => { root.native-refresh(); }
                 native-select-requested(id, sha, backend) => { root.native-select(id, sha, backend); }
                 native-activate-requested(id) => { root.native-activate(id); }

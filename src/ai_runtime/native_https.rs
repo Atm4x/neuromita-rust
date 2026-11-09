@@ -5,14 +5,14 @@ use std::{
     fs::{self, DirBuilder},
     io,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use reqwest::{Client, Url, header::ACCEPT_ENCODING, redirect::Policy};
 use ring::digest::{Context, SHA256};
 use serde_json::from_slice;
 use thiserror::Error;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, time::timeout};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -30,6 +30,30 @@ use super::{
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 const MAX_TOTAL_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 const MAX_BASE_URL_BYTES: usize = 2048;
+
+/// A progress observation is transfer telemetry, not an installation receipt or ModelReady.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTransferPhase {
+    Manifest,
+    Downloading,
+    Publishing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeTransferProgress {
+    pub phase: NativeTransferPhase,
+    pub transferred_bytes: u64,
+    pub planned_bytes: Option<u64>,
+}
+
+fn notify(
+    progress: Option<&mpsc::UnboundedSender<NativeTransferProgress>>,
+    status: NativeTransferProgress,
+) {
+    if let Some(sender) = progress {
+        let _ = sender.send(status);
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum NativeHttpsError {
@@ -153,6 +177,33 @@ impl NativeHttpsPackageTransfer {
         .await
     }
 
+    /// Streams bounded transfer observations. Publication is a separate stage;
+    /// reaching the byte total never implies the model was installed or started.
+    pub async fn download_and_install_observed(
+        &self,
+        revisions: &NativeRevisionStore,
+        trust: &NativeReleaseTrust,
+        request: NativeHttpsPackageRequest<'_>,
+        staging_root: &Path,
+        cancellation: &CancellationToken,
+        progress: &mpsc::UnboundedSender<NativeTransferProgress>,
+    ) -> Result<NativePackageInstallResult, NativeHttpsError> {
+        self.download_from_origin_observed(
+            revisions,
+            trust,
+            DownloadSpec {
+                model_id: request.model_id,
+                manifest_sha256: request.manifest_sha256,
+                backend: request.backend,
+            },
+            &request.origin.0,
+            staging_root,
+            cancellation,
+            Some(progress),
+        )
+        .await
+    }
+
     async fn download_from_origin(
         &self,
         revisions: &NativeRevisionStore,
@@ -161,6 +212,28 @@ impl NativeHttpsPackageTransfer {
         origin: &Url,
         staging_root: &Path,
         cancellation: &CancellationToken,
+    ) -> Result<NativePackageInstallResult, NativeHttpsError> {
+        self.download_from_origin_observed(
+            revisions,
+            trust,
+            spec,
+            origin,
+            staging_root,
+            cancellation,
+            None,
+        )
+        .await
+    }
+
+    async fn download_from_origin_observed(
+        &self,
+        revisions: &NativeRevisionStore,
+        trust: &NativeReleaseTrust,
+        spec: DownloadSpec<'_>,
+        origin: &Url,
+        staging_root: &Path,
+        cancellation: &CancellationToken,
+        progress: Option<&mpsc::UnboundedSender<NativeTransferProgress>>,
     ) -> Result<NativePackageInstallResult, NativeHttpsError> {
         let DownloadSpec {
             model_id,
@@ -174,6 +247,14 @@ impl NativeHttpsPackageTransfer {
         trust.verify(model_id, &manifest_sha256)?;
         revisions.verify_download_staging_root(staging_root)?;
         let stage = DownloadStage::new(staging_root, model_id)?;
+        notify(
+            progress,
+            NativeTransferProgress {
+                phase: NativeTransferPhase::Manifest,
+                transferred_bytes: 0,
+                planned_bytes: None,
+            },
+        );
         let manifest_url = artifact_url(origin, "packages", Some(model_id), "native-model.json")?;
         let manifest_path = stage.package.join("native-model.json");
         self.fetch_verified(
@@ -183,6 +264,7 @@ impl NativeHttpsPackageTransfer {
             None,
             MAX_MANIFEST_BYTES,
             cancellation,
+            None,
         )
         .await?;
         let bytes = tokio::fs::read(&manifest_path).await?;
@@ -195,10 +277,30 @@ impl NativeHttpsPackageTransfer {
         {
             return Err(NativeHttpsError::Invalid("model/backend/platform mismatch"));
         }
-        let mut total_bytes = bytes.len() as u64;
+        let manifest_len = bytes.len() as u64;
+        let mut total_bytes = manifest_len;
+        for file in std::iter::once(&manifest.executable).chain(manifest.assets.iter()) {
+            total_bytes = budget(total_bytes, file.size_bytes)?;
+        }
+        for file in manifest
+            .runtime_files
+            .iter()
+            .filter(|entry| entry.backends.contains(&backend))
+        {
+            total_bytes = budget(total_bytes, file.file.size_bytes)?;
+        }
+        let planned = total_bytes - manifest_len;
+        let mut transferred = 0u64;
+        notify(
+            progress,
+            NativeTransferProgress {
+                phase: NativeTransferPhase::Downloading,
+                transferred_bytes: 0,
+                planned_bytes: Some(planned),
+            },
+        );
         let package_files = std::iter::once(&manifest.executable).chain(manifest.assets.iter());
         for file in package_files {
-            total_bytes = budget(total_bytes, file.size_bytes)?;
             let url = artifact_url(origin, "packages", Some(model_id), &file.path)?;
             let dest = create_file_parent(&stage.package, &file.path)?;
             let expected = parse_sha256(&file.sha256)?;
@@ -209,8 +311,10 @@ impl NativeHttpsPackageTransfer {
                 Some(file.size_bytes),
                 file.size_bytes,
                 cancellation,
+                progress.map(|sink| (sink, transferred, planned)),
             )
             .await?;
+            transferred += file.size_bytes;
             if file.path == manifest.executable.path {
                 set_executable_permissions(&dest)?;
             }
@@ -220,7 +324,6 @@ impl NativeHttpsPackageTransfer {
                 continue;
             }
             let file = &runtime.file;
-            total_bytes = budget(total_bytes, file.size_bytes)?;
             let url = artifact_url(origin, "runtime", None, &file.path)?;
             let dest = create_file_parent(&stage.runtime, &file.path)?;
             let expected = parse_sha256(&file.sha256)?;
@@ -231,11 +334,21 @@ impl NativeHttpsPackageTransfer {
                 Some(file.size_bytes),
                 file.size_bytes,
                 cancellation,
+                progress.map(|sink| (sink, transferred, planned)),
             )
             .await?;
+            transferred += file.size_bytes;
         }
         ensure_not_cancelled(cancellation)?;
         let approved = trust.verify(model_id, &manifest_sha256)?;
+        notify(
+            progress,
+            NativeTransferProgress {
+                phase: NativeTransferPhase::Publishing,
+                transferred_bytes: transferred,
+                planned_bytes: Some(planned),
+            },
+        );
         let revisions = revisions.clone();
         let cancellation = cancellation.clone();
         tokio::task::spawn_blocking(move || {
@@ -256,6 +369,7 @@ impl NativeHttpsPackageTransfer {
         exact_size: Option<u64>,
         max_size: u64,
         cancellation: &CancellationToken,
+        observation: Option<(&mpsc::UnboundedSender<NativeTransferProgress>, u64, u64)>,
     ) -> Result<(), NativeHttpsError> {
         ensure_not_cancelled(cancellation)?;
         let future = async {
@@ -280,6 +394,7 @@ impl NativeHttpsPackageTransfer {
                 .await?;
             let mut context = Context::new(&SHA256);
             let mut total = 0u64;
+            let mut last_report = Instant::now();
             while let Some(chunk) = response.chunk().await? {
                 total = total
                     .checked_add(chunk.len() as u64)
@@ -289,6 +404,19 @@ impl NativeHttpsPackageTransfer {
                 }
                 context.update(&chunk);
                 output.write_all(&chunk).await?;
+                if last_report.elapsed() >= Duration::from_millis(250) {
+                    if let Some((sink, earlier, planned)) = observation {
+                        notify(
+                            Some(sink),
+                            NativeTransferProgress {
+                                phase: NativeTransferPhase::Downloading,
+                                transferred_bytes: earlier + total,
+                                planned_bytes: Some(planned),
+                            },
+                        );
+                    }
+                    last_report = Instant::now();
+                }
             }
             if total == 0
                 || exact_size.is_some_and(|expected| expected != total)
@@ -297,6 +425,16 @@ impl NativeHttpsPackageTransfer {
                 return Err(NativeHttpsError::Integrity);
             }
             output.sync_all().await?;
+            if let Some((sink, earlier, planned)) = observation {
+                notify(
+                    Some(sink),
+                    NativeTransferProgress {
+                        phase: NativeTransferPhase::Downloading,
+                        transferred_bytes: earlier + total,
+                        planned_bytes: Some(planned),
+                    },
+                );
+            }
             Ok(())
         };
         tokio::select! {
@@ -730,6 +868,96 @@ mod tests {
         assert!(fixture.no_staging());
         let second = run(&fixture, &server.base, &token).await.unwrap();
         assert!(second.reused_package);
+        assert!(fixture.no_staging());
+    }
+
+    #[tokio::test]
+    async fn progress_reports_real_bytes_then_atomic_publication_not_ready() {
+        let fixture = Fixture::new();
+        let server = LocalServer::start(fixture.responses.clone(), false).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let token = CancellationToken::new();
+        let installed = NativeHttpsPackageTransfer::new(Duration::from_secs(10))
+            .unwrap()
+            .download_from_origin_observed(
+                &fixture.store,
+                &fixture.trust,
+                DownloadSpec {
+                    model_id: "voice",
+                    manifest_sha256: fixture.manifest_sha256,
+                    backend: NativeBackend::Cpu,
+                },
+                &server.base,
+                &fixture.staging,
+                &token,
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.model_id, "voice");
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        assert_eq!(events[0].phase, NativeTransferPhase::Manifest);
+        assert_eq!(events[0].planned_bytes, None);
+        let expected = (b"test-worker-executable".len()
+            + b"test-model-weights".len()
+            + b"test-native-runtime".len()) as u64;
+        assert_eq!(events[1].planned_bytes, Some(expected));
+        let last = events.last().unwrap();
+        assert_eq!(last.phase, NativeTransferPhase::Publishing);
+        assert_eq!(last.transferred_bytes, expected);
+        assert_eq!(last.planned_bytes, Some(expected));
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.phase == NativeTransferPhase::Downloading)
+                .all(|e| e.transferred_bytes <= expected)
+        );
+        assert!(fixture.no_staging());
+    }
+
+    #[tokio::test]
+    async fn canceled_observed_transfer_does_not_emit_publication() {
+        let fixture = Fixture::new();
+        let server = LocalServer::start_with_delay(
+            fixture.responses.clone(),
+            false,
+            Duration::from_millis(300),
+        )
+        .await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let cancel = async move {
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            canceller.cancel();
+        };
+        let fetch = NativeHttpsPackageTransfer::new(Duration::from_secs(10)).unwrap();
+        let (result, _) = tokio::join!(
+            fetch.download_from_origin_observed(
+                &fixture.store,
+                &fixture.trust,
+                DownloadSpec {
+                    model_id: "voice",
+                    manifest_sha256: fixture.manifest_sha256,
+                    backend: NativeBackend::Cpu,
+                },
+                &server.base,
+                &fixture.staging,
+                &token,
+                Some(&tx),
+            ),
+            cancel,
+        );
+        assert!(matches!(result, Err(NativeHttpsError::Canceled)));
+        drop(tx);
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.phase, NativeTransferPhase::Publishing);
+        }
+        assert!(fixture.store.overview().unwrap().revisions.is_empty());
         assert!(fixture.no_staging());
     }
 

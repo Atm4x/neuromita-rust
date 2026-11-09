@@ -20,6 +20,17 @@ use super::{
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
+    window.set_native_download_configured(super::runtime::native_download_configured());
+    let native_install = send.clone();
+    window.on_native_download(move |model_id, digest, backend| {
+        native_install(Command::InstallNativePackage {
+            model_id: model_id.into(),
+            manifest_sha256: digest.into(),
+            backend: backend.into(),
+        });
+    });
+    let native_cancel = send.clone();
+    window.on_native_cancel_download(move || native_cancel(Command::CancelNativePackageInstall));
     let refresh = send.clone();
     window.on_native_refresh(move || refresh(Command::RefreshNativeModels));
     let select = send.clone();
@@ -264,4 +275,11 @@ pub fn native_models(window: &AppWindow, snapshot: NativeWorkflowSnapshot) {
 
 pub fn native_error(window: &AppWindow, error: String) {
     window.set_native_error(error.into());
+}
+
+/// Transport progress is not verified installation or a live worker status.
+pub fn native_download_status(window: &AppWindow, summary: String, percent: i32, active: bool) {
+    window.set_native_download_summary(summary.into());
+    window.set_native_download_progress(percent);
+    window.set_native_download_active(active);
 }

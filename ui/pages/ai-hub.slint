@@ -27,6 +27,12 @@ export component AiHubPage inherits Rectangle {
     in property <bool> native-has-active: false;
     in property <string> native-status;
     in property <string> native-error;
+    in property <bool> native-download-configured: false;
+    in property <bool> native-download-active: false;
+    in property <string> native-download-summary;
+    in property <int> native-download-progress: -1;
+    callback native-download-requested(string, string, string);
+    callback native-cancel-download-requested();
     callback native-refresh-requested();
     callback native-select-requested(string, string, string);
     callback native-activate-requested(string);
@@ -292,6 +298,12 @@ export component AiHubPage inherits Rectangle {
             has-active: root.native-has-active;
             status: root.native-status;
             error: root.native-error;
+            download-configured: root.native-download-configured;
+            download-active: root.native-download-active;
+            download-summary: root.native-download-summary;
+            download-progress: root.native-download-progress;
+            download-requested(id, sha, backend) => { root.native-download-requested(id, sha, backend); }
+            cancel-download-requested => { root.native-cancel-download-requested(); }
             refresh-requested => { root.native-refresh-requested(); }
             select-requested(id, sha, backend) => { root.native-select-requested(id, sha, backend); }
             activate-requested(id) => { root.native-activate-requested(id); }
