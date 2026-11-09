@@ -585,6 +585,34 @@ impl SingleFileActivator {
 
     fn cleanup(&self) -> Result<(), ActivationError> {
         let workspace = self.workspace();
+        let mut has_journal = false;
+        for entry in fs::read_dir(&workspace)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if ![
+                BACKUP,
+                CANDIDATE,
+                READY,
+                JOURNAL_PENDING,
+                ROLLBACK_MARKER,
+                JOURNAL,
+            ]
+            .iter()
+            .any(|allowed| name == *allowed)
+            {
+                return Err(ActivationError::Conflict("unexpected workspace entry"));
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(ActivationError::Conflict("unexpected workspace entry"));
+            }
+            if name == JOURNAL {
+                has_journal = true;
+            }
+        }
+        if !has_journal {
+            return Err(ActivationError::NotPrepared);
+        }
         for name in [BACKUP, CANDIDATE, READY, JOURNAL_PENDING, ROLLBACK_MARKER] {
             let path = workspace.join(name);
             match fs::symlink_metadata(&path) {
@@ -901,6 +929,44 @@ mod tests {
             b"private settings"
         );
         assert!(fixture.artifact.path().is_file());
+    }
+
+    #[test]
+    fn cleanup_refuses_unknown_workspace_entry_before_modifying_verified_candidate() {
+        let fixture = Fixture::new();
+        fixture
+            .activation
+            .prepare(&fixture.asset, &fixture.artifact)
+            .unwrap();
+        let candidate = fixture.workspace().join(CANDIDATE);
+        let journal = fixture.workspace().join(JOURNAL);
+        let original_candidate = fs::read(&candidate).unwrap();
+        let original_journal = fs::read(&journal).unwrap();
+        let obstruction = fixture.workspace().join("handoff.json");
+        fs::create_dir(&obstruction).unwrap();
+
+        assert!(matches!(
+            fixture.activation.discard_prepared(),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(&candidate).unwrap(), original_candidate);
+        assert_eq!(fs::read(&journal).unwrap(), original_journal);
+        assert_eq!(
+            fixture.activation.recover().unwrap(),
+            RecoveryOutcome::Prepared
+        );
+
+        fs::remove_dir(&obstruction).unwrap();
+        fs::write(&obstruction, b"previous helper intent").unwrap();
+        assert!(matches!(
+            fixture.activation.discard_prepared(),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(&candidate).unwrap(), original_candidate);
+        assert_eq!(fs::read(&journal).unwrap(), original_journal);
+        fs::remove_file(&obstruction).unwrap();
+        fixture.activation.discard_prepared().unwrap();
+        assert!(!fixture.workspace().exists());
     }
 
     #[test]

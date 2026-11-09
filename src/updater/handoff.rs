@@ -47,6 +47,11 @@ pub enum HandoffError {
     NotPrepared,
     #[error("the installed Windows recovery startup guard is not registered")]
     MissingRecoveryGuard,
+    #[error("updater handoff failed ({handoff}); transaction cleanup also failed ({cleanup})")]
+    HandoffCleanupFailed {
+        handoff: Box<HandoffError>,
+        cleanup: Box<HandoffError>,
+    },
     #[error("the helper supports only the default installation-owned UserData root")]
     NonPortableDataRoot,
     #[error("invalid updater helper process arguments")]
@@ -157,22 +162,41 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
         .create_new(true)
         .write(true)
         .open(&intent_path)?;
-    file.write_all(&serde_json::to_vec(&intent)?)?;
-    file.sync_all()?;
+    let record = (|| -> Result<(), HandoffError> {
+        file.write_all(&serde_json::to_vec(&intent)?)?;
+        file.sync_all()?;
+        Ok(())
+    })();
     drop(file);
+    if let Err(error) = record {
+        return Err(abort_failed_schedule(
+            activator,
+            &helper,
+            &intent_path,
+            false,
+            error,
+        ));
+    }
     let registered = match reboot_guard::arm(&helper) {
         Ok(registered) => registered,
         Err(error) => {
-            let _ = fs::remove_file(&intent_path);
-            return Err(error.into());
+            return Err(abort_failed_schedule(
+                activator,
+                &helper,
+                &intent_path,
+                false,
+                error.into(),
+            ));
         }
     };
     if let Err(error) = activator.arm_health_check(intent.nonce) {
-        let _ = fs::remove_file(&intent_path);
-        if registered {
-            let _ = reboot_guard::disarm(&helper);
-        }
-        return Err(error.into());
+        return Err(abort_failed_schedule(
+            activator,
+            &helper,
+            &intent_path,
+            registered,
+            error.into(),
+        ));
     }
     let child = Command::new(&helper)
         .arg(HELPER_COMMAND)
@@ -186,13 +210,44 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
         .spawn();
     match child {
         Ok(child) => Ok(child.id()),
-        Err(error) => {
-            let _ = fs::remove_file(intent_path);
-            if registered {
-                let _ = reboot_guard::disarm(&helper);
+        Err(error) => Err(abort_failed_schedule(
+            activator,
+            &helper,
+            &intent_path,
+            registered,
+            error.into(),
+        )),
+    }
+}
+
+fn abort_failed_schedule(
+    activator: &SingleFileActivator,
+    helper: &Path,
+    intent_path: &Path,
+    guard_armed: bool,
+    handoff: HandoffError,
+) -> HandoffError {
+    let cleanup = (|| -> Result<(), HandoffError> {
+        match fs::symlink_metadata(intent_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                fs::remove_file(intent_path)?;
             }
-            Err(error.into())
+            Ok(_) => return Err(HandoffError::UnsafeHelper),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        activator.discard_prepared()?;
+        if guard_armed {
+            reboot_guard::disarm(helper)?;
+        }
+        Ok(())
+    })();
+    match cleanup {
+        Ok(()) => handoff,
+        Err(cleanup) => HandoffError::HandoffCleanupFailed {
+            handoff: Box::new(handoff),
+            cleanup: Box::new(cleanup),
+        },
     }
 }
 

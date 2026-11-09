@@ -215,3 +215,32 @@ change the normal user's HKCU recovery guard. It therefore does not prove
 Windows helper-parent handoff, interactive Slint readiness, a real Windows
 reboot/sign-in, or application AI/Core health. The Windows PE probes emit a
 real nonce/PID receipt but do not start the Slint GUI event loop.
+
+## Failed helper scheduling and workspace preservation (D54)
+
+A verified preparation is not permission to abandon a partial handoff. If
+writing the parent-intent record, registering the Windows sign-in recovery
+lease, arming the one-time health nonce, or spawning the installed helper
+fails, handoff cancellation first removes the exact local intent, then
+attempts to discard the verified, unapplied transaction under the exclusive
+installation lock. Only after the discard succeeds may it deregister the
+recovery lease created by that attempt. An already registered identical
+lease is not claimed as owned by the failed attempt. If cancellation fails,
+its error is reported alongside the original handoff failure rather than
+silently treated as a successful rollback.
+
+Before deleting **any** transaction file, activation cleanup validates the
+complete workspace inventory: the journal must be present and all entries
+must be known regular files without symlinks. Unexpected entries, including
+an obstructing `handoff.json` directory, block cleanup *before* candidate or
+journal deletion. The original executable and portable `UserData` are not
+modified. After an operator removes the conflicting entry, the same
+journal can be independently revalidated and discarded. This avoids an
+unrecoverable partial cleanup that would otherwise delete the journal while
+leaving an unexpected file in `.neuromita-update`.
+
+Linux installed-process E2E additionally exercises successful activation,
+readiness-based completion, early-startup rollback, helper launch refusal,
+missing-helper refusal and a conflicting handoff record. Windows validation
+uses native CI; it does not imply a real published release or a completed
+interactive click-through with a running Slint GUI.

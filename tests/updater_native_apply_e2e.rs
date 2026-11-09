@@ -16,7 +16,8 @@ use neuromita::{
         UpdateAsset, UpdateStager,
         activation::SingleFileActivator,
         check::native_asset_name,
-        handoff::{READY_NONCE_ENV, acknowledge_gui_ready, schedule_after_shutdown},
+        handoff::{READY_NONCE_ENV, acknowledge_gui_ready},
+        install::schedule_prepared_native_update,
     },
 };
 #[cfg(target_os = "linux")]
@@ -63,8 +64,7 @@ fn installed_parent() -> Result<(), Box<dyn std::error::Error>> {
     let exe = env::current_exe()?;
     let install = exe.parent().ok_or("no parent")?;
     let data = PortableDataRoot::resolve(Some(&install.join("UserData")))?;
-    let activation = SingleFileActivator::new(install, &data, "neuromita-gui")?;
-    schedule_after_shutdown(&activation)?;
+    schedule_prepared_native_update(&data)?;
     Ok(())
 }
 
@@ -133,8 +133,25 @@ fn wait_until_report(data: &Path) -> Result<String, Box<dyn std::error::Error>> 
 }
 
 #[cfg(target_os = "linux")]
-fn case(success: bool, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let install = base.join(if success { "good" } else { "rollback" });
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    Healthy,
+    BadStartup,
+    HelperNotExecutable,
+    HelperMissing,
+    ConflictingHandoff,
+}
+
+#[cfg(target_os = "linux")]
+fn case(mode: Scenario, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let name = match mode {
+        Scenario::Healthy => "healthy",
+        Scenario::BadStartup => "rollback",
+        Scenario::HelperNotExecutable => "denied",
+        Scenario::HelperMissing => "missing",
+        Scenario::ConflictingHandoff => "conflicting-handoff",
+    };
+    let install = base.join(name);
     let data_path = install.join("UserData");
     fs::create_dir_all(&data_path)?;
     fs::write(
@@ -142,58 +159,121 @@ fn case(success: bool, base: &Path) -> Result<(), Box<dyn std::error::Error>> {
         b"unmodified private settings",
     )?;
     let gui = install.join("neuromita-gui");
-    let old = executable_bytes(b"NM_APPLY_PROBE_OLD")?;
-    let new = executable_bytes(if success { NEW_OK } else { NEW_BAD })?;
-    fs::write(&gui, &old)?;
+    let old_source = env::current_exe()?;
+    if fs::hard_link(&old_source, &gui).is_err() {
+        fs::copy(&old_source, &gui)?;
+    }
+    let old = fs::read(&gui)?;
+    let installed_probe = matches!(mode, Scenario::Healthy | Scenario::BadStartup);
+    let next_source = base.join(if mode == Scenario::BadStartup {
+        "new-bad"
+    } else {
+        "new-good"
+    });
+    let new = if installed_probe {
+        fs::read(&next_source)?
+    } else {
+        b"candidate never applied when helper startup fails".to_vec()
+    };
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&gui, fs::Permissions::from_mode(0o755))?;
     let helper = install.join("neuromita-updater");
-    fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), &helper)?;
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
+    match mode {
+        Scenario::HelperMissing => {}
+        Scenario::HelperNotExecutable => {
+            fs::write(&helper, b"helper without execute permission")?;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o644))?;
+        }
+        _ => {
+            if fs::hard_link(base.join("helper"), &helper).is_err() {
+                fs::copy(base.join("helper"), &helper)?;
+            }
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))?;
+        }
+    }
 
     let data = PortableDataRoot::resolve(Some(&data_path))?;
-    let name = native_asset_name("linux", env::consts::ARCH).ok_or("no native Linux asset")?;
+    let asset_name =
+        native_asset_name("linux", env::consts::ARCH).ok_or("no native Linux asset")?;
     let digest = sha256(&new);
     let asset = UpdateAsset::new(
-        name,
+        asset_name,
         "https://example.invalid/native",
         new.len() as u64,
         &format!("sha256:{digest}"),
     )?;
     let stage = data_path.join("updates/staged");
     fs::create_dir_all(&stage)?;
-    fs::write(stage.join(format!("sha256-{digest}.artifact")), &new)?;
-    let rt = tokio::runtime::Runtime::new()?;
+    let staged_path = stage.join(format!("sha256-{digest}.artifact"));
+    if installed_probe {
+        if fs::hard_link(&next_source, &staged_path).is_err() {
+            fs::copy(&next_source, &staged_path)?;
+        }
+    } else {
+        fs::write(&staged_path, &new)?;
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
     let artifact =
-        rt.block_on(UpdateStager::new(&data)?.stage(&asset, &CancellationToken::new()))?;
-    assert!(
-        artifact.reused(),
-        "exact publisher-hash cache was not reused"
-    );
+        runtime.block_on(UpdateStager::new(&data)?.stage(&asset, &CancellationToken::new()))?;
+    assert!(artifact.reused(), "publisher-hash cache was not reused");
     let activator = SingleFileActivator::new(&install, &data, "neuromita-gui")?;
     activator.prepare_native_gui(&asset, &artifact)?;
+    if mode == Scenario::ConflictingHandoff {
+        fs::create_dir(install.join(".neuromita-update/handoff.json"))?;
+    }
+
     let parent = Command::new(&gui)
         .arg("--e2e-install-parent")
         .stdin(Stdio::null())
         .output()?;
-    if !parent.status.success() {
-        return Err(format!(
-            "parent handoff failed: {}",
-            String::from_utf8_lossy(&parent.stderr)
-        )
-        .into());
-    }
-    let state = wait_until_report(&data_path)?;
-    if success {
-        assert_eq!(state, "updated-and-restarted");
-        assert_eq!(fs::read(&gui)?, new);
-        assert!(install.join("new-gui-ready").exists());
-        assert!(!install.join(".neuromita-update").exists());
-    } else {
-        assert_eq!(state, "rolled-back-after-startup-failure");
-        assert_eq!(fs::read(&gui)?, old);
-        assert!(install.join("old-gui-relaunched").exists());
-        assert!(!install.join(".neuromita-update").exists());
+    match mode {
+        Scenario::ConflictingHandoff => {
+            assert!(!parent.status.success());
+            let diagnostics = String::from_utf8_lossy(&parent.stderr);
+            assert!(
+                diagnostics.contains("prepared transaction could not be discarded"),
+                "unexpected collision diagnostics: {diagnostics}"
+            );
+            assert_eq!(fs::read(&gui)?, old);
+            assert!(install.join(".neuromita-update/activation.json").exists());
+            assert!(install.join(".neuromita-update/candidate").exists());
+            fs::remove_dir(install.join(".neuromita-update/handoff.json"))?;
+            activator.discard_prepared()?;
+            assert!(!install.join(".neuromita-update").exists());
+        }
+        Scenario::HelperNotExecutable | Scenario::HelperMissing => {
+            assert!(
+                !parent.status.success(),
+                "helper failure unexpectedly started update"
+            );
+            let diagnostics = String::from_utf8_lossy(&parent.stderr);
+            assert!(
+                !diagnostics.contains("prepared transaction could not be discarded"),
+                "handoff failure stranded prepared transaction: {diagnostics}"
+            );
+            assert_eq!(fs::read(&gui)?, old);
+            assert!(!install.join(".neuromita-update").exists());
+        }
+        Scenario::Healthy | Scenario::BadStartup => {
+            if !parent.status.success() {
+                return Err(format!(
+                    "parent handoff failed: {}",
+                    String::from_utf8_lossy(&parent.stderr)
+                )
+                .into());
+            }
+            let state = wait_until_report(&data_path)?;
+            if mode == Scenario::Healthy {
+                assert_eq!(state, "updated-and-restarted");
+                assert_eq!(fs::read(&gui)?, new);
+                assert!(install.join("new-gui-ready").exists());
+            } else {
+                assert_eq!(state, "rolled-back-after-startup-failure");
+                assert_eq!(fs::read(&gui)?, old);
+                assert!(install.join("old-gui-relaunched").exists());
+            }
+            assert!(!install.join(".neuromita-update").exists());
+        }
     }
     assert_eq!(
         fs::read(data_path.join("settings.json"))?,
@@ -207,8 +287,14 @@ fn conductor() -> Result<(), Box<dyn std::error::Error>> {
     let base = env::temp_dir().join(format!("nm-apply-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&base)?;
     let result = (|| {
-        case(true, &base)?;
-        case(false, &base)?;
+        fs::write(base.join("new-good"), executable_bytes(NEW_OK)?)?;
+        fs::write(base.join("new-bad"), executable_bytes(NEW_BAD)?)?;
+        fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), base.join("helper"))?;
+        case(Scenario::Healthy, &base)?;
+        case(Scenario::BadStartup, &base)?;
+        case(Scenario::HelperNotExecutable, &base)?;
+        case(Scenario::HelperMissing, &base)?;
+        case(Scenario::ConflictingHandoff, &base)?;
         Ok::<(), Box<dyn std::error::Error>>(())
     })();
     thread::sleep(Duration::from_secs(3));

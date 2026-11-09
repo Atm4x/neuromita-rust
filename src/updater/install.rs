@@ -58,7 +58,6 @@ fn running_gui_activator(
         .parent()
         .ok_or(NativeInstallError::InvalidInstallation)?;
     let activator = SingleFileActivator::new(directory, data_root, expected_name)?;
-    handoff::validate_handoff_environment(&activator)?;
     Ok(activator)
 }
 
@@ -75,6 +74,7 @@ pub async fn prepare_latest_native_update(
         ));
     };
     let activator = running_gui_activator(data_root)?;
+    handoff::validate_handoff_environment(&activator)?;
     if cancel.is_cancelled() {
         return Err(UpdateError::Cancelled.into());
     }
@@ -108,8 +108,20 @@ pub fn schedule_prepared_native_update(
     let activator = running_gui_activator(data_root)?;
     match handoff::schedule_after_shutdown(&activator) {
         Ok(pid) => Ok(pid),
-        Err(handoff) => match activator.discard_prepared() {
-            Ok(()) => Err(handoff.into()),
+        Err(handoff) => match activator.recover() {
+            Ok(super::activation::RecoveryOutcome::NoTransaction) => Err(handoff.into()),
+            Ok(super::activation::RecoveryOutcome::Prepared) => {
+                match activator.discard_prepared() {
+                    Ok(()) => Err(handoff.into()),
+                    Err(cleanup) => {
+                        Err(NativeInstallError::PendingTransaction { handoff, cleanup })
+                    }
+                }
+            }
+            Ok(_) => Err(NativeInstallError::PendingTransaction {
+                handoff,
+                cleanup: ActivationError::ExistingTransaction,
+            }),
             Err(cleanup) => Err(NativeInstallError::PendingTransaction { handoff, cleanup }),
         },
     }
