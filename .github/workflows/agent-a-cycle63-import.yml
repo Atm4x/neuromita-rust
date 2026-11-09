@@ -1,0 +1,42 @@
+name: Agent A Cycle63 exact Git object importer
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle63-import-20261109
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify original Git commit and publish
+        shell: bash
+        env:
+          BASE: 7972ac3d72dc10eb71c940c4d857c04291c16f6f
+          ORIGINAL: 947ce50a87ec9f12f83942aba16038bea54ceecd
+          TREE: 4ca840ad5a2bd07a39d7d5595cde39baf5eda753
+          SHA256: 873698bb637c38122ac2208badcd661ef29246d71b0b246a60891316f1dbfdf8
+          DEST: codex/knowledge-r7-provider-settings-failure-20261109
+        run: |
+          set -euo pipefail
+          base64 --decode bridge-data/cycle63.bundle.b64 > cycle63.bundle
+          echo "$SHA256  cycle63.bundle" | sha256sum --check
+          git cat-file -e "$BASE^{commit}"
+          git bundle verify cycle63.bundle
+          git fetch cycle63.bundle refs/heads/agent-a-cycle63-base:refs/heads/cycle63-candidate
+          test "$(git rev-parse refs/heads/cycle63-candidate)" = "$ORIGINAL"
+          test "$(git rev-parse "$ORIGINAL^{tree}")" = "$TREE"
+          test "$(git show -s --format=%P "$ORIGINAL")" = "$BASE"
+          git merge-base --is-ancestor "$BASE" "$ORIGINAL"
+          git fsck --full
+          test -z "$(git ls-remote --heads origin "refs/heads/$DEST")"
+          git push origin "$ORIGINAL:refs/heads/$DEST"
+          printf '%s\n' "head=$ORIGINAL" "parent=$BASE" "tree=$TREE" "bundle_sha256=$SHA256" > cycle63-verified.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle63-import-receipt
+          path: cycle63-verified.txt
+          retention-days: 1
