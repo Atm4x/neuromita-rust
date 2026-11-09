@@ -1,0 +1,35 @@
+name: Import exact Agent C native immutable revisions
+on:
+  push:
+    branches: [bridge/agent-c-native-revisions-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-revisions-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-revisions-20261109
+          fetch-depth: 0
+      - name: Verify exact Git bundle, parent, tree, and non-force push
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-revisions.part0{0,1,2,3,4,5} | base64 -d >/tmp/agent-c-native-revisions.bundle.xz
+          test "$(sha256sum /tmp/agent-c-native-revisions.bundle.xz | cut -d' ' -f1)" = "082a649a9843ccf67003c306636480070d781ccc5a80e213d4579bf1436f1237"
+          xz -dc /tmp/agent-c-native-revisions.bundle.xz >/tmp/agent-c-native-revisions.bundle
+          test "$(sha256sum /tmp/agent-c-native-revisions.bundle | cut -d' ' -f1)" = "53480686c16e86431b397863493b500b6c9c3894f2807d64b8d2e690fbde3860"
+          git fetch origin refs/heads/codex/ai-native-local-package-installer-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "17427333b69d73fecbc62a4053055246775274ba"
+          git fetch origin refs/heads/codex/ai-native-immutable-revisions-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "17427333b69d73fecbc62a4053055246775274ba"
+          git bundle verify /tmp/agent-c-native-revisions.bundle
+          git fetch /tmp/agent-c-native-revisions.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd"
+          git checkout --detach "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd"
+          test "$(git rev-parse HEAD^{tree})" = "626b984e727bc6479d6416e3481acf9fdbc8adcb"
+          test "$(git rev-list --parents -n1 HEAD)" = "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd 17427333b69d73fecbc62a4053055246775274ba"
+          git diff --check "17427333b69d73fecbc62a4053055246775274ba" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-immutable-revisions-20261109
