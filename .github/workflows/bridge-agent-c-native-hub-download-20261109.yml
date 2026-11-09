@@ -1,0 +1,35 @@
+name: Import exact Agent C native AI Hub download operation
+on:
+  push:
+    branches: [bridge/agent-c-native-hub-download-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-hub-download-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-hub-download-20261109
+          fetch-depth: 0
+      - name: Verify exact bundle and non-force publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native-hub.part0{0,1,2,3,4} | base64 -d >/tmp/agent-c-native-hub.bundle.xz
+          test "$(sha256sum /tmp/agent-c-native-hub.bundle.xz | cut -d' ' -f1)" = "68dda5b6bed1fa857bb1ffa5be3fbf911b25f29cc39b3dde0d501f1e2f228400"
+          xz -dc /tmp/agent-c-native-hub.bundle.xz >/tmp/agent-c-native-hub.bundle
+          test "$(sha256sum /tmp/agent-c-native-hub.bundle | cut -d' ' -f1)" = "7fc029f5f12dffd74836944cb56ccf191ed48ecf0556bed8b969e22d0de23300"
+          git fetch origin refs/heads/codex/ai-native-https-package-transfer-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "ee03b6d08002c7de8b776f359471aa8da2989163"
+          git fetch origin refs/heads/codex/ai-native-hub-download-operation-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "ee03b6d08002c7de8b776f359471aa8da2989163"
+          git bundle verify /tmp/agent-c-native-hub.bundle
+          git fetch /tmp/agent-c-native-hub.bundle refs/heads/codex/ai-native-hub-download-operation-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe"
+          git checkout --detach "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe"
+          test "$(git rev-parse HEAD^{tree})" = "6d6bb4b6db7853294fae6e4141479ff680054cd0"
+          test "$(git rev-list --parents -n1 HEAD)" = "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe ee03b6d08002c7de8b776f359471aa8da2989163"
+          git diff --check "ee03b6d08002c7de8b776f359471aa8da2989163" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-hub-download-operation-20261109
