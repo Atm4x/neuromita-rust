@@ -211,6 +211,119 @@ pub fn verify(snapshot: impl AsRef<Path>) -> Result<RecoveryInventory, Inventory
     recovery_inventory::verify(snapshot, &manifest)
 }
 
+fn destination_parent_outside_source(
+    source: &Path,
+    destination: &Path,
+) -> Result<PathBuf, InventoryError> {
+    validate_directory(source)?;
+    validate_path(destination)?;
+    must_not_exist(destination)?;
+    let parent = destination.parent().ok_or_else(|| {
+        InventoryError::UnsafePath("snapshot output needs an existing directory".into())
+    })?;
+    validate_directory(parent)?;
+    let original = fs::canonicalize(source)?;
+    let parent_canonical = fs::canonicalize(parent)?;
+    if parent_canonical.starts_with(&original) {
+        return Err(InventoryError::UnsafePath(
+            "destination must be outside the source directory".into(),
+        ));
+    }
+    Ok(parent.to_path_buf())
+}
+
+fn publish_stage(
+    stage: &mut Stage,
+    destination: &Path,
+    parent: &Path,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), InventoryError> {
+    sync_directory(&stage.path)?;
+    rename_no_replace(&stage.path, destination)?;
+    stage.published = true;
+    if let Err(error) = sync_parent(parent) {
+        return Err(InventoryError::PublicationUncertain {
+            destination: destination.to_path_buf(),
+            cause: error.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn copy_known_configs(
+    source: &Path,
+    target: &Path,
+    inventory: &RecoveryInventory,
+) -> Result<(), InventoryError> {
+    for evidence in &inventory.config_files {
+        let filename = Path::new(&evidence.path)
+            .file_name()
+            .filter(|name| recovery_inventory::CONFIG_FILES.contains(&name.to_str().unwrap_or("")))
+            .ok_or_else(|| InventoryError::UnsafePath("unknown config file".into()))?;
+        if filename != OsStr::new(&evidence.path) {
+            return Err(InventoryError::UnsafePath("unsafe config path".into()));
+        }
+        let bytes = recovery_inventory::read_bounded_file(
+            &source.join(filename),
+            recovery_inventory::MAX_JSON_BYTES,
+        )?;
+        write_new(&target.join(filename), &bytes)?;
+    }
+    Ok(())
+}
+
+/// Restore a verified known-files snapshot into a newly published data directory.
+/// The result intentionally omits the snapshot manifest: no source pathname, inode,
+/// active configuration or other owner's files are changed or linked to the output.
+/// This is not live cutover or complete dataset recovery (SessionArchive is excluded).
+pub fn restore_into_new(
+    snapshot: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+) -> Result<RecoveryInventory, InventoryError> {
+    restore_with_sync(snapshot.as_ref(), destination.as_ref(), sync_directory)
+}
+
+fn restore_with_sync(
+    snapshot: &Path,
+    destination: &Path,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<RecoveryInventory, InventoryError> {
+    restore_with_hooks(snapshot, destination, || Ok(()), sync_parent)
+}
+
+fn restore_with_hooks(
+    snapshot: &Path,
+    destination: &Path,
+    after_stage_verified: impl FnOnce() -> Result<(), InventoryError>,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<RecoveryInventory, InventoryError> {
+    let parent = destination_parent_outside_source(snapshot, destination)?;
+    let expected = verify(snapshot)?;
+    let mut stage = Stage::new(&parent)?;
+    let restored = SqliteTimelineRepository::restore_verified_backup_into_new_database(
+        snapshot.join("timeline.sqlite3"),
+        stage.path.join("timeline.sqlite3"),
+        &expected.timeline.fingerprint,
+    )
+    .map_err(|error| InventoryError::Timeline(error.to_string()))?;
+    if restored.backup_fingerprint != expected.timeline.fingerprint
+        || restored.revision != expected.timeline.revision
+        || restored.canonical_events != expected.timeline.canonical_events
+    {
+        return Err(InventoryError::Changed);
+    }
+    copy_known_configs(snapshot, &stage.path, &expected)?;
+    if recovery_inventory::inspect(&stage.path)? != expected {
+        return Err(InventoryError::Changed);
+    }
+    after_stage_verified()?;
+    if recovery_inventory::inspect(&stage.path)? != expected || verify(snapshot)? != expected {
+        return Err(InventoryError::Changed);
+    }
+    publish_stage(&mut stage, destination, &parent, sync_parent)?;
+    Ok(expected)
+}
+
 /// Create a new, atomically named directory with a verified SQLite snapshot and known JSONs.
 /// Source must be stopped or externally excluded from concurrent writes; two inspections
 /// do not constitute an application-wide consistency transaction.
@@ -235,23 +348,10 @@ fn create_with_hooks(
     after_stage_verified: impl FnOnce() -> Result<(), InventoryError>,
     sync_parent: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<RecoveryInventory, InventoryError> {
-    validate_directory(root)?;
-    validate_path(destination)?;
-    must_not_exist(destination)?;
-    let parent = destination.parent().ok_or_else(|| {
-        InventoryError::UnsafePath("snapshot output needs an existing directory".into())
-    })?;
-    validate_directory(parent)?;
-    let original = fs::canonicalize(root)?;
-    let parent_canonical = fs::canonicalize(parent)?;
-    if parent_canonical.starts_with(&original) {
-        return Err(InventoryError::UnsafePath(
-            "snapshot destination must be outside the source data directory".into(),
-        ));
-    }
+    let parent = destination_parent_outside_source(root, destination)?;
 
     let before = recovery_inventory::inspect(root)?;
-    let mut stage = Stage::new(parent)?;
+    let mut stage = Stage::new(&parent)?;
     let receipt = SqliteTimelineRepository::create_verified_backup(
         root.join("timeline.sqlite3"),
         stage.path.join("timeline.sqlite3"),
@@ -263,20 +363,7 @@ fn create_with_hooks(
     {
         return Err(InventoryError::Changed);
     }
-    for evidence in &before.config_files {
-        let filename = Path::new(&evidence.path)
-            .file_name()
-            .filter(|name| recovery_inventory::CONFIG_FILES.contains(&name.to_str().unwrap_or("")))
-            .ok_or_else(|| InventoryError::UnsafePath("unknown config file".into()))?;
-        if filename != OsStr::new(&evidence.path) {
-            return Err(InventoryError::UnsafePath("unsafe config path".into()));
-        }
-        let bytes = recovery_inventory::read_bounded_file(
-            &root.join(filename),
-            recovery_inventory::MAX_JSON_BYTES,
-        )?;
-        write_new(&stage.path.join(filename), &bytes)?;
-    }
+    copy_known_configs(root, &stage.path, &before)?;
     if recovery_inventory::inspect(&stage.path)? != before {
         return Err(InventoryError::Changed);
     }
@@ -291,15 +378,7 @@ fn create_with_hooks(
     if verify(&stage.path)? != before || recovery_inventory::inspect(root)? != before {
         return Err(InventoryError::Changed);
     }
-    sync_directory(&stage.path)?;
-    rename_no_replace(&stage.path, destination)?;
-    stage.published = true;
-    if let Err(error) = sync_parent(parent) {
-        return Err(InventoryError::PublicationUncertain {
-            destination: destination.to_path_buf(),
-            cause: error.to_string(),
-        });
-    }
+    publish_stage(&mut stage, destination, &parent, sync_parent)?;
     Ok(before)
 }
 
@@ -411,6 +490,115 @@ mod tests {
         );
         assert!(matches!(result, Err(InventoryError::Changed)));
         assert!(!fixture.destination.exists());
+    }
+
+    #[test]
+    fn restore_creates_independent_known_files_data_root() {
+        let fixture = Fixture::new();
+        create(&fixture.root, &fixture.destination).unwrap();
+        let restored_root = fixture.parent.join("restored-root");
+        let expected = verify(&fixture.destination).unwrap();
+        assert_eq!(
+            restore_into_new(&fixture.destination, &restored_root).unwrap(),
+            expected
+        );
+        assert_eq!(
+            recovery_inventory::inspect(&restored_root).unwrap(),
+            expected
+        );
+        assert!(!restored_root.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read(restored_root.join("settings.json")).unwrap(),
+            b"{\"secret\":true}"
+        );
+        fs::write(restored_root.join("settings.json"), "{\"secret\":false}").unwrap();
+        assert!(verify(&fixture.destination).is_ok());
+        assert_eq!(
+            fs::read(fixture.root.join("settings.json")).unwrap(),
+            b"{\"secret\":true}"
+        );
+        assert!(restore_into_new(&fixture.destination, &restored_root).is_err());
+    }
+
+    #[test]
+    fn restore_destination_race_keeps_foreign_files_and_cleans_private_stage() {
+        let fixture = Fixture::new();
+        create(&fixture.root, &fixture.destination).unwrap();
+        let restored_root = fixture.parent.join("restored-root");
+        let result = restore_with_hooks(
+            &fixture.destination,
+            &restored_root,
+            || {
+                fs::create_dir(&restored_root)?;
+                fs::write(restored_root.join("foreign"), "another owner")?;
+                Ok(())
+            },
+            sync_directory,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(restored_root.join("foreign")).unwrap(),
+            b"another owner"
+        );
+        assert!(fs::read_dir(&fixture.parent).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".neuromita-recovery-")
+        }));
+        assert!(verify(&fixture.destination).is_ok());
+    }
+
+    #[test]
+    fn restore_refuses_changed_source_after_private_staging() {
+        let fixture = Fixture::new();
+        create(&fixture.root, &fixture.destination).unwrap();
+        let restored_root = fixture.parent.join("restored-root");
+        let result = restore_with_hooks(
+            &fixture.destination,
+            &restored_root,
+            || {
+                fs::write(
+                    fixture.destination.join("settings.json"),
+                    "{\"secret\":false}",
+                )?;
+                Ok(())
+            },
+            sync_directory,
+        );
+        assert!(matches!(result, Err(InventoryError::Changed)));
+        assert!(!restored_root.exists());
+    }
+
+    #[test]
+    fn restore_postpublication_sync_failure_preserves_verified_data() {
+        let fixture = Fixture::new();
+        create(&fixture.root, &fixture.destination).unwrap();
+        let restored_root = fixture.parent.join("restored-root");
+        let result = restore_with_sync(&fixture.destination, &restored_root, |_| {
+            Err(io::Error::other(
+                "injected post-restore publication sync failure",
+            ))
+        });
+        assert!(
+            matches!(result, Err(InventoryError::PublicationUncertain { destination, .. }) if destination == restored_root)
+        );
+        assert_eq!(
+            recovery_inventory::inspect(&restored_root).unwrap(),
+            verify(&fixture.destination).unwrap()
+        );
+        assert!(!restored_root.join(MANIFEST_NAME).exists());
+    }
+
+    #[test]
+    fn restore_rejects_inside_snapshot_before_any_mutation() {
+        let fixture = Fixture::new();
+        create(&fixture.root, &fixture.destination).unwrap();
+        let child = fixture.destination.join("nested-data-root");
+        assert!(restore_into_new(&fixture.destination, &child).is_err());
+        assert!(!child.exists());
+        assert!(verify(&fixture.destination).is_ok());
     }
 
     #[test]

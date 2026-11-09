@@ -4,8 +4,17 @@ use neuromita::recovery_snapshot;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Create { root: PathBuf, destination: PathBuf },
-    Verify { snapshot: PathBuf },
+    Create {
+        root: PathBuf,
+        destination: PathBuf,
+    },
+    Verify {
+        snapshot: PathBuf,
+    },
+    Restore {
+        snapshot: PathBuf,
+        destination: PathBuf,
+    },
     Help,
 }
 
@@ -15,7 +24,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
         Some(v) if v == "--help" => return Ok(Action::Help),
         Some(v) if v == "create" => "create",
         Some(v) if v == "verify" => "verify",
-        _ => return Err("expected 'create', 'verify' or '--help'".into()),
+        Some(v) if v == "restore" => "restore",
+        _ => return Err("expected 'create', 'verify', 'restore' or '--help'".into()),
     };
     let mut root = None;
     let mut output = None;
@@ -28,7 +38,12 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
         match (verb, flag.to_str()) {
             ("create", Some("--root")) if root.is_none() => root = Some(value),
             ("create", Some("--output")) if output.is_none() => output = Some(value),
-            ("verify", Some("--snapshot")) if snapshot.is_none() => snapshot = Some(value),
+            ("verify", Some("--snapshot")) | ("restore", Some("--snapshot"))
+                if snapshot.is_none() =>
+            {
+                snapshot = Some(value)
+            }
+            ("restore", Some("--output")) if output.is_none() => output = Some(value),
             _ => return Err("unknown or duplicate recovery-snapshot option".into()),
         }
     }
@@ -37,9 +52,14 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
             root: root.ok_or("--root is required")?,
             destination: output.ok_or("--output is required")?,
         })
-    } else {
+    } else if verb == "verify" {
         Ok(Action::Verify {
             snapshot: snapshot.ok_or("--snapshot is required")?,
+        })
+    } else {
+        Ok(Action::Restore {
+            snapshot: snapshot.ok_or("--snapshot is required")?,
+            destination: output.ok_or("--output is required")?,
         })
     }
 }
@@ -47,11 +67,23 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
 pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn Error>> {
     match parse(args).map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))? {
         Action::Help => println!(
-            "neuromita recovery-snapshot create --root ABSOLUTE_DATA_DIRECTORY --output NEW_ABSOLUTE_DIRECTORY\nneuromita recovery-snapshot verify --snapshot ABSOLUTE_DIRECTORY\n\nOffline operator only. Stop all writers. Captures a verified SQLite Timeline plus four optional configuration JSONs, preserving their contents. This is an incomplete known-file snapshot: NO SessionArchive, models, external assets, cross-owner lock or live restore. Output cannot overwrite an existing directory."
+            "neuromita recovery-snapshot create --root ABSOLUTE_DATA_DIRECTORY --output NEW_ABSOLUTE_DIRECTORY\nneuromita recovery-snapshot verify --snapshot ABSOLUTE_DIRECTORY\nneuromita recovery-snapshot restore --snapshot VERIFIED_ABSOLUTE_DIRECTORY --output NEW_ABSOLUTE_DATA_DIRECTORY\n\nOffline operator only. Stop all writers. Captures a verified SQLite Timeline plus four optional configuration JSONs, preserving their contents. This is an incomplete known-file snapshot: NO SessionArchive, models, external assets, cross-owner lock or live restore. Output cannot overwrite an existing directory."
         ),
         Action::Create { root, destination } => {
             let manifest = recovery_snapshot::create(&root, &destination)?;
             println!("published known-files snapshot: {}", destination.display());
+            println!("timeline fingerprint: {}", manifest.timeline.fingerprint);
+            println!("complete dataset recovery: false");
+        }
+        Action::Restore {
+            snapshot,
+            destination,
+        } => {
+            let manifest = recovery_snapshot::restore_into_new(&snapshot, &destination)?;
+            println!(
+                "restored known files into new data directory: {}",
+                destination.display()
+            );
             println!("timeline fingerprint: {}", manifest.timeline.fingerprint);
             println!("complete dataset recovery: false");
         }
@@ -81,6 +113,23 @@ mod tests {
             ],
             vec!["verify", "--snapshot", "/tmp", "--root", "/tmp"],
             vec!["verify", "--snapshot", "relative"],
+            vec!["restore", "--snapshot", "/tmp/source"],
+            vec![
+                "restore",
+                "--snapshot",
+                "/tmp/source",
+                "--output",
+                "relative",
+            ],
+            vec![
+                "restore",
+                "--snapshot",
+                "/tmp/source",
+                "--output",
+                "/tmp/out",
+                "--root",
+                "/tmp",
+            ],
         ] {
             assert!(parse(args(&bad)).is_err(), "{bad:?}");
         }
