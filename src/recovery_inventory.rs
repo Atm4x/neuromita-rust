@@ -15,8 +15,8 @@ use crate::timeline::storage::SqliteTimelineRepository;
 
 const FORMAT: &str = "neuromita-recovery-inventory";
 const VERSION: u32 = 1;
-const MAX_JSON_BYTES: u64 = 32 * 1024 * 1024;
-const CONFIG_FILES: [&str; 4] = [
+pub(crate) const MAX_JSON_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const CONFIG_FILES: [&str; 4] = [
     "settings.json",
     "presets.json",
     "preset-credentials.json",
@@ -39,6 +39,13 @@ pub enum InventoryError {
     InvalidJson(String),
     #[error("recovery inventory file exceeds the bounded size limit")]
     TooLarge,
+    #[error(
+        "snapshot directory publication completed, but durability is uncertain at {destination}: {cause}"
+    )]
+    PublicationUncertain {
+        destination: std::path::PathBuf,
+        cause: String,
+    },
     #[error("Timeline inspection failed: {0}")]
     Timeline(String),
     #[error(transparent)]
@@ -83,7 +90,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn ensure_directory(root: &Path) -> Result<(), InventoryError> {
+pub(crate) fn ensure_directory(root: &Path) -> Result<(), InventoryError> {
     if !root.is_absolute() || !root.is_dir() {
         return Err(InventoryError::UnsafePath(root.display().to_string()));
     }
@@ -119,7 +126,7 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     a.len() == b.len() && a.modified().ok() == b.modified().ok()
 }
 
-fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, InventoryError> {
+pub(crate) fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>, InventoryError> {
     let before = ensure_regular_file(path)?;
     if before.len() > limit {
         return Err(InventoryError::TooLarge);

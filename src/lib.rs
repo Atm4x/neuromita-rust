@@ -23,6 +23,8 @@ pub mod migration;
 pub mod presentation;
 #[cfg(feature = "sqlite-system")]
 pub mod recovery_inventory;
+#[cfg(feature = "sqlite-system")]
+pub mod recovery_snapshot;
 pub mod reminders;
 pub mod request;
 mod runtime;

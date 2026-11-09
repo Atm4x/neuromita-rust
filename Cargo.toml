@@ -24,6 +24,7 @@ base64 = "0.23"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "serde"] }
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 iana-time-zone = "0.1.65"
+libc = "0.2"
 rusqlite = { version = "0.41", optional = true, default-features = false, features = ["bundled", "libsqlite3-sys"] }
 ring = "0.17.14"
 regex = "1"
