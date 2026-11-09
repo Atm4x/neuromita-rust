@@ -1,0 +1,12 @@
+name: D49 Windows runner admission
+on:
+  push:
+    branches:
+      - bridge/agent-d49-windows-probe-20261109
+permissions:
+  contents: read
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - run: echo windows-runner-admitted
