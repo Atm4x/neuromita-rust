@@ -1,0 +1,33 @@
+name: Import exact Agent C publisher-authorized native release catalog
+on:
+  push:
+    branches: [bridge/agent-c-native-release-catalog-20261110]
+    paths: [.github/workflows/bridge-agent-c-native-catalog-20261110.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-release-catalog-20261110
+          fetch-depth: 0
+      - name: Verify original bundle and non-force fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-release-catalog.part0{0,1,2,3} | base64 -d >/tmp/agent-c-native-release-catalog.bundle
+          test "$(sha256sum /tmp/agent-c-native-release-catalog.bundle | cut -d' ' -f1)" = "8a7ec3fbb8374b0e9a183b24cd7d812aec43efe002397fb6dcb06ca73c9c20c6"
+          git fetch origin refs/heads/codex/ai-native-hub-download-operation-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe"
+          git fetch origin refs/heads/codex/ai-native-signed-release-catalog-20261110:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe"
+          git bundle verify /tmp/agent-c-native-release-catalog.bundle
+          git fetch /tmp/agent-c-native-release-catalog.bundle refs/heads/codex/ai-native-signed-release-catalog-20261110
+          test "$(git rev-parse FETCH_HEAD)" = "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb"
+          git checkout --detach "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb"
+          test "$(git rev-parse HEAD^{tree})" = "658d1e85072d478039e166035656f5454b2bfc50"
+          test "$(git rev-list --parents -n1 HEAD)" = "fa6b0ba1c72b26ce79e5f39be65936fec6d78bfb e42d4e0d81c33ca3fe1bed71358c837bb6581fbe"
+          git diff --check "e42d4e0d81c33ca3fe1bed71358c837bb6581fbe" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-signed-release-catalog-20261110
