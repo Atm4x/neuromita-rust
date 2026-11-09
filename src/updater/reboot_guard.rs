@@ -245,17 +245,17 @@ mod windows {
         Ok(())
     }
 
-    pub(super) fn arm(helper: &Path) -> io::Result<bool> {
+    pub(crate) fn arm(helper: &Path) -> io::Result<bool> {
         let (name, command) = identity(helper)?;
         register_in_key(RUN_KEY, &name, &command)
     }
 
-    pub(super) fn disarm(helper: &Path) -> io::Result<()> {
+    pub(crate) fn disarm(helper: &Path) -> io::Result<()> {
         let (name, command) = identity(helper)?;
         remove_from_key(RUN_KEY, &name, &command)
     }
 
-    pub(super) fn is_armed(helper: &Path) -> io::Result<bool> {
+    pub(crate) fn is_armed(helper: &Path) -> io::Result<bool> {
         let (name, command) = identity(helper)?;
         is_registered_in_key(RUN_KEY, &name, &command)
     }
