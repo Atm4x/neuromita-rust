@@ -1,0 +1,31 @@
+name: D53 pinned D52 commit bundle
+on:
+  push:
+    branches:
+      - bridge/agent-d53-export-d52-delta-20261109
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d52-windows-installed-recovery-e2e-20261109
+          fetch-depth: 2
+      - name: Export one precise commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 629b8f4a78e8595a71913e8414bbaf1faf017609
+          test "$(git rev-parse HEAD^)" = 36bbabfbafe51a9a8cd39054d2a2174120fb2911
+          git bundle create /tmp/agent-d53-d52-only.bundle HEAD^..HEAD
+          sha256sum /tmp/agent-d53-d52-only.bundle > /tmp/agent-d53-d52-only.sha256
+          cp /tmp/agent-d53-d52-only.* .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d53-d52-only
+          path: |
+            agent-d53-d52-only.bundle
+            agent-d53-d52-only.sha256
+          retention-days: 1
