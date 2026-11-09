@@ -525,6 +525,15 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
             window.set_notice(error.into());
         }
     });
+    let readiness_window = window.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
+        if let Some(window) = readiness_window.upgrade()
+            && window.window().is_visible()
+            && let Err(error) = neuromita::updater::handoff::acknowledge_gui_ready()
+        {
+            window.set_notice(format!("Update startup confirmation failed: {error}").into());
+        }
+    });
     let result = window.run();
     let shutdown = launcher.borrow_mut().shutdown();
     result?;

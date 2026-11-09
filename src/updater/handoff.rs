@@ -8,11 +8,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
-    process::{self, Command, Stdio},
+    process::{self, Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
-
-#[cfg(target_os = "linux")]
-use std::{thread, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -26,6 +25,9 @@ use crate::portable::PortableDataRoot;
 pub const HELPER_COMMAND: &str = "--internal-apply-update";
 const RESULT_NAME: &str = "last-activation.json";
 const HANDOFF_NAME: &str = "handoff.json";
+const READY_NAME: &str = "readiness.json";
+pub const READY_NONCE_ENV: &str = "NEUROMITA_UPDATE_READY_NONCE";
+const READY_WAIT: Duration = Duration::from_secs(30);
 
 #[cfg(windows)]
 const HELPER_NAME: &str = "neuromita-updater.exe";
@@ -44,6 +46,14 @@ pub enum HandoffError {
     NonPortableDataRoot,
     #[error("invalid updater helper process arguments")]
     InvalidInvocation,
+    #[error("native GUI startup readiness was not acknowledged by the expected process")]
+    NotReady,
+    #[error("native GUI startup timed out while awaiting explicit readiness")]
+    ReadinessTimeout,
+    #[error("native GUI update failed and the previous executable could not be restored: {0}")]
+    RollbackFailed(ActivationError),
+    #[error("previous executable was restored but relaunch failed: {0}")]
+    RollbackRestartFailed(io::Error),
     #[error("parent process identity cannot be verified")]
     ParentIdentity,
     #[error("this platform has no supported parent identity waiting mechanism")]
@@ -69,6 +79,13 @@ struct HandoffIntent {
     parent_identity: u64,
     nonce: Uuid,
     target: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReadyReceipt {
+    nonce: Uuid,
+    pid: u32,
+    process_identity: u64,
 }
 
 /// Read-only preflight, invoked before staging and again when scheduling the helper.
@@ -99,6 +116,14 @@ pub fn validate_handoff_environment(activator: &SingleFileActivator) -> Result<(
 /// The transaction must have been prepared by `SingleFileActivator::prepare`.
 pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, HandoffError> {
     validate_handoff_environment(activator)?;
+    let expected = if cfg!(windows) {
+        "neuromita-gui.exe"
+    } else {
+        "neuromita-gui"
+    };
+    if activator.target_path().file_name() != Some(OsStr::new(expected)) {
+        return Err(HandoffError::InvalidInvocation);
+    }
     if activator.recover()? != RecoveryOutcome::Prepared {
         return Err(HandoffError::NotPrepared);
     }
@@ -126,6 +151,10 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
     file.write_all(&serde_json::to_vec(&intent)?)?;
     file.sync_all()?;
     drop(file);
+    if let Err(error) = activator.arm_health_check(intent.nonce) {
+        let _ = fs::remove_file(&intent_path);
+        return Err(error.into());
+    }
     let child = Command::new(&helper)
         .arg(HELPER_COMMAND)
         .arg(process::id().to_string())
@@ -203,22 +232,39 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
     let data_root = PortableDataRoot::from_executable(&executable, Some(&data_directory), None)?;
     let activator = SingleFileActivator::new(install_root, &data_root, &target_name)?;
     let result = (|| -> Result<&'static str, HandoffError> {
+        activator.verify_handoff_nonce(nonce)?;
+        if !target_name.starts_with("neuromita-gui") {
+            return Err(HandoffError::InvalidInvocation);
+        }
         let resolved = activator.apply_or_resume()?;
-        if resolved != RecoveryOutcome::NewVersionVerified {
+        if resolved != RecoveryOutcome::AwaitingHealth {
             return Err(HandoffError::NotPrepared);
         }
-        if target_name.starts_with("neuromita-gui") {
-            Command::new(activator.target_path())
-                .current_dir(install_root)
-                .env_remove("NEUROMITA_DATA_DIR")
-                .spawn()?;
-            Ok("updated-and-restarted")
-        } else {
-            Ok("updated-restart-skipped-cli")
+        match restart_and_verify(install_root, &activator, nonce) {
+            Ok(()) => Ok("updated-and-restarted"),
+            Err(error) => {
+                activator
+                    .rollback_health_check(nonce)
+                    .map_err(HandoffError::RollbackFailed)?;
+                Command::new(activator.target_path())
+                    .current_dir(install_root)
+                    .env_remove(READY_NONCE_ENV)
+                    .env_remove("NEUROMITA_DATA_DIR")
+                    .spawn()
+                    .map_err(HandoffError::RollbackRestartFailed)?;
+                Err(error)
+            }
         }
     })();
     let details = result.as_ref().err().map(ToString::to_string);
-    let outcome = result.as_ref().copied().unwrap_or("failed");
+    let outcome = match &result {
+        Ok(state) => *state,
+        Err(HandoffError::ReadinessTimeout) => "rolled-back-after-readiness-timeout",
+        Err(HandoffError::NotReady) => "rolled-back-after-startup-failure",
+        Err(HandoffError::RollbackFailed(_)) => "rollback-failed",
+        Err(HandoffError::RollbackRestartFailed(_)) => "rollback-restored-relaunch-failed",
+        Err(_) => "failed",
+    };
     write_report(
         &data_root,
         &target_name,
@@ -226,6 +272,157 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         details.as_deref().unwrap_or(""),
     )?;
     result.map(|_| ())
+}
+
+/// Called only after Slint has entered its event loop and the window is visible.
+/// The nonce comes from the private helper-started child environment and the
+/// durable journal is checked before any receipt is written.
+pub fn acknowledge_gui_ready() -> Result<bool, HandoffError> {
+    let Some(raw) = std::env::var_os(READY_NONCE_ENV) else {
+        return Ok(false);
+    };
+    let nonce = raw
+        .to_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(HandoffError::InvalidInvocation)?;
+    let executable = fs::canonicalize(std::env::current_exe()?)?;
+    let expected = if cfg!(windows) {
+        "neuromita-gui.exe"
+    } else {
+        "neuromita-gui"
+    };
+    if executable.file_name() != Some(OsStr::new(expected)) {
+        return Err(HandoffError::WrongCaller);
+    }
+    let install_root = executable.parent().ok_or(HandoffError::WrongCaller)?;
+    let data_path = install_root.join("UserData");
+    let meta = fs::symlink_metadata(&data_path)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(HandoffError::NonPortableDataRoot);
+    }
+    let data_root = PortableDataRoot::from_executable(&executable, Some(&data_path), None)?;
+    let activator = SingleFileActivator::new(install_root, &data_root, expected)?;
+    activator.verify_health_nonce(nonce)?;
+    let receipt = ReadyReceipt {
+        nonce,
+        pid: process::id(),
+        process_identity: current_process_identity()?,
+    };
+    let path = install_root.join(".neuromita-update").join(READY_NAME);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)?;
+    file.write_all(&serde_json::to_vec(&receipt)?)?;
+    file.sync_all()?;
+    Ok(true)
+}
+
+/// A receipt is accepted only from the exact new child instance and matching
+/// transaction nonce. A process merely existing is not a success signal.
+fn wait_for_readiness(
+    child: &mut Child,
+    identity: u64,
+    path: &Path,
+    nonce: Uuid,
+    timeout: Duration,
+) -> Result<(), HandoffError> {
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return Err(HandoffError::NotReady);
+        }
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > 1024 {
+                    return Err(HandoffError::NotReady);
+                }
+                let receipt: ReadyReceipt = serde_json::from_slice(&fs::read(path)?)?;
+                if receipt.nonce != nonce
+                    || receipt.pid != child.id()
+                    || receipt.process_identity != identity
+                {
+                    return Err(HandoffError::NotReady);
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if started.elapsed() >= timeout {
+            return Err(HandoffError::ReadinessTimeout);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn restart_and_verify(
+    install_root: &Path,
+    activator: &SingleFileActivator,
+    nonce: Uuid,
+) -> Result<(), HandoffError> {
+    let mut child = Command::new(activator.target_path())
+        .current_dir(install_root)
+        .env_remove("NEUROMITA_DATA_DIR")
+        .env(READY_NONCE_ENV, nonce.to_string())
+        .spawn()?;
+    let child_identity = match child_process_identity(child.id()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let result = wait_for_readiness(
+        &mut child,
+        child_identity,
+        &install_root.join(".neuromita-update").join(READY_NAME),
+        nonce,
+        READY_WAIT,
+    );
+    if result.is_err() {
+        if child.try_wait()?.is_none() {
+            if let Err(error) = child.kill()
+                && child.try_wait()?.is_none()
+            {
+                return Err(error.into());
+            }
+        }
+        child.wait()?;
+    } else if child.try_wait()?.is_some() {
+        return Err(HandoffError::NotReady);
+    } else {
+        activator.complete_health_check(nonce)?;
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn child_process_identity(pid: u32) -> Result<u64, HandoffError> {
+    process_identity(pid)?
+        .map(|(stamp, _)| stamp)
+        .ok_or(HandoffError::ParentIdentity)
+}
+
+#[cfg(windows)]
+fn child_process_identity(pid: u32) -> Result<u64, HandoffError> {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error().into());
+    }
+    let result = process_creation_time(handle, GetProcessTimes);
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn child_process_identity(_pid: u32) -> Result<u64, HandoffError> {
+    Err(HandoffError::UnsupportedPlatform)
 }
 
 fn require_regular_file(path: &Path) -> Result<(), HandoffError> {
@@ -440,5 +637,79 @@ mod tests {
         assert!(contents.contains("updated-and-restarted"));
         assert!(!contents.contains("simulated"));
         fs::remove_dir_all(base).unwrap();
+    }
+    #[test]
+    #[ignore]
+    fn readiness_probe() {
+        let Ok(file) = std::env::var("NEUROMITA_TEST_READY_FILE") else {
+            return;
+        };
+        let mode = std::env::var("NEUROMITA_TEST_READY_MODE").unwrap();
+        let nonce = Uuid::parse_str(&std::env::var("NEUROMITA_TEST_READY_NONCE").unwrap()).unwrap();
+        thread::sleep(Duration::from_millis(120));
+        if mode == "valid" || mode == "mismatch" {
+            let receipt = ReadyReceipt {
+                nonce: if mode == "valid" {
+                    nonce
+                } else {
+                    Uuid::new_v4()
+                },
+                pid: process::id(),
+                process_identity: current_process_identity().unwrap(),
+            };
+            let mut output = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(file)
+                .unwrap();
+            output
+                .write_all(&serde_json::to_vec(&receipt).unwrap())
+                .unwrap();
+            output.sync_all().unwrap();
+        }
+        if mode != "exit" {
+            thread::sleep(Duration::from_millis(850));
+        }
+    }
+
+    #[test]
+    fn real_child_readiness_requires_exact_pid_creation_and_nonce() {
+        for (mode, timeout, expected) in [
+            ("valid", Duration::from_millis(700), "success"),
+            ("mismatch", Duration::from_millis(700), "not-ready"),
+            ("none", Duration::from_millis(250), "timeout"),
+            ("exit", Duration::from_millis(700), "not-ready"),
+        ] {
+            let base = std::env::temp_dir().join(format!("neuromita-health-{}", Uuid::new_v4()));
+            fs::create_dir_all(&base).unwrap();
+            let path = base.join("receipt.json");
+            let nonce = Uuid::new_v4();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "updater::handoff::tests::readiness_probe",
+                    "--ignored",
+                ])
+                .env("NEUROMITA_TEST_READY_FILE", &path)
+                .env("NEUROMITA_TEST_READY_MODE", mode)
+                .env("NEUROMITA_TEST_READY_NONCE", nonce.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let identity = child_process_identity(child.id()).unwrap();
+            let result = wait_for_readiness(&mut child, identity, &path, nonce, timeout);
+            match expected {
+                "success" => assert!(result.is_ok(), "{result:?}"),
+                "not-ready" => assert!(matches!(result, Err(HandoffError::NotReady))),
+                "timeout" => assert!(matches!(result, Err(HandoffError::ReadinessTimeout))),
+                _ => unreachable!(),
+            }
+            if child.try_wait().unwrap().is_none() {
+                child.kill().unwrap();
+            }
+            child.wait().unwrap();
+            fs::remove_dir_all(base).unwrap();
+        }
     }
 }

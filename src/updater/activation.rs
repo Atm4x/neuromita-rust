@@ -7,11 +7,14 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Component, Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::{StagedArtifact, UpdateAsset};
 use crate::portable::PortableDataRoot;
@@ -21,6 +24,9 @@ const CANDIDATE: &str = "candidate";
 const BACKUP: &str = "backup";
 const JOURNAL: &str = "activation.json";
 const LOCK: &str = ".neuromita-update.lock";
+const READY: &str = "readiness.json";
+const JOURNAL_PENDING: &str = ".activation-journal.pending";
+const ROLLBACK_MARKER: &str = "rollback.intent";
 
 #[derive(Debug, Error)]
 pub enum ActivationError {
@@ -46,6 +52,7 @@ pub enum RecoveryOutcome {
     Prepared,
     PreviousRestored,
     NewVersionVerified,
+    AwaitingHealth,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +62,8 @@ struct ActivationJournal {
     previous_sha256: String,
     next_size: u64,
     next_sha256: String,
+    #[serde(default)]
+    health_nonce: Option<Uuid>,
 }
 
 pub struct SingleFileActivator {
@@ -223,6 +232,7 @@ impl SingleFileActivator {
                 previous_sha256: old_digest,
                 next_size: artifact.size(),
                 next_sha256: artifact.sha256().to_owned(),
+                health_nonce: None,
             };
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -251,6 +261,124 @@ impl SingleFileActivator {
             ));
         }
         self.cleanup()
+    }
+
+    /// Bind an unapplied update to exactly one helper restart attempt.
+    /// A recoverable backup then remains on disk until an explicit readiness receipt.
+    pub fn arm_health_check(&self, nonce: Uuid) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if self.recover_unlocked()? != RecoveryOutcome::Prepared {
+            return Err(ActivationError::NotPrepared);
+        }
+        let mut journal = self.load_journal()?;
+        if journal.health_nonce.is_some() {
+            return Err(ActivationError::ExistingTransaction);
+        }
+        journal.health_nonce = Some(nonce);
+        let pending = self.workspace().join(JOURNAL_PENDING);
+        let write = (|| -> Result<(), ActivationError> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&pending)?;
+            file.write_all(&serde_json::to_vec(&journal)?)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&pending, self.workspace().join(JOURNAL))?;
+            sync_directory(&self.workspace())?;
+            Ok(())
+        })();
+        if write.is_err() {
+            let _ = fs::remove_file(pending);
+        }
+        write
+    }
+
+    pub fn verify_handoff_nonce(&self, nonce: Uuid) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if self.load_journal()?.health_nonce != Some(nonce) {
+            return Err(ActivationError::Conflict("helper nonce mismatch"));
+        }
+        Ok(())
+    }
+
+    pub fn verify_health_nonce(&self, nonce: Uuid) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        let journal = self.load_journal()?;
+        if journal.health_nonce != Some(nonce) {
+            return Err(ActivationError::Conflict("health check nonce mismatch"));
+        }
+        if self.recover_unlocked()? != RecoveryOutcome::AwaitingHealth {
+            return Err(ActivationError::Conflict(
+                "new executable is not awaiting health",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only the helper holding the verified readiness receipt may finalize the update.
+    pub fn complete_health_check(&self, nonce: Uuid) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if self.load_journal()?.health_nonce != Some(nonce)
+            || self.recover_unlocked()? != RecoveryOutcome::AwaitingHealth
+        {
+            return Err(ActivationError::Conflict(
+                "missing verified health transaction",
+            ));
+        }
+        self.cleanup()
+    }
+
+    /// Restores the exact previous executable; refuses to overwrite third-party bytes.
+    /// The new child must already have exited, especially on Windows file locks.
+    pub fn rollback_health_check(&self, nonce: Uuid) -> Result<(), ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if self.load_journal()?.health_nonce != Some(nonce)
+            || self.recover_unlocked()? != RecoveryOutcome::AwaitingHealth
+        {
+            return Err(ActivationError::Conflict(
+                "missing verified rollback transaction",
+            ));
+        }
+        let candidate = self.workspace().join(CANDIDATE);
+        if candidate.exists() {
+            return Err(ActivationError::Conflict(
+                "candidate occupied during rollback",
+            ));
+        }
+        let marker_path = self.workspace().join(ROLLBACK_MARKER);
+        match fs::symlink_metadata(&marker_path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let mut marker = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker_path)?;
+                marker.write_all(b"rollback")?;
+                marker.sync_all()?;
+                sync_directory(&self.workspace())?;
+            }
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                if fs::read(&marker_path)? != b"rollback" {
+                    return Err(ActivationError::Conflict("invalid rollback marker"));
+                }
+            }
+            Ok(_) => return Err(ActivationError::UnsafeTarget),
+            Err(error) => return Err(error.into()),
+        }
+        rename_after_file_unlock(&self.target(), &candidate)?;
+        sync_directory(&self.install_root)?;
+        if let Err(error) = rename_after_file_unlock(&self.workspace().join(BACKUP), &self.target())
+        {
+            let _ = self.recover_unlocked();
+            return Err(error.into());
+        }
+        sync_directory(&self.install_root)?;
+        if self.recover_unlocked()? != RecoveryOutcome::PreviousRestored {
+            return Err(ActivationError::Conflict(
+                "previous executable was not restored",
+            ));
+        }
+        Ok(())
     }
 
     pub fn apply(&self) -> Result<RecoveryOutcome, ActivationError> {
@@ -296,6 +424,7 @@ impl SingleFileActivator {
         sync_directory(&self.install_root)?;
         match self.recover_unlocked()? {
             RecoveryOutcome::NewVersionVerified => Ok(RecoveryOutcome::NewVersionVerified),
+            RecoveryOutcome::AwaitingHealth => Ok(RecoveryOutcome::AwaitingHealth),
             _ => Err(ActivationError::Conflict("activation not confirmed")),
         }
     }
@@ -339,6 +468,13 @@ impl SingleFileActivator {
                     &journal.previous_sha256,
                     "backup",
                 )?;
+            } else if journal.health_nonce.is_some() {
+                return Err(ActivationError::Conflict(
+                    "health transaction has no backup",
+                ));
+            }
+            if journal.health_nonce.is_some() {
+                return Ok(RecoveryOutcome::AwaitingHealth);
             }
             self.cleanup()?;
             return Ok(RecoveryOutcome::NewVersionVerified);
@@ -351,7 +487,9 @@ impl SingleFileActivator {
                     &journal.next_sha256,
                     "candidate",
                 )?;
-                return Ok(RecoveryOutcome::Prepared);
+                if !self.workspace().join(ROLLBACK_MARKER).exists() {
+                    return Ok(RecoveryOutcome::Prepared);
+                }
             }
             self.cleanup()?;
             return Ok(RecoveryOutcome::PreviousRestored);
@@ -412,7 +550,7 @@ impl SingleFileActivator {
 
     fn cleanup(&self) -> Result<(), ActivationError> {
         let workspace = self.workspace();
-        for name in [BACKUP, CANDIDATE] {
+        for name in [BACKUP, CANDIDATE, READY, JOURNAL_PENDING, ROLLBACK_MARKER] {
             let path = workspace.join(name);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
@@ -435,6 +573,24 @@ impl SingleFileActivator {
 
     fn workspace(&self) -> PathBuf {
         self.install_root.join(WORKSPACE)
+    }
+}
+
+fn rename_after_file_unlock(source: &Path, target: &Path) -> io::Result<()> {
+    let start = Instant::now();
+    loop {
+        match fs::rename(source, target) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::WouldBlock
+                ) && start.elapsed() < Duration::from_secs(4) =>
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -1005,5 +1161,136 @@ mod tests {
         ] {
             assert!(SingleFileActivator::new(&f.install, &f.data, name).is_err());
         }
+    }
+    #[test]
+    fn health_armed_update_retains_verified_backup_until_explicit_ready() {
+        let f = Fixture::new();
+        let nonce = Uuid::new_v4();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(nonce).unwrap();
+        assert_eq!(
+            f.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        assert_eq!(
+            f.activation.recover().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        assert_eq!(
+            fs::read(f.workspace().join(BACKUP)).unwrap(),
+            b"old version"
+        );
+        assert!(matches!(
+            f.activation.complete_health_check(Uuid::new_v4()),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert!(f.workspace().join(BACKUP).is_file());
+        f.activation.complete_health_check(nonce).unwrap();
+        assert_eq!(
+            f.activation.recover().unwrap(),
+            RecoveryOutcome::NoTransaction
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"new version");
+        assert_eq!(
+            fs::read(f.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+    }
+
+    #[test]
+    fn failed_startup_rolls_back_only_exact_journal_bytes() {
+        let f = Fixture::new();
+        let nonce = Uuid::new_v4();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(nonce).unwrap();
+        assert_eq!(
+            f.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        assert!(matches!(
+            f.activation.rollback_health_check(Uuid::new_v4()),
+            Err(ActivationError::Conflict(_))
+        ));
+        f.activation.rollback_health_check(nonce).unwrap();
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+        assert!(!f.workspace().exists());
+        assert_eq!(
+            fs::read(f.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+    }
+
+    #[test]
+    fn damaged_new_executable_refuses_rollback_and_keeps_backup_evidence() {
+        let f = Fixture::new();
+        let nonce = Uuid::new_v4();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(nonce).unwrap();
+        f.activation.apply_or_resume().unwrap();
+        fs::write(f.target(), b"third-party unknown bytes").unwrap();
+        assert!(matches!(
+            f.activation.rollback_health_check(nonce),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(
+            fs::read(f.workspace().join(BACKUP)).unwrap(),
+            b"old version"
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"third-party unknown bytes");
+    }
+
+    #[test]
+    fn interrupted_health_activation_restores_previous_executable() {
+        let f = Fixture::new();
+        let nonce = Uuid::new_v4();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(nonce).unwrap();
+        fs::rename(f.target(), f.workspace().join(BACKUP)).unwrap();
+        let recovered = SingleFileActivator::new(&f.install, &f.data, "neuromita.exe").unwrap();
+        assert_eq!(
+            recovered.recover().unwrap(),
+            RecoveryOutcome::PreviousRestored
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+        assert!(!f.workspace().exists());
+    }
+
+    #[test]
+    fn journal_health_nonce_is_one_shot_and_prepared_abort_remains_safe() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        let nonce = Uuid::new_v4();
+        f.activation.arm_health_check(nonce).unwrap();
+        assert!(matches!(
+            f.activation.arm_health_check(Uuid::new_v4()),
+            Err(ActivationError::ExistingTransaction)
+        ));
+        f.activation.discard_prepared().unwrap();
+        assert_eq!(
+            f.activation.recover().unwrap(),
+            RecoveryOutcome::NoTransaction
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+    }
+    #[test]
+    fn rollback_resumes_after_interruption_between_two_file_moves() {
+        let f = Fixture::new();
+        let nonce = Uuid::new_v4();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(nonce).unwrap();
+        assert_eq!(
+            f.activation.apply_or_resume().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        fs::write(f.workspace().join(ROLLBACK_MARKER), b"rollback").unwrap();
+        fs::rename(f.target(), f.workspace().join(CANDIDATE)).unwrap();
+        let fresh = SingleFileActivator::new(&f.install, &f.data, "neuromita.exe").unwrap();
+        assert_eq!(fresh.recover().unwrap(), RecoveryOutcome::PreviousRestored);
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+        assert!(!f.workspace().exists());
+        assert_eq!(
+            fs::read(f.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
     }
 }

@@ -78,11 +78,31 @@ prepared/unapplied candidate is discarded under the installation lock, leaving
 both the old executable and user data unchanged. If the transaction has been
 partially applied, cleanup refuses to discard unknown installation state.
 
-**Current recovery limits:** The activator protects and verifies the old and new
-executable bytes around an interrupted rename. It currently cleans the backup
-after the new executable's *digest* is verified, **not** after a ready/healthy
-signal from the restarted GUI. A new binary that starts and immediately fails
-is therefore **not automatically rolled back**. This action must not be called
-full runtime-health or installer-archive rollback. Production publication of a
-compatible helper and a real native release, live Windows GUI acceptance and
-post-restart health acknowledgement remain separate #44 criteria.
+## Post-restart readiness and rollback (D48)
+
+The GUI update helper now retains its verified old executable backup after the
+new executable's SHA-256 matches. The journal records a one-time UUID nonce,
+which the helper passes only to the exact new GUI child. At least 800 ms after
+the Slint event loop starts, the displayed window publishes a durable readiness
+receipt containing the nonce, its PID, and OS process-creation identity. The
+helper checks the exact child's live identity and journal state before deleting
+the old backup. Merely spawning a process or verifying the EXE hash is **not**
+a successful update. This signal confirms initialized, visible GUI event-loop
+progress, **not** readiness of every AI engine or attached Unity game.
+
+The helper waits up to 30 seconds for this explicit receipt. On early exit,
+invalid receipt or timeout it terminates/reaps only its own new child, then
+restores the prior EXE from the hashed backup under the installation lock. The
+rollback-intent marker makes interruption between its rename operations
+recoverable. It retries Windows sharing-violation / permission-denied renames
+for up to four seconds, preserving the journal and backup if the old state
+cannot be safely restored; an unrecognized replacement is never overwritten.
+UserData is not moved or erased. The helper reports success only after readiness,
+and records failure/rollback status in `UserData/updates/last-activation.json`.
+
+**Outstanding acceptance:** No actual published Rust native release or installed
+Windows GUI click-through has been exercised yet. Abrupt termination of the
+helper itself after replacing the EXE leaves a durable pending transaction, but
+an automatic watchdog relaunch across power loss has not been integrated.
+Multi-file/archive activation and deeper Core/AI startup acknowledgement remain
+separate work; this is a verified *single raw EXE* rollback boundary.
