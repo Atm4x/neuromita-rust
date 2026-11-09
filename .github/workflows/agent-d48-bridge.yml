@@ -1,32 +1,31 @@
-name: Agent D48 original verified readiness rollback import
+name: Agent D48 exact health rollback import and Windows
 on:
   push:
-    branches:
-      - bridge/agent-d48-ready-rollback-20261109
+    branches: [bridge/agent-d48-ready-rollback-20261109]
 permissions:
   contents: write
 jobs:
   import:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify exact D48 source patch and publish original commit
+      - name: Validate exact original patch, commit identity and publish candidate
         shell: bash
         run: |
           set -euo pipefail
           BASE=5c99d8201519e3762622e7173bead1b94978d7d7
           EXPECTED=89607b00cb576ad97ce953d18d2f750337cbbf0b
           TREE=9da632b7d4f5c14bd53989ef823a333073e48998
-          cat .agent-bridge/d48-part-0{1,2,3,4,5,6}.b64 | tr -d '\n' | base64 -d > /tmp/d48.patch.br
-          echo 'f525aac83dd5e2b9dfc0123747ee29a6f892b9cdb81e45516822c0fa1298314b  /tmp/d48.patch.br' | sha256sum -c
-          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d48.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d48.patch.br')))"
-          echo 'a0a62206ddb1b941ef55a010f100762ea30dfeee079a510fc99f0c063d74082e  /tmp/d48.patch' | sha256sum -c
+          cat .agent-bridge/d48-part-0{1,2,3,4,5,6}.b64 | tr -d '\n' | base64 -d >/tmp/d46.patch.br
+          echo 'f525aac83dd5e2b9dfc0123747ee29a6f892b9cdb81e45516822c0fa1298314b  /tmp/d46.patch.br' | sha256sum --check
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d46.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d46.patch.br')))"
+          echo 'a0a62206ddb1b941ef55a010f100762ea30dfeee079a510fc99f0c063d74082e  /tmp/d46.patch' | sha256sum --check
           git fetch origin "$BASE"
           git checkout --detach "$BASE"
-          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d48.patch
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d46.patch
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$(git rev-parse HEAD^{tree})" = "$TREE"
           test "$(git rev-parse HEAD^)" = "$BASE"
@@ -37,12 +36,12 @@ jobs:
   windows-native:
     needs: import
     runs-on: windows-latest
-    timeout-minutes: 55
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           ref: codex/agent-d48-health-ack-rollback-20261109
-      - name: Verify exact published product commit
+      - name: Verify original D48 SHA and tree
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "89607b00cb576ad97ce953d18d2f750337cbbf0b"
@@ -51,11 +50,11 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Run Windows updater rollback tests
+      - name: Native download contracts and complete lifecycle tests
         run: cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: Compile native GUI on Windows
+      - name: Native Windows GUI compile
         run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: Verify all target builds
+      - name: Native all-targets compile
         run: cargo check --locked --offline --all-targets
       - name: Rustfmt
         run: cargo fmt --all -- --check
