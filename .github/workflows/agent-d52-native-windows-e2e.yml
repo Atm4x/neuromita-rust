@@ -1,0 +1,36 @@
+name: Agent D52 real installed Windows GUI lock and helper recovery
+on:
+  push:
+    branches:
+      - bridge/agent-d52-windows-native-acceptance-20261109
+permissions:
+  contents: read
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d52-windows-installed-recovery-e2e-20261109
+      - name: Verify exact original D52 SHA and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "629b8f4a78e8595a71913e8414bbaf1faf017609"
+          test "$(git rev-parse HEAD^{tree})" = "9ead3792d01e775bb89b0ea32f3dda42158abffc"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Actual installed Windows PE GUI and updater recovery E2E
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery -- --test-threads=1
+      - name: Native updater unit regressions
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Rust all-targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rust formatting
+        run: |
+          cargo fmt --all -- --check
