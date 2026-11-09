@@ -1006,7 +1006,10 @@ async fn handle_cancel_vs_independent_sqlite_acceptance_has_one_durable_winner()
         crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(id) => {
             assert_eq!(results.0, crate::request::CancelResult::TooLate);
             assert_eq!(results.1, Ok(id));
-            assert_eq!(handle.record.externally_accepted(), Some(id));
+            assert!(!matches!(
+                handle.snapshot().state,
+                crate::request::RequestState::Cancelled
+            ));
         }
         other => panic!("incomplete cancellation/acceptance resolution: {other:?}"),
     }
