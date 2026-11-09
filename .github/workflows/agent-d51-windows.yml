@@ -1,0 +1,30 @@
+name: Agent D51 native Windows update activation
+on:
+  push:
+    branches:
+      - bridge/agent-d51-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d51-windows-sync-permission-20261109
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Test Windows updater activation and readonly target
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Test native Windows interrupted update recovery
+        run: cargo test --locked --offline --test updater_offline_recovery
+      - name: Check Windows GUI
+        run: cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Check all targets
+        run: cargo check --locked --offline --all-targets
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
