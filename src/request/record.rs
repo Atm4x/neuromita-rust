@@ -346,9 +346,7 @@ impl RequestRecord {
                         inner.pending_terminal = Some(PendingTerminal::Cancelled);
                     }
                 }
-                if matches!(error, crate::timeline::domain::TimelineError::Conflict) {
-                    self.observe_external_acceptance(ingress.as_ref(), request);
-                }
+                self.observe_external_acceptance(ingress.as_ref(), request);
                 tracing::warn!(%request, %error, "durable regenerate abandonment refused");
                 return CancelResult::TooLate;
             }

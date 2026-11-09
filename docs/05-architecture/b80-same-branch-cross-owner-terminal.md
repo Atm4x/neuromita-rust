@@ -1,0 +1,9 @@
+# B80 — Same-branch Regenerate: cross-owner terminal consistency
+
+`RequestHandle.cancel()` is a volatile request operation guarded by a durable Timeline terminal. An independent SQLite owner may commit an accepted reply and its state effects while this handle attempts `RegenerateAbandoned`.
+
+The SQLite append may reject that cancellation with either a domain `Conflict` **or** an optimistic `ConcurrentWrite` (depending on the competing transaction and snapshot). Neither error is evidence that the remote acceptance did not occur. On any failed durable abandonment, the request record performs a read-only reconciliation against the original typed `RegenerateProtocol`. If a canonical `AcceptedReply` is observed, it retires the volatile record with `DurablyAcceptedElsewhere(EventId)`. No synthetic `AcceptedResponse` is fabricated, and the provider is not replayed.
+
+If no accepted fact is confirmed, the failed cancellation remains conservatively unresolved. Storage and concurrency failures retain the existing `PendingTerminal` retry path. A non-error durable abandonment still atomically prevents any later reply or state effects. The same rules apply to the legacy fork protocol, with no cross-protocol fallback.
+
+Two integration tests exercise a same-branch admission through the real `ChatApiState` / `RequestRegistry`: (1) an independent SQLite owner accepts a response with `CharacterStateChanged` before the queued request starts, and (2) two owners race durable acceptance and `RequestHandle.cancel()`. They verify canonical terminal agreement, truthful observer resolution, and absence of partial state effects. These do not prove remote provider exactly-once delivery, character runtime acceptance under every scheduling interleaving, or reconciliation of physical Unity effects. Public Regenerate remains disabled.
