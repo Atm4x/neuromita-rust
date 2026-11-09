@@ -1,4 +1,4 @@
-name: Agent D56 native Windows installed helper and isolated lease E2E
+name: Agent D56 Windows helper isolated lease acceptance
 on:
   push:
     branches:
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: codex/agent-d56-isolated-windows-handoff-20261109
-      - name: Verify exact D56 commit identity
+      - name: Verify exact D55 HEAD and tree
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "6b22584ff5162331e1b5ab837feae2be31a284ea"
@@ -22,16 +22,16 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: True Windows installed GUI helper isolated HKCU handoff E2E
+      - name: Windows installed helper and isolated registry real handoff test
         run: |
           cargo test --locked --offline --lib updater::handoff::windows_acceptance::installed_windows_helper_handoff_with_isolated_guard -- --test-threads=1 --nocapture
-      - name: Windows updater library and guard regressions
+      - name: Native Windows updater and isolated HKCU lease unit tests
         run: |
           cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: Windows real helper offline recovery E2E
+      - name: Windows installed-helper orphan handoff and file-lock E2E
         run: |
-          cargo test --locked --offline --test updater_offline_recovery
-      - name: Windows raw PE apply readiness E2E
+          cargo test --locked --offline --test updater_offline_recovery -- --test-threads=1
+      - name: Windows raw PE stage apply readiness rollback
         run: |
           cargo test --locked --offline --test updater_native_apply_e2e
       - name: All Windows Rust targets
