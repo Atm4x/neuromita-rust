@@ -1,0 +1,39 @@
+name: Agent D54 native Windows guarded handoff acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d54-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d54-failclosed-handoff-20261109
+      - name: Verify exact D54 commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "8b91fb8b36c7755714cc0aa6975e09e2fa5f8850"
+          test "$(git rev-parse HEAD^{tree})" = "9f00ecb26850497c247929b9383d462076ccd04d"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Windows updater library regression and registry lease
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Windows PE activation and rollback E2E
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e
+      - name: Windows installed updater offline recovery E2E
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery
+      - name: All Rust targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
