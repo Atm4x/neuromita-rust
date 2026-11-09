@@ -246,7 +246,7 @@ fn valid_version(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
 }
 
-fn validate_manifest(manifest: &NativeModelManifest) -> Result<(), NativeRegistryError> {
+pub(super) fn validate_manifest(manifest: &NativeModelManifest) -> Result<(), NativeRegistryError> {
     if manifest.schema_version != 1 || manifest.protocol_version != 1 {
         return Err(NativeRegistryError::Invalid(
             "unsupported manifest/protocol version",

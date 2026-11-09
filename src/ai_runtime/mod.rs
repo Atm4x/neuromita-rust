@@ -25,6 +25,7 @@ pub mod live_speech;
 pub mod managed;
 pub mod native_approval;
 pub mod native_controller;
+pub mod native_https;
 pub mod native_model;
 pub mod native_package_install;
 pub mod native_registry;

@@ -447,6 +447,26 @@ impl NativeRevisionStore {
         self.root.join(OBJECTS_DIR).join(digest_hex(digest))
     }
 
+    /// Transfer staging must be separate from both published model revisions and
+    /// the shared runtime. Fail before making a network request or creating a stage.
+    pub(super) fn verify_download_staging_root(
+        &self,
+        staging_root: &Path,
+    ) -> Result<(), NativeRevisionError> {
+        self.verify_roots()?;
+        check_path(staging_root, true)?;
+        let staging = staging_root.canonicalize()?;
+        for managed in [&self.root, &self.runtime_root] {
+            let managed = managed.canonicalize()?;
+            if staging.starts_with(&managed) || managed.starts_with(&staging) {
+                return Err(NativeRevisionError::Invalid(
+                    "native download staging overlaps managed storage",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn verify_roots(&self) -> Result<(), NativeRevisionError> {
         check_path(&self.root, true)?;
         check_path(&self.runtime_root, true)?;
