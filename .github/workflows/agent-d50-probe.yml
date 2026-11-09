@@ -1,0 +1,12 @@
+name: Agent D50 Windows admission probe
+on:
+  push:
+    branches:
+      - bridge/agent-d50-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - run: echo windows-d50-admitted
