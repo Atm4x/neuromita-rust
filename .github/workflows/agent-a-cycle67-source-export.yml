@@ -1,0 +1,35 @@
+name: Agent A Cycle67 incremental source export
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle67-source-export-20261109
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 6fb888fd2dd2224872bb8675d94ae3b67aed53f3
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact incremental Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 6fb888fd2dd2224872bb8675d94ae3b67aed53f3
+          git cat-file -e "7972ac3d72dc10eb71c940c4d857c04291c16f6f^{commit}"
+          git merge-base --is-ancestor 7972ac3d72dc10eb71c940c4d857c04291c16f6f HEAD
+          git update-ref refs/heads/agent-a-cycle67-source HEAD
+          git bundle create cycle67-source.bundle refs/heads/agent-a-cycle67-source ^7972ac3d72dc10eb71c940c4d857c04291c16f6f
+          git bundle verify cycle67-source.bundle
+          sha256sum cycle67-source.bundle > cycle67-source.bundle.sha256
+          git bundle list-heads cycle67-source.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle67-source-increment
+          path: |
+            cycle67-source.bundle
+            cycle67-source.bundle.sha256
+          retention-days: 1
