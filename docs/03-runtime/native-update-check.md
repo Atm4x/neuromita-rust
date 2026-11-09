@@ -308,3 +308,24 @@ a real downloaded publisher asset or Windows sign-in startup ordering is healthy
 Windows CI is the source of truth for this test; Linux's no-op recovery guard
 cannot prove Windows registry semantics. Production release acceptance and
 actual interactive reboot remain separate requirements under #44.
+
+## Bounded original-GUI shutdown (D57)
+
+A scheduled helper never replaces the application while its exact original
+PID **and process-creation identity** are running. The wait is bounded to
+120 seconds on Linux and Windows rather than allowing a hung GUI to keep an
+updater-helper process waiting indefinitely. An unrelated process that reuses
+the PID does not delay the update. If the same GUI remains alive at the
+deadline, the helper returns a distinct `ParentExitTimeout` error **before**
+removing `handoff.json` or attempting activation; the original EXE and
+UserData remain intact, and the health-armed journal and Windows sign-in
+recovery lease stay available for subsequent fail-closed recovery. The
+helper does not force-kill the running GUI or silently install a release
+later. After a deadline failure, the user must close the GUI and complete
+explicit offline recovery (or use the previously armed Windows sign-in guard)
+before requesting another update.
+
+A small platform-specific unit test uses a live process with an abbreviated
+wait deadline, plus a process-identity-mismatch case, without making the
+whole test suite wait two minutes. This does not constitute a released-GUI
+click-through test or a real Windows native acceptance run.

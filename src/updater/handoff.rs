@@ -31,6 +31,7 @@ const HANDOFF_NAME: &str = "handoff.json";
 const READY_NAME: &str = "readiness.json";
 pub const READY_NONCE_ENV: &str = "NEUROMITA_UPDATE_READY_NONCE";
 const READY_WAIT: Duration = Duration::from_secs(30);
+const PARENT_EXIT_WAIT: Duration = Duration::from_secs(120);
 
 #[cfg(windows)]
 const HELPER_NAME: &str = "neuromita-updater.exe";
@@ -109,6 +110,8 @@ pub enum HandoffError {
     RollbackRestartFailed(io::Error),
     #[error("parent process identity cannot be verified")]
     ParentIdentity,
+    #[error("the original GUI did not exit before the updater handoff deadline")]
+    ParentExitTimeout,
     #[error("this platform has no supported parent identity waiting mechanism")]
     UnsupportedPlatform,
     #[error("recovery refused because an installed GUI or another updater helper is still running")]
@@ -869,12 +872,26 @@ fn original_parent_still_alive(_pid: u32, _expected: u64) -> Result<bool, Handof
 
 #[cfg(target_os = "linux")]
 fn wait_until_parent_exits(pid: u32, expected: u64) -> Result<(), HandoffError> {
+    wait_until_parent_exits_bounded(pid, expected, PARENT_EXIT_WAIT)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_until_parent_exits_bounded(
+    pid: u32,
+    expected: u64,
+    timeout: Duration,
+) -> Result<(), HandoffError> {
+    let started = Instant::now();
     loop {
         match process_identity(pid)? {
             None | Some((_, 'Z' | 'X')) => return Ok(()),
             Some((observed, _)) if observed != expected => return Ok(()),
-            Some(_) => thread::sleep(Duration::from_millis(100)),
+            Some(_) => {}
         }
+        if started.elapsed() >= timeout {
+            return Err(HandoffError::ParentExitTimeout);
+        }
+        thread::sleep(Duration::from_millis(100).min(timeout.saturating_sub(started.elapsed())));
     }
 }
 
@@ -911,12 +928,20 @@ fn process_creation_time(
 
 #[cfg(windows)]
 fn wait_until_parent_exits(pid: u32, expected: u64) -> Result<(), HandoffError> {
+    wait_until_parent_exits_bounded(pid, expected, PARENT_EXIT_WAIT)
+}
+
+#[cfg(windows)]
+fn wait_until_parent_exits_bounded(
+    pid: u32,
+    expected: u64,
+    timeout: Duration,
+) -> Result<(), HandoffError> {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
         Storage::FileSystem::SYNCHRONIZE,
         System::Threading::{
-            GetProcessTimes, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-            WaitForSingleObject,
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
         },
     };
     let handle = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
@@ -932,11 +957,12 @@ fn wait_until_parent_exits(pid: u32, expected: u64) -> Result<(), HandoffError> 
         if observed != expected {
             return Ok(());
         }
-        let code = unsafe { WaitForSingleObject(handle, INFINITE) };
-        if code != WAIT_OBJECT_0 {
-            return Err(io::Error::last_os_error().into());
+        let milliseconds = timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+        match unsafe { WaitForSingleObject(handle, milliseconds) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(HandoffError::ParentExitTimeout),
+            _ => Err(io::Error::last_os_error().into()),
         }
-        Ok(())
     })();
     unsafe { CloseHandle(handle) };
     result
@@ -955,6 +981,31 @@ fn wait_until_parent_exits(_pid: u32, _expected: u64) -> Result<(), HandoffError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn live_parent_times_out_without_consuming_handoff() {
+        let result = wait_until_parent_exits_bounded(
+            process::id(),
+            current_process_identity().unwrap(),
+            Duration::from_millis(15),
+        );
+        assert!(matches!(result, Err(HandoffError::ParentExitTimeout)));
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn reused_parent_pid_does_not_block_handoff() {
+        let expected = current_process_identity().unwrap();
+        assert!(
+            wait_until_parent_exits_bounded(
+                process::id(),
+                expected.wrapping_add(1),
+                Duration::ZERO,
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn rejects_invalid_helper_invocations() {
