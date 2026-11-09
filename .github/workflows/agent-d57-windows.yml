@@ -1,0 +1,36 @@
+name: Agent D57 native Windows parent wait and handoff acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d57-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d57-bounded-parent-shutdown-20261109
+      - name: Verify pinned D57 original commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "85b081ca858e78e65e9b96c103bb868ec3432c6d"
+          test "$(git rev-parse HEAD^{tree})" = "18418a26a6cc462a2fb07c91ccbea10f46900719"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Windows bounded parent and PID reuse unit regressions
+        run: |
+          cargo test --locked --offline --lib updater::handoff::tests:: -- --test-threads=1
+      - name: Windows actual installed GUI helper isolated HKCU E2E
+        run: |
+          cargo test --locked --offline --lib updater::handoff::windows_acceptance::installed_windows_helper_handoff_with_isolated_guard -- --test-threads=1 --nocapture
+      - name: All Windows Rust targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
