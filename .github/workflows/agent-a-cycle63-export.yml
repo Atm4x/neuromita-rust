@@ -1,0 +1,32 @@
+name: Agent A Cycle63 exact source increment
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle63-fetch-20261109
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7972ac3d72dc10eb71c940c4d857c04291c16f6f
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and export one new commit
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7972ac3d72dc10eb71c940c4d857c04291c16f6f
+          test "$(git rev-parse HEAD^)" = a10d573e3b8d720d509f867066d81971f419a3bf
+          git update-ref refs/heads/agent-a-cycle63-head HEAD
+          git bundle create cycle63-import.bundle refs/heads/agent-a-cycle63-head ^a10d573e3b8d720d509f867066d81971f419a3bf
+          git bundle verify cycle63-import.bundle
+          sha256sum cycle63-import.bundle > cycle63-import.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle63-head-increment
+          path: |
+            cycle63-import.bundle
+            cycle63-import.bundle.sha256
+          retention-days: 1
