@@ -1,0 +1,35 @@
+name: Import exact Agent C native UI revision read model
+on:
+  push:
+    branches: [bridge/agent-c-native-ui-readmodel-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-ui-readmodel-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-ui-readmodel-20261109
+          fetch-depth: 0
+      - name: Verify original Git commit and non-force publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-ui-revisions.part0{0,1,2,3,4} | base64 -d > /tmp/agent-c-native-ui-inventory.bundle.xz
+          test "$(sha256sum /tmp/agent-c-native-ui-inventory.bundle.xz | cut -d' ' -f1)" = "702ae30f9b99cb30227b4d055933ab74bd987b3f607dc7d159018efe8f6d2f90"
+          xz -dc /tmp/agent-c-native-ui-inventory.bundle.xz > /tmp/agent-c-native-ui-inventory.bundle
+          test "$(sha256sum /tmp/agent-c-native-ui-inventory.bundle | cut -d' ' -f1)" = "7f09bd8f07fe676ad27090d18701d963358d8cf965fe1c65b5ce96a285c6579e"
+          git fetch origin refs/heads/codex/ai-native-immutable-revisions-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd"
+          git fetch origin refs/heads/codex/ai-native-revision-ui-readmodel-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd"
+          git bundle verify /tmp/agent-c-native-ui-inventory.bundle
+          git fetch /tmp/agent-c-native-ui-inventory.bundle refs/heads/codex/ai-native-revision-overview-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          git checkout --detach "7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          test "$(git rev-parse HEAD^{tree})" = "77fad415d3bc46108c431bca8020ee0372d22aa0"
+          test "$(git rev-list --parents -n1 HEAD)" = "7076ddcadd1ac93d1121c531b26c1494c06356ae 7fb4cf0a4dea539972f15bd54f793aeac3ee95bd"
+          git diff --check "7fb4cf0a4dea539972f15bd54f793aeac3ee95bd" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-revision-ui-readmodel-20261109
