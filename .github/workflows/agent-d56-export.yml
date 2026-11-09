@@ -1,0 +1,37 @@
+name: Agent D56 exact D51 to D55 source delta export
+on:
+  push:
+    branches:
+      - bridge/agent-d56-d55-source-export-20261109
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d55-orphan-handoff-recovery-20261109
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin D55 git delta and digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=36bbabfbafe51a9a8cd39054d2a2174120fb2911
+          EXPECTED=2791700dbbedda574a8fb587e128701980565b85
+          TREE=a3610234d623aad11dc455de5d455eb3fb5bf5ce
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          git bundle create agent-d56-d55-pinned.bundle "$BASE"..HEAD
+          git bundle verify agent-d56-d55-pinned.bundle
+          sha256sum agent-d56-d55-pinned.bundle > agent-d56-d55-pinned.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d56-d55-pinned-delta
+          path: |
+            agent-d56-d55-pinned.bundle
+            agent-d56-d55-pinned.sha256
+          retention-days: 2
