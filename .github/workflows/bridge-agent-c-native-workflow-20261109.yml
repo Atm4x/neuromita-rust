@@ -1,0 +1,33 @@
+name: Import exact Agent C native model workflow
+on:
+  push:
+    branches: [bridge/agent-c-native-workflow-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-workflow-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-workflow-20261109
+          fetch-depth: 0
+      - name: Verify exact Git commit and non-force publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native-workflow.part0{0,1,2,3,4,5} | base64 -d > /tmp/agent-c-native-workflow.bundle
+          test "$(sha256sum /tmp/agent-c-native-workflow.bundle | cut -d' ' -f1)" = "366067e9a51ea090408137586e9d9f97a0fc9aba9b7210b5d8c11c1e8ca518d8"
+          git fetch origin refs/heads/codex/ai-native-revision-ui-readmodel-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          git fetch origin refs/heads/codex/ai-native-workflow-hub-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          git bundle verify /tmp/agent-c-native-workflow.bundle
+          git fetch /tmp/agent-c-native-workflow.bundle refs/heads/agent-c
+          test "$(git rev-parse FETCH_HEAD)" = "260249daa6679d78644301c9a80bfebd1a2376dc"
+          git checkout --detach "260249daa6679d78644301c9a80bfebd1a2376dc"
+          test "$(git rev-parse HEAD^{tree})" = "34e56892d763ee99359b13d8396ea5d0be15a25f"
+          test "$(git rev-list --parents -n1 HEAD)" = "260249daa6679d78644301c9a80bfebd1a2376dc 7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          git diff --check HEAD^ HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-workflow-hub-20261109
