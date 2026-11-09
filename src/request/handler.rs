@@ -428,7 +428,9 @@ impl MessageHandler {
                 return;
             }
         };
-        record.mark_applied();
+        if !record.mark_applied() {
+            return;
+        }
         if let Some(invite) = accepted.game_invite.clone()
             && (!invite.auto_gated || self.games.auto_reactions)
         {

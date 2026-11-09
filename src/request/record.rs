@@ -401,14 +401,21 @@ impl RequestRecord {
         true
     }
 
-    pub(crate) fn mark_applied(&self) {
+    pub(crate) fn mark_applied(&self) -> bool {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
+        if matches!(
+            inner.snapshot.durable_resolution,
+            Some(DurableRequestResolution::AcceptedElsewhere(_))
+        ) {
+            return false;
+        }
         assert_eq!(inner.phase, EffectPhase::Accepting);
         inner.phase = EffectPhase::Applied;
         let snapshot = Arc::clone(&inner.snapshot);
         if let Some(trace) = &mut inner.trace {
             trace.push_transition(snapshot.revision, EffectPhase::Applied, &snapshot.state);
         }
+        true
     }
 
     fn observe_external_acceptance(

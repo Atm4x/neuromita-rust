@@ -2473,3 +2473,113 @@ async fn same_branch_request_handle_cancel_races_foreign_acceptance_with_effects
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
 }
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_character_handle_acceptance_survives_post_commit_cancel() {
+    let db = std::env::temp_dir().join(format!("b81-character-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let mut fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (characters, tasks) = crate::character::CharacterRegistry::spawn(
+        Arc::clone(&fixture.timeline),
+        stop.clone(),
+        8,
+    );
+    let character = characters.get(CharacterId::Crazy).unwrap();
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    let message = record.try_start().unwrap();
+    let gate = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    gate.before_provider(
+        handle.id(),
+        record.admission(),
+        record.regenerate_protocol(),
+    )
+    .unwrap();
+    let context = character
+        .prepare(
+            handle.id(),
+            Arc::from(""),
+            message.intent(),
+            message.at(),
+            record.admission(),
+        )
+        .await
+        .unwrap();
+    assert!(record.text_ready(Arc::from("generated response")));
+    assert!(record.begin_accepting());
+    let acceptance = crate::character::AcceptanceContext {
+        anchor: context.anchor,
+        intent: context.focus.intent,
+        state_revision: context.state.revision,
+        turn: context.turn,
+        game: context.game_key,
+        game_guard: context.game_guard,
+    };
+    let mut structured = crate::generation::StructuredResponse::spoken("generated response");
+    structured.attitude_change = 3.0;
+    let accepted = character
+        .accept(
+            handle.id(),
+            acceptance,
+            crate::generation::ProposedResponse::from_structured(structured).unwrap(),
+            None,
+            crate::timeline::conversation::ConversationAudience::private_to(CharacterId::Crazy),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert_eq!(record.externally_accepted(), Some(accepted.event_id));
+    assert!(!record.mark_applied());
+    assert!(matches!(
+        handle.wait().await,
+        Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event))
+            if event == accepted.event_id
+    ));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert!(matches!(
+        reopened
+            .reconcile_same_branch_regenerate(root, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(event)
+            if event == accepted.event_id
+    ));
+    assert_eq!(
+        reopened
+            .character_behavior_at(CharacterId::Crazy, reopened.anchor())
+            .unwrap()
+            .attitude,
+        context.state.attitude + 3.0
+    );
+    stop.cancel();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    drop((reopened, message, record, handle, character, characters, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
