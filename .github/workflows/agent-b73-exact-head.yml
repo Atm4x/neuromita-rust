@@ -12,15 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: cd95a0793741bd42d5cdf44a7bd5d784bb26894e
+          ref: 2f0a21c43eaf7881a40c641fcce7e1b8caeb42fd
           fetch-depth: 2
           persist-credentials: false
       - name: Verify exact B73 SHA tree and parent
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "cd95a0793741bd42d5cdf44a7bd5d784bb26894e"
-          test "$(git rev-parse HEAD^{tree})" = "98a3eac19f9b83349162019bb3d7dd5288279665"
+          test "$(git rev-parse HEAD)" = "2f0a21c43eaf7881a40c641fcce7e1b8caeb42fd"
+          test "$(git rev-parse HEAD^{tree})" = "89dfb99fea19fd00e731d7559194b1ffa8848647"
           test "$(git rev-parse HEAD^)" = "52c8960b47cf5194abecb2116f85de31306ec296"
       - name: Install Rust 1.98.1 and ALSA headers
         shell: bash
