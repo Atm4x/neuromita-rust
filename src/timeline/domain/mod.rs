@@ -12,6 +12,7 @@ mod regenerate_lifecycle;
 mod replies;
 pub(crate) use regenerate_lifecycle::{
     abandoned_regenerate, dispatch_may_have_started, validate_regenerate_transition,
+    validate_same_branch_admission,
 };
 mod repository;
 mod request_evidence;

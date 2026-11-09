@@ -33,6 +33,7 @@ mod regenerate_enumeration_tests;
 #[cfg(test)]
 mod regenerate_owner_tests;
 mod regenerate_receipt;
+use regenerate_receipt::SameBranchRegenerateReceipt;
 #[doc(hidden)]
 pub use regenerate_receipt::{
     RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoveryOutcome,
@@ -1147,6 +1148,121 @@ impl SessionTimeline {
         })
     }
 
+    /// The only same-branch durable admission preparation. Caller MUST first
+    /// reserve its queue permit and freeze settings/preset/prompt; the request
+    /// lifecycle is not wired to this receipt until dispatch and cancellation
+    /// are migrated from fork markers.
+    #[allow(dead_code)]
+    pub(crate) fn admit_same_branch_regenerate(
+        &mut self,
+        proposed: &RegenerateKnowledgePlan,
+        receipt: &SameBranchRegenerateReceipt,
+        marker_id: EventId,
+    ) -> Result<TimelineAdmission, domain::TimelineError> {
+        let source = proposed.source;
+        if receipt.request == source.accepted_request
+            || receipt.request.0.is_nil()
+            || receipt.accepted_request != source.accepted_request
+            || receipt.accepted_message != source.accepted_message
+            || receipt.original_input != source.original_input
+            || receipt.character != source.character
+            || receipt.branch != proposed.selection.branch_id
+            || receipt.source_head != proposed.head
+            || receipt.selection_generation != proposed.selection.generation
+            || receipt.hidden_messages != proposed.hide_messages
+            || receipt.forgotten_events != proposed.forget_events
+            || receipt.hidden_messages.is_empty()
+            || receipt.configuration.provider_model.trim().is_empty()
+            || receipt
+                .configuration
+                .prompt_set
+                .as_deref()
+                .is_some_and(|s| s.trim().is_empty())
+            || marker_id == receipt.hide_operation
+            || receipt
+                .forget_operation
+                .is_some_and(|id| id == marker_id || id == receipt.hide_operation)
+            || receipt.forget_operation.is_some() != !receipt.forgotten_events.is_empty()
+        {
+            return Err(domain::TimelineError::Invalid(
+                "invalid same-branch regenerate admission",
+            ));
+        }
+        let plan = self.plan_knowledge_regenerate(source, proposed.selection, proposed.head)?;
+        if &plan != proposed || !plan.related_effects.is_empty() {
+            return Err(domain::TimelineError::Invalid(
+                "stale regenerate knowledge plan",
+            ));
+        }
+        self.assert_regenerate_effects_safe(&plan)?;
+        let mut drafts = vec![
+            MessageAction::Hide {
+                targets: plan.hide_messages.clone(),
+            }
+            .into_draft(receipt.hide_operation, source.character),
+        ];
+        if let Some(id) = receipt.forget_operation {
+            let mut forget = EventDraft::new(EventKind::CharacterKnowledgeForgotten);
+            forget.id = id;
+            forget.observers.insert(source.character);
+            forget.payload.insert(
+                "event_ids".into(),
+                json!(
+                    plan.forget_events
+                        .iter()
+                        .map(|id| id.0.to_string())
+                        .collect::<Vec<_>>()
+                ),
+            );
+            drafts.push(forget);
+        }
+        drafts.push(receipt.draft(marker_id)?);
+        self.store.append_guarded(
+            self.branch,
+            plan.head,
+            &format!("regenerate-admission:{}", receipt.request.0),
+            json!({"request": receipt.request.0.to_string(), "character": source.character.to_string()}),
+            drafts,
+            AppendGuard {
+                selection_generation: plan.selection.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        let epoch = self.store.context_epoch(self.branch, source.character)?;
+        self.context_updates[&source.character].send_replace(epoch);
+        self.notify_memory_changed(source.character);
+        self.admission(source.character, plan.selection)
+    }
+
+    fn assert_regenerate_effects_safe(
+        &self,
+        plan: &RegenerateKnowledgePlan,
+    ) -> Result<(), domain::TimelineError> {
+        let accepted_sequence = self
+            .store
+            .event(self.branch, plan.source.accepted_message)?
+            .sequence;
+        if self.store.world(self.branch)?.iter().any(|fact| {
+            fact.sequence >= accepted_sequence
+                && fact.draft.actor.as_deref() == Some(plan.source.character.as_str())
+                && matches!(
+                    fact.draft.kind,
+                    EventKind::CharacterStateChanged
+                        | EventKind::CharacterWorkingStateReplaced
+                        | EventKind::CharacterVariablesChanged
+                        | EventKind::CharacterMemoryChanged
+                        | EventKind::GameAction
+                        | EventKind::GameStateCaptured
+                )
+        }) {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate needs explicit reconciliation of stateful effects",
+            ));
+        }
+        Ok(())
+    }
+
     /// Atomically apply only the character-scoped knowledge/presentation changes
     /// of a prevalidated Regenerate plan. This is NOT request admission: no caller
     /// may expose it until a durable same-branch receipt and queue permit join
@@ -1170,28 +1286,7 @@ impl SessionTimeline {
                 "regenerate plan is stale or needs effect reconciliation",
             ));
         }
-        let accepted_sequence = self
-            .store
-            .event(self.branch, proposed.source.accepted_message)?
-            .sequence;
-        let unsafe_effect = self.store.world(self.branch)?.iter().any(|fact| {
-            fact.sequence >= accepted_sequence
-                && fact.draft.actor.as_deref() == Some(proposed.source.character.as_str())
-                && matches!(
-                    fact.draft.kind,
-                    EventKind::CharacterStateChanged
-                        | EventKind::CharacterWorkingStateReplaced
-                        | EventKind::CharacterVariablesChanged
-                        | EventKind::CharacterMemoryChanged
-                        | EventKind::GameAction
-                        | EventKind::GameStateCaptured
-                )
-        });
-        if unsafe_effect {
-            return Err(domain::TimelineError::Invalid(
-                "regenerate needs explicit reconciliation of stateful effects",
-            ));
-        }
+        self.assert_regenerate_effects_safe(&checked)?;
         let mut drafts = vec![
             MessageAction::Hide {
                 targets: checked.hide_messages.clone(),

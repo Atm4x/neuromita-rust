@@ -266,6 +266,39 @@ impl TimelineStore {
     fn validate_regenerate_admissions(&self) -> Result<(), TimelineError> {
         let mut requests = HashSet::new();
         for branch in self.branches.values() {
+            let markers = branch
+                .events
+                .iter()
+                .filter(|fact| fact.draft.kind == EventKind::RegenerateAdmitted)
+                .collect::<Vec<_>>();
+            if !markers.is_empty() {
+                let world = self.world(branch.info.id)?;
+                for marker in markers {
+                    let receipt = crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(&marker.draft)?;
+                    if !requests.insert((branch.info.session_id, receipt.request)) {
+                        return Err(TimelineError::Conflict);
+                    }
+                    let start = usize::try_from(receipt.source_head)
+                        .map_err(|_| TimelineError::Conflict)?;
+                    let count = usize::from(receipt.forget_operation.is_some()) + 2;
+                    if marker.sequence != receipt.source_head + count as u64
+                        || world.len() < start + count
+                    {
+                        return Err(TimelineError::Invalid(
+                            "invalid persisted admission sequence",
+                        ));
+                    }
+                    let drafts = world[start..start + count]
+                        .iter()
+                        .map(|fact| fact.draft.clone())
+                        .collect::<Vec<_>>();
+                    super::validate_same_branch_admission(
+                        branch.info.id,
+                        &world[..start],
+                        &drafts,
+                    )?;
+                }
+            }
             let Some(parent) = branch.info.parent else {
                 continue;
             };
@@ -599,10 +632,34 @@ impl TimelineStore {
         if expected_head != branch.info.head_sequence {
             return Err(TimelineError::ConcurrentWrite);
         }
+        if let Some(marker) = drafts
+            .iter()
+            .find(|draft| draft.kind == EventKind::RegenerateAdmitted)
+        {
+            let candidate =
+                crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(
+                    marker,
+                )?;
+            if self.branches.values()
+                .filter(|other| other.info.session_id == branch.info.session_id)
+                .any(|other| other.events.iter().any(|fact| {
+                    if fact.draft.kind == EventKind::RegenerateAdmitted {
+                        crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(&fact.draft)
+                            .is_ok_and(|receipt| receipt.request == candidate.request)
+                    } else if fact.draft.kind == EventKind::BranchCreated {
+                        crate::timeline::RegenerateAdmissionReceipt::from_marker(&fact.draft.payload)
+                            .ok().flatten().is_some_and(|receipt| receipt.request == candidate.request)
+                    } else { false }
+                })) {
+                return Err(TimelineError::Conflict);
+            }
+        }
         if drafts.iter().any(|draft| {
             matches!(
                 draft.kind,
-                EventKind::RegenerateAbandoned | EventKind::RegenerateMayHaveDispatched
+                EventKind::RegenerateAdmitted
+                    | EventKind::RegenerateAbandoned
+                    | EventKind::RegenerateMayHaveDispatched
             ) || (draft.kind == EventKind::CharacterMessage
                 && draft.payload.contains_key("request_id"))
         }) {
@@ -921,6 +978,9 @@ impl TimelineStore {
             return Err(TimelineError::Invalid(
                 "checkpoint requires a snapshot object",
             ));
+        }
+        if draft.kind == EventKind::RegenerateAdmitted {
+            crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(draft)?;
         }
         if draft.kind == EventKind::BranchCreated {
             return Err(TimelineError::Invalid("branch markers are created by fork"));

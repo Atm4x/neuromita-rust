@@ -54,6 +54,9 @@ CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_character
 CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_request
     ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.request'),branch_id,sequence)
     WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.request') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_same_branch_regenerate_by_request
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.same_branch_regenerate_admission.request'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.same_branch_regenerate_admission.request') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_observers(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -936,10 +939,30 @@ impl SqliteTimelineRepository {
             if info.head_sequence != expected_head {
                 return Err(TimelineError::ConcurrentWrite);
             }
+            if let Some(marker) = drafts
+                .iter()
+                .find(|draft| draft.kind == EventKind::RegenerateAdmitted)
+            {
+                let admitted =
+                    crate::timeline::regenerate_receipt::SameBranchRegenerateReceipt::from_fact(
+                        marker,
+                    )?;
+                let session_id = info.session_id.0.to_string();
+                let request = admitted.request.0.to_string();
+                let existing = connection.query(
+                    "SELECT 1 FROM timeline_events e JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE b.session_id=? AND (json_extract(e.fact_json,'$.draft.payload.same_branch_regenerate_admission.request')=? OR json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request')=?) LIMIT 1",
+                    &[&session_id, &request, &request],
+                )?;
+                if !existing.is_empty() {
+                    return Err(TimelineError::Conflict);
+                }
+            }
             if drafts.iter().any(|draft| {
                 matches!(
                     draft.kind,
-                    EventKind::RegenerateAbandoned | EventKind::RegenerateMayHaveDispatched
+                    EventKind::RegenerateAdmitted
+                        | EventKind::RegenerateAbandoned
+                        | EventKind::RegenerateMayHaveDispatched
                 ) || (draft.kind == EventKind::CharacterMessage
                     && draft.payload.contains_key("request_id"))
             }) {

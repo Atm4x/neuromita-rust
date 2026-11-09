@@ -135,3 +135,55 @@ impl RegenerateAdmissionReceipt {
         Ok(())
     }
 }
+
+/// Pending same-branch regeneration, atomically persisted with character-scoped
+/// Hide/Forget. This is not a dispatch permit or permission for provider replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SameBranchRegenerateReceipt {
+    pub request: RequestId,
+    pub accepted_request: RequestId,
+    pub accepted_message: EventId,
+    pub original_input: EventId,
+    pub character: CharacterId,
+    pub branch: BranchId,
+    pub source_head: u64,
+    pub selection_generation: u64,
+    pub hide_operation: EventId,
+    pub forget_operation: Option<EventId>,
+    pub hidden_messages: Vec<EventId>,
+    pub forgotten_events: Vec<EventId>,
+    pub configuration: RegenerateConfigurationReference,
+}
+
+impl SameBranchRegenerateReceipt {
+    pub(crate) const KEY: &'static str = "same_branch_regenerate_admission";
+
+    pub(crate) fn from_fact(draft: &super::domain::EventDraft) -> Result<Self, TimelineError> {
+        if draft.kind != EventKind::RegenerateAdmitted
+            || draft.payload.len() != 1
+            || draft.actor.is_some()
+            || !draft.observers.is_empty()
+            || !draft.links.is_empty()
+            || draft.external_message_id.is_some()
+        {
+            return Err(TimelineError::Invalid(
+                "invalid same-branch admission marker",
+            ));
+        }
+        serde_json::from_value(draft.payload.get(Self::KEY).cloned().ok_or(
+            TimelineError::Invalid("missing same-branch admission receipt"),
+        )?)
+        .map_err(|_| TimelineError::Invalid("invalid same-branch admission receipt"))
+    }
+
+    pub(crate) fn draft(&self, id: EventId) -> Result<super::domain::EventDraft, TimelineError> {
+        let mut draft = super::domain::EventDraft::new(EventKind::RegenerateAdmitted);
+        draft.id = id;
+        draft.payload.insert(
+            Self::KEY.into(),
+            serde_json::to_value(self).map_err(|_| TimelineError::Invalid("invalid receipt"))?,
+        );
+        Ok(draft)
+    }
+}

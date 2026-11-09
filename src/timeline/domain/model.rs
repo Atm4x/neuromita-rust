@@ -78,6 +78,7 @@ pub enum EventKind {
     CharacterKnowledgeRevealed,
     Checkpoint,
     BranchCreated,
+    RegenerateAdmitted,
     RegenerateAbandoned,
     RegenerateMayHaveDispatched,
 }
