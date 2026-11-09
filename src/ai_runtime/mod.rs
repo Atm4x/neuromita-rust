@@ -27,6 +27,7 @@ pub mod native_controller;
 pub mod native_model;
 pub mod native_package_install;
 pub mod native_registry;
+pub mod native_revisions;
 pub mod overlay;
 pub mod production;
 pub mod removal;

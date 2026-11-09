@@ -1,0 +1,461 @@
+use std::{
+    fs::{self, OpenOptions},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+
+use neuromita::ai_runtime::{
+    native_model::{NativeBackend, NativePhase},
+    native_registry::{NativeFileRef, NativeModelManifest, NativeRuntimeFile},
+    native_revisions::{NativeRevisionChoice, NativeRevisionStore},
+};
+use serde_json::json;
+use uuid::Uuid;
+
+struct Fixture {
+    root: PathBuf,
+    source_packages: PathBuf,
+    source_runtime: PathBuf,
+    runtime: PathBuf,
+    revisions: PathBuf,
+    manifest: NativeModelManifest,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("native-revisions-{}", Uuid::new_v4()));
+        let source_packages = root.join("source-packages");
+        let source_runtime = root.join("source-runtime");
+        let runtime = root.join("runtime");
+        let revisions = root.join("revisions");
+        for dir in [
+            source_packages.join("native-test/bin"),
+            source_packages.join("native-test/models"),
+            source_runtime.join("shared"),
+            runtime.clone(),
+            revisions.clone(),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let executable_name = if cfg!(windows) {
+            "worker.exe"
+        } else {
+            "worker"
+        };
+        let executable = source_packages
+            .join("native-test/bin")
+            .join(executable_name);
+        let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg("--edition=2021")
+            .arg(format!(
+                "{}/tests/fixtures/native_protocol_worker.rs",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let weight = source_packages.join("native-test/models/weight.bin");
+        fs::write(&weight, b"not-rvc-weights").unwrap();
+        let runtime_file = source_runtime.join("shared/runtime.bin");
+        fs::write(&runtime_file, b"shared-test-runtime").unwrap();
+        let manifest = NativeModelManifest {
+            schema_version: 1,
+            model_id: "native-test".into(),
+            display_name: "Synthetic worker only".into(),
+            package_version: "1.0.0".into(),
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            protocol_version: 1,
+            backends: vec![NativeBackend::Cpu],
+            executable: file_ref(&executable, &format!("bin/{executable_name}")),
+            assets: vec![file_ref(&weight, "models/weight.bin")],
+            runtime_files: vec![NativeRuntimeFile {
+                backends: vec![NativeBackend::Cpu],
+                file: file_ref(&runtime_file, "shared/runtime.bin"),
+            }],
+        };
+        let fixture = Self {
+            root,
+            source_packages,
+            source_runtime,
+            runtime,
+            revisions,
+            manifest,
+        };
+        fixture.write_manifest();
+        fixture
+    }
+
+    fn store(&self) -> NativeRevisionStore {
+        NativeRevisionStore::new(self.revisions.clone(), self.runtime.clone())
+    }
+
+    fn write_manifest(&self) {
+        fs::write(
+            self.source_packages.join("native-test/native-model.json"),
+            serde_json::to_vec(&self.manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn digest(&self) -> [u8; 32] {
+        let bytes = fs::read(self.source_packages.join("native-test/native-model.json")).unwrap();
+        let mut result = [0; 32];
+        result.copy_from_slice(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref());
+        result
+    }
+
+    fn version(&mut self, version: &str) -> [u8; 32] {
+        self.manifest.package_version = version.into();
+        self.write_manifest();
+        self.digest()
+    }
+
+    fn install(&self, digest: [u8; 32]) {
+        self.store()
+            .install_local(
+                &self.source_packages,
+                &self.source_runtime,
+                "native-test",
+                digest,
+                NativeBackend::Cpu,
+            )
+            .unwrap();
+    }
+
+    fn choice(&self, digest: [u8; 32]) -> NativeRevisionChoice {
+        NativeRevisionChoice {
+            model_id: "native-test".into(),
+            manifest_sha256: digest,
+            backend: NativeBackend::Cpu,
+        }
+    }
+
+    fn object_root(&self, digest: [u8; 32]) -> PathBuf {
+        let hex = digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        self.revisions.join("objects").join(hex)
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn file_ref(path: &Path, relative: &str) -> NativeFileRef {
+    let bytes = fs::read(path).unwrap();
+    NativeFileRef {
+        path: relative.into(),
+        size_bytes: bytes.len() as u64,
+        sha256: ring::digest::digest(&ring::digest::SHA256, &bytes)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn upgrade_and_rollback_do_not_redirect_resident_worker() {
+    let mut fixture = Fixture::new();
+    let v1 = fixture.digest();
+    fixture.install(v1);
+    fixture.store().select(&fixture.choice(v1)).unwrap();
+    let (mut old, old_selection) = fixture
+        .store()
+        .controller_for_selected("native-test", Duration::from_secs(3))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.activate(&old_selection).await.unwrap().phase,
+        NativePhase::Ready
+    );
+    let first = old.infer(json!({"input":"one"})).await.unwrap();
+
+    let v2 = fixture.version("2.0.0");
+    assert_ne!(v1, v2);
+    fixture.install(v2);
+    fixture.store().select(&fixture.choice(v2)).unwrap();
+    let (mut new, new_selection) = fixture
+        .store()
+        .controller_for_selected("native-test", Duration::from_secs(3))
+        .unwrap()
+        .unwrap();
+    assert_eq!(new_selection.approved_manifest_sha256, v2);
+    assert_eq!(
+        new.activate(&new_selection).await.unwrap().phase,
+        NativePhase::Ready
+    );
+    let second = old.infer(json!({"input":"two"})).await.unwrap();
+    let newer = new.infer(json!({"input":"new"})).await.unwrap();
+    assert_eq!(first["pid"], second["pid"]);
+    assert_eq!(second["sequence"], 2);
+    assert_eq!(newer["sequence"], 1);
+
+    fixture.store().select(&fixture.choice(v1)).unwrap();
+    assert_eq!(
+        fixture
+            .store()
+            .selected("native-test")
+            .unwrap()
+            .unwrap()
+            .manifest_sha256,
+        v1
+    );
+    assert_eq!(fixture.store().list("native-test").unwrap().len(), 2);
+    assert!(
+        fixture
+            .object_root(v1)
+            .join("native-test/native-model.json")
+            .is_file()
+    );
+    assert!(
+        fixture
+            .object_root(v2)
+            .join("native-test/native-model.json")
+            .is_file()
+    );
+    assert_eq!(
+        new.infer(json!({"input":"still-new"})).await.unwrap()["sequence"],
+        2
+    );
+    old.deactivate().await.unwrap();
+    new.deactivate().await.unwrap();
+}
+
+#[test]
+fn absent_selection_has_no_implicit_newest_fallback() {
+    let mut fixture = Fixture::new();
+    assert!(fixture.store().selected("native-test").unwrap().is_none());
+    let v1 = fixture.digest();
+    fixture.install(v1);
+    let v2 = fixture.version("1.0.1");
+    fixture.install(v2);
+    assert_eq!(fixture.store().list("native-test").unwrap().len(), 2);
+    assert!(
+        fixture
+            .store()
+            .controller_for_selected("native-test", Duration::from_secs(3))
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.store().selected("native-test").unwrap().is_none());
+}
+
+#[test]
+fn same_revision_is_idempotent_and_shares_verified_runtime() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    let second = fixture
+        .store()
+        .install_local(
+            &fixture.source_packages,
+            &fixture.source_runtime,
+            "native-test",
+            digest,
+            NativeBackend::Cpu,
+        )
+        .unwrap();
+    assert!(second.reused_package);
+    assert_eq!(second.new_runtime_files, 0);
+    assert_eq!(fixture.store().list("native-test").unwrap().len(), 1);
+}
+
+#[test]
+fn unauthorized_revision_does_not_change_existing_selection() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let mut forged = digest;
+    forged[0] ^= 0xFF;
+    assert!(fixture.store().select(&fixture.choice(forged)).is_err());
+    assert!(
+        fixture
+            .store()
+            .install_local(
+                &fixture.source_packages,
+                &fixture.source_runtime,
+                "native-test",
+                forged,
+                NativeBackend::Cpu
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .selected("native-test")
+            .unwrap()
+            .unwrap()
+            .manifest_sha256,
+        digest
+    );
+}
+
+#[test]
+fn corrupt_or_torn_selection_fails_closed_without_rewrite() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let file = fixture.revisions.join("selections/native-test.json");
+    fs::write(&file, b"{\"schema_version\":1,").unwrap();
+    assert!(fixture.store().selected("native-test").is_err());
+    assert_eq!(fs::read(&file).unwrap(), b"{\"schema_version\":1,");
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    assert_eq!(
+        fixture
+            .store()
+            .selected("native-test")
+            .unwrap()
+            .unwrap()
+            .manifest_sha256,
+        digest
+    );
+}
+
+#[test]
+fn missing_published_weights_reject_selected_but_keep_pointer() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let file = fixture
+        .object_root(digest)
+        .join("native-test/models/weight.bin");
+    fs::write(&file, b"changed-by-untrusted-writer").unwrap();
+    assert!(fixture.store().selected("native-test").is_err());
+    let pointer = fixture.revisions.join("selections/native-test.json");
+    assert!(pointer.is_file());
+}
+
+#[test]
+fn abandoned_selection_temps_recovered_without_touching_foreign_files() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let selections = fixture.revisions.join("selections");
+    let orphan = selections.join(format!(".select-{}.tmp", Uuid::new_v4()));
+    fs::write(&orphan, b"incomplete").unwrap();
+    fs::write(selections.join("foreign"), b"preserved").unwrap();
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    assert!(!orphan.exists());
+    assert_eq!(fs::read(selections.join("foreign")).unwrap(), b"preserved");
+}
+
+#[cfg(unix)]
+#[test]
+fn foreign_symlink_selection_stage_rejected_without_erasing_victim() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let selections = fixture.revisions.join("selections");
+    let victim = fixture.root.join("victim.txt");
+    fs::write(&victim, b"preserved").unwrap();
+    symlink(
+        &victim,
+        selections.join(format!(".select-{}.tmp", Uuid::new_v4())),
+    )
+    .unwrap();
+    assert!(fixture.store().select(&fixture.choice(digest)).is_err());
+    assert_eq!(fs::read(victim).unwrap(), b"preserved");
+}
+
+#[test]
+fn selected_runtime_mutation_fails_closed() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    fs::write(fixture.runtime.join("shared/runtime.bin"), b"changed").unwrap();
+    assert!(fixture.store().selected("native-test").is_err());
+}
+
+#[test]
+fn cross_process_selection_lock_protects_live_owner() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.revisions.join("selections/.install-owner.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    assert!(fixture.store().select(&fixture.choice(digest)).is_err());
+    lock.unlock().unwrap();
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+}
+
+#[test]
+fn selection_owner_child_fixture() {
+    let Ok(path) = std::env::var("NM_TEST_SELECTION_CRASH") else {
+        return;
+    };
+    let root = PathBuf::from(path);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".install-owner.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    fs::write(
+        root.join(format!(".select-{}.tmp", Uuid::new_v4())),
+        b"uncommitted",
+    )
+    .unwrap();
+    fs::write(root.join("child-ready"), b"ready").unwrap();
+    std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn killed_selection_owner_preserves_previous_pointer_and_reclaims_temp() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let dir = fixture.revisions.join("selections");
+    let old = fs::read(dir.join("native-test.json")).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "selection_owner_child_fixture", "--nocapture"])
+        .env("NM_TEST_SELECTION_CRASH", &dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !dir.join("child-ready").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(dir.join("child-ready").exists());
+    assert!(fixture.store().select(&fixture.choice(digest)).is_err());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(fs::read(dir.join("native-test.json")).unwrap(), old);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    assert_eq!(fs::read(dir.join("native-test.json")).unwrap(), old);
+    assert!(
+        fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".select-"))
+    );
+}

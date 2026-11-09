@@ -250,12 +250,12 @@ impl NativePackageInstaller {
     }
 }
 
-struct ManagedLock {
+pub(super) struct ManagedLock {
     _owner: File,
 }
 
 impl ManagedLock {
-    fn acquire(root: &Path) -> Result<Self, NativePackageInstallError> {
+    pub(super) fn acquire(root: &Path) -> Result<Self, NativePackageInstallError> {
         let marker = root.join(".install-owner.lock");
         let file = OpenOptions::new()
             .read(true)
@@ -456,11 +456,11 @@ fn verified_copy(
 }
 
 #[cfg(unix)]
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> io::Result<()> {
+pub(super) fn sync_dir(_path: &Path) -> io::Result<()> {
     Ok(())
 }

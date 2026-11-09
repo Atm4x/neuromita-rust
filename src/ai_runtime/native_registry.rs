@@ -229,7 +229,7 @@ pub(super) fn parse_sha256(value: &str) -> Result<[u8; 32], NativeRegistryError>
     Ok(digest)
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(super) fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
