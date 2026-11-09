@@ -14,6 +14,14 @@ enum Action {
         source: PathBuf,
         name: String,
     },
+    ForkReplace {
+        root: PathBuf,
+        character: CharacterId,
+        source: PathBuf,
+        name: String,
+        expected_sha256: String,
+        output: PathBuf,
+    },
     Reindex {
         root: PathBuf,
         character: CharacterId,
@@ -43,7 +51,7 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
     let mode = args
         .next()
-        .ok_or("expected import, build, reindex, verify or query")?;
+        .ok_or("expected import, fork-replace, build, reindex, verify or query")?;
     if mode == "--help" {
         return if args.next().is_none() {
             Ok(Action::Help)
@@ -51,14 +59,17 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
             Err("unknown help arguments".into())
         };
     }
-    if mode != "import"
+    if mode != "fork-replace"
+        && mode != "import"
         && mode != "build"
         && mode != "reindex"
         && mode != "verify"
         && mode != "query"
     {
-        return Err("expected import, build, reindex, verify or query".into());
+        return Err("expected import, fork-replace, build, reindex, verify or query".into());
     }
+    let mut expected_sha256 = None;
+    let mut output = None;
     let mut source = None;
     let mut name = None;
     let mut root = None;
@@ -71,11 +82,19 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
         let value = args.next().ok_or("missing option value")?;
         match flag.to_str() {
             Some("--root") if root.is_none() => root = Some(PathBuf::from(value)),
-            Some("--source") if mode == "import" && source.is_none() => {
+            Some("--source")
+                if (mode == "import" || mode == "fork-replace") && source.is_none() =>
+            {
                 source = Some(PathBuf::from(value));
             }
-            Some("--name") if mode == "import" && name.is_none() => {
+            Some("--name") if (mode == "import" || mode == "fork-replace") && name.is_none() => {
                 name = Some(value.into_string().map_err(|_| "invalid document name")?);
+            }
+            Some("--expected-sha256") if mode == "fork-replace" && expected_sha256.is_none() => {
+                expected_sha256 = Some(value.into_string().map_err(|_| "invalid digest")?);
+            }
+            Some("--output") if mode == "fork-replace" && output.is_none() => {
+                output = Some(PathBuf::from(value));
             }
             Some("--index") if index.is_none() => index = Some(PathBuf::from(value)),
             Some("--revisions-dir") if mode == "reindex" && revisions_directory.is_none() => {
@@ -100,6 +119,29 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
     if !root.is_absolute() {
         return Err("source path must be absolute".into());
     }
+    if mode == "fork-replace" {
+        let source = source.ok_or("--source is required")?;
+        let output = output.ok_or("--output is required")?;
+        if !source.is_absolute()
+            || !output.is_absolute()
+            || index.is_some()
+            || revisions_directory.is_some()
+            || text.is_some()
+            || limit.is_some()
+        {
+            return Err(
+                "fork-replace needs absolute --source and --output and no index options".into(),
+            );
+        }
+        return Ok(Action::ForkReplace {
+            root,
+            character,
+            source,
+            output,
+            name: name.ok_or("--name is required")?,
+            expected_sha256: expected_sha256.ok_or("--expected-sha256 is required")?,
+        });
+    }
     if mode == "import" {
         if index.is_some() || revisions_directory.is_some() || text.is_some() || limit.is_some() {
             return Err("import accepts only --source and --name".into());
@@ -114,6 +156,9 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
             source,
             name: name.ok_or("--name is required")?,
         });
+    }
+    if expected_sha256.is_some() || output.is_some() {
+        return Err("unexpected fork-replace option".into());
     }
     if mode == "reindex" {
         if index.is_some() || text.is_some() || limit.is_some() {
@@ -159,8 +204,26 @@ pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     let action = parse(args).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     match action {
         Action::Help => println!(
-            "neuromita documents import --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --source ABSOLUTE_INPUT_TEXT_PATH --name NEW_FILENAME.md\nneuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
+            "neuromita documents fork-replace --root ABSOLUTE_OLD_CORPUS --character Kind --name DOCUMENT.md --expected-sha256 OLD_SHA256 --source ABSOLUTE_NEW_TEXT_FILE --output NEW_ABSOLUTE_CORPUS_DIRECTORY\nneuromita documents import --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --source ABSOLUTE_INPUT_TEXT_PATH --name NEW_FILENAME.md\nneuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
         ),
+        Action::ForkReplace {
+            root,
+            character,
+            source,
+            name,
+            expected_sha256,
+            output,
+        } => {
+            let result = document_index::fork_replacing_document(
+                &root,
+                character,
+                &name,
+                &expected_sha256,
+                &source,
+                &output,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
         Action::Import {
             root,
             character,

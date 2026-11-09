@@ -364,6 +364,263 @@ pub fn import_new_document(
     })
 }
 
+/// Create an independently published canonical corpus revision with one named document
+/// replaced. Never rename, unlink, or rewrite a byte in the previous corpus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForkedCorpus {
+    pub character: CharacterId,
+    pub replaced_name: String,
+    pub previous_sha256: String,
+    pub replacement_sha256: String,
+    pub output_root: String,
+    pub requires_reindex: bool,
+}
+
+fn rename_directory_without_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid staging path")
+        })?;
+        let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid output path")
+        })?;
+        if unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let from = from
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let to = to
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = (from, to);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no-clobber directory rename unsupported",
+        ))
+    }
+}
+
+fn write_private_document(path: &Path, bytes: &[u8]) -> Result<(), DocumentError> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// A versioned replacement changes one new root only. The old source and its
+/// selected index remain valid until an operator explicitly switches settings.
+pub fn fork_replacing_document(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    expected_sha256: &str,
+    replacement: &Path,
+    output_root: &Path,
+) -> Result<ForkedCorpus, DocumentError> {
+    fork_replacing_with_hooks(
+        root,
+        character,
+        name,
+        expected_sha256,
+        replacement,
+        output_root,
+        || Ok(()),
+        |parent| {
+            #[cfg(unix)]
+            {
+                File::open(parent)?.sync_all()
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = parent;
+                Ok(())
+            }
+        },
+    )
+}
+
+fn fork_replacing_with_hooks(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    expected_sha256: &str,
+    replacement: &Path,
+    output_root: &Path,
+    after_staging: impl FnOnce() -> Result<(), DocumentError>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ForkedCorpus, DocumentError> {
+    validate_root(root)?;
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.trim() != name
+        || name.chars().count() > 128
+        || name.chars().any(char::is_control)
+        || name.contains(['/', '\\'])
+        || !(name.ends_with(".md") || name.ends_with(".txt"))
+        || expected_sha256.len() != 64
+        || !expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(DocumentError::UnsafePath(
+            "invalid document name or expected digest".into(),
+        ));
+    }
+    if !replacement.is_absolute()
+        || fs::canonicalize(replacement)? != replacement
+        || replacement.starts_with(root)
+        || !output_root.is_absolute()
+        || output_root.starts_with(root)
+    {
+        return Err(DocumentError::UnsafePath(
+            "invalid replacement or output location".into(),
+        ));
+    }
+    let parent = output_root
+        .parent()
+        .ok_or_else(|| DocumentError::UnsafePath("output needs parent".into()))?;
+    validate_root(parent)?;
+    match fs::symlink_metadata(output_root) {
+        Ok(_) => return Err(DocumentError::UnsafePath("output already exists".into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let output_root_string = output_root
+        .to_str()
+        .ok_or_else(|| DocumentError::UnsafePath("output must be UTF-8".into()))?
+        .to_owned();
+    let original = inspect_source(root, character)?;
+    // Never silently discard unrelated application-owned files during a fork.
+    let entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
+    if entries.len() != original.documents.len() {
+        return Err(DocumentError::UnsafePath(
+            "source corpus contains files outside the .md/.txt ownership contract".into(),
+        ));
+    }
+    let entry = original
+        .documents
+        .iter()
+        .find(|item| item.path == name)
+        .ok_or_else(|| {
+            DocumentError::UnsafePath("document not found in the canonical corpus".into())
+        })?;
+    if entry.source_sha256 != expected_sha256 {
+        return Err(DocumentError::StaleIndex);
+    }
+    let bytes = read_regular(replacement, MAX_SINGLE_BYTES)?;
+    if chunks(std::str::from_utf8(&bytes).map_err(|_| DocumentError::InvalidText)?)?.is_empty() {
+        return Err(DocumentError::InvalidText);
+    }
+    let replacement_digest = sha256(&bytes);
+    let stage = parent.join(format!(".neuromita-document-fork-{}", uuid::Uuid::new_v4()));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&stage)?;
+    let mut published = false;
+    let result = (|| -> Result<(), DocumentError> {
+        for document in &original.documents {
+            let data = if document.path == name {
+                bytes.clone()
+            } else {
+                let data = read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?;
+                if sha256(&data) != document.source_sha256 {
+                    return Err(DocumentError::StaleIndex);
+                }
+                data
+            };
+            write_private_document(&stage.join(&document.path), &data)?;
+        }
+        let next = inspect_source(&stage, character)?;
+        if next.documents.len() != original.documents.len()
+            || next
+                .documents
+                .iter()
+                .zip(&original.documents)
+                .any(|(new, old)| {
+                    if new.path != old.path {
+                        return true;
+                    }
+                    if new.path == name {
+                        new.source_sha256 != replacement_digest
+                    } else {
+                        new != old
+                    }
+                })
+        {
+            return Err(DocumentError::Limit);
+        }
+        after_staging()?;
+        if inspect_source(root, character)? != original
+            || read_regular(replacement, MAX_SINGLE_BYTES)? != bytes
+            || inspect_source(&stage, character)?.documents != next.documents
+        {
+            return Err(DocumentError::StaleIndex);
+        }
+        #[cfg(unix)]
+        File::open(&stage)?.sync_all()?;
+        rename_directory_without_replace(&stage, output_root)?;
+        published = true;
+        sync_parent(parent).map_err(|error| {
+            DocumentError::PublicationUncertain(format!("{}: {error}", output_root.display()))
+        })?;
+        Ok(())
+    })();
+    if !published {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result?;
+    Ok(ForkedCorpus {
+        character,
+        replaced_name: name.to_owned(),
+        previous_sha256: expected_sha256.into(),
+        replacement_sha256: replacement_digest,
+        output_root: output_root_string,
+        requires_reindex: true,
+    })
+}
+
 pub fn build_new(
     root: &Path,
     character: CharacterId,
@@ -512,4 +769,136 @@ pub fn search_verified(
         documents: index.documents.len(),
         hits,
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fork_tests {
+    use super::*;
+    use std::io;
+
+    struct Fixture {
+        temp: std::path::PathBuf,
+        root: std::path::PathBuf,
+        replacement: std::path::PathBuf,
+        target: std::path::PathBuf,
+        expected: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let temp =
+                std::env::temp_dir().join(format!("neuromita-fork-{}", uuid::Uuid::new_v4()));
+            let root = temp.join("original");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("notes.md"), "The unchanged owner file").unwrap();
+            let replacement = temp.join("updated.txt");
+            fs::write(&replacement, "A new versioned document").unwrap();
+            let target = temp.join("new-version");
+            let expected = sha256(&fs::read(root.join("notes.md")).unwrap());
+            Self {
+                temp,
+                root,
+                replacement,
+                target,
+                expected,
+            }
+        }
+        fn call(
+            &self,
+            hook: impl FnOnce() -> Result<(), DocumentError>,
+            sync: impl FnOnce(&Path) -> io::Result<()>,
+        ) -> Result<ForkedCorpus, DocumentError> {
+            fork_replacing_with_hooks(
+                &self.root,
+                CharacterId::Kind,
+                "notes.md",
+                &self.expected,
+                &self.replacement,
+                &self.target,
+                hook,
+                sync,
+            )
+        }
+        fn assert_no_staging(&self) {
+            assert!(fs::read_dir(&self.temp).unwrap().all(|item| {
+                !item
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".neuromita-document-fork-")
+            }));
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.temp);
+        }
+    }
+
+    #[test]
+    fn concurrent_old_root_replacement_fails_before_publishing_new_root() {
+        let f = Fixture::new();
+        let result = f.call(
+            || {
+                fs::write(
+                    f.root.join("notes.md"),
+                    "Someone else updated this document",
+                )?;
+                Ok(())
+            },
+            |dir| File::open(dir)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::StaleIndex)));
+        assert!(!f.target.exists());
+        assert_eq!(
+            fs::read_to_string(f.root.join("notes.md")).unwrap(),
+            "Someone else updated this document"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn destination_appearing_during_staging_is_preserved() {
+        let f = Fixture::new();
+        let result = f.call(
+            || {
+                fs::create_dir(&f.target)?;
+                fs::write(f.target.join("foreign.md"), "foreign winner")?;
+                Ok(())
+            },
+            |dir| File::open(dir)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::Io(_))));
+        assert_eq!(
+            fs::read_to_string(f.target.join("foreign.md")).unwrap(),
+            "foreign winner"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("notes.md")).unwrap(),
+            "The unchanged owner file"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn post_publication_sync_failure_does_not_delete_published_version() {
+        let f = Fixture::new();
+        let result = f.call(
+            || Ok(()),
+            |_| Err(io::Error::other("forced parent fsync failure")),
+        );
+        assert!(matches!(
+            result,
+            Err(DocumentError::PublicationUncertain(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(f.target.join("notes.md")).unwrap(),
+            "A new versioned document"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("notes.md")).unwrap(),
+            "The unchanged owner file"
+        );
+        f.assert_no_staging();
+    }
 }

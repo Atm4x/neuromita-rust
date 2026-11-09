@@ -631,3 +631,264 @@ fn import_rejects_symlink_inputs_and_existing_symlink_targets() {
     );
     assert_eq!(fs::read_to_string(&source).unwrap(), "source owner test");
 }
+
+#[test]
+fn versioned_fork_replaces_only_in_new_root_and_keeps_old_index_active() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    f.build();
+    let before = fs::read(f.documents.join("notes.md")).unwrap();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let source = f.root.join("new-notes.md");
+    fs::write(
+        &source,
+        "Revised meteor observations belong only to this version.",
+    )
+    .unwrap();
+    let output = f.root.join("kind-documents-v2");
+    let result = f.call(&[
+        "fork-replace",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--name",
+        "notes.md",
+        "--expected-sha256",
+        &digest,
+        "--source",
+        source.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(receipt["previous_sha256"], digest);
+    assert_eq!(receipt["requires_reindex"], true);
+    assert_eq!(receipt["output_root"], output.to_str().unwrap());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), before);
+    assert!(f.run("verify", &[]).status.success());
+    assert!(f.query("sakura").status.success());
+    assert_eq!(
+        fs::read_to_string(output.join("notes.md")).unwrap(),
+        fs::read_to_string(&source).unwrap()
+    );
+    assert_eq!(
+        fs::read(output.join("details.txt")).unwrap(),
+        fs::read(f.documents.join("details.txt")).unwrap()
+    );
+    let new_index = f.root.join("index-v2.json");
+    let built = f.call(&[
+        "build",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let queried = f.call(&[
+        "query",
+        "--root",
+        output.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index.to_str().unwrap(),
+        "--text",
+        "meteor",
+    ]);
+    assert!(queried.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&queried.stdout).unwrap()["status"],
+        "selected"
+    );
+    assert!(
+        !f.call(&[
+            "verify",
+            "--root",
+            output.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--index",
+            f.index.to_str().unwrap(),
+        ])
+        .status
+        .success()
+    );
+}
+
+#[test]
+fn versioned_fork_rejects_wrong_expected_hash_and_existing_output_without_touching_old() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let source = f.root.join("new-notes.md");
+    fs::write(&source, "New immutable source").unwrap();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let old = fs::read(f.documents.join("notes.md")).unwrap();
+    let output = f.root.join("version2");
+    let call = |sha: &str| {
+        f.call(&[
+            "fork-replace",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            sha,
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+    };
+    assert!(!call(&"0".repeat(64)).status.success());
+    assert!(!output.exists());
+    assert!(call(&digest).status.success());
+    assert!(!call(&digest).status.success());
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), old);
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        fs::read_to_string(output.join("notes.md")).unwrap()
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
+
+#[test]
+fn versioned_fork_rejects_unowned_files_and_unsafe_replacement() {
+    let f = Fixture::new();
+    let expected = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = expected
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let source = f.root.join("new-notes.md");
+    fs::write(&source, "new").unwrap();
+    let out = f.root.join("version2");
+    let call = |source: &std::path::Path| {
+        f.call(&[
+            "fork-replace",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--name",
+            "notes.md",
+            "--expected-sha256",
+            &digest,
+            "--source",
+            source.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+        ])
+    };
+    assert!(!call(&source).status.success());
+    assert!(!out.exists());
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    assert!(!call(&f.documents.join("notes.md")).status.success());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let link = f.root.join("link.md");
+        symlink(&source, &link).unwrap();
+        assert!(!call(&link).status.success());
+    }
+    assert!(!out.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_fork_writers_cannot_overwrite_each_others_output() {
+    let f = Fixture::new();
+    fs::remove_file(f.documents.join("ignored.bin")).unwrap();
+    let snapshot = document_index::inspect_source(&f.documents, CharacterId::Kind).unwrap();
+    let digest = snapshot
+        .documents
+        .iter()
+        .find(|x| x.path == "notes.md")
+        .unwrap()
+        .source_sha256
+        .clone();
+    let root = f.documents.to_string_lossy().to_string();
+    let output = f.root.join("version2").to_string_lossy().to_string();
+    let source = f.root.join("revised.txt");
+    fs::write(&source, "Concurrent version is consistent").unwrap();
+    let input = source.to_string_lossy().to_string();
+    let handles = (0..2)
+        .map(|_| {
+            let (root, output, input, digest) =
+                (root.clone(), output.clone(), input.clone(), digest.clone());
+            std::thread::spawn(move || {
+                Command::new(env!("CARGO_BIN_EXE_neuromita"))
+                    .args([
+                        "documents",
+                        "fork-replace",
+                        "--root",
+                        &root,
+                        "--character",
+                        "Kind",
+                        "--name",
+                        "notes.md",
+                        "--expected-sha256",
+                        &digest,
+                        "--source",
+                        &input,
+                        "--output",
+                        &output,
+                    ])
+                    .output()
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|r| r.status.success()).count(), 1);
+    assert_eq!(
+        fs::read_to_string(f.root.join("version2/notes.md")).unwrap(),
+        "Concurrent version is consistent"
+    );
+    assert!(fs::read_dir(&f.root).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-fork-")
+    }));
+}
