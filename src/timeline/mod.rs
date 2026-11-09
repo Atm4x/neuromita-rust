@@ -602,69 +602,27 @@ impl SessionTimeline {
         RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)
     }
 
-    /// Discover all admitted Regenerates for this session and character.
-    /// Discovery is indexed by child-branch marker; each outcome is read-only
-    /// and a concurrent persistent writer invalidates the entire enumeration.
-    /// An unknown outcome is never permission to invoke a provider again.
+    /// Read-only recovery diagnostic. Consume the same bounded source pages as
+    /// the recovery pager rather than scanning the full event or branch history.
+    /// The returned Vec is inherently unbounded; callers needing bounded memory
+    /// must use `enumerate_regenerate_admissions_page` directly.
+    /// A concurrent writer or selection A→B→A invalidates the scan.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn enumerate_regenerate_admissions(
         &self,
         character: CharacterId,
     ) -> Result<Vec<RegenerateRecoverySnapshot>, domain::TimelineError> {
-        let revision = self.store.enumeration_revision()?;
-        #[cfg(feature = "sqlite-system")]
-        let persisted_selection = self
-            .selection_repository
-            .as_ref()
-            .map(|repository| repository.selection())
-            .transpose()?;
-        let session = self.store.branch(self.branch)?.session_id;
-        let candidates = self
-            .store
-            .regenerate_admission_branches(session, character)?;
-        let mut result = Vec::with_capacity(candidates.len());
-        let mut requests = std::collections::HashSet::new();
-        for child in candidates {
-            let info = self.store.branch(child)?;
-            if info.session_id != session {
-                return Err(domain::TimelineError::Conflict);
+        let mut snapshots = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = self.enumerate_regenerate_admissions_page(character, 128, cursor)?;
+            snapshots.extend(page.entries);
+            if let Some(next) = page.next {
+                cursor = Some(next);
+            } else {
+                return Ok(snapshots);
             }
-            let receipt =
-                self.regenerate_admission_receipt(child)?
-                    .ok_or(domain::TimelineError::Invalid(
-                        "missing regenerate admission marker",
-                    ))?;
-            if receipt.character != character || info.parent != Some(receipt.parent_branch) {
-                return Err(domain::TimelineError::Invalid(
-                    "regenerate admission recipient or parent mismatch",
-                ));
-            }
-            receipt.validate(
-                self.store.as_ref(),
-                receipt.parent_branch,
-                child,
-                receipt.original_input,
-                character,
-            )?;
-            if !requests.insert(receipt.request) {
-                return Err(domain::TimelineError::Conflict);
-            }
-            result.push(self.reconcile_regenerate(child, receipt.request)?);
         }
-        if self.store.enumeration_revision()? != revision {
-            return Err(domain::TimelineError::ConcurrentWrite);
-        }
-        #[cfg(feature = "sqlite-system")]
-        if self
-            .selection_repository
-            .as_ref()
-            .map(|repository| repository.selection())
-            .transpose()?
-            != persisted_selection
-        {
-            return Err(domain::TimelineError::ConcurrentWrite);
-        }
-        Ok(result)
     }
 
     /// Bounded, read-only keyset enumeration. The next cursor is valid only

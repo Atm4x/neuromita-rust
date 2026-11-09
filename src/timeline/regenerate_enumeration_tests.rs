@@ -562,6 +562,59 @@ fn b72_collect_pages(
 }
 
 #[test]
+fn recovery_diagnostic_consumes_multiple_bounded_pages_without_duplicate_requests() {
+    let mut timeline = SessionTimeline::new();
+    let (_, _, character) = b72_many_admissions(&mut timeline, 130);
+    let original_selection = timeline.selection();
+    let snapshots = timeline.enumerate_regenerate_admissions(character).unwrap();
+    assert_eq!(snapshots.len(), 130);
+    assert_eq!(snapshots, b72_collect_pages(&timeline, character, 128));
+    assert_eq!(timeline.selection(), original_selection);
+    let mut requests = std::collections::HashSet::new();
+    for entry in snapshots {
+        assert!(requests.insert(entry.admission.request));
+        assert_eq!(entry.outcome, RegenerateRecoveryOutcome::DispatchUnknown);
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_recovery_diagnostic_crosses_page_boundary_and_preserves_snapshot() {
+    let path = std::env::temp_dir().join(format!("b73-paged-recovery-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (_, _, character) = b72_many_admissions(&mut owner, 130);
+    let original_selection = owner.selection();
+    let revision = owner.store.enumeration_revision().unwrap();
+    let before = owner.enumerate_regenerate_admissions(character).unwrap();
+    assert_eq!(before.len(), 130);
+    assert_eq!(before, b72_collect_pages(&owner, character, 128));
+    assert_eq!(owner.store.enumeration_revision().unwrap(), revision);
+    assert_eq!(owner.selection(), original_selection);
+    drop(owner);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        before,
+        reopened.enumerate_regenerate_admissions(character).unwrap()
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[test]
 fn keyset_pages_sizes_one_two_empty_and_character_scope() {
     let mut timeline = SessionTimeline::new();
     let (_session, _root, character) = b72_many_admissions(&mut timeline, 9);
