@@ -1,0 +1,12 @@
+name: Agent D48 workflow admission probe
+on:
+  push:
+    branches:
+      - bridge/agent-d48-ready-rollback-20261109
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo verified
