@@ -1,0 +1,35 @@
+name: Import exact Agent C native publisher approval
+on:
+  push:
+    branches: [bridge/agent-c-native-publisher-approval-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-publisher-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-publisher-approval-20261109
+          fetch-depth: 0
+      - name: Verify signed-release integration Git commit and non-force fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-publisher.part0{0,1,2,3} | base64 -d > /tmp/agent-c-publisher.bundle.xz
+          test "$(sha256sum /tmp/agent-c-publisher.bundle.xz | cut -d' ' -f1)" = "4a8ca77f86a63fb2537974c16d0d970e974b4c636f4b81db2ab43742c964ee34"
+          xz -dc /tmp/agent-c-publisher.bundle.xz > /tmp/agent-c-publisher.bundle
+          test "$(sha256sum /tmp/agent-c-publisher.bundle | cut -d' ' -f1)" = "fb9688656e1d76e9273b37e9f6d63f4532e9a27cd81f29d7e112b3716bf036f6"
+          git fetch origin refs/heads/codex/ai-native-workflow-hub-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "260249daa6679d78644301c9a80bfebd1a2376dc"
+          git fetch origin refs/heads/codex/ai-native-publisher-approval-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "260249daa6679d78644301c9a80bfebd1a2376dc"
+          git bundle verify /tmp/agent-c-publisher.bundle
+          git fetch /tmp/agent-c-publisher.bundle refs/heads/agent-c-publisher-release
+          test "$(git rev-parse FETCH_HEAD)" = "99f24d388446eeb06db9b1813d86c23eb6195f23"
+          git checkout --detach "99f24d388446eeb06db9b1813d86c23eb6195f23"
+          test "$(git rev-parse HEAD^{tree})" = "ce963e168a5a0872872343ea8185f7628a0ce8ae"
+          test "$(git rev-list --parents -n1 HEAD)" = "99f24d388446eeb06db9b1813d86c23eb6195f23 260249daa6679d78644301c9a80bfebd1a2376dc"
+          git diff --check "260249daa6679d78644301c9a80bfebd1a2376dc" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-publisher-approval-20261109
