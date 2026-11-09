@@ -222,9 +222,9 @@ impl SingleFileActivator {
                 .open(&candidate)?;
             io::copy(&mut input, &mut output)?;
             output.sync_all()?;
-            drop(output);
             fs::set_permissions(&candidate, fs::metadata(&target)?.permissions())?;
-            File::open(&candidate)?.sync_all()?;
+            output.sync_all()?;
+            drop(output);
             verify(&candidate, artifact.size(), artifact.sha256(), "candidate")?;
             let journal = ActivationJournal {
                 target_name: self.target_name.clone(),
@@ -826,6 +826,29 @@ mod tests {
             fs::metadata(f.target()).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_installed_executable_does_not_block_candidate_sync() {
+        let fixture = Fixture::new();
+        let target = fixture.target();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions).unwrap();
+
+        fixture
+            .activation
+            .prepare(&fixture.asset, &fixture.artifact)
+            .unwrap();
+        let candidate = fixture.workspace().join(CANDIDATE);
+        assert!(fs::metadata(&candidate).unwrap().permissions().readonly());
+
+        for path in [target, candidate] {
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions).unwrap();
+        }
     }
 
     #[test]
