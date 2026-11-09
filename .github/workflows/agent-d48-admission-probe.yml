@@ -1,12 +1,35 @@
-name: Agent D48 workflow admission probe
+name: Agent D48 single-job exact bridge
 on:
   push:
-    branches:
-      - bridge/agent-d48-ready-rollback-20261109
+    branches: [bridge/agent-d48-ready-rollback-20261109]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  probe:
+  import:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo verified
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate exact original patch, commit identity and publish candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=5c99d8201519e3762622e7173bead1b94978d7d7
+          EXPECTED=89607b00cb576ad97ce953d18d2f750337cbbf0b
+          TREE=9da632b7d4f5c14bd53989ef823a333073e48998
+          cat .agent-bridge/d48-part-0{1,2,3,4,5,6}.b64 | tr -d '\n' | base64 -d >/tmp/d46.patch.br
+          echo 'f525aac83dd5e2b9dfc0123747ee29a6f892b9cdb81e45516822c0fa1298314b  /tmp/d46.patch.br' | sha256sum --check
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d46.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d46.patch.br')))"
+          echo 'a0a62206ddb1b941ef55a010f100762ea30dfeee079a510fc99f0c063d74082e  /tmp/d46.patch' | sha256sum --check
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d46.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d48-health-ack-rollback-20261109
