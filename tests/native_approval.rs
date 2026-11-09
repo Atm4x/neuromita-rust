@@ -312,13 +312,21 @@ fn provision_approval(fixture: &LocalFixture, signer: &Ed25519KeyPair) -> PathBu
     release_file
 }
 
+fn pinned_trust(fixture: &LocalFixture) -> neuromita::ai_runtime::native_trust::NativeReleaseTrust {
+    use neuromita::ai_runtime::native_trust::{NativePolicyPin, NativeReleaseTrust};
+    let (policy, approvals) = trust_paths(fixture);
+    let pin = fs::read(&policy)
+        .ok()
+        .map(|bytes| NativePolicyPin::from_sha256_hex(&sha_hex(&bytes)).unwrap());
+    NativeReleaseTrust::new(policy, approvals, pin)
+}
+
 fn trusted_workflow(
     fixture: &LocalFixture,
 ) -> neuromita::ai_runtime::native_workflow::NativeModelWorkflow {
-    let (policy, approvals) = trust_paths(fixture);
     neuromita::ai_runtime::native_workflow::NativeModelWorkflow::with_trust(
         fixture.store(),
-        neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(policy, approvals),
+        pinned_trust(fixture),
     )
 }
 
@@ -348,10 +356,7 @@ fn no_independently_provisioned_key_or_release_denies_gui_selection() {
             .is_err()
     );
     provision_approval(&fixture, &signer);
-    let trust = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
-        trust_paths(&fixture).0,
-        trust_paths(&fixture).1,
-    );
+    let trust = pinned_trust(&fixture);
     assert!(matches!(
         trust.verdict("test-model", &fixture.manifest_digest),
         NativeTrustVerdict::Authorized { .. }
@@ -459,10 +464,7 @@ fn altered_signed_release_and_wrong_trusted_key_fail_closed() {
     let signer = signing_pair();
     provision_trust(&fixture, &signer);
     let path = provision_approval(&fixture, &signer);
-    let policy = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
-        trust_paths(&fixture).0,
-        trust_paths(&fixture).1,
-    );
+    let policy = pinned_trust(&fixture);
     let other = signing_pair();
     fs::write(
         &path,
@@ -496,10 +498,7 @@ fn malformed_trust_document_is_never_silently_ignored() {
     let signer = signing_pair();
     provision_trust(&fixture, &signer);
     provision_approval(&fixture, &signer);
-    let policy = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
-        trust_paths(&fixture).0.clone(),
-        trust_paths(&fixture).1,
-    );
+    let policy = pinned_trust(&fixture);
     fs::write(trust_paths(&fixture).0, b"{bad json}").unwrap();
     assert!(matches!(
         policy.verdict("test-model", &fixture.manifest_digest),
@@ -525,10 +524,7 @@ fn symlinked_publisher_keys_and_signed_release_are_rejected() {
     let original = fixture.root.join("keys.original.json");
     fs::rename(&policy_path, &original).unwrap();
     symlink(&original, &policy_path).unwrap();
-    let trust = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
-        policy_path.clone(),
-        trust_paths(&fixture).1,
-    );
+    let trust = pinned_trust(&fixture);
     assert!(matches!(
         trust.verdict("test-model", &fixture.manifest_digest),
         NativeTrustVerdict::Rejected
@@ -542,4 +538,154 @@ fn symlinked_publisher_keys_and_signed_release_are_rejected() {
         trust.verdict("test-model", &fixture.manifest_digest),
         NativeTrustVerdict::Rejected
     ));
+}
+
+#[test]
+fn binary_pinned_policy_rejects_replacement_with_attacker_keys() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    let approval = provision_approval(&fixture, &signer);
+    let trust = pinned_trust(&fixture);
+    assert!(matches!(
+        trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Authorized { .. }
+    ));
+
+    let attacker = signing_pair();
+    fs::write(
+        trust_paths(&fixture).0,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "publishers": [{
+                "publisher_id": "release-author",
+                "ed25519_public_key_base64": STANDARD.encode(attacker.public_key().as_ref()),
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        approval,
+        signed(&attacker, "test-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    assert!(matches!(
+        trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    assert!(
+        trust
+            .verify("test-model", &fixture.manifest_digest)
+            .is_err()
+    );
+}
+
+#[test]
+fn replacing_even_legitimate_policy_requires_updated_binary_pin() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    provision_approval(&fixture, &signer);
+    let old_bytes = fs::read(trust_paths(&fixture).0).unwrap();
+    let old_trust = pinned_trust(&fixture);
+
+    let mut modified: serde_json::Value = serde_json::from_slice(&old_bytes).unwrap();
+    modified["publishers"] = serde_json::json!([]);
+    let new_bytes = serde_json::to_vec(&modified).unwrap();
+    fs::write(trust_paths(&fixture).0, &new_bytes).unwrap();
+    assert!(matches!(
+        old_trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    let new_trust = pinned_trust(&fixture);
+    assert!(matches!(
+        new_trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    fs::write(trust_paths(&fixture).0, old_bytes).unwrap();
+    assert!(matches!(
+        new_trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    assert!(matches!(
+        old_trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Authorized { .. }
+    ));
+}
+
+#[test]
+fn product_without_compiled_pin_remains_denied_after_local_key_enrollment() {
+    use neuromita::ai_runtime::native_trust::{NativeReleaseTrust, NativeTrustVerdict};
+    let fixture = LocalFixture::new();
+    let (path, approvals) = trust_paths(&fixture);
+    let unprovisioned = NativeReleaseTrust::new(path, approvals, None);
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    provision_approval(&fixture, &signer);
+    assert!(matches!(
+        unprovisioned.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Missing
+    ));
+    assert!(
+        unprovisioned
+            .verify("test-model", &fixture.manifest_digest)
+            .is_err()
+    );
+    assert!(matches!(
+        pinned_trust(&fixture).verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Authorized { .. }
+    ));
+}
+
+#[test]
+fn build_policy_pin_must_be_exact_lowercase_sha256() {
+    use neuromita::ai_runtime::native_trust::NativePolicyPin;
+    assert!(NativePolicyPin::from_sha256_hex(&"ab".repeat(32)).is_ok());
+    for value in [
+        "AB".repeat(32),
+        "ab".repeat(31),
+        format!("{}\n", "ab".repeat(32)),
+    ] {
+        assert!(NativePolicyPin::from_sha256_hex(&value).is_err());
+    }
+}
+
+#[tokio::test]
+async fn publisher_policy_tamper_blocks_previously_selected_worker_activation() {
+    use neuromita::ai_runtime::native_workflow::NativeWorkflowError;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    provision_approval(&fixture, &signer);
+    let approved = verifier(&signer)
+        .verify(&signed(&signer, "test-model", &digest_string(&fixture)))
+        .unwrap();
+    fixture
+        .store()
+        .install_verified_local(
+            &fixture.source_packages,
+            &fixture.source_runtime,
+            &approved,
+            NativeBackend::Cpu,
+        )
+        .unwrap();
+    let mut workflow = trusted_workflow(&fixture);
+    workflow
+        .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+        .unwrap();
+    fs::write(
+        trust_paths(&fixture).0,
+        b"{\"schema_version\":1,\"publishers\":[]}",
+    )
+    .unwrap();
+    assert!(matches!(
+        workflow
+            .activate_selected("test-model", std::time::Duration::from_secs(1))
+            .await,
+        Err(NativeWorkflowError::Trust(_))
+    ));
+    assert!(workflow.snapshot().unwrap().worker.is_none());
 }

@@ -8,6 +8,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use ring::digest::{SHA256, digest};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -15,7 +16,7 @@ use super::{
     native_approval::{
         NativeApprovalError, NativePublisherKey, NativePublisherVerifier, VerifiedNativeRelease,
     },
-    native_registry::{NativeRegistryError, check_path, valid_identifier},
+    native_registry::{NativeRegistryError, check_path, parse_sha256, valid_identifier},
 };
 
 const MAX_TRUST_BYTES: u64 = 16 * 1024;
@@ -60,21 +61,43 @@ struct TrustedPublisherDocument {
     ed25519_public_key_base64: String,
 }
 
-/// The trust-policy file must be provisioned by the application administrator,
-/// independently of any model package or downloaded release document. This
-/// component never writes/creates it and never enrolls a key implicitly.
-/// Signed approvals are untrusted inputs, verified on every selection/activation.
+/// Binds an exact publisher policy to the trusted application build. A local
+/// JSON file is never a trust anchor by itself, even if its keys are well-formed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativePolicyPin([u8; 32]);
+
+impl NativePolicyPin {
+    pub fn from_sha256_hex(value: &str) -> Result<Self, NativeTrustError> {
+        let digest = parse_sha256(value)?;
+        if value != hex_digest(&digest) {
+            return Err(NativeTrustError::Invalid(
+                "policy pin must be lowercase SHA-256",
+            ));
+        }
+        Ok(Self(digest))
+    }
+}
+
+/// A publisher policy is accepted only if its exact bytes match an independently
+/// pinned digest. `None` is a deliberate deny-all state for builds without a
+/// provisioned anchor. Signed release documents are verified on every use.
 #[derive(Debug, Clone)]
 pub struct NativeReleaseTrust {
     policy_file: PathBuf,
     approvals_root: PathBuf,
+    policy_pin: Option<NativePolicyPin>,
 }
 
 impl NativeReleaseTrust {
-    pub fn new(policy_file: PathBuf, approvals_root: PathBuf) -> Self {
+    pub fn new(
+        policy_file: PathBuf,
+        approvals_root: PathBuf,
+        policy_pin: Option<NativePolicyPin>,
+    ) -> Self {
         Self {
             policy_file,
             approvals_root,
+            policy_pin,
         }
     }
 
@@ -113,9 +136,14 @@ impl NativeReleaseTrust {
     }
 
     fn load_verifier(&self) -> Result<NativePublisherVerifier, NativeTrustError> {
-        let Some(bytes) = read_optional(&self.policy_file, MAX_TRUST_BYTES)? else {
-            return Ok(NativePublisherVerifier::new([])?);
-        };
+        let pin = self.policy_pin.ok_or(NativeTrustError::NotAuthorized)?;
+        let bytes = read_optional(&self.policy_file, MAX_TRUST_BYTES)?
+            .ok_or(NativeTrustError::NotAuthorized)?;
+        if digest(&SHA256, &bytes).as_ref() != pin.0 {
+            return Err(NativeTrustError::Invalid(
+                "publisher policy does not match binary-pinned SHA-256",
+            ));
+        }
         let document: TrustDocument = serde_json::from_slice(&bytes)?;
         if document.schema_version != 1 || document.publishers.len() > 32 {
             return Err(NativeTrustError::Invalid(

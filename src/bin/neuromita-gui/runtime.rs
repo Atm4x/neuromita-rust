@@ -9,7 +9,7 @@ use neuromita::{
         install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
         native_model::NativeBackend,
         native_revisions::{NativeRevisionOverview, NativeRevisionStore},
-        native_trust::NativeReleaseTrust,
+        native_trust::{NativePolicyPin, NativeReleaseTrust},
         native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
@@ -457,11 +457,16 @@ fn open_native_workflow(
     if !native_exists || !runtime_exists {
         return Err("Нативное хранилище установлено не полностью".into());
     }
+    let policy_pin = option_env!("NEUROMITA_NATIVE_PUBLISHER_POLICY_SHA256")
+        .map(NativePolicyPin::from_sha256_hex)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let workflow = NativeModelWorkflow::with_trust(
         NativeRevisionStore::new(native, runtime),
         NativeReleaseTrust::new(
             directory.join("Config/native-publisher-keys.json"),
             directory.join("AIData/NativeApprovals"),
+            policy_pin,
         ),
     );
     workflow.snapshot().map_err(|error| error.to_string())?;
