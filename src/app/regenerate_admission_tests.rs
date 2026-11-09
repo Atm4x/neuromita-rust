@@ -2582,3 +2582,153 @@ async fn same_branch_character_handle_acceptance_survives_post_commit_cancel() {
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
 }
+
+#[cfg(feature = "sqlite-system")]
+#[derive(Clone, Copy, Debug)]
+enum B82ForeignKnowledgeChange {
+    Forget,
+    Reveal,
+    HistoryReset,
+}
+
+#[cfg(feature = "sqlite-system")]
+async fn b82_foreign_knowledge_change_rejects_dispatch(change: B82ForeignKnowledgeChange) {
+    let db = std::env::temp_dir().join(format!("b82-foreign-forget-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let branch = BranchId::new();
+    let fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root: branch,
+        },
+        2,
+        true,
+    )
+    .await;
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert_eq!(
+        fixture
+            .api
+            .inspect_orphaned_same_branch_regenerate(branch, handle.id())
+            .unwrap(),
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    );
+    let mut foreign = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root: branch,
+    })
+    .unwrap();
+    assert!(
+        foreign
+            .knows_event_at(CharacterId::Crazy, fixture.source.original_input, None)
+            .unwrap()
+    );
+    let (target, known_after) = match change {
+        B82ForeignKnowledgeChange::Forget => {
+            foreign
+                .change_character_knowledge(
+                    foreign.selection(),
+                    CharacterId::Crazy,
+                    EventId::new(),
+                    false,
+                    vec![fixture.source.original_input],
+                )
+                .unwrap();
+            (fixture.source.original_input, false)
+        }
+        B82ForeignKnowledgeChange::Reveal => {
+            foreign
+                .change_character_knowledge(
+                    foreign.selection(),
+                    CharacterId::Crazy,
+                    EventId::new(),
+                    true,
+                    vec![fixture.source.accepted_message],
+                )
+                .unwrap();
+            (fixture.source.accepted_message, true)
+        }
+        B82ForeignKnowledgeChange::HistoryReset => {
+            foreign
+                .reset_character_context(foreign.selection(), CharacterId::Crazy, EventId::new())
+                .unwrap();
+            (fixture.source.original_input, false)
+        }
+    };
+    assert_eq!(
+        foreign
+            .knows_event_at(CharacterId::Crazy, target, None)
+            .unwrap(),
+        known_after
+    );
+    assert!(
+        foreign
+            .knows_event_at(CharacterId::Crazy, target, Some(fixture.fence.at.through))
+            .unwrap()
+    );
+    let before = foreign.anchor();
+    let gate = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    assert!(
+        gate.before_provider(
+            handle.id(),
+            record.admission(),
+            record.regenerate_protocol(),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fixture
+            .api
+            .inspect_orphaned_same_branch_regenerate(branch, handle.id())
+            .unwrap(),
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    );
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root: branch,
+    })
+    .unwrap();
+    assert_eq!(reopened.anchor(), before);
+    assert!(matches!(
+        handle.cancel(),
+        crate::request::CancelResult::Cancelled | crate::request::CancelResult::Requested
+    ));
+    assert!(matches!(
+        fixture
+            .api
+            .inspect_orphaned_same_branch_regenerate(branch, handle.id())
+            .unwrap(),
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+    drop((reopened, foreign, handle, record, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_foreign_forget_denies_provider_dispatch_without_replaying_orphan() {
+    b82_foreign_knowledge_change_rejects_dispatch(B82ForeignKnowledgeChange::Forget).await;
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_foreign_reveal_denies_provider_dispatch_without_replaying_orphan() {
+    b82_foreign_knowledge_change_rejects_dispatch(B82ForeignKnowledgeChange::Reveal).await;
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_foreign_history_reset_denies_provider_dispatch_without_replaying_orphan() {
+    b82_foreign_knowledge_change_rejects_dispatch(B82ForeignKnowledgeChange::HistoryReset).await;
+}
