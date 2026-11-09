@@ -1,4 +1,4 @@
-name: Export pinned Agent C native source delta
+name: Export pinned Agent C PR377 delta
 on:
   push:
     branches:
@@ -11,22 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/ai-native-revision-ui-readmodel-20261109
+          ref: codex/ai-native-workflow-hub-20261109
           fetch-depth: 0
           persist-credentials: false
-      - name: Export branch delta from PR344
+      - name: Export exact delta
         shell: bash
         run: |
           set -euo pipefail
           HEAD="$(git rev-parse HEAD)"
-          test "$HEAD" = "7076ddcadd1ac93d1121c531b26c1494c06356ae"
-          TARGET="refs/heads/codex/ai-native-revision-ui-readmodel-20261109"
+          test "$HEAD" = "260249daa6679d78644301c9a80bfebd1a2376dc"
+          TARGET="refs/heads/codex/ai-native-workflow-hub-20261109"
           git update-ref "$TARGET" "$HEAD"
-          git merge-base --is-ancestor "7e12464181355c79179afd61f26d2d1839a6508e" "$HEAD"
-          git bundle create neuromita-rust-latest.bundle "$TARGET" "^7e12464181355c79179afd61f26d2d1839a6508e"
+          git merge-base --is-ancestor "7076ddcadd1ac93d1121c531b26c1494c06356ae" "$HEAD"
+          git bundle create neuromita-rust-latest.bundle "$TARGET" "^7076ddcadd1ac93d1121c531b26c1494c06356ae"
           git bundle verify neuromita-rust-latest.bundle
           sha256sum neuromita-rust-latest.bundle > neuromita-rust-latest.bundle.sha256
-          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-native-revision-ui-readmodel-20261109\nhead=%s\nbase=7e12464181355c79179afd61f26d2d1839a6508e\n' "$HEAD" > neuromita-rust-latest.manifest
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-native-workflow-hub-20261109\nhead=%s\nbase=7076ddcadd1ac93d1121c531b26c1494c06356ae\n' "$HEAD" > neuromita-rust-latest.manifest
       - uses: actions/upload-artifact@v4
         with:
           name: neuromita-rust-latest-source
