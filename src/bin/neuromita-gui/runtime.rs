@@ -13,7 +13,9 @@ use neuromita::{
         native_https::{NativeHttpsOrigin, NativeTransferPhase},
         native_model::NativeBackend,
         native_revisions::{NativeRevisionOverview, NativeRevisionStore},
-        native_trust::{NativePolicyPin, NativeReleaseTrust},
+        native_trust::{
+            NativeAuthorizedRelease, NativePolicyPin, NativeReleaseTrust, NativeTrustError,
+        },
         native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
@@ -136,6 +138,7 @@ pub enum Update {
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
     NativeModels(Box<NativeWorkflowSnapshot>),
+    NativeReleaseCatalog(Vec<NativeAuthorizedRelease>, NativeRevisionOverview),
     NativeError(String),
     NativeDownloadStatus {
         summary: String,
@@ -544,6 +547,60 @@ fn open_native_workflow(
     Ok(Some(workflow))
 }
 
+fn publish_native_release_catalog(
+    directory: &std::path::Path,
+    workflow: &Option<NativeModelWorkflow>,
+    publish: &impl Fn(Update),
+) {
+    let trust = match native_policy_pin() {
+        Ok(pin) => NativeReleaseTrust::new(
+            directory.join("Config/native-publisher-keys.json"),
+            directory.join("AIData/NativeApprovals"),
+            pin,
+        ),
+        Err(error) => {
+            publish(Update::NativeError(format!(
+                "Недействительная закреплённая политика: {error}"
+            )));
+            return;
+        }
+    };
+    let overview = match workflow.as_ref() {
+        Some(workflow) => match workflow.snapshot() {
+            Ok(snapshot) => snapshot.inventory,
+            Err(error) => {
+                publish(Update::NativeReleaseCatalog(
+                    vec![],
+                    NativeRevisionOverview {
+                        revisions: vec![],
+                        selections: vec![],
+                    },
+                ));
+                publish(Update::NativeError(format!(
+                    "Каталог установленных ревизий отклонён: {error}"
+                )));
+                return;
+            }
+        },
+        None => NativeRevisionOverview {
+            revisions: vec![],
+            selections: vec![],
+        },
+    };
+    match trust.available_releases() {
+        Ok(releases) => publish(Update::NativeReleaseCatalog(releases, overview)),
+        Err(NativeTrustError::NotAuthorized) => {
+            publish(Update::NativeReleaseCatalog(vec![], overview))
+        }
+        Err(error) => {
+            publish(Update::NativeReleaseCatalog(vec![], overview));
+            publish(Update::NativeError(format!(
+                "Каталог подписанных релизов отклонён: {error}"
+            )));
+        }
+    }
+}
+
 fn publish_native(workflow: &Option<NativeModelWorkflow>, publish: &impl Fn(Update)) {
     let snapshot = match workflow.as_ref() {
         Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
@@ -629,6 +686,7 @@ async fn observe(
     let native_error = initial_native.is_err();
     let mut native_workflow = initial_native.unwrap_or(None);
     publish_native(&native_workflow, publish);
+    publish_native_release_catalog(directory, &native_workflow, publish);
     if native_error {
         publish(Update::NativeError(
             "Ошибка при обнаружении нативных моделей".into(),
@@ -736,6 +794,7 @@ async fn observe(
                         }
                     }
                     publish_native(&native_workflow, publish);
+                    publish_native_release_catalog(directory, &native_workflow, publish);
                     if failed {
                         publish(Update::NativeError("Ошибка при обнаружении нативных моделей".into()));
                     }
@@ -1148,6 +1207,7 @@ async fn observe(
                                             }
                                         }
                                         publish_native(&native_workflow, publish);
+                                        publish_native_release_catalog(directory, &native_workflow, publish);
                                         publish(Update::NativeDownloadStatus {
                                             summary: format!("Пакет {} опубликован (повторное использование: {})",
                                                 installed.model_id, installed.reused_package),

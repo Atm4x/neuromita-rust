@@ -237,6 +237,9 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
             );
         }
         Update::NativeModels(snapshot) => super::ai_hub::native_models(window, *snapshot),
+        Update::NativeReleaseCatalog(releases, overview) => {
+            super::ai_hub::native_release_catalog(window, releases, overview)
+        }
         Update::NativeError(error) => super::ai_hub::native_error(window, error),
         Update::NativeDownloadStatus {
             summary,

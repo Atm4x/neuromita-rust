@@ -2,7 +2,7 @@ import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
 import { HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
-import { NativeRevisionPanel, NativeRevisionRow } from "../ai-hub/native.slint";
+import { NativeRevisionPanel, NativeRevisionRow, NativeReleaseRow } from "../ai-hub/native.slint";
 
 export component AiHubPage inherits Rectangle {
     background: Theme.background;
@@ -24,6 +24,7 @@ export component AiHubPage inherits Rectangle {
     private property <HubModel> selected-model;
     in property <[HubModel]> entries;
     in property <[NativeRevisionRow]> native-revisions;
+    in property <[NativeReleaseRow]> native-releases;
     in property <bool> native-has-active: false;
     in property <string> native-status;
     in property <string> native-error;
@@ -295,6 +296,7 @@ export component AiHubPage inherits Rectangle {
         if !root.settings-open && root.category == "native": NativeRevisionPanel {
             vertical-stretch: 1; horizontal-stretch: 1;
             revisions: root.native-revisions;
+            releases: root.native-releases;
             has-active: root.native-has-active;
             status: root.native-status;
             error: root.native-error;

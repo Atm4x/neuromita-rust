@@ -689,3 +689,124 @@ async fn publisher_policy_tamper_blocks_previously_selected_worker_activation() 
     ));
     assert!(workflow.snapshot().unwrap().worker.is_none());
 }
+
+#[test]
+fn signed_catalog_lists_uninstalled_releases_without_manifest_or_weight_reads() {
+    let fixture = LocalFixture::new();
+    let key = signing_pair();
+    provision_trust(&fixture, &key);
+    provision_approval(&fixture, &key);
+    let additional = "da".repeat(32);
+    let (_, approvals) = trust_paths(&fixture);
+    fs::write(
+        approvals
+            .join("test-model")
+            .join(format!("{additional}.json")),
+        signed(&key, "test-model", &additional),
+    )
+    .unwrap();
+    let catalog = pinned_trust(&fixture).available_releases().unwrap();
+    assert_eq!(catalog.len(), 2);
+    assert_eq!(catalog[0].model_id, "test-model");
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| entry.manifest_sha256 == fixture.manifest_digest)
+    );
+    assert!(
+        catalog
+            .iter()
+            .any(|entry| entry.manifest_sha256 == [0xda; 32])
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|entry| entry.publisher_id == "release-author")
+    );
+    assert!(fixture.store().list("test-model").unwrap().is_empty());
+}
+
+#[test]
+fn approval_catalog_fails_closed_on_forgery_filename_and_model_mismatch() {
+    let fixture = LocalFixture::new();
+    let key = signing_pair();
+    provision_trust(&fixture, &key);
+    let document = provision_approval(&fixture, &key);
+    let other = signing_pair();
+    fs::write(
+        &document,
+        signed(&other, "test-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+    fs::write(
+        &document,
+        signed(&key, "different", &digest_string(&fixture)),
+    )
+    .unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+    fs::write(&document, signed(&key, "test-model", &"cc".repeat(32))).unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+    fs::write(
+        &document,
+        signed(&key, "test-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    fs::rename(
+        &document,
+        document.with_file_name(format!("{}.json", "AB".repeat(32))),
+    )
+    .unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+}
+
+#[test]
+fn approval_catalog_denies_missing_or_mutated_trust_policy() {
+    let fixture = LocalFixture::new();
+    let key = signing_pair();
+    provision_trust(&fixture, &key);
+    provision_approval(&fixture, &key);
+    let policy = pinned_trust(&fixture);
+    assert_eq!(policy.available_releases().unwrap().len(), 1);
+    fs::write(trust_paths(&fixture).0, b"{").unwrap();
+    assert!(policy.available_releases().is_err());
+    let (config, approvals) = trust_paths(&fixture);
+    let denied =
+        neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(config, approvals, None);
+    assert!(denied.available_releases().is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn approval_catalog_rejects_symlinked_model_folder_and_release_file() {
+    use std::os::unix::fs::symlink;
+    let fixture = LocalFixture::new();
+    let key = signing_pair();
+    provision_trust(&fixture, &key);
+    let document = provision_approval(&fixture, &key);
+    let original = fixture.root.join("original-approval.json");
+    fs::rename(&document, &original).unwrap();
+    symlink(&original, &document).unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+    fs::remove_file(&document).unwrap();
+    fs::rename(original, &document).unwrap();
+    let (_, root) = trust_paths(&fixture);
+    let original = fixture.root.join("original-approvals");
+    fs::rename(root.join("test-model"), &original).unwrap();
+    symlink(original, root.join("test-model")).unwrap();
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+}
+
+#[test]
+fn approval_catalog_limits_number_of_releases_without_network_or_publishing() {
+    let fixture = LocalFixture::new();
+    let key = signing_pair();
+    provision_trust(&fixture, &key);
+    let (_, approvals) = trust_paths(&fixture);
+    for i in 0..257u16 {
+        let name = format!("{i:064x}.json");
+        fs::write(approvals.join("test-model").join(name), b"not validated").unwrap();
+    }
+    assert!(pinned_trust(&fixture).available_releases().is_err());
+    assert!(fixture.store().list("test-model").unwrap().is_empty());
+}

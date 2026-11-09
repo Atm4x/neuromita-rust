@@ -21,6 +21,17 @@ use super::{
 
 const MAX_TRUST_BYTES: u64 = 16 * 1024;
 const MAX_APPROVAL_BYTES: u64 = 4096;
+const MAX_APPROVAL_MODELS: usize = 128;
+const MAX_APPROVED_RELEASES: usize = 256;
+
+/// A signed, publisher-authorized release identity, not evidence that its
+/// manifest or model files are installed, intact, or supported by the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeAuthorizedRelease {
+    pub model_id: String,
+    pub manifest_sha256: [u8; 32],
+    pub publisher_id: String,
+}
 
 #[derive(Debug, Error)]
 pub enum NativeTrustError {
@@ -132,6 +143,56 @@ impl NativeReleaseTrust {
         Ok(approved)
     }
 
+    /// A bounded release catalog derived solely from verified signed approvals.
+    /// There is no mutable catalog JSON, network data, trust-on-first-use key or
+    /// fallback to manifest-discovered digests. Invalid entries fail closed.
+    pub fn available_releases(&self) -> Result<Vec<NativeAuthorizedRelease>, NativeTrustError> {
+        let verifier = self.load_verifier()?;
+        let mut releases = Vec::new();
+        let models = read_directory(&self.approvals_root)?;
+        if models.len() > MAX_APPROVAL_MODELS {
+            return Err(NativeTrustError::Invalid("too many approved models"));
+        }
+        for (model_id, model_path) in models {
+            if !valid_identifier(&model_id) {
+                return Err(NativeTrustError::Invalid(
+                    "invalid approved model directory",
+                ));
+            }
+            check_path(&model_path, true)?;
+            let documents = read_directory(&model_path)?;
+            if documents.len() > MAX_APPROVED_RELEASES.saturating_sub(releases.len()) {
+                return Err(NativeTrustError::Invalid("too many approved releases"));
+            }
+            for (name, path) in documents {
+                let digest_hex = name
+                    .strip_suffix(".json")
+                    .ok_or(NativeTrustError::Invalid("unexpected approval entry"))?;
+                let expected = parse_sha256(digest_hex)?;
+                if hex_digest(&expected) != digest_hex {
+                    return Err(NativeTrustError::Invalid("noncanonical approval filename"));
+                }
+                let bytes = read_optional(&path, MAX_APPROVAL_BYTES)?
+                    .ok_or(NativeTrustError::Invalid("approved release disappeared"))?;
+                let approved = verifier.verify(&bytes)?;
+                if approved.model_id() != model_id || approved.manifest_sha256() != expected {
+                    return Err(NativeTrustError::ReleaseMismatch);
+                }
+                releases.push(NativeAuthorizedRelease {
+                    model_id: model_id.clone(),
+                    manifest_sha256: expected,
+                    publisher_id: approved.publisher_id().to_owned(),
+                });
+            }
+        }
+        releases.sort_by(|a, b| {
+            a.model_id
+                .cmp(&b.model_id)
+                .then(a.manifest_sha256.cmp(&b.manifest_sha256))
+        });
+        Ok(releases)
+    }
+
     /// Metadata-only trust indication for UI. This never hashes weights and never
     /// equates publisher approval with installed-artifact integrity or worker Ready.
     pub fn verdict(&self, model_id: &str, digest: &[u8; 32]) -> NativeTrustVerdict {
@@ -225,4 +286,35 @@ fn read_optional(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, NativeTrust
         ));
     }
     Ok(Some(bytes))
+}
+
+/// Check every ancestor before enumeration, including a missing root. We do not
+/// create a directory or follow a symlink supplied by a release publisher.
+fn read_directory(path: &Path) -> Result<Vec<(String, PathBuf)>, NativeTrustError> {
+    if !path.is_absolute() {
+        return Err(NativeTrustError::Invalid("approval root must be absolute"));
+    }
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for parent in ancestors {
+        match fs::symlink_metadata(parent) {
+            Ok(_) => check_path(parent, true)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| NativeTrustError::Invalid("non-UTF8 approval entry"))?;
+        entries.push((name, entry.path()));
+        if entries.len() > MAX_APPROVED_RELEASES {
+            return Err(NativeTrustError::Invalid("too many approval entries"));
+        }
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
 }

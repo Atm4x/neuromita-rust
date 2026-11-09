@@ -16,9 +16,19 @@ export struct NativeRevisionRow {
     observed-phase: string,
 }
 
+export struct NativeReleaseRow {
+    model-id: string,
+    publisher-id: string,
+    manifest-sha256: string,
+    installed: bool,
+    display-name: string,
+    package-version: string,
+}
+
 export component NativeRevisionPanel inherits Rectangle {
     background: transparent;
     in property <[NativeRevisionRow]> revisions;
+    in property <[NativeReleaseRow]> releases;
     in property <bool> has-active: false;
     in property <string> status;
     in property <string> error;
@@ -26,8 +36,6 @@ export component NativeRevisionPanel inherits Rectangle {
     in property <bool> download-active: false;
     in property <string> download-summary;
     in property <int> download-progress: -1;
-    private property <string> install-model-id;
-    private property <string> install-digest;
     private property <string> install-backend: "cpu";
     callback download-requested(string, string, string);
     callback cancel-download-requested();
@@ -55,68 +63,68 @@ export component NativeRevisionPanel inherits Rectangle {
             }
         }
         Rectangle {
-            height: 159px;
+            height: root.releases.length == 0 ? 118px : 236px;
             background: Theme.panel;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 12px;
+            border-width: 1px; border-color: Theme.border; border-radius: 12px;
             VerticalLayout {
-                padding: 12px;
-                spacing: 7px;
+                padding: 12px; spacing: 8px;
                 HorizontalLayout {
-                    height: 20px;
-                    Label { text: "Скачать подписанный пакет"; font-size: 13px; font-weight: 650; horizontal-stretch: 1; }
+                    height: 24px;
+                    Label { text: "Доступные релизы · подписаны издателем"; font-size: 13px; font-weight: 650; horizontal-stretch: 1; }
                     Label {
-                        text: root.download-configured ? "HTTPS-источник закреплён в сборке" : "Источник или ключ не закреплены";
-                        font-size: 10px;
-                        color: root.download-configured ? Theme.muted : Theme.warning;
+                        text: root.download-configured ? "Доверенный HTTPS-источник" : "Источник или ключ не закреплены";
+                        font-size: 10px; color: root.download-configured ? Theme.muted : Theme.warning;
                     }
                 }
                 HorizontalLayout {
-                    height: 32px; spacing: 8px;
-                    Label { text: "ID"; width: 48px; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
+                    height: 29px; spacing: 8px;
+                    Label { text: "Backend установки"; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
                     Rectangle {
-                        horizontal-stretch: 1; min-width: 0px; border-radius: 7px;
-                        background: Theme.text.with-alpha(0.045); border-width: 1px; border-color: Theme.border;
-                        HorizontalLayout { padding-left: 8px; padding-right: 8px;
-                            TextInput { text <=> root.install-model-id; single-line: true; enabled: !root.download-active;
-                                color: Theme.text; font-size: 12px; vertical-alignment: center; }
-                        }
-                    }
-                    Label { text: "Backend"; width: 55px; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
-                    Rectangle {
-                        width: 92px; border-radius: 7px; background: Theme.text.with-alpha(0.045);
+                        width: 115px; border-radius: 7px; background: Theme.text.with-alpha(0.045);
                         border-width: 1px; border-color: Theme.border;
                         HorizontalLayout { padding-left: 8px; padding-right: 8px;
                             TextInput { text <=> root.install-backend; single-line: true; enabled: !root.download-active;
                                 color: Theme.text; font-size: 12px; vertical-alignment: center; }
                         }
                     }
-                }
-                HorizontalLayout {
-                    height: 32px; spacing: 8px;
-                    Label { text: "SHA-256"; width: 48px; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
-                    Rectangle {
-                        horizontal-stretch: 1; min-width: 0px; border-radius: 7px;
-                        background: Theme.text.with-alpha(0.045); border-width: 1px; border-color: Theme.border;
-                        HorizontalLayout { padding-left: 8px; padding-right: 8px;
-                            TextInput { text <=> root.install-digest; single-line: true; enabled: !root.download-active;
-                                color: Theme.text; font-size: 11px; vertical-alignment: center; }
-                        }
-                    }
-                    if !root.download-active: HubAction {
-                        caption: "Установить"; compact: true; primary: true;
-                        enabled: root.download-configured && root.install-model-id != "" && root.install-digest != "";
-                        activated => { root.download-requested(root.install-model-id, root.install-digest, root.install-backend); }
-                    }
                     if root.download-active: HubAction {
                         caption: "Отменить"; compact: true;
                         activated => { root.cancel-download-requested(); }
                     }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                }
+                if root.releases.length == 0: Label {
+                    text: "Подписанных релизов нет. Добавьте одобренные издателем документы через доверенный канал.";
+                    color: Theme.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1;
+                }
+                if root.releases.length > 0: ScrollView {
+                    horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
+                    VerticalLayout { spacing: 6px; padding-right: 7px;
+                        for release in root.releases: Rectangle {
+                            height: 57px; border-radius: 8px;
+                            background: Theme.text.with-alpha(0.035);
+                            HorizontalLayout { padding-left: 9px; padding-right: 9px; spacing: 9px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 3px; alignment: center; min-width: 0px;
+                                    Label {
+                                        text: release.display-name == "" ? release.model-id : release.display-name + " · " + release.package-version;
+                                        font-size: 12px; font-weight: 650; overflow: elide;
+                                    }
+                                    Label { text: release.publisher-id + " · SHA-256 " + release.manifest-sha256;
+                                        font-size: 10px; color: Theme.muted; overflow: elide; }
+                                }
+                                if release.installed: HubPill { caption: "На диске"; accent: true; }
+                                if !release.installed: HubAction {
+                                    caption: "Скачать"; compact: true; primary: true;
+                                    enabled: root.download-configured && !root.download-active;
+                                    activated => { root.download-requested(release.model-id, release.manifest-sha256, root.install-backend); }
+                                }
+                            }
+                        }
+                    }
                 }
                 Label {
                     text: root.download-summary != "" ? root.download-summary
-                        : "Укажите ID и точный digest релиза с подтверждённой подписью издателя";
+                        : "Релизы подтверждены подписью; файлы и поддержка backend проверяются при установке";
                     font-size: 11px; color: Theme.muted; overflow: elide; height: 18px;
                 }
                 if root.download-progress >= 0: Rectangle {

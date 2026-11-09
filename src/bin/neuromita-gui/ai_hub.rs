@@ -2,13 +2,17 @@
 
 use neuromita::{
     ai_runtime::{
-        native_model::NativePhase, native_trust::NativeTrustVerdict,
-        native_workflow::NativeWorkflowSnapshot, runtime_status::RuntimeSnapshot,
+        native_model::NativePhase,
+        native_revisions::NativeRevisionOverview,
+        native_trust::{NativeAuthorizedRelease, NativeTrustVerdict},
+        native_workflow::NativeWorkflowSnapshot,
+        runtime_status::RuntimeSnapshot,
         speech_catalog::SpeechInventory,
     },
     presentation::{
         ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
         native_hub::NativeHubPresenter,
+        native_release_catalog::NativeReleaseCatalogPresenter,
     },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
@@ -16,7 +20,10 @@ use std::rc::Rc;
 
 use super::{
     runtime::Command,
-    view::{AppWindow, HubInstallOperation, HubInstallPreview, HubModel, NativeRevisionRow},
+    view::{
+        AppWindow, HubInstallOperation, HubInstallPreview, HubModel, NativeReleaseRow,
+        NativeRevisionRow,
+    },
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
@@ -222,6 +229,27 @@ pub fn install_operation(
         stage: stage.into(),
         summary: summary.into(),
     });
+}
+
+/// Every row is derived from a current publisher signature, independently
+/// pinned trust policy and the existing revision inventory, never a mutable catalog.
+pub fn native_release_catalog(
+    window: &AppWindow,
+    releases: Vec<NativeAuthorizedRelease>,
+    overview: NativeRevisionOverview,
+) {
+    let rows = NativeReleaseCatalogPresenter::project(releases, &overview)
+        .into_iter()
+        .map(|entry| NativeReleaseRow {
+            model_id: entry.model_id.into(),
+            publisher_id: entry.publisher_id.into(),
+            manifest_sha256: entry.manifest_sha256.into(),
+            installed: entry.installed,
+            display_name: entry.display_name.unwrap_or_default().into(),
+            package_version: entry.package_version.unwrap_or_default().into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_native_releases(ModelRc::new(VecModel::from(rows)));
 }
 
 /// Read-only inventory; an explicit choice is not model readiness.
