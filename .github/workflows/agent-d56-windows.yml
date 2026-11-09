@@ -1,0 +1,42 @@
+name: Agent D56 native Windows installed helper and isolated lease E2E
+on:
+  push:
+    branches:
+      - bridge/agent-d56-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d56-isolated-windows-handoff-20261109
+      - name: Verify exact D56 commit identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "6b22584ff5162331e1b5ab837feae2be31a284ea"
+          test "$(git rev-parse HEAD^{tree})" = "3f0f8f4f60bb07c1b800a19da3fe39300f7e80a7"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: True Windows installed GUI helper isolated HKCU handoff E2E
+        run: |
+          cargo test --locked --offline --lib updater::handoff::windows_acceptance::installed_windows_helper_handoff_with_isolated_guard -- --test-threads=1 --nocapture
+      - name: Windows updater library and guard regressions
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Windows real helper offline recovery E2E
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery
+      - name: Windows raw PE apply readiness E2E
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e
+      - name: All Windows Rust targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
