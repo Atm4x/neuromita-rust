@@ -1,0 +1,36 @@
+name: Agent D52 exact installed Windows recovery E2E import
+on:
+  push:
+    branches:
+      - bridge/agent-d52-installed-windows-e2e-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and import original D52 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=36bbabfbafe51a9a8cd39054d2a2174120fb2911
+          EXPECTED=629b8f4a78e8595a71913e8414bbaf1faf017609
+          TREE=9ead3792d01e775bb89b0ea32f3dda42158abffc
+          cat .agent-bridge/d52-part-0{1,2}.b64 | tr -d '\n' | base64 -d >/tmp/d52.patch.br
+          echo '1ebd5d7eb0baffbeac880852ced8a7d707b0acf384c95955b868aab8a3a4a159  /tmp/d52.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d52.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d52.patch.br')))"
+          echo 'efcee9e90bd6cb8a3f488aa228416827dbf8930b2aea8ee1812845d27f76645a  /tmp/d52.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d52.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d52-windows-installed-recovery-e2e-20261109
