@@ -2491,11 +2491,8 @@ async fn same_branch_character_handle_acceptance_survives_post_commit_cancel() {
     )
     .await;
     let stop = tokio_util::sync::CancellationToken::new();
-    let (characters, tasks) = crate::character::CharacterRegistry::spawn(
-        Arc::clone(&fixture.timeline),
-        stop.clone(),
-        8,
-    );
+    let (characters, tasks) =
+        crate::character::CharacterRegistry::spawn(Arc::clone(&fixture.timeline), stop.clone(), 8);
     let character = characters.get(CharacterId::Crazy).unwrap();
     let handle = fixture
         .api
@@ -2578,7 +2575,9 @@ async fn same_branch_character_handle_acceptance_survives_post_commit_cancel() {
     for task in tasks {
         task.await.unwrap();
     }
-    drop((reopened, message, record, handle, character, characters, fixture));
+    drop((
+        reopened, message, record, handle, character, characters, fixture,
+    ));
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
     }
