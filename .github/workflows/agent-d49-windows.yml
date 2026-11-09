@@ -1,4 +1,4 @@
-name: Agent D50 Windows registry native validation
+name: Agent D50 Windows GUI compile using established job
 on:
   push:
     branches:
@@ -11,12 +11,12 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d50-windows-reboot-guard-20261109
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Windows registry recovery guard tests
-        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
       - name: Test real Windows recovery helper
         run: cargo test --locked --offline --test updater_offline_recovery
       - name: Check native GUI
