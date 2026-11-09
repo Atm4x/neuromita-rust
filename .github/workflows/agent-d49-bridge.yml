@@ -1,0 +1,36 @@
+name: Agent D49 exact offline-recovery import
+on:
+  push:
+    branches:
+      - bridge/agent-d49-recovery-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify D49 original patch and publish exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=89607b00cb576ad97ce953d18d2f750337cbbf0b
+          EXPECTED=72bfa9e5daf9d485de0cf51bc440578f86845ad5
+          TREE=c6d2a5f61536d5efcb668cee9437753ee0e803cd
+          cat .agent-bridge/d49-part-0{1,2,3,4}.b64 | tr -d '\n' | base64 -d > /tmp/d49.patch.br
+          echo 'c5741f9b38a5371c6f4263b13fa5f9f1b8ed43ac14195408d32666a6aea5d710  /tmp/d49.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d49.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d49.patch.br')))"
+          echo '69f36d8bd61d86e52cf60f8a82ae20ac9f20893eae56b9648113515202b427d8  /tmp/d49.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d49.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d49-offline-helper-recovery-20261109
