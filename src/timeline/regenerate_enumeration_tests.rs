@@ -919,3 +919,230 @@ fn sqlite_keyset_scans_admission_markers_not_unrelated_player_history() {
         let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
     }
 }
+
+#[cfg(all(feature = "sqlite-system", target_os = "linux"))]
+#[test]
+#[ignore = "explicit native SQLite benchmark; set B74_ADMISSIONS, B74_EVENTS, B74_ITERATIONS"]
+fn b74_native_recovery_benchmark() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn setting(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    }
+    fn rss_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+    fn summary(samples: &mut [Duration]) -> (f64, f64) {
+        samples.sort_unstable();
+        let len = samples.len();
+        let p50 = samples[(len - 1) / 2].as_secs_f64() * 1_000.0;
+        let p95 = samples[((len * 95).div_ceil(100)).saturating_sub(1)].as_secs_f64() * 1_000.0;
+        (p50, p95)
+    }
+    fn legacy_snapshot(
+        timeline: &SessionTimeline,
+        session: SessionId,
+        character: CharacterId,
+    ) -> Vec<RegenerateRecoverySnapshot> {
+        let mut result = Vec::new();
+        for child in timeline
+            .store
+            .regenerate_admission_branches(session, character)
+            .unwrap()
+        {
+            let info = timeline.store.branch(child).unwrap();
+            let receipt = timeline
+                .regenerate_admission_receipt(child)
+                .unwrap()
+                .unwrap();
+            assert_eq!(info.parent, Some(receipt.parent_branch));
+            assert!(
+                !timeline
+                    .store
+                    .regenerate_admission_request_duplicate(session, child, receipt.request.0)
+                    .unwrap()
+            );
+            receipt
+                .validate(
+                    timeline.store.as_ref(),
+                    receipt.parent_branch,
+                    child,
+                    receipt.original_input,
+                    character,
+                )
+                .unwrap();
+            result.push(
+                timeline
+                    .reconcile_regenerate(child, receipt.request)
+                    .unwrap(),
+            );
+        }
+        result
+    }
+
+    let admissions = setting("B74_ADMISSIONS", 132);
+    let unrelated = setting("B74_EVENTS", 512);
+    let iterations = setting("B74_ITERATIONS", 12);
+    let path = std::env::temp_dir().join(format!("b74-native-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let start_setup = Instant::now();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (_, _, character) = b72_many_admissions(&mut timeline, admissions);
+    let seed = timeline.enumerate_regenerate_admissions(character).unwrap();
+    // Spread durable lifecycle outcomes across different historical children.
+    for (index, entry) in seed.iter().enumerate().take(24) {
+        if index % 3 == 0 {
+            let selected = timeline
+                .select_branch(entry.admission.child_branch, timeline.selection())
+                .unwrap();
+            let event = timeline
+                .permit_regenerate_dispatch(
+                    entry.admission.child_branch,
+                    entry.admission.request,
+                    selected,
+                )
+                .unwrap();
+            assert_ne!(event, entry.admission.original_input);
+            if index % 2 == 0 {
+                timeline
+                    .abandon_regenerate(
+                        entry.admission.child_branch,
+                        entry.admission.request,
+                        selected,
+                    )
+                    .unwrap();
+            }
+        } else if index % 3 == 1 {
+            timeline
+                .select_branch(entry.admission.child_branch, timeline.selection())
+                .unwrap();
+            let input = entry.admission.original_input;
+            let turn = timeline
+                .capture_turn(character, Some(input), timeline.anchor())
+                .unwrap();
+            let variables = std::collections::BTreeMap::from([(
+                "b74_benchmark_index".to_owned(),
+                serde_json::json!(index),
+            )]);
+            timeline
+                .append_reply(GeneratedReply {
+                    request: entry.admission.request,
+                    intent: TurnIntent::Reply(input),
+                    turn,
+                    expected_revision: 0,
+                    content: serde_json::json!("benchmark accepted response"),
+                    audience: ConversationAudience::private_to(character),
+                    effects: vec![domain::AppliedEffect::CharacterVariablesChanged(variables)],
+                })
+                .unwrap();
+        }
+    }
+    for _ in 0..unrelated {
+        timeline
+            .publish_player_message(
+                character,
+                EventId::new(),
+                std::sync::Arc::from("unrelated large-session input"),
+            )
+            .unwrap();
+    }
+    let setup_ms = start_setup.elapsed().as_secs_f64() * 1000.0;
+    let expected = timeline.enumerate_regenerate_admissions(character).unwrap();
+    assert_eq!(expected.len(), admissions);
+    let legacy = legacy_snapshot(&timeline, session, character);
+    assert_eq!(expected, legacy);
+    let read_only_selection = timeline.selection();
+    let read_only_revision = timeline.store.enumeration_revision().unwrap();
+    let kinds = expected.iter().fold([0usize; 4], |mut kinds, row| {
+        let pos = match row.outcome {
+            RegenerateRecoveryOutcome::DispatchUnknown => 0,
+            RegenerateRecoveryOutcome::MayHaveDispatched(_) => 1,
+            RegenerateRecoveryOutcome::AcceptedReply(_) => 2,
+            RegenerateRecoveryOutcome::Abandoned(_) => 3,
+        };
+        kinds[pos] += 1;
+        kinds
+    });
+
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let peak = std::sync::Arc::new(AtomicU64::new(rss_kib()));
+    let runner = std::thread::spawn({
+        let done = done.clone();
+        let peak = peak.clone();
+        move || {
+            while !done.load(Ordering::Relaxed) {
+                peak.fetch_max(rss_kib(), Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    });
+    let mut legacy_samples = Vec::with_capacity(iterations);
+    let mut paged_samples = Vec::with_capacity(iterations);
+    for i in 0..iterations {
+        // Alternate the order to reduce bias from warm-cache effects.
+        if i % 2 == 0 {
+            let started = Instant::now();
+            assert_eq!(legacy_snapshot(&timeline, session, character), expected);
+            legacy_samples.push(started.elapsed());
+            let started = Instant::now();
+            assert_eq!(
+                timeline.enumerate_regenerate_admissions(character).unwrap(),
+                expected
+            );
+            paged_samples.push(started.elapsed());
+        } else {
+            let started = Instant::now();
+            assert_eq!(
+                timeline.enumerate_regenerate_admissions(character).unwrap(),
+                expected
+            );
+            paged_samples.push(started.elapsed());
+            let started = Instant::now();
+            assert_eq!(legacy_snapshot(&timeline, session, character), expected);
+            legacy_samples.push(started.elapsed());
+        }
+    }
+    done.store(true, Ordering::Relaxed);
+    runner.join().unwrap();
+    assert_eq!(timeline.selection(), read_only_selection);
+    assert_eq!(
+        timeline.store.enumeration_revision().unwrap(),
+        read_only_revision
+    );
+    let (old50, old95) = summary(&mut legacy_samples);
+    let (new50, new95) = summary(&mut paged_samples);
+    eprintln!(
+        "B74_NATIVE_RUST admissions={admissions} unrelated_events={unrelated} iterations={iterations} setup_ms={setup_ms:.1} outcomes_unknown={} dispatch={} accepted={} abandoned={} legacy_p50_ms={old50:.3} legacy_p95_ms={old95:.3} paged_p50_ms={new50:.3} paged_p95_ms={new95:.3} sampled_peak_process_rss_kib={} final_process_rss_kib={}",
+        kinds[0],
+        kinds[1],
+        kinds[2],
+        kinds[3],
+        peak.load(Ordering::Relaxed),
+        rss_kib()
+    );
+    drop(timeline);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
