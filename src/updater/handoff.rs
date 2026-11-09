@@ -23,6 +23,7 @@ use super::activation::{
 use crate::portable::PortableDataRoot;
 
 pub const HELPER_COMMAND: &str = "--internal-apply-update";
+pub const RECOVER_COMMAND: &str = "--recover-interrupted-update";
 const RESULT_NAME: &str = "last-activation.json";
 const HANDOFF_NAME: &str = "handoff.json";
 const READY_NAME: &str = "readiness.json";
@@ -58,6 +59,10 @@ pub enum HandoffError {
     ParentIdentity,
     #[error("this platform has no supported parent identity waiting mechanism")]
     UnsupportedPlatform,
+    #[error("recovery refused because an installed GUI or another updater helper is still running")]
+    RecoveryBusy,
+    #[error("recovery cannot prove that all installation processes are stopped: {0}")]
+    RecoveryInspection(String),
     #[error("activation failed: {0}")]
     Activation(#[from] ActivationError),
     #[error("updater handoff I/O failed: {0}")]
@@ -181,6 +186,9 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         .into_iter()
         .map(|part| part.as_ref().to_owned())
         .collect::<Vec<_>>();
+    if arguments.as_slice() == [OsStr::new(RECOVER_COMMAND)] {
+        return recover_stopped_installation();
+    }
     let [command, pid, identity, nonce] = arguments.as_slice() else {
         return Err(HandoffError::InvalidInvocation);
     };
@@ -272,6 +280,126 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         details.as_deref().unwrap_or(""),
     )?;
     result.map(|_| ())
+}
+
+/// Explicit offline recovery after a helper crash or reboot. The installation
+/// root and target are derived from the real helper executable, never CLI paths.
+/// This command NEVER resumes installation, launches a GUI or accepts a nonce.
+fn recover_stopped_installation() -> Result<(), HandoffError> {
+    let executable = std::env::current_exe()?;
+    if executable.file_name() != Some(OsStr::new(HELPER_NAME)) {
+        return Err(HandoffError::UnsafeHelper);
+    }
+    require_regular_file(&executable)?;
+    let install = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
+    let target_name = prepared_target_name(install)?;
+    let required_name = if cfg!(windows) {
+        "neuromita-gui.exe"
+    } else {
+        "neuromita-gui"
+    };
+    if target_name != required_name {
+        return Err(HandoffError::InvalidInvocation);
+    }
+    let data_path = install.join("UserData");
+    let metadata = fs::symlink_metadata(&data_path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(HandoffError::NonPortableDataRoot);
+    }
+    let data_root = PortableDataRoot::from_executable(&executable, Some(&data_path), None)?;
+    let activator = SingleFileActivator::new(install, &data_root, required_name)?;
+    ensure_no_active_installation_processes(&activator, &executable)?;
+    let recovered = activator.recover_interrupted_health_check()?;
+    if recovered != RecoveryOutcome::PreviousRestored {
+        return Err(HandoffError::NotPrepared);
+    }
+    write_report(&data_root, required_name, "interrupted-update-restored", "")?;
+    eprintln!("Previous NeuroMita executable restored. UserData was not changed.");
+    Ok(())
+}
+
+fn ensure_no_active_installation_processes(
+    activator: &SingleFileActivator,
+    helper: &Path,
+) -> Result<(), HandoffError> {
+    for (path, allow_self) in [
+        (activator.target_path(), false),
+        (helper.to_path_buf(), true),
+    ] {
+        let scan = crate::launcher::scan_install(&path)
+            .map_err(|error| HandoffError::RecoveryInspection(error.to_string()))?;
+        if scan
+            .matching
+            .iter()
+            .any(|identity| !allow_self || identity.pid != process::id())
+        {
+            return Err(HandoffError::RecoveryBusy);
+        }
+        #[cfg(target_os = "linux")]
+        for pid in scan.inaccessible {
+            let name = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or(HandoffError::UnsafeHelper)?;
+            let expected = &name.as_bytes()[..name.len().min(15)];
+            let actual = fs::read(format!("/proc/{pid}/comm"))
+                .map_err(|error| HandoffError::RecoveryInspection(error.to_string()))?;
+            if actual.strip_suffix(b"\n").unwrap_or(&actual) == expected {
+                return Err(HandoffError::RecoveryBusy);
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    ensure_no_running_linux_inodes(activator)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_no_running_linux_inodes(activator: &SingleFileActivator) -> Result<(), HandoffError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let workspace = activator.install_root().join(".neuromita-update");
+    let mut tracked = Vec::new();
+    for path in [
+        activator.target_path(),
+        workspace.join("candidate"),
+        workspace.join("backup"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+                tracked.push((meta.dev(), meta.ino()));
+            }
+            Ok(_) => return Err(HandoffError::UnsafeHelper),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match fs::metadata(format!("/proc/{pid}/exe")) {
+            Ok(meta) if tracked.contains(&(meta.dev(), meta.ino())) => {
+                return Err(HandoffError::RecoveryBusy);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .map_err(|error| HandoffError::RecoveryInspection(error.to_string()))?;
+                if comm.trim_end() == "neuromita-gui" {
+                    return Err(HandoffError::RecoveryBusy);
+                }
+            }
+            Err(error) => return Err(HandoffError::RecoveryInspection(error.to_string())),
+        }
+    }
+    Ok(())
 }
 
 /// Called only after Slint has entered its event loop and the window is visible.
@@ -592,6 +720,7 @@ mod tests {
             vec!["--internal-apply-update", "99", "0"],
             vec!["--internal-apply-update", "x", "2"],
             vec!["--internal-apply-update", "99", "invalid", "bad"],
+            vec!["--recover-interrupted-update", "unexpected"],
         ] {
             assert!(matches!(
                 run_helper(args),

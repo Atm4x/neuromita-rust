@@ -329,10 +329,45 @@ impl SingleFileActivator {
         self.cleanup()
     }
 
+    /// Recover a health-armed update left behind by a terminated helper.
+    /// The caller must first establish that no installed GUI or other updater
+    /// helper is running; this operation never stops external processes.
+    /// Unarmed/legacy transactions are intentionally ineligible.
+    pub fn recover_interrupted_health_check(&self) -> Result<RecoveryOutcome, ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if !self.workspace().exists() {
+            return Ok(RecoveryOutcome::NoTransaction);
+        }
+        let nonce = self
+            .load_journal()?
+            .health_nonce
+            .ok_or(ActivationError::Conflict(
+                "manual recovery requires an explicitly health-armed transaction",
+            ))?;
+        match self.recover_unlocked()? {
+            RecoveryOutcome::Prepared => {
+                self.cleanup()?;
+                Ok(RecoveryOutcome::PreviousRestored)
+            }
+            RecoveryOutcome::AwaitingHealth => {
+                self.rollback_health_unlocked(nonce)?;
+                Ok(RecoveryOutcome::PreviousRestored)
+            }
+            RecoveryOutcome::PreviousRestored => Ok(RecoveryOutcome::PreviousRestored),
+            _ => Err(ActivationError::Conflict(
+                "interrupted health transaction has unexpected state",
+            )),
+        }
+    }
+
     /// Restores the exact previous executable; refuses to overwrite third-party bytes.
     /// The new child must already have exited, especially on Windows file locks.
     pub fn rollback_health_check(&self, nonce: Uuid) -> Result<(), ActivationError> {
         let _lock = lock_installation(&self.install_root)?;
+        self.rollback_health_unlocked(nonce)
+    }
+
+    fn rollback_health_unlocked(&self, nonce: Uuid) -> Result<(), ActivationError> {
         if self.load_journal()?.health_nonce != Some(nonce)
             || self.recover_unlocked()? != RecoveryOutcome::AwaitingHealth
         {
@@ -1272,6 +1307,83 @@ mod tests {
         );
         assert_eq!(fs::read(f.target()).unwrap(), b"old version");
     }
+    #[test]
+    fn manual_recovery_restores_orphaned_health_transaction_and_user_data() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(Uuid::new_v4()).unwrap();
+        assert_eq!(
+            f.activation.apply().unwrap(),
+            RecoveryOutcome::AwaitingHealth
+        );
+        let recovered = SingleFileActivator::new(&f.install, &f.data, "neuromita.exe").unwrap();
+        assert_eq!(
+            recovered.recover_interrupted_health_check().unwrap(),
+            RecoveryOutcome::PreviousRestored
+        );
+        assert_eq!(
+            recovered.recover_interrupted_health_check().unwrap(),
+            RecoveryOutcome::NoTransaction
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+        assert_eq!(
+            fs::read(f.data.path().join("settings.json")).unwrap(),
+            b"private settings"
+        );
+    }
+
+    #[test]
+    fn manual_recovery_discards_only_the_verified_unapplied_health_candidate() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(Uuid::new_v4()).unwrap();
+        assert_eq!(
+            f.activation.recover_interrupted_health_check().unwrap(),
+            RecoveryOutcome::PreviousRestored
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+        assert!(!f.workspace().exists());
+    }
+
+    #[test]
+    fn manual_recovery_never_changes_unarmed_or_third_party_transactions() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        assert!(matches!(
+            f.activation.recover_interrupted_health_check(),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(f.activation.recover().unwrap(), RecoveryOutcome::Prepared);
+        f.activation.arm_health_check(Uuid::new_v4()).unwrap();
+        f.activation.apply().unwrap();
+        fs::write(f.target(), b"unknown executable").unwrap();
+        assert!(matches!(
+            f.activation.recover_interrupted_health_check(),
+            Err(ActivationError::Conflict(_))
+        ));
+        assert_eq!(fs::read(f.target()).unwrap(), b"unknown executable");
+        assert_eq!(
+            fs::read(f.workspace().join(BACKUP)).unwrap(),
+            b"old version"
+        );
+    }
+
+    #[test]
+    fn manual_recovery_can_finish_interrupted_rollback_without_reapplying() {
+        let f = Fixture::new();
+        f.activation.prepare(&f.asset, &f.artifact).unwrap();
+        f.activation.arm_health_check(Uuid::new_v4()).unwrap();
+        f.activation.apply().unwrap();
+        fs::write(f.workspace().join(ROLLBACK_MARKER), b"rollback").unwrap();
+        fs::rename(f.target(), f.workspace().join(CANDIDATE)).unwrap();
+        let fresh = SingleFileActivator::new(&f.install, &f.data, "neuromita.exe").unwrap();
+        assert_eq!(
+            fresh.recover_interrupted_health_check().unwrap(),
+            RecoveryOutcome::PreviousRestored
+        );
+        assert_eq!(fs::read(f.target()).unwrap(), b"old version");
+    }
+
     #[test]
     fn rollback_resumes_after_interruption_between_two_file_moves() {
         let f = Fixture::new();

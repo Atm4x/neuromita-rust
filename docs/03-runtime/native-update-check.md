@@ -106,3 +106,33 @@ helper itself after replacing the EXE leaves a durable pending transaction, but
 an automatic watchdog relaunch across power loss has not been integrated.
 Multi-file/archive activation and deeper Core/AI startup acknowledgement remain
 separate work; this is a verified *single raw EXE* rollback boundary.
+
+## Explicit offline recovery after helper termination (D49)
+
+If the updater helper itself terminates or the machine loses power **after** the
+new EXE is installed but **before** the verified GUI readiness receipt is
+accepted, the previous version remains in the journaled backup. Never assume
+that restarting the GUI alone completes that transaction. Stop **all**
+`neuromita-gui[.exe]` instances and other `neuromita-updater[.exe]` processes,
+then run the actual installed helper beside the GUI:
+
+- Windows: `neuromita-updater.exe --recover-interrupted-update`
+- Linux: `./neuromita-updater --recover-interrupted-update`
+
+This is an explicit offline repair command, **not an automatic retry or update
+installer**. The helper accepts no user-supplied installation path, package
+path, nonce or release URL. Its own executable location determines the target.
+It verifies the default, non-symlink `UserData` root, the health-armed journal,
+and the exact hashes of both the old and new bytes. A still-running installed
+GUI or another helper blocks recovery. On Linux, even a running executable
+renamed into the transaction workspace is detected by device/inode scanning.
+Unknown target bytes, a damaged backup, an unarmed/legacy transaction, or
+inaccessible relevant processes cause an explicit refusal without overwriting
+evidence. A successfully recovered transaction restores the old binary,
+preserves `UserData`, records `interrupted-update-restored` in
+`UserData/updates/last-activation.json`, and cannot be replayed.
+
+The operator must start the restored GUI separately after recovery. An
+unattended boot-time watchdog or automatic safe helper restart is **not yet
+implemented**. Production Windows acceptance still requires testing the real
+installed executable, Windows file-sharing locks, and GUI interaction.
