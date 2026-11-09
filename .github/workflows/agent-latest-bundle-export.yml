@@ -1,4 +1,4 @@
-name: Export NeuroMita Rust latest source bundle
+name: Export pinned Agent C native source delta
 on:
   push:
     branches:
@@ -11,20 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/ai-platform-hub-c3-operation-readmodel-20261108
+          ref: codex/ai-native-revision-ui-readmodel-20261109
           fetch-depth: 0
           persist-credentials: false
-      - name: Export latest branch only
+      - name: Export branch delta from PR344
         shell: bash
         run: |
           set -euo pipefail
           HEAD="$(git rev-parse HEAD)"
-          TARGET="refs/heads/codex/ai-platform-hub-c3-operation-readmodel-20261108"
+          test "$HEAD" = "7076ddcadd1ac93d1121c531b26c1494c06356ae"
+          TARGET="refs/heads/codex/ai-native-revision-ui-readmodel-20261109"
           git update-ref "$TARGET" "$HEAD"
-          git bundle create neuromita-rust-latest.bundle "$TARGET"
+          git merge-base --is-ancestor "7e12464181355c79179afd61f26d2d1839a6508e" "$HEAD"
+          git bundle create neuromita-rust-latest.bundle "$TARGET" "^7e12464181355c79179afd61f26d2d1839a6508e"
           git bundle verify neuromita-rust-latest.bundle
           sha256sum neuromita-rust-latest.bundle > neuromita-rust-latest.bundle.sha256
-          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-platform-hub-c3-operation-readmodel-20261108\nhead=%s\n' "$HEAD" > neuromita-rust-latest.manifest
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-native-revision-ui-readmodel-20261109\nhead=%s\nbase=7e12464181355c79179afd61f26d2d1839a6508e\n' "$HEAD" > neuromita-rust-latest.manifest
       - uses: actions/upload-artifact@v4
         with:
           name: neuromita-rust-latest-source
@@ -32,5 +34,5 @@ jobs:
             neuromita-rust-latest.bundle
             neuromita-rust-latest.bundle.sha256
             neuromita-rust-latest.manifest
-          retention-days: 7
+          retention-days: 3
           if-no-files-found: error
