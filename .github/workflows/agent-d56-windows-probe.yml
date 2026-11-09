@@ -1,0 +1,12 @@
+name: Agent D56 isolated Windows job admission
+on:
+  push:
+    branches:
+      - bridge/agent-d56-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - run: echo d56-native-runner
