@@ -236,6 +236,8 @@ fn apply(window: &AppWindow, update: Update, memory_editor: &super::memory::Edit
                 operation_id,
             );
         }
+        Update::NativeModels(snapshot) => super::ai_hub::native_models(window, *snapshot),
+        Update::NativeError(error) => super::ai_hub::native_error(window, error),
         Update::SpeechInventory(catalog, devices) => {
             super::voice::inventory(window, &catalog);
             super::asr::inventory(window, &catalog, &devices);

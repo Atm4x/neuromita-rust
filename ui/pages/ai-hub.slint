@@ -2,6 +2,7 @@ import { Theme, Icons } from "../theme.slint";
 import { Label, Icon, ActionSurface } from "../components/controls.slint";
 import { HubModelIdentity, HubInstallPreview, HubInstallOperation, HubModel, HubPill, HubAction, HubModelCard, HubStat } from "../ai-hub/components.slint";
 import { ScrollView } from "std-widgets.slint";
+import { NativeRevisionPanel, NativeRevisionRow } from "../ai-hub/native.slint";
 
 export component AiHubPage inherits Rectangle {
     background: Theme.background;
@@ -10,7 +11,7 @@ export component AiHubPage inherits Rectangle {
     private property <string> runtime-filter: "all";
     private property <string> search-text: "";
     private property <int> category-slot: root.category == "tts" ? 0 : root.category == "asr" ? 1 : root.category == "core" ? 2 : root.category == "rag" ? 3 : 4;
-    private property <int> category-total: root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
+    private property <int> category-total: root.category == "native" ? root.native-revisions.length : root.category-counts.length > root.category-slot ? root.category-counts[root.category-slot] : 0;
     out property <HubModelIdentity> selected-key;
     out property <bool> selection-missing: false;
     private property <bool> selection-changed: false;
@@ -22,6 +23,14 @@ export component AiHubPage inherits Rectangle {
     private property <string> field-two: "";
     private property <HubModel> selected-model;
     in property <[HubModel]> entries;
+    in property <[NativeRevisionRow]> native-revisions;
+    in property <bool> native-has-active: false;
+    in property <string> native-status;
+    in property <string> native-error;
+    callback native-refresh-requested();
+    callback native-select-requested(string, string, string);
+    callback native-activate-requested(string);
+    callback native-stop-requested();
     in property <[int]> category-counts;
     in-out property <int> review-token: 0;
     in property <HubInstallPreview> install-preview;
@@ -206,13 +215,14 @@ export component AiHubPage inherits Rectangle {
                     { id: "asr", title: "ASR", subtitle: "Речь", icon: Icons.ai-asr, order: 1 },
                     { id: "core", title: "Core", subtitle: "Ядро", icon: Icons.ai-core, order: 2 },
                     { id: "rag", title: "RAG", subtitle: "Память", icon: Icons.ai-rag, order: 3 },
-                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else, order: 4 }
+                    { id: "else", title: "Else", subtitle: "Прочее", icon: Icons.ai-else, order: 4 },
+                    { id: "native", title: "Native", subtitle: "EXE", icon: Icons.ai-core, order: 5 }
                 ]: ActionSurface {
                     height: 46px;
                     horizontal-stretch: 1;
                     min-width: 126px;
                     max-width: 10000px;
-                    label: cat.title + ", моделей: " + (root.category-counts.length > cat.order ? root.category-counts[cat.order] : 0);
+                    label: cat.title + ", моделей: " + (cat.id == "native" ? root.native-revisions.length : root.category-counts.length > cat.order ? root.category-counts[cat.order] : 0);
                     selected: root.category == cat.id;
                     border-radius: 10px;
                     border-width: root.category == cat.id ? 1px : 0px;
@@ -252,7 +262,7 @@ export component AiHubPage inherits Rectangle {
                                 border-width: 1px;
                                 border-color: root.category == cat.id ? Theme.accent-border : Theme.border;
                                 count-label := Label {
-                                    text: root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
+                                    text: cat.id == "native" ? "" + root.native-revisions.length : root.category-counts.length > cat.order ? "" + root.category-counts[cat.order] : "0";
                                     horizontal-alignment: center; font-size: 10px; font-weight: 650;
                                     color: root.category == cat.id ? Theme.text : Theme.muted;
                                 }
@@ -276,7 +286,18 @@ export component AiHubPage inherits Rectangle {
                 }
             }
         }
-        if !root.settings-open: VerticalLayout {
+        if !root.settings-open && root.category == "native": NativeRevisionPanel {
+            vertical-stretch: 1; horizontal-stretch: 1;
+            revisions: root.native-revisions;
+            has-active: root.native-has-active;
+            status: root.native-status;
+            error: root.native-error;
+            refresh-requested => { root.native-refresh-requested(); }
+            select-requested(id, sha, backend) => { root.native-select-requested(id, sha, backend); }
+            activate-requested(id) => { root.native-activate-requested(id); }
+            stop-requested => { root.native-stop-requested(); }
+        }
+        if !root.settings-open && root.category != "native": VerticalLayout {
             spacing: 11px;
             HorizontalLayout {
                 height: 40px; spacing: 10px;

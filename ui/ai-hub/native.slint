@@ -1,0 +1,89 @@
+import { Theme, Icons } from "../theme.slint";
+import { Label, Icon } from "../components/controls.slint";
+import { HubAction, HubPill } from "components.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export struct NativeRevisionRow {
+    model-id: string,
+    display-name: string,
+    package-version: string,
+    manifest-sha256: string,
+    backend: string,
+    selected: bool,
+    running: bool,
+    observed-phase: string,
+}
+
+export component NativeRevisionPanel inherits Rectangle {
+    background: transparent;
+    in property <[NativeRevisionRow]> revisions;
+    in property <bool> has-active: false;
+    in property <string> status;
+    in property <string> error;
+    callback refresh-requested();
+    callback select-requested(string, string, string);
+    callback activate-requested(string);
+    callback stop-requested();
+
+    VerticalLayout {
+        spacing: 12px;
+        HorizontalLayout {
+            height: 38px;
+            spacing: 12px;
+            VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 2px;
+                Label { text: "Нативные модели · EXE"; font-size: 18px; font-weight: 700; }
+                Label { text: "Версии из Core; проверка файлов выполняется перед выбором и запуском"; font-size: 11px; color: Theme.muted; }
+            }
+            HubAction { caption: "Обновить"; compact: true; activated => { root.refresh-requested(); } }
+        }
+        if root.status != "" || root.error != "": Rectangle {
+            height: 48px; background: root.error == "" ? Theme.accent.with-alpha(0.07) : Theme.warning.with-alpha(0.07);
+            border-radius: 10px; border-width: 1px; border-color: root.error == "" ? Theme.accent-border : Theme.warning.with-alpha(0.4);
+            VerticalLayout { padding-left: 12px; padding-right: 12px; alignment: center;
+                Label { text: root.error == "" ? root.status : root.error; font-size: 12px; color: root.error == "" ? Theme.text : Theme.warning; overflow: elide; }
+            }
+        }
+        if root.revisions.length == 0: Rectangle {
+            background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 14px;
+            vertical-stretch: 1;
+            VerticalLayout { padding: 20px; spacing: 8px; alignment: center;
+                Label { text: "Установленные нативные пакеты не обнаружены"; font-size: 15px; font-weight: 650; horizontal-alignment: center; }
+                Label { text: "Нативная установка выполняется отдельно из проверенного пакета. Запуск и выбор недоступны без опубликованной ревизии."; font-size: 12px; color: Theme.muted; wrap: word-wrap; horizontal-alignment: center; }
+            }
+        }
+        if root.revisions.length > 0: ScrollView {
+            horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
+            VerticalLayout { spacing: 9px; padding-right: 8px; padding-bottom: 6px;
+                for revision in root.revisions: Rectangle {
+                    height: 100px; background: Theme.panel; border-width: 1px;
+                    border-color: revision.running ? Theme.accent-border : Theme.border;
+                    border-radius: 12px;
+                    HorizontalLayout { padding-left: 16px; padding-right: 12px; spacing: 12px;
+                        VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 5px; min-width: 0px;
+                            Label { text: revision.display-name + " · " + revision.package-version; font-size: 14px; font-weight: 700; overflow: elide; }
+                            Label { text: revision.model-id + " · " + revision.backend.to-uppercase() + " · " + revision.manifest-sha256; font-size: 10px; color: Theme.muted; overflow: elide; }
+                            Label {
+                                text: revision.running ? "Worker: " + revision.observed-phase + " (последний ответ IPC)"
+                                    : revision.selected ? "Выбрано. Файлы будут проверены при запуске" : "Manifest обнаружен. Целостность не проверена";
+                                font-size: 11px; color: Theme.muted; overflow: elide;
+                            }
+                        }
+                        if revision.selected: HubPill { caption: "Выбрано"; accent: true; }
+                        if !revision.selected: HubAction {
+                            caption: "Выбрать"; compact: true;
+                            activated => { root.select-requested(revision.model-id, revision.manifest-sha256, revision.backend); }
+                        }
+                        if revision.selected && !root.has-active: HubAction {
+                            caption: "Запустить"; compact: true; primary: true;
+                            activated => { root.activate-requested(revision.model-id); }
+                        }
+                        if revision.running: HubAction {
+                            caption: "Остановить"; compact: true;
+                            activated => { root.stop-requested(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

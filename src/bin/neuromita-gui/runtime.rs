@@ -7,6 +7,9 @@ use neuromita::{
             install_reviewed_overlay, install_reviewed_wheel_stage, preview_install_action,
         },
         install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
+        native_model::NativeBackend,
+        native_revisions::{NativeRevisionOverview, NativeRevisionStore},
+        native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
         speech_catalog::{SpeechInventory, SpeechModelCatalog},
@@ -73,6 +76,16 @@ pub enum Command {
     SaveAsr(AsrPreferences, Option<String>),
     SelectAsrRecognizer(String),
     RefreshSpeechInventory,
+    RefreshNativeModels,
+    SelectNativeRevision {
+        model_id: String,
+        manifest_sha256: String,
+        backend: String,
+    },
+    ActivateNativeModel {
+        model_id: String,
+    },
+    StopNativeModel,
     PreviewAiHubInstall {
         category: String,
         id: String,
@@ -111,6 +124,8 @@ pub enum Update {
     Hardware(neuromita::presentation::hardware::HardwareView),
     CharacterCatalog(Vec<neuromita::character::CharacterDefinition>),
     SpeechInventory(Box<SpeechInventory>, Vec<AudioInputDevice>),
+    NativeModels(Box<NativeWorkflowSnapshot>),
+    NativeError(String),
     AiHubInstallOperation {
         operation_id: String,
         category: String,
@@ -428,6 +443,54 @@ async fn run(
     publish(Update::Stopped);
 }
 
+fn open_native_workflow(
+    directory: &std::path::Path,
+) -> Result<Option<NativeModelWorkflow>, String> {
+    let native = directory.join("AIData/NativeModels/revisions");
+    let runtime = directory.join("AIData/NativeRuntime");
+    let native_exists = native.try_exists().map_err(|error| error.to_string())?;
+    let runtime_exists = runtime.try_exists().map_err(|error| error.to_string())?;
+    if !native_exists && !runtime_exists {
+        return Ok(None);
+    }
+    if !native_exists || !runtime_exists {
+        return Err("Нативное хранилище установлено не полностью".into());
+    }
+    let workflow = NativeModelWorkflow::new(NativeRevisionStore::new(native, runtime));
+    workflow.snapshot().map_err(|error| error.to_string())?;
+    Ok(Some(workflow))
+}
+
+fn publish_native(workflow: &Option<NativeModelWorkflow>, publish: &impl Fn(Update)) {
+    let snapshot = match workflow.as_ref() {
+        Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
+        None => Ok(NativeWorkflowSnapshot {
+            inventory: NativeRevisionOverview {
+                revisions: Vec::new(),
+                selections: Vec::new(),
+            },
+            active_revision: None,
+            worker: None,
+        }),
+    };
+    match snapshot {
+        Ok(snapshot) => publish(Update::NativeModels(Box::new(snapshot))),
+        Err(_) => publish(Update::NativeError(
+            "Не удалось прочитать каталог нативных ревизий".into(),
+        )),
+    }
+}
+
+fn native_backend(value: &str) -> Option<NativeBackend> {
+    match value {
+        "cpu" => Some(NativeBackend::Cpu),
+        "cuda" => Some(NativeBackend::Cuda),
+        "wgpu" => Some(NativeBackend::Wgpu),
+        "onnx" => Some(NativeBackend::Onnx),
+        _ => None,
+    }
+}
+
 async fn observe(
     app: &ApplicationLifecycle,
     directory: &std::path::Path,
@@ -475,6 +538,15 @@ async fn observe(
     let transcript_sink: Arc<dyn SpeechConversation> = Arc::new(DesktopTranscriptSink(transcripts));
     let mut liveness = tokio::time::interval(Duration::from_secs(5));
     liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let initial_native = open_native_workflow(directory);
+    let native_error = initial_native.is_err();
+    let mut native_workflow = initial_native.unwrap_or(None);
+    publish_native(&native_workflow, publish);
+    if native_error {
+        publish(Update::NativeError(
+            "Ошибка при обнаружении нативных моделей".into(),
+        ));
+    }
     let mut refresh_views = true;
     loop {
         if refresh_views {
@@ -516,7 +588,14 @@ async fn observe(
         refresh_views = true;
         tokio::select! {
             biased;
-            _ = stop.cancelled() => return Ok(()),
+            _ = stop.cancelled() => {
+                if let Some(workflow) = native_workflow.as_mut() {
+                    if workflow.snapshot().ok().and_then(|snapshot| snapshot.worker).is_some() {
+                        let _ = workflow.deactivate().await;
+                    }
+                }
+                return Ok(());
+            },
             command = receive.recv() => match command {
                 Some(command @ Command::UpdatePreset(id, _)) => {
                     match super::settings::execute(administration, command) {
@@ -556,6 +635,47 @@ async fn observe(
                         administration.audio_input.stop_test().await
                     };
                     if let Err(error) = result { publish(Update::AdminError(error.to_string())); }
+                },
+                Some(Command::RefreshNativeModels) => {
+                    let mut failed = false;
+                    if native_workflow.is_none() {
+                        match open_native_workflow(directory) {
+                            Ok(workflow) => native_workflow = workflow,
+                            Err(_) => failed = true,
+                        }
+                    }
+                    publish_native(&native_workflow, publish);
+                    if failed {
+                        publish(Update::NativeError("Ошибка при обнаружении нативных моделей".into()));
+                    }
+                    refresh_views = false;
+                },
+                Some(Command::SelectNativeRevision { model_id, manifest_sha256, backend }) => {
+                    let result = match (native_workflow.as_ref(), native_backend(&backend)) {
+                        (Some(workflow), Some(backend)) => workflow.select(&model_id, &manifest_sha256, backend).map_err(|_| "Выбор отклонён: пакет отсутствует, изменён или несовместим"),
+                        _ => Err("Нативная ревизия или backend недоступны"),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if let Err(error) = result { publish(Update::NativeError(error.into())); }
+                    refresh_views = false;
+                },
+                Some(Command::ActivateNativeModel { model_id }) => {
+                    let result = match native_workflow.as_mut() {
+                        Some(workflow) => workflow.activate_selected(&model_id, Duration::from_secs(30)).await.map(|_| ()),
+                        None => Err(neuromita::ai_runtime::native_workflow::NativeWorkflowError::NotSelected),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if result.is_err() { publish(Update::NativeError("Запуск отклонён: проверьте выбранную ревизию, целостность файлов и ответ worker".into())); }
+                    refresh_views = false;
+                },
+                Some(Command::StopNativeModel) => {
+                    let result = match native_workflow.as_mut() {
+                        Some(workflow) => workflow.deactivate().await,
+                        None => Err(neuromita::ai_runtime::native_workflow::NativeWorkflowError::NotActive),
+                    };
+                    publish_native(&native_workflow, publish);
+                    if result.is_err() { publish(Update::NativeError("Завершение нативного worker не подтверждено".into())); }
+                    refresh_views = false;
                 },
                 Some(Command::RefreshPromptCatalog) => {},
                 Some(Command::DebugSelect(id)) => { debug_character = id; },
@@ -858,6 +978,13 @@ async fn observe(
             _ = liveness.tick() => {
                 let status = administration.ai_runtime.refresh_status().await;
                 publish(Update::RuntimeStatus(status));
+                if let Some(workflow) = native_workflow.as_mut() {
+                    let lost = workflow.refresh_worker().await.is_err();
+                    publish_native(&native_workflow, publish);
+                    if lost {
+                        publish(Update::NativeError("Связь с нативным worker прервана".into()));
+                    }
+                }
             },
         }
     }

@@ -1,18 +1,42 @@
 //! Read-only projection of Core's speech inventory into the AI Hub view.
 
 use neuromita::{
-    ai_runtime::{runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory},
-    presentation::ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
+    ai_runtime::{
+        native_model::NativePhase, native_workflow::NativeWorkflowSnapshot,
+        runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory,
+    },
+    presentation::{
+        ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
+        native_hub::NativeHubPresenter,
+    },
 };
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::rc::Rc;
 
 use super::{
     runtime::Command,
-    view::{AppWindow, HubInstallOperation, HubInstallPreview, HubModel},
+    view::{AppWindow, HubInstallOperation, HubInstallPreview, HubModel, NativeRevisionRow},
 };
 
 pub fn bind(window: &AppWindow, send: Rc<dyn Fn(Command)>) {
+    let refresh = send.clone();
+    window.on_native_refresh(move || refresh(Command::RefreshNativeModels));
+    let select = send.clone();
+    window.on_native_select(move |model_id, digest, backend| {
+        select(Command::SelectNativeRevision {
+            model_id: model_id.into(),
+            manifest_sha256: digest.into(),
+            backend: backend.into(),
+        })
+    });
+    let activate = send.clone();
+    window.on_native_activate(move |model_id| {
+        activate(Command::ActivateNativeModel {
+            model_id: model_id.into(),
+        })
+    });
+    let stop = send.clone();
+    window.on_native_stop(move || stop(Command::StopNativeModel));
     let weak = window.as_weak();
     window.on_ai_hub_find_selection_index(move |identity| {
         weak.upgrade().map_or(-1, |window| {
@@ -186,4 +210,48 @@ pub fn install_operation(
         stage: stage.into(),
         summary: summary.into(),
     });
+}
+
+/// Read-only inventory; an explicit choice is not model readiness.
+pub fn native_models(window: &AppWindow, snapshot: NativeWorkflowSnapshot) {
+    let view = NativeHubPresenter::project(snapshot);
+    let rows = view
+        .revisions
+        .into_iter()
+        .map(|item| {
+            let observed_phase = match item.observed_phase {
+                Some(NativePhase::Ready) => "Ready",
+                Some(NativePhase::Warm) => "Warm",
+                Some(NativePhase::Loaded) => "Loaded",
+                Some(NativePhase::Started) => "Started",
+                Some(NativePhase::Failed) => "Failed",
+                Some(NativePhase::Stopped) => "Stopped",
+                None => "Не наблюдался",
+            };
+            NativeRevisionRow {
+                model_id: item.model_id.into(),
+                display_name: item.display_name.into(),
+                package_version: item.package_version.into(),
+                manifest_sha256: item.manifest_sha256.into(),
+                backend: item.backend.as_str().into(),
+                selected: item.selected,
+                running: item.active,
+                observed_phase: observed_phase.into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    window.set_native_revisions(ModelRc::new(VecModel::from(rows)));
+    window.set_native_has_active(view.has_active_worker);
+    window.set_native_status(if view.has_active_worker {
+        "Запущенный EXE сохраняет закреплённую ревизию до явной остановки".into()
+    } else if view.invalid_selection {
+        "Выбранная ревизия отсутствует или backend более не объявлен".into()
+    } else {
+        "Обнаружение manifest не подтверждает целостность весов и готовность модели".into()
+    });
+    window.set_native_error("".into());
+}
+
+pub fn native_error(window: &AppWindow, error: String) {
+    window.set_native_error(error.into());
 }

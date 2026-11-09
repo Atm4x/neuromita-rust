@@ -615,3 +615,168 @@ fn killed_selection_owner_preserves_previous_pointer_and_reclaims_temp() {
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(".select-"))
     );
 }
+
+#[tokio::test]
+async fn application_workflow_requires_explicit_selection_before_activation() {
+    use neuromita::ai_runtime::native_workflow::{NativeModelWorkflow, NativeWorkflowError};
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    let mut workflow = NativeModelWorkflow::new(fixture.store());
+    let snapshot = workflow.snapshot().unwrap();
+    assert_eq!(snapshot.inventory.revisions.len(), 1);
+    assert!(snapshot.inventory.selections.is_empty());
+    assert!(snapshot.worker.is_none());
+    assert!(matches!(
+        workflow
+            .activate_selected("native-test", Duration::from_secs(3))
+            .await,
+        Err(NativeWorkflowError::NotSelected)
+    ));
+    workflow
+        .select("native-test", &hex_digest(digest), NativeBackend::Cpu)
+        .unwrap();
+    let snapshot = workflow.snapshot().unwrap();
+    assert_eq!(snapshot.inventory.selections.len(), 1);
+    assert!(snapshot.worker.is_none());
+    assert_eq!(
+        workflow
+            .activate_selected("native-test", Duration::from_secs(3))
+            .await
+            .unwrap()
+            .phase,
+        NativePhase::Ready
+    );
+    workflow.deactivate().await.unwrap();
+}
+
+#[tokio::test]
+async fn application_workflow_selection_change_does_not_redirect_active_process() {
+    use neuromita::ai_runtime::native_workflow::{NativeModelWorkflow, NativeWorkflowError};
+    let mut fixture = Fixture::new();
+    let old_digest = fixture.digest();
+    fixture.install(old_digest);
+    let mut workflow = NativeModelWorkflow::new(fixture.store());
+    workflow
+        .select("native-test", &hex_digest(old_digest), NativeBackend::Cpu)
+        .unwrap();
+    let old_snapshot = workflow
+        .activate_selected("native-test", Duration::from_secs(3))
+        .await
+        .unwrap();
+    let first = workflow.infer(json!({"input":"old"})).await.unwrap();
+
+    let new_digest = fixture.version("2.0.0");
+    fixture.install(new_digest);
+    workflow
+        .select("native-test", &hex_digest(new_digest), NativeBackend::Cpu)
+        .unwrap();
+    let view = workflow.snapshot().unwrap();
+    assert_eq!(
+        view.active_revision.as_ref().unwrap().manifest_sha256,
+        old_digest
+    );
+    assert_eq!(
+        view.inventory.selections[0].choice.manifest_sha256,
+        new_digest
+    );
+    let second = workflow.infer(json!({"input":"still old"})).await.unwrap();
+    assert_eq!(first["pid"], second["pid"]);
+    assert_eq!(second["sequence"], 2);
+    assert_eq!(
+        workflow.refresh_worker().await.unwrap().unwrap().session_id,
+        old_snapshot.session_id
+    );
+    assert!(matches!(
+        workflow
+            .activate_selected("native-test", Duration::from_secs(3))
+            .await,
+        Err(NativeWorkflowError::AlreadyActive)
+    ));
+    workflow.deactivate().await.unwrap();
+    let new_snapshot = workflow
+        .activate_selected("native-test", Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_ne!(new_snapshot.session_id, old_snapshot.session_id);
+    assert_eq!(
+        workflow
+            .snapshot()
+            .unwrap()
+            .active_revision
+            .unwrap()
+            .manifest_sha256,
+        new_digest
+    );
+    assert_eq!(
+        workflow.infer(json!({"input":"new"})).await.unwrap()["sequence"],
+        1
+    );
+    workflow.deactivate().await.unwrap();
+}
+
+#[tokio::test]
+async fn application_workflow_refuses_unapproved_or_corrupt_content() {
+    use neuromita::ai_runtime::native_workflow::NativeModelWorkflow;
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    let mut workflow = NativeModelWorkflow::new(fixture.store());
+    assert!(
+        workflow
+            .select("native-test", &"0".repeat(64), NativeBackend::Cpu)
+            .is_err()
+    );
+    assert!(workflow.snapshot().unwrap().inventory.selections.is_empty());
+    workflow
+        .select("native-test", &hex_digest(digest), NativeBackend::Cpu)
+        .unwrap();
+    fs::write(
+        fixture
+            .object_root(digest)
+            .join("native-test/models/weight.bin"),
+        b"modified",
+    )
+    .unwrap();
+    let overview = workflow.snapshot().unwrap();
+    assert_eq!(overview.inventory.revisions.len(), 1);
+    assert!(overview.worker.is_none());
+    assert!(
+        workflow
+            .activate_selected("native-test", Duration::from_secs(3))
+            .await
+            .is_err()
+    );
+    assert!(workflow.snapshot().unwrap().worker.is_none());
+}
+
+#[tokio::test]
+async fn application_workflow_reports_worker_failure_without_changing_selection() {
+    use neuromita::ai_runtime::native_workflow::NativeModelWorkflow;
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fs::write(
+        fixture.object_root(digest).join("native-test/crash-infer"),
+        b"",
+    )
+    .unwrap();
+    let mut workflow = NativeModelWorkflow::new(fixture.store());
+    workflow
+        .select("native-test", &hex_digest(digest), NativeBackend::Cpu)
+        .unwrap();
+    workflow
+        .activate_selected("native-test", Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(workflow.infer(json!({})).await.is_err());
+    let state = workflow.snapshot().unwrap();
+    assert_eq!(state.worker.unwrap().phase, NativePhase::Failed);
+    assert_eq!(state.inventory.selections[0].choice.manifest_sha256, digest);
+    workflow.deactivate().await.unwrap();
+    assert!(workflow.snapshot().unwrap().worker.is_none());
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}

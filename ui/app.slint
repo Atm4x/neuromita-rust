@@ -7,6 +7,7 @@ import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
 import { HubModel, HubModelIdentity, HubInstallPreview, HubInstallOperation } from "ai-hub/components.slint";
+import { NativeRevisionRow } from "ai-hub/native.slint";
 import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, AiEngineUi, AiHardwareDevice } from "pages/settings.slint";
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
@@ -17,7 +18,7 @@ import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { NativeRevisionRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -64,6 +65,14 @@ export component AppWindow inherits Window {
     in property <int> chat-volume;
     in property <bool> chat-voice;
     in property <[HubModel]> ai-hub-entries;
+    in property <[NativeRevisionRow]> native-revisions;
+    in property <bool> native-has-active: false;
+    in property <string> native-status;
+    in property <string> native-error;
+    callback native-refresh();
+    callback native-select(string, string, string);
+    callback native-activate(string);
+    callback native-stop();
     in property <[int]> ai-hub-category-counts;
     in property <bool> ai-hub-can-refresh: false;
     in property <int> ai-hub-discovery-warning-count: 0;
@@ -117,6 +126,14 @@ export component AppWindow inherits Window {
             if root.ai-hub-open: AiHubPage {
                 width: parent.width; height: parent.height;
                 entries: root.ai-hub-entries;
+                native-revisions: root.native-revisions;
+                native-has-active: root.native-has-active;
+                native-status: root.native-status;
+                native-error: root.native-error;
+                native-refresh-requested => { root.native-refresh(); }
+                native-select-requested(id, sha, backend) => { root.native-select(id, sha, backend); }
+                native-activate-requested(id) => { root.native-activate(id); }
+                native-stop-requested => { root.native-stop(); }
                 category-counts: root.ai-hub-category-counts;
                 can-refresh: root.ai-hub-can-refresh;
                 discovery-warning-count: root.ai-hub-discovery-warning-count;
