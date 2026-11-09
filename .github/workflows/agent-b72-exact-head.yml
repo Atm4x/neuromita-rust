@@ -1,0 +1,45 @@
+name: Agent B72 exact-head backend
+on:
+  push:
+    branches:
+      - bridge/agent-b72-verify-20261109
+jobs:
+  exact-b72:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 52c8960b47cf5194abecb2116f85de31306ec296
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact B72 SHA tree and parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "52c8960b47cf5194abecb2116f85de31306ec296"
+          test "$(git rev-parse HEAD^{tree})" = "6f9d67e617cccfaa5c9845f7a94c634b98078bf0"
+          test "$(git rev-parse HEAD^)" = "86a4dd40453ff4c460bb3089f3a34171b140fe6d"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: B72 indexed enumeration and admission tests
+        run: |
+          cargo test --locked --offline --lib regenerate_enumeration_tests -- --test-threads=2
+          cargo test --locked --offline --lib app::regenerate_admission_tests -- --test-threads=2
+      - name: Full filtered library suite
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: Static verification
+        shell: bash
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
