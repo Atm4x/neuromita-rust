@@ -164,3 +164,24 @@ and the operator may still use `--recover-interrupted-update` after stopping
 all installation processes. Linux has no automatic login recovery in this
 release; its explicit offline command remains unchanged. The Run entry is
 scoped to each installation path, not shared globally between installations.
+
+## Disposable installed-helper recovery acceptance (D52)
+
+The integration test `tests/updater_offline_recovery.rs` runs the **real native
+`neuromita-updater[.exe]` binary copied beside a disposable
+`neuromita-gui[.exe]` fixture**. On Windows that GUI fixture is an actual PE
+executable running a deliberately isolated subprocess test, not merely a file
+with a GUI-looking name. It verifies that explicit offline recovery fails while
+the GUI is executing, while the installed EXE has an exclusive Windows sharing
+lock, and while its old-version backup has such a lock. After those processes
+and handles are released, the same installed helper must restore the exact
+previous bytes, preserve `UserData/settings.json`, write a recovery receipt,
+clean up its workspace and refuse replay.
+
+The test never publishes a release, downloads an executable, registers a value
+under the real `HKCU\\...\\Run` key, or simulates a Windows reboot. The separate
+registry-unit tests exercise the recovery lease in an isolated HKCU test key.
+This acceptance therefore validates **offline native Windows process and file
+sharing semantics**, not the full interactive GUI → latest-release → helper
+handoff → authenticated readiness path, Windows sign-in startup ordering, or
+publisher release availability. Those remain open acceptance criteria for #44.

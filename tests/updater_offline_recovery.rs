@@ -1,5 +1,13 @@
 use std::{fs, path::Path, process::Command};
 
+#[cfg(windows)]
+use std::{
+    os::windows::fs::OpenOptionsExt,
+    process::{Child, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
 use ring::digest::{SHA256, digest};
 use serde_json::json;
 use uuid::Uuid;
@@ -38,8 +46,8 @@ fn stopped_installation_recovers_terminated_helper_transaction() {
 
     #[cfg(target_os = "linux")]
     let new = fs::read("/bin/sleep").unwrap();
-    #[cfg(not(target_os = "linux"))]
-    let new = b"verified next executable".to_vec();
+    #[cfg(windows)]
+    let new = fs::read(std::env::current_exe().unwrap()).unwrap();
 
     fs::write(&installed, &new).unwrap();
     #[cfg(target_os = "linux")]
@@ -64,6 +72,58 @@ fn stopped_installation_recovers_terminated_helper_transaction() {
     .unwrap();
     let helper = install.join(helper_name);
     fs::copy(env!("CARGO_BIN_EXE_neuromita-updater"), &helper).unwrap();
+
+    #[cfg(windows)]
+    {
+        let marker = root.join("gui-running");
+        let mut gui = RunningWindowsGui::spawn(&installed, &marker);
+        let rejected = Command::new(&helper)
+            .arg("--recover-interrupted-update")
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "a running installed GUI must block recovery"
+        );
+        assert!(workspace.join("backup").is_file());
+        assert_eq!(fs::read(&installed).unwrap(), new);
+        gui.stop();
+        fs::remove_file(marker).unwrap();
+
+        let installed_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&installed)
+            .unwrap();
+        let rejected = Command::new(&helper)
+            .arg("--recover-interrupted-update")
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "a sharing-locked installed EXE must not be overwritten"
+        );
+        assert!(workspace.join("backup").exists());
+        drop(installed_lock);
+        assert_eq!(fs::read(&installed).unwrap(), new);
+
+        let backup = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(workspace.join("backup"))
+            .unwrap();
+        let rejected = Command::new(&helper)
+            .arg("--recover-interrupted-update")
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "an exclusively locked backup must not be consumed"
+        );
+        assert!(workspace.join("backup").exists());
+        assert_eq!(fs::read(&installed).unwrap(), new);
+        drop(backup);
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -123,4 +183,56 @@ fn stopped_installation_recovers_terminated_helper_transaction() {
     );
     assert_eq!(fs::read(&installed).unwrap(), old);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+struct RunningWindowsGui(Child);
+
+#[cfg(windows)]
+impl RunningWindowsGui {
+    fn spawn(executable: &Path, marker: &Path) -> Self {
+        let child = Command::new(executable)
+            .args(["--exact", "internal_running_gui_probe", "--ignored"])
+            .env("NM_D52_GUI_PROBE_MARKER", marker)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut guard = Self(child);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(
+                guard.0.try_wait().unwrap().is_none(),
+                "installed GUI probe exited before starting"
+            );
+            assert!(Instant::now() < deadline, "installed GUI probe timed out");
+            thread::sleep(Duration::from_millis(50));
+        }
+        guard
+    }
+
+    fn stop(&mut self) {
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RunningWindowsGui {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "subprocess probe invoked only by the installed Windows E2E test"]
+fn internal_running_gui_probe() {
+    let marker = std::env::var_os("NM_D52_GUI_PROBE_MARKER").expect("missing probe marker");
+    fs::write(marker, b"running").unwrap();
+    thread::sleep(Duration::from_secs(20));
 }
