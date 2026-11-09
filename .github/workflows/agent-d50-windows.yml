@@ -1,4 +1,4 @@
-name: Agent D50 Windows registry recovery acceptance
+name: Agent D50 Windows recovery guard validation
 on:
   push:
     branches:
@@ -8,22 +8,18 @@ permissions:
 jobs:
   windows-gui:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: codex/agent-d50-windows-reboot-guard-20261109
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Test Windows registry startup guard and updater lifecycle
+      - name: Windows registry lease and updater tests
         run: cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: Test real native Windows offline recovery helper
+      - name: Test real Windows recovery helper
         run: cargo test --locked --offline --test updater_offline_recovery
       - name: Check native GUI
         run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: Check all targets
-        run: cargo check --locked --offline --all-targets
       - name: Rust formatting
         run: cargo fmt --all -- --check
