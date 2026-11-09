@@ -97,6 +97,23 @@ CREATE TABLE IF NOT EXISTS timeline_resets(
 );
 CREATE INDEX IF NOT EXISTS timeline_resets_by_character
     ON timeline_resets(branch_id,character_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_knowledge_forgets(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id,event_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_knowledge_forgets_by_event
+    ON timeline_knowledge_forgets(branch_id,character_id,event_id,sequence);
+CREATE TABLE IF NOT EXISTS timeline_knowledge_epochs(
+    branch_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    character_id TEXT NOT NULL,
+    PRIMARY KEY(branch_id,sequence,character_id)
+);
+CREATE INDEX IF NOT EXISTS timeline_knowledge_epochs_by_character
+    ON timeline_knowledge_epochs(branch_id,character_id,sequence);
 CREATE TABLE IF NOT EXISTS timeline_active_selection(
     slot TEXT PRIMARY KEY CHECK(slot='core'),
     branch_id TEXT NOT NULL,
@@ -472,8 +489,19 @@ fn index_fact(conn: &Connection, fact: &TimelineFact) -> Result<(), TimelineErro
                 &[&branch, &sequence, &character],
             )?;
         }
-        {
-            let acquired = change.acquired;
+        if !change.forgotten.is_empty() || !change.revealed.is_empty() {
+            conn.write(
+                "INSERT INTO timeline_knowledge_epochs(branch_id,sequence,character_id) VALUES(?,?,?)",
+                &[&branch, &sequence, &character],
+            )?;
+        }
+        for forgotten in change.forgotten {
+            conn.write(
+                "INSERT INTO timeline_knowledge_forgets(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
+                &[&branch, &sequence, &character, &forgotten.0.to_string()],
+            )?;
+        }
+        for acquired in std::iter::once(change.acquired).chain(change.revealed) {
             conn.write(
                 "INSERT INTO timeline_acquisitions(branch_id,sequence,character_id,event_id) VALUES(?,?,?,?)",
                 &[&branch, &sequence, &character, &acquired.0.to_string()],
@@ -535,9 +563,42 @@ impl<'a> IndexedWorld<'a> {
     }
 
     fn latest_reset(&self, character: CharacterId) -> Result<u64, TimelineError> {
-        Ok(self
-            .max_position("timeline_resets", character, None)?
-            .unwrap_or(0))
+        let reset = self.max_position("timeline_resets", character, None)?;
+        let mut changed = None;
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT max(sequence) FROM timeline_knowledge_epochs WHERE branch_id=? AND character_id=? AND sequence<=?",
+                &[&branch.0.to_string(), &character.to_string(), &cutoff.to_string()],
+            )?;
+            if let Some(row) = rows.first()
+                && !row[0].is_empty()
+            {
+                let position = parse_u64(&row[0])?;
+                changed = Some(changed.map_or(position, |previous: u64| previous.max(position)));
+            }
+        }
+        Ok(reset.unwrap_or(0).max(changed.unwrap_or(0)))
+    }
+
+    fn max_forget(
+        &self,
+        character: CharacterId,
+        event: EventId,
+    ) -> Result<Option<u64>, TimelineError> {
+        let mut maximum = None;
+        for (branch, cutoff) in &self.lineage {
+            let rows = self.connection.query(
+                "SELECT max(sequence) FROM timeline_knowledge_forgets WHERE branch_id=? AND character_id=? AND event_id=? AND sequence<=?",
+                &[&branch.0.to_string(), &character.to_string(), &event.0.to_string(), &cutoff.to_string()],
+            )?;
+            if let Some(row) = rows.first()
+                && !row[0].is_empty()
+            {
+                let position = parse_u64(&row[0])?;
+                maximum = Some(maximum.map_or(position, |previous: u64| previous.max(position)));
+            }
+        }
+        Ok(maximum)
     }
 
     fn max_position(
@@ -627,7 +688,11 @@ impl WorldLookup for IndexedWorld<'_> {
     fn knows(&self, character: CharacterId, event: EventId) -> Result<bool, TimelineError> {
         let acquired = self.max_position("timeline_acquisitions", character, Some(event))?;
         let reset = self.max_position("timeline_resets", character, None)?;
-        Ok(acquired.is_some_and(|position| reset.is_none_or(|reset| position >= reset)))
+        let forgotten = self.max_forget(character, event)?;
+        Ok(acquired.is_some_and(|position| {
+            reset.is_none_or(|reset| position >= reset)
+                && forgotten.is_none_or(|forgotten| position > forgotten)
+        }))
     }
 }
 
@@ -1494,6 +1559,8 @@ mod tests {
             "timeline_fact_keys",
             "timeline_acquisitions",
             "timeline_resets",
+            "timeline_knowledge_forgets",
+            "timeline_knowledge_epochs",
         ] {
             conn.write(&format!("DELETE FROM {table}"), &[]).unwrap();
         }

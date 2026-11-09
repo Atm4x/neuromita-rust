@@ -20,6 +20,8 @@ pub mod file_attachments;
 #[cfg(test)]
 mod historical_input_fork_tests;
 pub mod ingress;
+#[cfg(test)]
+mod knowledge_revision_tests;
 mod legacy;
 #[cfg(test)]
 mod memory_maintenance_tests;
@@ -92,6 +94,19 @@ pub(crate) struct RegenerateSource {
     pub accepted_message: EventId,
     pub accepted_request: RequestId,
     pub original_input: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegenerateKnowledgePlan {
+    pub source: RegenerateSource,
+    pub selection: TimelineSelection,
+    pub head: u64,
+    /// Only authored messages of the selected character, never another Mita.
+    pub hide_messages: Vec<EventId>,
+    /// Facts this character currently knows that are selected for revocation.
+    pub forget_events: Vec<EventId>,
+    /// Effects requiring separate reconciliation: knowledge mutation does not undo them.
+    pub related_effects: Vec<EventId>,
 }
 
 #[derive(Debug, Clone)]
@@ -420,6 +435,52 @@ impl SessionTimeline {
             sender.send_replace(epoch);
         }
         Ok(id)
+    }
+
+    /// Privileged, revisioned changes to a character's knowledge of specific
+    /// existing events. This is not message routing or an implicit story transfer.
+    /// History Reset remains a separate, broader CharacterContextReset event.
+    pub(crate) fn change_character_knowledge(
+        &mut self,
+        expected: TimelineSelection,
+        character: CharacterId,
+        operation: EventId,
+        reveal: bool,
+        targets: Vec<EventId>,
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        let mut draft = EventDraft::new(if reveal {
+            EventKind::CharacterKnowledgeRevealed
+        } else {
+            EventKind::CharacterKnowledgeForgotten
+        });
+        draft.id = operation;
+        draft.observers.insert(character);
+        draft.payload.insert(
+            "event_ids".into(),
+            serde_json::to_value(
+                targets
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|_| domain::TimelineError::Invalid("invalid knowledge targets"))?,
+        );
+        self.store.append_guarded(
+            self.branch,
+            self.anchor().through,
+            &format!("knowledge:{}", operation.0),
+            json!({"character":character.to_string(),"reveal":reveal}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        let epoch = self.store.context_epoch(self.branch, character)?;
+        self.context_updates[&character].send_replace(epoch);
+        Ok(operation)
     }
 
     pub(crate) fn observe_selection(&self) -> watch::Receiver<TimelineSelection> {
@@ -955,6 +1016,135 @@ impl SessionTimeline {
             vec![draft],
         )?;
         Ok(id)
+    }
+
+    /// Read-only, single-world proposal for the non-fork Regenerate design.
+    /// This cannot be committed separately from the new request admission.
+    pub(crate) fn plan_knowledge_regenerate(
+        &self,
+        source: RegenerateSource,
+        expected: TimelineSelection,
+        expected_head: u64,
+    ) -> Result<RegenerateKnowledgePlan, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if self.branch != expected.branch_id
+            || self.store.branch(self.branch)?.head_sequence != expected_head
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let facts = self.store.world(self.branch)?;
+        let accepted = self
+            .store
+            .accepted_reply_at(
+                self.branch,
+                source.character,
+                source.accepted_request.0,
+                Some(expected_head),
+            )?
+            .filter(|fact| fact.draft.id == source.accepted_message)
+            .ok_or(domain::TimelineError::Invalid(
+                "unknown accepted regenerate source",
+            ))?;
+        let input = self.store.event(self.branch, source.original_input)?;
+        let valid_reply = accepted
+            .draft
+            .links
+            .iter()
+            .filter(|link| link.relation == CausalRelation::ReplyTo)
+            .collect::<Vec<_>>();
+        if input.draft.kind != EventKind::PlayerMessage
+            || input.draft.actor.as_deref() != Some("player")
+            || !input.draft.observers.contains(&source.character)
+            || input.sequence >= accepted.sequence
+            || valid_reply.len() != 1
+            || valid_reply[0].event_id != source.original_input
+            || accepted
+                .draft
+                .payload
+                .get("reply_to")
+                .and_then(serde_json::Value::as_str)
+                != Some(source.original_input.0.to_string().as_str())
+        {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate source has invalid causality",
+            ));
+        }
+        let view = MitaView::from_facts(self.branch, expected_head, source.character, &facts);
+        if !view
+            .messages()
+            .iter()
+            .any(|message| message.event_id == source.accepted_message)
+            || !view
+                .messages()
+                .iter()
+                .any(|message| message.event_id == source.original_input)
+        {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate source is not visible",
+            ));
+        }
+        let hide_messages = view
+            .messages()
+            .iter()
+            .filter(|message| {
+                message.sequence >= accepted.sequence
+                    && message.kind == EventKind::CharacterMessage
+                    && message.speaker.as_deref() == Some(source.character.as_str())
+            })
+            .map(|message| message.event_id)
+            .collect::<Vec<_>>();
+        let mut selected = hide_messages
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        let mut related_effects = Vec::new();
+        for fact in facts
+            .iter()
+            .filter(|fact| fact.sequence > accepted.sequence)
+        {
+            if fact.draft.actor.as_deref() != Some(source.character.as_str())
+                || !matches!(
+                    fact.draft.kind,
+                    EventKind::CharacterStateChanged
+                        | EventKind::CharacterWorkingStateReplaced
+                        | EventKind::CharacterVariablesChanged
+                        | EventKind::CharacterMemoryChanged
+                )
+            {
+                continue;
+            }
+            if fact.draft.links.iter().any(|link| {
+                link.relation == CausalRelation::CausedBy && selected.contains(&link.event_id)
+            }) {
+                related_effects.push(fact.draft.id);
+                selected.insert(fact.draft.id);
+            }
+        }
+        let forget_events = facts
+            .iter()
+            .filter(|fact| selected.contains(&fact.draft.id))
+            .map(|fact| {
+                self.store
+                    .knows(
+                        self.branch,
+                        source.character,
+                        fact.draft.id,
+                        Some(expected_head),
+                    )
+                    .map(|known| known.then_some(fact.draft.id))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(RegenerateKnowledgePlan {
+            source,
+            selection: expected,
+            head: expected_head,
+            hide_messages,
+            forget_events,
+            related_effects,
+        })
     }
 
     fn validate_regenerate_source(

@@ -3,8 +3,8 @@ use serde_json::{Map, Value};
 use crate::identity::CharacterId;
 
 use super::domain::{
-    BranchId, CharacterMessageProjection, CharacterWorldProjection, KnownEvent, MessageRole,
-    ProjectedMessage, ProjectedWorldEvent, TimelineError, TimelineRepository, knowledge_change,
+    BranchId, CharacterMessageProjection, CharacterWorldProjection, MessageRole, ProjectedMessage,
+    ProjectedWorldEvent, TimelineError, TimelineRepository, character_view,
 };
 
 fn provider_document(message: ProjectedMessage) -> Map<String, Value> {
@@ -83,17 +83,12 @@ impl MitaView {
     ) -> Self {
         let mut projection = CharacterMessageProjection::new(character);
         let mut world = CharacterWorldProjection::new();
-        for fact in facts
+        let prefix = facts
             .iter()
-            .filter(|fact| fact.sequence <= through && fact.draft.observers.contains(&character))
-        {
-            let known = KnownEvent {
-                fact: fact.clone(),
-                learned_at: fact.sequence,
-            };
-            if knowledge_change(fact, character).is_some_and(|change| change.reset) {
-                world.reset();
-            }
+            .filter(|fact| fact.sequence <= through)
+            .cloned()
+            .collect::<Vec<_>>();
+        for known in character_view(&prefix, character) {
             projection.observe(&known);
             world.observe(&known);
         }
@@ -173,32 +168,16 @@ impl TimelineMessageQueries {
                 "context position exceeds branch head",
             ));
         }
-        let mut projection = CharacterMessageProjection::new(character);
-        let mut world = CharacterWorldProjection::new();
+        let mut facts = Vec::new();
         let mut cursor = 0_u64;
         loop {
-            let page = repository.read(branch, cursor, Some(head), 128, Some(character))?;
+            let page = repository.read(branch, cursor, Some(head), 128, None)?;
             if page.is_empty() {
                 break;
             }
-            for fact in &page {
-                let known = KnownEvent {
-                    fact: fact.clone(),
-                    learned_at: fact.sequence,
-                };
-                if knowledge_change(fact, character).is_some_and(|change| change.reset) {
-                    world.reset();
-                }
-                projection.observe(&known);
-                world.observe(&known);
-            }
             cursor = page.last().expect("nonempty page").sequence;
+            facts.extend(page);
         }
-        Ok(MitaView {
-            branch,
-            through: head,
-            projection,
-            world,
-        })
+        Ok(MitaView::from_facts(branch, head, character, &facts))
     }
 }

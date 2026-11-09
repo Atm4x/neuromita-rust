@@ -526,7 +526,12 @@ impl TimelineStore {
             .iter()
             .filter(|fact| {
                 fact.sequence <= ceiling
-                    && fact.draft.kind == EventKind::CharacterContextReset
+                    && matches!(
+                        fact.draft.kind,
+                        EventKind::CharacterContextReset
+                            | EventKind::CharacterKnowledgeForgotten
+                            | EventKind::CharacterKnowledgeRevealed
+                    )
                     && fact.draft.observers.contains(&character)
             })
             .map(|fact| fact.sequence)
@@ -877,6 +882,38 @@ impl TimelineStore {
         }
         if matches!(draft.kind, EventKind::CharacterContextReset) && draft.observers.is_empty() {
             return Err(TimelineError::Invalid("context reset requires an observer"));
+        }
+        if matches!(
+            draft.kind,
+            EventKind::CharacterKnowledgeForgotten | EventKind::CharacterKnowledgeRevealed
+        ) {
+            if draft.observers.len() != 1
+                || draft.actor.is_some()
+                || !draft.links.is_empty()
+                || draft.external_message_id.is_some()
+                || draft.payload.len() != 1
+            {
+                return Err(TimelineError::Invalid(
+                    "knowledge control must be private and system-owned",
+                ));
+            }
+            let targets = super::knowledge::knowledge_targets(&draft.payload)
+                .filter(|ids| !ids.is_empty())
+                .ok_or(TimelineError::Invalid("knowledge control needs event_ids"))?;
+            let mut unique = HashSet::new();
+            for id in targets {
+                if !unique.insert(id) {
+                    return Err(TimelineError::Invalid("duplicate knowledge target"));
+                }
+                if index.kind(id)?.is_none() {
+                    return Err(TimelineError::NotFound);
+                }
+                if draft.kind == EventKind::CharacterKnowledgeForgotten
+                    && !index.knows(*draft.observers.iter().next().expect("one observer"), id)?
+                {
+                    return Err(TimelineError::Invalid("cannot forget unknown event"));
+                }
+            }
         }
         if draft.kind == EventKind::Checkpoint
             && !draft.payload.get("snapshot").is_some_and(Value::is_object)

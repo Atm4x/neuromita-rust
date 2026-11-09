@@ -74,6 +74,8 @@ pub enum EventKind {
     MessageRevised,
     MessageRestored,
     CharacterContextReset,
+    CharacterKnowledgeForgotten,
+    CharacterKnowledgeRevealed,
     Checkpoint,
     BranchCreated,
     RegenerateAbandoned,
