@@ -1,0 +1,36 @@
+name: Agent D58 exact safe-cancellation source import
+on:
+  push:
+    branches:
+      - bridge/agent-d58-cancel-handoff-20261110
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish original D58 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=85b081ca858e78e65e9b96c103bb868ec3432c6d
+          EXPECTED=e1cfdc21f4a9b0a57e2828d6fc09a43d0456ddb0
+          TREE=37c5dc6fb069d898d11ba890c2f2b72468ec3724
+          cat .agent-bridge/d58-part-0{1,2,3,4,5}.b64 | tr -d '\n' | base64 -d >/tmp/d58.patch.br
+          echo '1ce15417547c314cd8c93054c0031bebbb7ff717bc658a38a9fa5e5f1b16e5ce  /tmp/d58.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d58.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d58.patch.br')))"
+          echo '27b1165b2aacd5f1d577fa08411dd47b5f45169fa2a57220203ee2d148bd158b  /tmp/d58.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d58.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d58-cancel-scheduled-handoff-20261110
