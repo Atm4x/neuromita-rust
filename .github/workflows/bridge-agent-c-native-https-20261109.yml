@@ -1,0 +1,35 @@
+name: Import exact Agent C native HTTPS package transfer
+on:
+  push:
+    branches: [bridge/agent-c-native-https-package-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-https-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-https-package-20261109
+          fetch-depth: 0
+      - name: Verify exact Git bundle and non-force fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native-https.part0{0,1,2,3} | base64 -d >/tmp/agent-c-native-https.bundle.xz
+          test "$(sha256sum /tmp/agent-c-native-https.bundle.xz | cut -d' ' -f1)" = "917571818b587b5d6da6821fe3358d5cc5f16897d638bf8206b0593d8951a709"
+          xz -dc /tmp/agent-c-native-https.bundle.xz >/tmp/agent-c-native-https.bundle
+          test "$(sha256sum /tmp/agent-c-native-https.bundle | cut -d' ' -f1)" = "a6c5a8ac87ba907895ea6971f05501cd0b4af5f8b37e8ee10e441559748604a7"
+          git fetch origin refs/heads/codex/ai-native-binary-pinned-publisher-policy-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "f5b9116f9984f7939ba727a949f561dc1215b4c8"
+          git fetch origin refs/heads/codex/ai-native-https-package-transfer-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "f5b9116f9984f7939ba727a949f561dc1215b4c8"
+          git bundle verify /tmp/agent-c-native-https.bundle
+          git fetch /tmp/agent-c-native-https.bundle refs/heads/codex/ai-native-https-package-transfer-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "ee03b6d08002c7de8b776f359471aa8da2989163"
+          git checkout --detach "ee03b6d08002c7de8b776f359471aa8da2989163"
+          test "$(git rev-parse HEAD^{tree})" = "ac15fc21fe9743a36f4387e98a1c8d8e17406690"
+          test "$(git rev-list --parents -n1 HEAD)" = "ee03b6d08002c7de8b776f359471aa8da2989163 f5b9116f9984f7939ba727a949f561dc1215b4c8"
+          git diff --check "f5b9116f9984f7939ba727a949f561dc1215b4c8" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-https-package-transfer-20261109
