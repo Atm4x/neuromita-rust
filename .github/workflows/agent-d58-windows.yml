@@ -1,0 +1,42 @@
+name: Agent D58 native Windows cancel handoff acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d58-windows-native-20261110
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d58-cancel-scheduled-handoff-20261110
+      - name: Verify pinned D58 original commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "e1cfdc21f4a9b0a57e2828d6fc09a43d0456ddb0"
+          test "$(git rev-parse HEAD^{tree})" = "37c5dc6fb069d898d11ba890c2f2b72468ec3724"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Windows genuine GUI/helper/registry cancel handoff acceptance
+        run: |
+          cargo test --locked --offline --lib updater::handoff::windows_acceptance::installed_windows_helper_handoff_with_isolated_guard -- --test-threads=1 --nocapture
+      - name: Windows updater safety regressions
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Windows PE apply and rollback E2E
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e
+      - name: Windows offline recovery E2E
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery
+      - name: Windows all-targets typecheck
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
