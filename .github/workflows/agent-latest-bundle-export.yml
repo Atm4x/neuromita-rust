@@ -1,4 +1,4 @@
-name: Export pinned Agent C PR390 delta
+name: Export exact Agent C PR395 source delta
 on:
   push:
     branches:
@@ -11,28 +11,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/ai-native-binary-pinned-publisher-policy-20261109
+          ref: codex/ai-native-https-package-transfer-20261109
           fetch-depth: 0
           persist-credentials: false
-      - name: Export exact branch delta
+      - name: Export exact native branch delta
         shell: bash
         run: |
           set -euo pipefail
           HEAD="$(git rev-parse HEAD)"
-          test "$HEAD" = "f5b9116f9984f7939ba727a949f561dc1215b4c8"
-          TARGET="refs/heads/codex/ai-native-binary-pinned-publisher-policy-20261109"
+          test "$HEAD" = "ee03b6d08002c7de8b776f359471aa8da2989163"
+          TARGET="refs/heads/codex/ai-native-https-package-transfer-20261109"
           git update-ref "$TARGET" "$HEAD"
           git merge-base --is-ancestor "7e12464181355c79179afd61f26d2d1839a6508e" "$HEAD"
-          git bundle create neuromita-rust-latest.bundle "$TARGET" "^7e12464181355c79179afd61f26d2d1839a6508e"
-          git bundle verify neuromita-rust-latest.bundle
-          sha256sum neuromita-rust-latest.bundle > neuromita-rust-latest.bundle.sha256
-          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-native-binary-pinned-publisher-policy-20261109\nhead=%s\nbase=7e12464181355c79179afd61f26d2d1839a6508e\n' "$HEAD" > neuromita-rust-latest.manifest
+          git bundle create agent-c-pr395-delta.bundle "$TARGET" "^7e12464181355c79179afd61f26d2d1839a6508e"
+          git bundle verify agent-c-pr395-delta.bundle
+          sha256sum agent-c-pr395-delta.bundle > agent-c-pr395-delta.bundle.sha256
+          printf 'repository=Atm4x/neuromita-rust\nbranch=codex/ai-native-https-package-transfer-20261109\nhead=%s\nbase=7e12464181355c79179afd61f26d2d1839a6508e\n' "$HEAD" > agent-c-pr395.manifest
       - uses: actions/upload-artifact@v4
         with:
-          name: neuromita-rust-latest-source
+          name: agent-c-pr395-source
           path: |
-            neuromita-rust-latest.bundle
-            neuromita-rust-latest.bundle.sha256
-            neuromita-rust-latest.manifest
+            agent-c-pr395-delta.bundle
+            agent-c-pr395-delta.bundle.sha256
+            agent-c-pr395.manifest
           retention-days: 3
           if-no-files-found: error
