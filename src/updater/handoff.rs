@@ -20,10 +20,12 @@ use uuid::Uuid;
 use super::activation::{
     ActivationError, RecoveryOutcome, SingleFileActivator, prepared_target_name,
 };
+use super::reboot_guard;
 use crate::portable::PortableDataRoot;
 
 pub const HELPER_COMMAND: &str = "--internal-apply-update";
 pub const RECOVER_COMMAND: &str = "--recover-interrupted-update";
+const AUTO_RECOVER_COMMAND: &str = "--auto-recover-interrupted-update";
 const RESULT_NAME: &str = "last-activation.json";
 const HANDOFF_NAME: &str = "handoff.json";
 const READY_NAME: &str = "readiness.json";
@@ -43,6 +45,8 @@ pub enum HandoffError {
     WrongCaller,
     #[error("the updater has no prepared transaction")]
     NotPrepared,
+    #[error("the installed Windows recovery startup guard is not registered")]
+    MissingRecoveryGuard,
     #[error("the helper supports only the default installation-owned UserData root")]
     NonPortableDataRoot,
     #[error("invalid updater helper process arguments")]
@@ -156,8 +160,18 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
     file.write_all(&serde_json::to_vec(&intent)?)?;
     file.sync_all()?;
     drop(file);
+    let registered = match reboot_guard::arm(&helper) {
+        Ok(registered) => registered,
+        Err(error) => {
+            let _ = fs::remove_file(&intent_path);
+            return Err(error.into());
+        }
+    };
     if let Err(error) = activator.arm_health_check(intent.nonce) {
         let _ = fs::remove_file(&intent_path);
+        if registered {
+            let _ = reboot_guard::disarm(&helper);
+        }
         return Err(error.into());
     }
     let child = Command::new(&helper)
@@ -174,6 +188,9 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
         Ok(child) => Ok(child.id()),
         Err(error) => {
             let _ = fs::remove_file(intent_path);
+            if registered {
+                let _ = reboot_guard::disarm(&helper);
+            }
             Err(error.into())
         }
     }
@@ -188,6 +205,9 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         .collect::<Vec<_>>();
     if arguments.as_slice() == [OsStr::new(RECOVER_COMMAND)] {
         return recover_stopped_installation();
+    }
+    if arguments.as_slice() == [OsStr::new(AUTO_RECOVER_COMMAND)] {
+        return auto_recover_on_login();
     }
     let [command, pid, identity, nonce] = arguments.as_slice() else {
         return Err(HandoffError::InvalidInvocation);
@@ -214,6 +234,9 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         return Err(HandoffError::UnsafeHelper);
     }
     require_regular_file(&executable)?;
+    if !reboot_guard::is_armed(&executable)? {
+        return Err(HandoffError::MissingRecoveryGuard);
+    }
     let install_root = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
     let target_name = prepared_target_name(install_root)?;
     let intent_path = install_root.join(".neuromita-update").join(HANDOFF_NAME);
@@ -279,7 +302,41 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         outcome,
         details.as_deref().unwrap_or(""),
     )?;
+    if matches!(activator.recover(), Ok(RecoveryOutcome::NoTransaction)) {
+        reboot_guard::disarm(&executable)?;
+    }
     result.map(|_| ())
+}
+
+/// Windows-only per-user login recovery for a previously consented native update.
+/// It never installs, restarts a GUI or modifies any transaction lacking its
+/// registered, installation-scoped startup command.
+fn auto_recover_on_login() -> Result<(), HandoffError> {
+    #[cfg(not(windows))]
+    {
+        return Err(HandoffError::UnsupportedPlatform);
+    }
+    #[cfg(windows)]
+    {
+        let helper = std::env::current_exe()?;
+        if helper.file_name() != Some(OsStr::new(HELPER_NAME)) {
+            return Err(HandoffError::UnsafeHelper);
+        }
+        require_regular_file(&helper)?;
+        if !reboot_guard::is_armed(&helper)? {
+            return Err(HandoffError::MissingRecoveryGuard);
+        }
+        let install = helper.parent().ok_or(HandoffError::UnsafeHelper)?;
+        match fs::symlink_metadata(install.join(".neuromita-update")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // The normal helper may already have finished successfully.
+                reboot_guard::disarm(&helper)?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+            Ok(_) => recover_stopped_installation(),
+        }
+    }
 }
 
 /// Explicit offline recovery after a helper crash or reboot. The installation
@@ -314,6 +371,7 @@ fn recover_stopped_installation() -> Result<(), HandoffError> {
         return Err(HandoffError::NotPrepared);
     }
     write_report(&data_root, required_name, "interrupted-update-restored", "")?;
+    reboot_guard::disarm(&executable)?;
     eprintln!("Previous NeuroMita executable restored. UserData was not changed.");
     Ok(())
 }
@@ -747,6 +805,15 @@ mod tests {
         wait_until_parent_exits(child.id(), identity).unwrap();
         assert!(started.elapsed() >= Duration::from_millis(200));
         child.wait().unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn automatic_login_recovery_is_not_claimed_on_unsupported_platforms() {
+        assert!(matches!(
+            run_helper([AUTO_RECOVER_COMMAND]),
+            Err(HandoffError::UnsupportedPlatform)
+        ));
     }
 
     #[test]

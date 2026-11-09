@@ -22,6 +22,7 @@ pub mod activation;
 pub mod check;
 pub mod handoff;
 pub mod install;
+pub(crate) mod reboot_guard;
 
 use crate::portable::PortableDataRoot;
 

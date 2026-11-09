@@ -136,3 +136,31 @@ The operator must start the restored GUI separately after recovery. An
 unattended boot-time watchdog or automatic safe helper restart is **not yet
 implemented**. Production Windows acceptance still requires testing the real
 installed executable, Windows file-sharing locks, and GUI interaction.
+
+### Windows recovery after a forced shutdown (D50)
+
+When the user explicitly chooses **Install Rust update and restart**, the GUI
+registers an installation-specific, per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+entry for the installed `neuromita-updater.exe` before spawning the helper.
+The entry invokes only `--auto-recover-interrupted-update`, never a new
+installation, download, package selection or arbitrary target. Failure to
+register the guard blocks an otherwise prepared update. The helper refuses to
+apply when that guard is missing or belongs to a different command.
+
+A successful verified restart, or a completed rollback, removes the entry.
+If Windows restarts during activation and the helper disappears, the next
+interactive sign-in launches that same installed helper to **roll back**, under
+the installation lock, provided the GUI and every other updater process are
+stopped and the health-armed journal and both executable hashes match.
+Unexpected, corrupted or externally modified files remain untouched. The
+helper does **not** start the restored GUI automatically after a login-time
+rollback, and never retries the failed release.
+
+This is a **per-user sign-in recovery** rather than a system-boot service: it
+requires a normal Windows login, a writable HKCU startup key, and successful
+startup processing. If a different application auto-launches the GUI before
+recovery, the guard fails closed, remains registered for a later sign-in,
+and the operator may still use `--recover-interrupted-update` after stopping
+all installation processes. Linux has no automatic login recovery in this
+release; its explicit offline command remains unchanged. The Run entry is
+scoped to each installation path, not shared globally between installations.
