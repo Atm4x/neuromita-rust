@@ -1,0 +1,36 @@
+name: Agent D50 exact Windows sign-in recovery source import
+on:
+  push:
+    branches:
+      - bridge/agent-d50-windows-signin-recovery-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact D50 source patch and publish original commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=72bfa9e5daf9d485de0cf51bc440578f86845ad5
+          EXPECTED=7e301907c259f0634d16a72f6dd1b93ed3c2d834
+          TREE=6dcd5fcb7814fd3c3eee94a1fee04024f41994c1
+          cat .agent-bridge/d50.part-0{1,2,3,4}.b64 | tr -d '\n' | base64 -d > /tmp/d50.patch.br
+          echo 'be20353db8a0fe19c297201dc5356b3ce41326e2d80b141bdca897aee366743f  /tmp/d50.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d50.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d50.patch.br')))"
+          echo 'e9f5a6d6a9ad488d6b4e0569197461a2baec7aff9f62ba3c4bb19f16670429c4  /tmp/d50.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d50.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d50-windows-reboot-guard-20261109
