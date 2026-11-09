@@ -14,6 +14,7 @@ use super::{
     native_revisions::{
         NativeRevisionChoice, NativeRevisionError, NativeRevisionOverview, NativeRevisionStore,
     },
+    native_trust::{NativeReleaseTrust, NativeTrustError, NativeTrustVerdict},
 };
 
 #[derive(Debug, Error)]
@@ -30,13 +31,23 @@ pub enum NativeWorkflowError {
     Revisions(#[from] NativeRevisionError),
     #[error(transparent)]
     Controller(#[from] NativeControllerError),
+    #[error(transparent)]
+    Trust(#[from] NativeTrustError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeWorkflowSnapshot {
     pub inventory: NativeRevisionOverview,
+    pub trust: Vec<NativeRevisionTrust>,
     pub active_revision: Option<NativeRevisionChoice>,
     pub worker: Option<NativeModelSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRevisionTrust {
+    pub model_id: String,
+    pub manifest_sha256: [u8; 32],
+    pub verdict: NativeTrustVerdict,
 }
 
 struct ActiveNativeSession {
@@ -48,6 +59,7 @@ struct ActiveNativeSession {
 /// on-disk selected revision without redirecting the already activated process.
 pub struct NativeModelWorkflow {
     revisions: NativeRevisionStore,
+    trust: Option<NativeReleaseTrust>,
     active: Option<ActiveNativeSession>,
 }
 
@@ -55,13 +67,40 @@ impl NativeModelWorkflow {
     pub fn new(revisions: NativeRevisionStore) -> Self {
         Self {
             revisions,
+            trust: None,
+            active: None,
+        }
+    }
+
+    /// Product workflows must have this independently provisioned publisher trust source.
+    /// An absent policy never permits unsigned selection or worker startup.
+    pub fn with_trust(revisions: NativeRevisionStore, trust: NativeReleaseTrust) -> Self {
+        Self {
+            revisions,
+            trust: Some(trust),
             active: None,
         }
     }
 
     pub fn snapshot(&self) -> Result<NativeWorkflowSnapshot, NativeWorkflowError> {
+        let inventory = self.revisions.overview()?;
+        let trust = inventory
+            .revisions
+            .iter()
+            .map(|revision| NativeRevisionTrust {
+                model_id: revision.model_id.clone(),
+                manifest_sha256: revision.manifest_sha256,
+                verdict: self
+                    .trust
+                    .as_ref()
+                    .map_or(NativeTrustVerdict::Missing, |policy| {
+                        policy.verdict(&revision.model_id, &revision.manifest_sha256)
+                    }),
+            })
+            .collect();
         Ok(NativeWorkflowSnapshot {
-            inventory: self.revisions.overview()?,
+            inventory,
+            trust,
             active_revision: self.active.as_ref().map(|session| session.choice.clone()),
             worker: self
                 .active
@@ -83,6 +122,20 @@ impl NativeModelWorkflow {
             backend,
         })?;
         Ok(())
+    }
+
+    /// Product-facing entrypoint: the untrusted GUI digest is only a lookup key.
+    /// A release must be signed by a currently enrolled independent publisher.
+    pub fn select_trusted(
+        &self,
+        model_id: &str,
+        manifest_sha256: &str,
+        backend: NativeBackend,
+    ) -> Result<(), NativeWorkflowError> {
+        let digest = parse_sha256(manifest_sha256)?;
+        let policy = self.trust.as_ref().ok_or(NativeTrustError::NotAuthorized)?;
+        let approved = policy.verify(model_id, &digest)?;
+        self.select_verified(&approved, backend)
     }
 
     /// The digest must come from a separately approved, already published package.
@@ -110,10 +163,20 @@ impl NativeModelWorkflow {
         if self.active.is_some() {
             return Err(NativeWorkflowError::AlreadyActive);
         }
+        if let Some(policy) = &self.trust {
+            let choice = self
+                .revisions
+                .selection_hint(model_id)?
+                .ok_or(NativeWorkflowError::NotSelected)?;
+            policy.verify(&choice.model_id, &choice.manifest_sha256)?;
+        }
         let (mut controller, selection) = self
             .revisions
             .controller_for_selected(model_id, deadline)?
             .ok_or(NativeWorkflowError::NotSelected)?;
+        if let Some(policy) = &self.trust {
+            policy.verify(&selection.model_id, &selection.approved_manifest_sha256)?;
+        }
         let snapshot = controller.activate(&selection).await?;
         self.active = Some(ActiveNativeSession {
             choice: choice_from_selection(selection),

@@ -4,6 +4,7 @@
 use crate::ai_runtime::{
     native_model::{NativeBackend, NativePhase},
     native_revisions::NativeSelectionManifestState,
+    native_trust::NativeTrustVerdict,
     native_workflow::NativeWorkflowSnapshot,
 };
 
@@ -26,12 +27,14 @@ pub struct NativeHubRevision {
     pub selected: bool,
     pub active: bool,
     pub observed_phase: Option<NativePhase>,
+    pub trust: NativeTrustVerdict,
 }
 
 pub struct NativeHubPresenter;
 
 impl NativeHubPresenter {
     pub fn project(snapshot: NativeWorkflowSnapshot) -> NativeHubView {
+        let trust = snapshot.trust;
         let inventory = NativeRevisionPresenter::project(snapshot.inventory);
         let invalid_selection = inventory
             .selections
@@ -74,6 +77,13 @@ impl NativeHubPresenter {
                     selected,
                     active: running,
                     observed_phase,
+                    trust: trust
+                        .iter()
+                        .find(|entry| {
+                            entry.model_id == item.model_id
+                                && hex_digest(entry.manifest_sha256) == item.manifest_sha256
+                        })
+                        .map_or(NativeTrustVerdict::Missing, |entry| entry.verdict.clone()),
                 });
             }
         }
@@ -98,14 +108,52 @@ mod tests {
             NativeRevisionChoice, NativeRevisionMetadata, NativeRevisionOverview,
             NativeSelectionMetadata,
         },
+        native_workflow::NativeRevisionTrust,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn signed_approval_is_scoped_to_exact_model_and_revision() {
+        let first = [0x11; 32];
+        let second = [0x22; 32];
+        let view = NativeHubPresenter::project(NativeWorkflowSnapshot {
+            inventory: NativeRevisionOverview {
+                revisions: [first, second]
+                    .into_iter()
+                    .map(|digest| NativeRevisionMetadata {
+                        model_id: "voice".into(),
+                        display_name: "Voice".into(),
+                        package_version: "1".into(),
+                        manifest_sha256: digest,
+                        backends: vec![NativeBackend::Cpu],
+                    })
+                    .collect(),
+                selections: vec![],
+            },
+            trust: vec![NativeRevisionTrust {
+                model_id: "voice".into(),
+                manifest_sha256: first,
+                verdict: NativeTrustVerdict::Authorized {
+                    publisher_id: "author".into(),
+                },
+            }],
+            active_revision: None,
+            worker: None,
+        });
+        assert!(matches!(
+            view.revisions[0].trust,
+            NativeTrustVerdict::Authorized { .. }
+        ));
+        assert_eq!(view.revisions[1].trust, NativeTrustVerdict::Missing);
+        assert!(!view.has_active_worker);
+    }
 
     #[test]
     fn a_new_selection_does_not_redirect_the_resident_worker() {
         let old = [1; 32];
         let new = [2; 32];
         let view = NativeHubPresenter::project(NativeWorkflowSnapshot {
+            trust: Vec::new(),
             inventory: NativeRevisionOverview {
                 revisions: [old, new]
                     .into_iter()
@@ -152,6 +200,7 @@ mod tests {
     #[test]
     fn missing_selected_version_is_not_promoted_to_ready() {
         let view = NativeHubPresenter::project(NativeWorkflowSnapshot {
+            trust: Vec::new(),
             inventory: NativeRevisionOverview {
                 revisions: Vec::new(),
                 selections: vec![NativeSelectionMetadata {

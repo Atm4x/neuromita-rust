@@ -10,6 +10,8 @@ export struct NativeRevisionRow {
     manifest-sha256: string,
     backend: string,
     selected: bool,
+    trusted: bool,
+    trust-status: string,
     running: bool,
     observed-phase: string,
 }
@@ -32,7 +34,7 @@ export component NativeRevisionPanel inherits Rectangle {
             spacing: 12px;
             VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 2px;
                 Label { text: "Нативные модели · EXE"; font-size: 18px; font-weight: 700; }
-                Label { text: "Версии из Core; проверка файлов выполняется перед выбором и запуском"; font-size: 11px; color: Theme.muted; }
+                Label { text: "Нужна подпись доверенного издателя; проверка файлов выполняется перед запуском"; font-size: 11px; color: Theme.muted; }
             }
             HubAction { caption: "Обновить"; compact: true; activated => { root.refresh-requested(); } }
         }
@@ -55,13 +57,14 @@ export component NativeRevisionPanel inherits Rectangle {
             horizontal-stretch: 1; vertical-stretch: 1; content-width: self.visible-width;
             VerticalLayout { spacing: 9px; padding-right: 8px; padding-bottom: 6px;
                 for revision in root.revisions: Rectangle {
-                    height: 100px; background: Theme.panel; border-width: 1px;
+                    height: 116px; background: Theme.panel; border-width: 1px;
                     border-color: revision.running ? Theme.accent-border : Theme.border;
                     border-radius: 12px;
                     HorizontalLayout { padding-left: 16px; padding-right: 12px; spacing: 12px;
                         VerticalLayout { horizontal-stretch: 1; alignment: center; spacing: 5px; min-width: 0px;
                             Label { text: revision.display-name + " · " + revision.package-version; font-size: 14px; font-weight: 700; overflow: elide; }
                             Label { text: revision.model-id + " · " + revision.backend.to-uppercase() + " · " + revision.manifest-sha256; font-size: 10px; color: Theme.muted; overflow: elide; }
+                            Label { text: revision.trust-status; font-size: 11px; color: revision.trusted ? Theme.muted : Theme.warning; overflow: elide; }
                             Label {
                                 text: revision.running ? "Worker: " + revision.observed-phase + " (последний ответ IPC)"
                                     : revision.selected ? "Выбрано. Файлы будут проверены при запуске" : "Manifest обнаружен. Целостность не проверена";
@@ -69,11 +72,11 @@ export component NativeRevisionPanel inherits Rectangle {
                             }
                         }
                         if revision.selected: HubPill { caption: "Выбрано"; accent: true; }
-                        if !revision.selected: HubAction {
+                        if !revision.selected && revision.trusted: HubAction {
                             caption: "Выбрать"; compact: true;
                             activated => { root.select-requested(revision.model-id, revision.manifest-sha256, revision.backend); }
                         }
-                        if revision.selected && !root.has-active: HubAction {
+                        if revision.selected && revision.trusted && !root.has-active: HubAction {
                             caption: "Запустить"; compact: true; primary: true;
                             activated => { root.activate-requested(revision.model-id); }
                         }

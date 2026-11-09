@@ -29,6 +29,7 @@ pub mod native_model;
 pub mod native_package_install;
 pub mod native_registry;
 pub mod native_revisions;
+pub mod native_trust;
 pub mod native_workflow;
 pub mod overlay;
 pub mod production;

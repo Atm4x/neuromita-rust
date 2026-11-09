@@ -9,6 +9,7 @@ use neuromita::{
         install_review::{InstallPlanReview, InstallPreviewError, InstallReviewFence},
         native_model::NativeBackend,
         native_revisions::{NativeRevisionOverview, NativeRevisionStore},
+        native_trust::NativeReleaseTrust,
         native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
         runtime_status::{RuntimePhase, RuntimeSnapshot},
         speech::Transcript,
@@ -456,7 +457,13 @@ fn open_native_workflow(
     if !native_exists || !runtime_exists {
         return Err("Нативное хранилище установлено не полностью".into());
     }
-    let workflow = NativeModelWorkflow::new(NativeRevisionStore::new(native, runtime));
+    let workflow = NativeModelWorkflow::with_trust(
+        NativeRevisionStore::new(native, runtime),
+        NativeReleaseTrust::new(
+            directory.join("Config/native-publisher-keys.json"),
+            directory.join("AIData/NativeApprovals"),
+        ),
+    );
     workflow.snapshot().map_err(|error| error.to_string())?;
     Ok(Some(workflow))
 }
@@ -465,6 +472,7 @@ fn publish_native(workflow: &Option<NativeModelWorkflow>, publish: &impl Fn(Upda
     let snapshot = match workflow.as_ref() {
         Some(workflow) => workflow.snapshot().map_err(|error| error.to_string()),
         None => Ok(NativeWorkflowSnapshot {
+            trust: Vec::new(),
             inventory: NativeRevisionOverview {
                 revisions: Vec::new(),
                 selections: Vec::new(),
@@ -652,7 +660,7 @@ async fn observe(
                 },
                 Some(Command::SelectNativeRevision { model_id, manifest_sha256, backend }) => {
                     let result = match (native_workflow.as_ref(), native_backend(&backend)) {
-                        (Some(workflow), Some(backend)) => workflow.select(&model_id, &manifest_sha256, backend).map_err(|_| "Выбор отклонён: пакет отсутствует, изменён или несовместим"),
+                        (Some(workflow), Some(backend)) => workflow.select_trusted(&model_id, &manifest_sha256, backend).map_err(|_| "Выбор отклонён: необходимы подтверждённая подпись издателя и целостный совместимый пакет"),
                         _ => Err("Нативная ревизия или backend недоступны"),
                     };
                     publish_native(&native_workflow, publish);
@@ -665,7 +673,7 @@ async fn observe(
                         None => Err(neuromita::ai_runtime::native_workflow::NativeWorkflowError::NotSelected),
                     };
                     publish_native(&native_workflow, publish);
-                    if result.is_err() { publish(Update::NativeError("Запуск отклонён: проверьте выбранную ревизию, целостность файлов и ответ worker".into())); }
+                    if result.is_err() { publish(Update::NativeError("Запуск отклонён: подпись издателя, выбранная ревизия, файлы или ответ worker не подтверждены".into())); }
                     refresh_views = false;
                 },
                 Some(Command::StopNativeModel) => {

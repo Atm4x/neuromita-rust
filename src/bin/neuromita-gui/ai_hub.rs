@@ -2,8 +2,9 @@
 
 use neuromita::{
     ai_runtime::{
-        native_model::NativePhase, native_workflow::NativeWorkflowSnapshot,
-        runtime_status::RuntimeSnapshot, speech_catalog::SpeechInventory,
+        native_model::NativePhase, native_trust::NativeTrustVerdict,
+        native_workflow::NativeWorkflowSnapshot, runtime_status::RuntimeSnapshot,
+        speech_catalog::SpeechInventory,
     },
     presentation::{
         ai_hub_catalog::{SpeechHubCatalog, SpeechHubEntry, SpeechHubLoadedModels},
@@ -229,6 +230,15 @@ pub fn native_models(window: &AppWindow, snapshot: NativeWorkflowSnapshot) {
                 None => "Не наблюдался",
             };
             NativeRevisionRow {
+                trusted: matches!(item.trust, NativeTrustVerdict::Authorized { .. }),
+                trust_status: match &item.trust {
+                    NativeTrustVerdict::Authorized { publisher_id } => {
+                        format!("Подпись издателя {publisher_id} подтверждена")
+                    }
+                    NativeTrustVerdict::Missing => "Нет подтверждённой подписи издателя".into(),
+                    NativeTrustVerdict::Rejected => "Подпись или политика доверия отклонена".into(),
+                }
+                .into(),
                 model_id: item.model_id.into(),
                 display_name: item.display_name.into(),
                 package_version: item.package_version.into(),
@@ -247,7 +257,7 @@ pub fn native_models(window: &AppWindow, snapshot: NativeWorkflowSnapshot) {
     } else if view.invalid_selection {
         "Выбранная ревизия отсутствует или backend более не объявлен".into()
     } else {
-        "Обнаружение manifest не подтверждает целостность весов и готовность модели".into()
+        "Для запуска необходимы независимый доверенный ключ и подписанный approval; manifest не доказывает готовность".into()
     });
     window.set_native_error("".into());
 }

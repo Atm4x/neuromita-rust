@@ -276,3 +276,270 @@ fn signed_but_wrong_digest_cannot_publish_unrelated_local_bytes() {
     );
     assert!(fixture.store().list("test-model").unwrap().is_empty());
 }
+
+fn trust_paths(fixture: &LocalFixture) -> (PathBuf, PathBuf) {
+    (
+        fixture.root.join("Config/native-publisher-keys.json"),
+        fixture.root.join("AIData/NativeApprovals"),
+    )
+}
+
+fn provision_trust(fixture: &LocalFixture, signer: &Ed25519KeyPair) {
+    let (policy, approvals) = trust_paths(fixture);
+    fs::create_dir_all(policy.parent().unwrap()).unwrap();
+    let key = STANDARD.encode(signer.public_key().as_ref());
+    fs::write(
+        policy,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "publishers": [{
+                "publisher_id": "release-author",
+                "ed25519_public_key_base64": key,
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::create_dir_all(approvals.join("test-model")).unwrap();
+}
+
+fn provision_approval(fixture: &LocalFixture, signer: &Ed25519KeyPair) -> PathBuf {
+    let (_, approvals) = trust_paths(fixture);
+    let digest =
+        sha_hex(&fs::read(fixture.source_packages.join("test-model/native-model.json")).unwrap());
+    let release_file = approvals.join("test-model").join(format!("{digest}.json"));
+    fs::write(&release_file, signed(signer, "test-model", &digest)).unwrap();
+    release_file
+}
+
+fn trusted_workflow(
+    fixture: &LocalFixture,
+) -> neuromita::ai_runtime::native_workflow::NativeModelWorkflow {
+    let (policy, approvals) = trust_paths(fixture);
+    neuromita::ai_runtime::native_workflow::NativeModelWorkflow::with_trust(
+        fixture.store(),
+        neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(policy, approvals),
+    )
+}
+
+fn digest_string(fixture: &LocalFixture) -> String {
+    fixture
+        .manifest_digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn no_independently_provisioned_key_or_release_denies_gui_selection() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    let workflow = trusted_workflow(&fixture);
+    assert!(
+        workflow
+            .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+            .is_err()
+    );
+    provision_trust(&fixture, &signer);
+    assert!(
+        workflow
+            .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+            .is_err()
+    );
+    provision_approval(&fixture, &signer);
+    let trust = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
+        trust_paths(&fixture).0,
+        trust_paths(&fixture).1,
+    );
+    assert!(matches!(
+        trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Authorized { .. }
+    ));
+}
+
+#[test]
+fn signed_application_approval_allows_only_the_pinned_revision() {
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    provision_approval(&fixture, &signer);
+    let approved = verifier(&signer)
+        .verify(&signed(&signer, "test-model", &digest_string(&fixture)))
+        .unwrap();
+    fixture
+        .store()
+        .install_verified_local(
+            &fixture.source_packages,
+            &fixture.source_runtime,
+            &approved,
+            NativeBackend::Cpu,
+        )
+        .unwrap();
+    let workflow = trusted_workflow(&fixture);
+    workflow
+        .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store()
+            .selected("test-model")
+            .unwrap()
+            .unwrap()
+            .manifest_sha256,
+        fixture.manifest_digest
+    );
+    assert!(
+        workflow
+            .select_trusted("test-model", &"ff".repeat(32), NativeBackend::Cpu)
+            .is_err()
+    );
+    assert!(
+        workflow
+            .snapshot()
+            .unwrap()
+            .trust
+            .iter()
+            .any(|entry| matches!(
+                entry.verdict,
+                neuromita::ai_runtime::native_trust::NativeTrustVerdict::Authorized { .. }
+            ))
+    );
+}
+
+#[tokio::test]
+async fn revoking_key_or_approval_blocks_start_even_after_an_old_selection() {
+    use neuromita::ai_runtime::native_workflow::NativeWorkflowError;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    let release_path = provision_approval(&fixture, &signer);
+    let approved = verifier(&signer)
+        .verify(&signed(&signer, "test-model", &digest_string(&fixture)))
+        .unwrap();
+    fixture
+        .store()
+        .install_verified_local(
+            &fixture.source_packages,
+            &fixture.source_runtime,
+            &approved,
+            NativeBackend::Cpu,
+        )
+        .unwrap();
+    let mut workflow = trusted_workflow(&fixture);
+    workflow
+        .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+        .unwrap();
+    fs::remove_file(&release_path).unwrap();
+    assert!(matches!(
+        workflow
+            .activate_selected("test-model", std::time::Duration::from_secs(1))
+            .await,
+        Err(NativeWorkflowError::Trust(_))
+    ));
+    fs::write(
+        &release_path,
+        signed(&signer, "test-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    fs::remove_file(trust_paths(&fixture).0).unwrap();
+    assert!(matches!(
+        workflow
+            .activate_selected("test-model", std::time::Duration::from_secs(1))
+            .await,
+        Err(NativeWorkflowError::Trust(_))
+    ));
+    assert!(workflow.snapshot().unwrap().worker.is_none());
+}
+
+#[test]
+fn altered_signed_release_and_wrong_trusted_key_fail_closed() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    let path = provision_approval(&fixture, &signer);
+    let policy = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
+        trust_paths(&fixture).0,
+        trust_paths(&fixture).1,
+    );
+    let other = signing_pair();
+    fs::write(
+        &path,
+        signed(&other, "test-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    assert!(matches!(
+        policy.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    fs::write(
+        &path,
+        signed(&signer, "other-model", &digest_string(&fixture)),
+    )
+    .unwrap();
+    assert!(matches!(
+        policy.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    fs::write(&path, signed(&signer, "test-model", &"aa".repeat(32))).unwrap();
+    assert!(matches!(
+        policy.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+}
+
+#[test]
+fn malformed_trust_document_is_never_silently_ignored() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    provision_approval(&fixture, &signer);
+    let policy = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
+        trust_paths(&fixture).0.clone(),
+        trust_paths(&fixture).1,
+    );
+    fs::write(trust_paths(&fixture).0, b"{bad json}").unwrap();
+    assert!(matches!(
+        policy.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    assert!(
+        trusted_workflow(&fixture)
+            .select_trusted("test-model", &digest_string(&fixture), NativeBackend::Cpu)
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_publisher_keys_and_signed_release_are_rejected() {
+    use neuromita::ai_runtime::native_trust::NativeTrustVerdict;
+    use std::os::unix::fs::symlink;
+    let fixture = LocalFixture::new();
+    let signer = signing_pair();
+    provision_trust(&fixture, &signer);
+    let approval = provision_approval(&fixture, &signer);
+    let policy_path = trust_paths(&fixture).0;
+    let original = fixture.root.join("keys.original.json");
+    fs::rename(&policy_path, &original).unwrap();
+    symlink(&original, &policy_path).unwrap();
+    let trust = neuromita::ai_runtime::native_trust::NativeReleaseTrust::new(
+        policy_path.clone(),
+        trust_paths(&fixture).1,
+    );
+    assert!(matches!(
+        trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+    fs::remove_file(&policy_path).unwrap();
+    fs::rename(&original, &policy_path).unwrap();
+    let source = fixture.root.join("approval.original.json");
+    fs::rename(&approval, &source).unwrap();
+    symlink(&source, &approval).unwrap();
+    assert!(matches!(
+        trust.verdict("test-model", &fixture.manifest_digest),
+        NativeTrustVerdict::Rejected
+    ));
+}
