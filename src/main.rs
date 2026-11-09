@@ -1,3 +1,4 @@
+mod documents_cli;
 mod logging;
 #[cfg(feature = "sqlite-system")]
 mod recovery_inventory_cli;
@@ -36,6 +37,12 @@ async fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     let command = arguments.next();
+    if command.as_deref() == Some(std::ffi::OsStr::new("documents")) {
+        return match documents_cli::run(arguments.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(error),
+        };
+    }
     if command.as_deref() == Some(std::ffi::OsStr::new("recovery-snapshot")) {
         #[cfg(feature = "sqlite-system")]
         return match recovery_snapshot_cli::run(arguments.collect()) {

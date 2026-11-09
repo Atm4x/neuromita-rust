@@ -1,6 +1,7 @@
 //! Deterministic knowledge selection over caller-owned, snapshot-scoped facts.
 //! The embedding port is an abstraction; provider implementations live outside this module.
 
+pub mod document_index;
 pub mod embedding;
 pub mod forgotten_recall;
 pub(crate) mod generation_fusion;
