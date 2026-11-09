@@ -1,0 +1,41 @@
+name: agent-b78-pinned-source-verify
+on:
+  push:
+    branches: [bridge/agent-b78-verify-20261109]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact B78
+        uses: actions/checkout@v4
+        with:
+          ref: 2ece4632915daaef456c4e20c00ca4a3ff406336
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "2ece4632915daaef456c4e20c00ca4a3ff406336"
+          test "$(git rev-parse HEAD^{tree})" = "ec801f20ed1fe50094947101e6c234217ea36dc5"
+          test "$(git rev-list --parents -n1 HEAD | awk '{print $2}')" = "6ac6d056eb83cf461447576130e35bfa8edd2869"
+      - name: Install Rust and ALSA
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup override set 1.98.1
+          rustc --version
+      - name: Focused same-branch lifecycle tests
+        run: |
+          cargo test --locked --offline --lib same_branch_ -- --test-threads=2
+      - name: Full filtered library regression
+        run: |
+          cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets and formatting
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
