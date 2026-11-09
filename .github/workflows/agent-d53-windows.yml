@@ -1,0 +1,36 @@
+name: Agent D53 native Windows PE activation acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d53-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d53-native-apply-e2e-20261109
+      - name: Verify exact source commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "601f3f7c011dda450f2e2292b934a3dbdcd9a970"
+          test "$(git rev-parse HEAD^{tree})" = "b983928cd27b05eb9f5383a92d1b604eee0c78df"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Real Windows PE activation readiness rollback fixture
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e
+      - name: Installed Windows offline recovery acceptance
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery
+      - name: All Windows Rust targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
