@@ -1,4 +1,4 @@
-name: Agent D55 native Windows orphan recovery acceptance
+name: Agent D56 installed Windows isolated lease acceptance
 on:
   push:
     branches:
@@ -12,16 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: codex/agent-d55-orphan-handoff-recovery-20261109
+          ref: codex/agent-d56-isolated-windows-handoff-20261109
       - name: Verify exact D55 HEAD and tree
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "2791700dbbedda574a8fb587e128701980565b85"
-          test "$(git rev-parse HEAD^{tree})" = "a3610234d623aad11dc455de5d455eb3fb5bf5ce"
+          test "$(git rev-parse HEAD)" = "6b22584ff5162331e1b5ab837feae2be31a284ea"
+          test "$(git rev-parse HEAD^{tree})" = "3f0f8f4f60bb07c1b800a19da3fe39300f7e80a7"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
+      - name: Real Windows installed handoff isolated lease E2E
+        run: |
+          cargo test --locked --offline --lib updater::handoff::windows_acceptance::installed_windows_helper_handoff_with_isolated_guard -- --test-threads=1 --nocapture
       - name: Native Windows updater and isolated HKCU lease unit tests
         run: |
           cargo test --locked --offline --lib updater:: -- --test-threads=2
