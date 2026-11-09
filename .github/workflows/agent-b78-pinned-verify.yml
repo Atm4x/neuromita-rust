@@ -20,7 +20,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "8d2198f7f46fd4852e89ec15750f97a57fa64aa0"
           test "$(git rev-parse HEAD^{tree})" = "4af0f68a9d4f611b53d0ce5ab03e83acb4a9d816"
-          test "$(git rev-list --parents -n1 HEAD | awk '{print $2}')" = "6ac6d056eb83cf461447576130e35bfa8edd2869"
+          test "$(git rev-list --parents -n1 HEAD | awk '{print $2}')" = "2ece4632915daaef456c4e20c00ca4a3ff406336"
       - name: Install Rust and ALSA
         run: |
           sudo apt-get update -qq
