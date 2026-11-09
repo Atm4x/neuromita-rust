@@ -1,0 +1,36 @@
+name: Agent D57 exact guarded parent wait import
+on:
+  push:
+    branches:
+      - bridge/agent-d57-parent-shutdown-deadline-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate source patch, Git identity and publish original commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=6b22584ff5162331e1b5ab837feae2be31a284ea
+          EXPECTED=85b081ca858e78e65e9b96c103bb868ec3432c6d
+          TREE=18418a26a6cc462a2fb07c91ccbea10f46900719
+          cat .agent-bridge/d57-part-0{1,2,3}.b64 | tr -d '\n' | base64 -d > /tmp/d57.patch.br
+          echo '99222a3aa29a2409ad5db01af981d84626bb5821f26925de52bfeb0196639ed6  /tmp/d57.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d57.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d57.patch.br')))"
+          echo '3282f8955f27d7a796951afd2189205813d1eb23ed54e93898c74882ae20e1f9  /tmp/d57.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d57.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d57-bounded-parent-shutdown-20261109
