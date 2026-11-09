@@ -1,0 +1,43 @@
+name: agent-b77-pinned-source-verify
+on:
+  push:
+    branches: [bridge/agent-b77-verify-20261109]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact B77
+        uses: actions/checkout@v4
+        with:
+          ref: 6ac6d056eb83cf461447576130e35bfa8edd2869
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify pinned tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "6ac6d056eb83cf461447576130e35bfa8edd2869"
+          test "$(git rev-parse HEAD^{tree})" = "f077cbc8eda45f179781d9c452c2e89fb4bc5dda"
+          test "$(git rev-list --parents -n1 HEAD | awk '{print $2}')" = "71a48dead745e9f3ee965ca8fc98a1b369979281"
+      - name: Prepare Rust and ALSA
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup override set 1.98.1
+          rustc --version
+      - name: Focused same-branch tests
+        run: |
+          cargo test --locked --offline --lib same_branch_admission
+          cargo test --locked --offline --lib sqlite_failed_admission_marker
+          cargo test --locked --offline --lib history_reset_invalidates_old_same_branch_admission
+      - name: Filtered full regression
+        run: |
+          cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: All targets and format
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
