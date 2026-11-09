@@ -1,0 +1,33 @@
+name: Import exact Agent C signed native product trust
+on:
+  push:
+    branches: [bridge/agent-c-native-product-trust-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-product-trust-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-product-trust-20261109
+          fetch-depth: 0
+      - name: Verify source bundle and non-force fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native-product-trust.part0{0,1,2,3} | base64 -d >/tmp/agent-c-native-product-trust.bundle
+          test "$(sha256sum /tmp/agent-c-native-product-trust.bundle | cut -d' ' -f1)" = "1d6a30e25ba3ace2fcd5f0922453db670aeb866c19947a6ac004aa44fdc43cec"
+          git fetch origin refs/heads/codex/ai-native-publisher-approval-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "99f24d388446eeb06db9b1813d86c23eb6195f23"
+          git fetch origin refs/heads/codex/ai-native-product-trust-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "99f24d388446eeb06db9b1813d86c23eb6195f23"
+          git bundle verify /tmp/agent-c-native-product-trust.bundle
+          git fetch /tmp/agent-c-native-product-trust.bundle refs/heads/codex/ai-native-product-trust-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "43e7b068ce541451ca5c058b41bc410c3b4e3fc8"
+          git checkout --detach "43e7b068ce541451ca5c058b41bc410c3b4e3fc8"
+          test "$(git rev-parse HEAD^{tree})" = "f206fcb1050ff275830adaa6bd9bd45b1cf82c88"
+          test "$(git rev-list --parents -n1 HEAD)" = "43e7b068ce541451ca5c058b41bc410c3b4e3fc8 99f24d388446eeb06db9b1813d86c23eb6195f23"
+          git diff --check "99f24d388446eeb06db9b1813d86c23eb6195f23" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-product-trust-20261109
