@@ -1,0 +1,32 @@
+name: Regenerate B82 backend checks
+
+on:
+  push:
+    branches:
+      - codex/timeline-b82-foreign-knowledge-dispatch-fence-20261110
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio link headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+      - name: Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          rustc --version
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check all targets offline
+        run: cargo check --locked --offline --all-targets
+      - name: Backend regression
+        run: |
+          cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
