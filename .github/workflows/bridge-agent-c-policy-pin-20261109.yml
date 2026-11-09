@@ -1,0 +1,35 @@
+name: Import Agent C exact binary-pinned native publisher policy
+on:
+  push:
+    branches: [bridge/agent-c-native-binary-pinned-policy-20261109]
+    paths: [.github/workflows/bridge-agent-c-policy-pin-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-binary-pinned-policy-20261109
+          fetch-depth: 0
+      - name: Verify bundle, exact commit/tree and non-force fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-policy-pin.part0{0,1} | base64 -d >/tmp/agent-c-policy-pin.bundle.xz
+          test "$(sha256sum /tmp/agent-c-policy-pin.bundle.xz | cut -d' ' -f1)" = "3e1b8ad92db3d0b259b5a4e2818d880c00b7fe487ed9eab3e189eb0d44980435"
+          xz -dc /tmp/agent-c-policy-pin.bundle.xz >/tmp/agent-c-policy-pin.bundle
+          test "$(sha256sum /tmp/agent-c-policy-pin.bundle | cut -d' ' -f1)" = "8856ff0cd3788dacbbeb92415d6e6abbf0266d21ae78069109ac912ad6d7c350"
+          git fetch origin refs/heads/codex/ai-native-product-trust-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "43e7b068ce541451ca5c058b41bc410c3b4e3fc8"
+          git fetch origin refs/heads/codex/ai-native-binary-pinned-publisher-policy-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "43e7b068ce541451ca5c058b41bc410c3b4e3fc8"
+          git bundle verify /tmp/agent-c-policy-pin.bundle
+          git fetch /tmp/agent-c-policy-pin.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "f5b9116f9984f7939ba727a949f561dc1215b4c8"
+          git checkout --detach "f5b9116f9984f7939ba727a949f561dc1215b4c8"
+          test "$(git rev-parse HEAD^{tree})" = "bfe182341fb9d83c915958836c28ea6addcf38eb"
+          test "$(git rev-list --parents -n1 HEAD)" = "f5b9116f9984f7939ba727a949f561dc1215b4c8 43e7b068ce541451ca5c058b41bc410c3b4e3fc8"
+          git diff --check "43e7b068ce541451ca5c058b41bc410c3b4e3fc8" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-binary-pinned-publisher-policy-20261109
