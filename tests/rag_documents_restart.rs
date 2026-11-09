@@ -50,9 +50,9 @@ impl GenerationProvider for ControlledProvider {
     }
 }
 
-fn config(
+fn config<R: SettingsRepository>(
     sender: mpsc::UnboundedSender<ProviderCall>,
-    repository: Arc<JsonSettingsRepository>,
+    repository: Arc<R>,
     source: SettingsSource,
 ) -> ApplicationConfig {
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(
@@ -281,6 +281,217 @@ async fn persistent_document_revisions_survive_restart_and_fail_closed_until_exp
         } if settings_revision == repaired.revision
     ));
     assert_eq!(repo.load().unwrap().revision, repaired.revision);
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+struct FailableJsonRepository {
+    inner: JsonSettingsRepository,
+    reject_saves: std::sync::atomic::AtomicBool,
+}
+
+impl FailableJsonRepository {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            inner: JsonSettingsRepository::new(path),
+            reject_saves: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn reject_saves(&self, reject: bool) {
+        self.reject_saves
+            .store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl SettingsRepository for FailableJsonRepository {
+    fn migrate(&self) -> Result<(), SettingsError> {
+        self.inner.migrate()
+    }
+
+    fn load(&self) -> Result<neuromita::settings::StoredSettings, SettingsError> {
+        self.inner.load()
+    }
+
+    fn save(&self, settings: &neuromita::settings::StoredSettings) -> Result<(), SettingsError> {
+        if self.reject_saves.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SettingsError::Storage("injected write failure".into()));
+        }
+        self.inner.save(settings)
+    }
+}
+
+#[tokio::test]
+async fn document_provider_failure_and_explicit_cancellation_do_not_change_selection() {
+    use neuromita::request::CancelResult;
+
+    let folder = std::env::temp_dir().join(format!("nm-r7-provider-{}", uuid::Uuid::new_v4()));
+    let crazy_root = folder.join("crazy");
+    let kind_root = folder.join("kind");
+    let revisions = folder.join("revisions");
+    std::fs::create_dir_all(&crazy_root).unwrap();
+    std::fs::create_dir_all(&kind_root).unwrap();
+    std::fs::create_dir(&revisions).unwrap();
+    std::fs::write(crazy_root.join("doc.md"), "Nebula orchid: sapphire blue.").unwrap();
+    std::fs::write(kind_root.join("doc.txt"), "Nebula orchid: violet sky.").unwrap();
+    let crazy = DocumentRevisionApi::prepare(&crazy_root, CharacterId::Crazy, &revisions).unwrap();
+    let kind = DocumentRevisionApi::prepare(&kind_root, CharacterId::Kind, &revisions).unwrap();
+    let repository = Arc::new(JsonSettingsRepository::new(folder.join("settings.json")));
+    let (sender, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(
+        sender,
+        Arc::clone(&repository),
+        SettingsSource::initial(AppSettings::initial_profile()),
+    ))
+    .await
+    .unwrap();
+    let baseline = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let first = DocumentRevisionApi::activate(&crazy, baseline.revision).unwrap();
+    let both = DocumentRevisionApi::activate(&kind, first.revision).unwrap();
+    SettingsApi::flush().await.unwrap();
+
+    let failure = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "nebula orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let broken_call = timeout(Duration::from_secs(8), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        broken_call
+            .input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains("sapphire blue")
+    );
+    drop(broken_call.reply);
+    assert!(matches!(
+        timeout(Duration::from_secs(8), failure.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(
+            GenerationError::Transport(_)
+        ))
+    ));
+
+    generated(&mut calls, CharacterId::Kind, "violet sky").await;
+
+    let cancelled = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "nebula orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let pending_call = timeout(Duration::from_secs(8), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        pending_call
+            .input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains("sapphire blue")
+    );
+    assert!(matches!(
+        cancelled.cancel(),
+        CancelResult::Requested | CancelResult::Cancelled
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(8), cancelled.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Cancelled
+    ));
+    assert!(pending_call.reply.send("too late".into()).is_err());
+
+    generated(&mut calls, CharacterId::Crazy, "sapphire blue").await;
+    assert_eq!(
+        SettingsApi::snapshot::<DocumentGenerationSettings>()
+            .unwrap()
+            .revision,
+        both.revision
+    );
+    assert_eq!(repository.load().unwrap().revision, both.revision);
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[tokio::test]
+async fn failed_settings_save_needs_explicit_retry_before_restart_keeps_document_selection() {
+    let folder = std::env::temp_dir().join(format!("nm-r7-save-{}", uuid::Uuid::new_v4()));
+    let root = folder.join("crazy");
+    let revisions = folder.join("revisions");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir(&revisions).unwrap();
+    std::fs::write(root.join("doc.md"), "Nebula orchid: sapphire blue.").unwrap();
+    let receipt = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    let repository = Arc::new(FailableJsonRepository::new(folder.join("settings.json")));
+    let (sender, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(
+        sender.clone(),
+        Arc::clone(&repository),
+        SettingsSource::initial(AppSettings::initial_profile()),
+    ))
+    .await
+    .unwrap();
+    SettingsApi::flush().await.unwrap();
+    let original = repository.load().unwrap();
+    repository.reject_saves(true);
+    let activated = DocumentRevisionApi::activate(&receipt, original.revision).unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(8), SettingsApi::flush())
+            .await
+            .unwrap(),
+        Err(SettingsError::Storage(_))
+    ));
+    assert_eq!(repository.load().unwrap().revision, original.revision);
+    assert_eq!(
+        repository
+            .load()
+            .unwrap()
+            .settings
+            .document_generation
+            .sources
+            .len(),
+        0
+    );
+    assert!(matches!(
+        DocumentRevisionApi::inspect(CharacterId::Crazy).unwrap(),
+        DocumentRevisionInspection::Ready { settings_revision, .. } if settings_revision == activated.revision
+    ));
+    generated(&mut calls, CharacterId::Crazy, "sapphire blue").await;
+
+    repository.reject_saves(false);
+    SettingsApi::retry_save().unwrap();
+    timeout(Duration::from_secs(8), SettingsApi::flush())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repository.load().unwrap().revision, activated.revision);
+    app.shutdown().await.unwrap();
+
+    let app = ApplicationLifecycle::start(config(
+        sender,
+        Arc::clone(&repository),
+        SettingsSource::Stored,
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        DocumentRevisionApi::status(CharacterId::Crazy).unwrap(),
+        DocumentRevisionStatus::Ready { settings_revision, revision } if settings_revision == activated.revision && revision == receipt
+    ));
+    generated(&mut calls, CharacterId::Crazy, "sapphire blue").await;
     app.shutdown().await.unwrap();
     std::fs::remove_dir_all(folder).unwrap();
 }
