@@ -18,6 +18,7 @@ use crate::{
     interaction::TurnIntent,
     knowledge::{
         KnowledgeRetrieval,
+        document_generation::select_for_generation as select_document_generation,
         generation_fusion::select_lexical_generation,
         history_generation::render_archived_history_evidence,
         history_retrieval::{
@@ -353,6 +354,26 @@ impl MessageHandler {
                     })?;
                     if latest.anchor() != context.anchor {
                         return Err(GenerationError::Response("history Timeline prefix changed during retrieval".into()));
+                    }
+                }
+                if let Some(source) = settings.values.document_generation.sources.get(&context.character_id) {
+                    let source = source.clone();
+                    let character = context.character_id;
+                    let document_query = query.chars().take(512).collect::<String>();
+                    let max_results = usize::from(settings.values.document_generation.max_results);
+                    let max_content_chars = usize::from(settings.values.document_generation.max_content_chars);
+                    let documents = tokio::task::spawn_blocking(move || {
+                        select_document_generation(character, &source.root, &source.index, &document_query, max_results, max_content_chars)
+                    }).await.map_err(|error| GenerationError::Response(format!(
+                        "document retrieval task failed: {error}"
+                    )))?.map_err(|error| GenerationError::Response(format!(
+                        "selected document retrieval failed: {error}"
+                    )))?;
+                    if let Some(documents) = documents {
+                        match &mut selected {
+                            Some(text) => { text.push_str("\n"); text.push_str(&documents); }
+                            None => selected = Some(documents),
+                        }
                     }
                 }
                 let request = GenerationRequest::new(context, preset, selected)

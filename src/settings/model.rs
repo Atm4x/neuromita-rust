@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    path::{Component, PathBuf},
+};
 
 use super::{SettingsError, SpeechSettings};
 use crate::generation::{ModelMemoryAddPolicy, PresetId, ToolSettings};
@@ -327,6 +330,61 @@ impl HistoryGenerationSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DocumentGenerationSource {
+    pub root: PathBuf,
+    pub index: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DocumentGenerationSettings {
+    pub sources: BTreeMap<crate::identity::CharacterId, DocumentGenerationSource>,
+    pub max_results: u8,
+    pub max_content_chars: u16,
+}
+
+impl Default for DocumentGenerationSettings {
+    fn default() -> Self {
+        Self {
+            sources: BTreeMap::new(),
+            max_results: 3,
+            max_content_chars: 500,
+        }
+    }
+}
+
+impl DocumentGenerationSettings {
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        if !(1..=4).contains(&self.max_results) || !(64..=800).contains(&self.max_content_chars) {
+            return Err(SettingsError::Validation(
+                "document generation requires 1..=4 results and 64..=800 characters per result"
+                    .into(),
+            ));
+        }
+        for source in self.sources.values() {
+            if !source.root.is_absolute()
+                || !source.index.is_absolute()
+                || source.index.starts_with(&source.root)
+                || source.index == source.root
+                || [source.root.as_path(), source.index.as_path()]
+                    .iter()
+                    .any(|path| {
+                        path.components().any(|component| {
+                            matches!(component, Component::ParentDir | Component::CurDir)
+                        })
+                    })
+            {
+                return Err(SettingsError::Validation(
+                    "document generation requires absolute canonical-form source and independent index paths".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemindersSettings {
     pub enabled: bool,
     pub timezone: TimeZoneId,
@@ -361,6 +419,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub history_generation: HistoryGenerationSettings,
     #[serde(default)]
+    pub document_generation: DocumentGenerationSettings,
+    #[serde(default)]
     pub tools: ToolSettings,
 }
 
@@ -391,6 +451,7 @@ impl AppSettings {
             speech: SpeechSettings::default(),
             memory: MemorySettings::default(),
             history_generation: HistoryGenerationSettings::default(),
+            document_generation: DocumentGenerationSettings::default(),
             tools: ToolSettings::default(),
         }
     }
@@ -421,6 +482,7 @@ impl AppSettings {
         self.speech.validate()?;
         self.memory.validate()?;
         self.history_generation.validate()?;
+        self.document_generation.validate()?;
         self.tools
             .validate()
             .map_err(|error| SettingsError::Validation(error.to_string()))?;
@@ -470,6 +532,7 @@ section!(VoiceSettings, voice);
 section!(SpeechSettings, speech);
 section!(MemorySettings, memory);
 section!(HistoryGenerationSettings, history_generation);
+section!(DocumentGenerationSettings, document_generation);
 section!(CaptureSettings, capture);
 section!(InterfaceSettings, interface);
 section!(RemindersSettings, reminders);
