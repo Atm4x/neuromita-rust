@@ -279,3 +279,141 @@ fn document_settings_are_disabled_by_default_backward_compatible_and_validated()
     value.max_results = 0;
     assert!(value.validate().is_err());
 }
+
+#[tokio::test]
+async fn reindex_activation_is_explicit_revision_scoped_and_queued_requests_remain_pinned() {
+    use neuromita::document_revision::{DocumentRevisionApi, DocumentRevisionStatus};
+    let folder = std::env::temp_dir().join(format!("nm-doc-revision-{}", uuid::Uuid::new_v4()));
+    let root = folder.join("documents");
+    let revisions = folder.join("revisions");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir(&revisions).unwrap();
+    std::fs::write(root.join("notes.md"), "Nebula orchid is sapphire blue.").unwrap();
+
+    let v1 = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    let (tx, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(tx)).await.unwrap();
+    let start = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let active = DocumentRevisionApi::activate(&v1, start.revision).unwrap();
+    assert_eq!(active.value.sources[&CharacterId::Crazy].index, v1.index);
+    assert!(
+        matches!(DocumentRevisionApi::status(CharacterId::Crazy).unwrap(),
+        DocumentRevisionStatus::Ready { revision, .. } if revision == v1)
+    );
+
+    let blocked = request(CharacterId::Crazy);
+    let pending_provider = next_call(&mut calls).await;
+    assert!(
+        pending_provider
+            .input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains("sapphire blue")
+    );
+    let queued_v1 = request(CharacterId::Crazy);
+
+    std::fs::write(root.join("notes.md"), "Nebula orchid is glowing amber.").unwrap();
+    let v2 = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    assert_ne!(v1.index, v2.index);
+    assert_ne!(v1.fingerprint, v2.fingerprint);
+    assert!(
+        v1.index.exists(),
+        "old index revision must remain available"
+    );
+    assert!(
+        DocumentRevisionApi::verify(&v1).is_err(),
+        "old index should now fail closed"
+    );
+
+    let mut forged = v2.clone();
+    forged.fingerprint = "0".repeat(64);
+    assert!(DocumentRevisionApi::activate(&forged, active.revision).is_err());
+    assert_eq!(
+        SettingsApi::snapshot::<DocumentGenerationSettings>()
+            .unwrap()
+            .revision,
+        active.revision
+    );
+    let changed = DocumentRevisionApi::activate(&v2, active.revision).unwrap();
+    assert!(matches!(
+        DocumentRevisionApi::activate(&v2, active.revision),
+        Err(
+            neuromita::document_revision::DocumentRevisionError::Settings(
+                neuromita::settings::SettingsError::Conflict { .. }
+            )
+        )
+    ));
+    assert_eq!(changed.value.sources[&CharacterId::Crazy].index, v2.index);
+    assert!(
+        matches!(DocumentRevisionApi::status(CharacterId::Crazy).unwrap(),
+        DocumentRevisionStatus::Ready { revision, .. } if revision == v2)
+    );
+
+    let queued_v2 = request(CharacterId::Crazy);
+    pending_provider.reply.send("first".into()).unwrap();
+    assert!(matches!(
+        completed(blocked).await,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert!(matches!(
+        completed(queued_v1).await,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(_))
+    ));
+    let updated_provider = next_call(&mut calls).await;
+    let text = updated_provider
+        .input
+        .prepared_knowledge
+        .as_deref()
+        .unwrap_or("");
+    assert!(
+        text.contains("glowing amber") && !text.contains("sapphire blue"),
+        "{text}"
+    );
+    updated_provider.reply.send("second".into()).unwrap();
+    assert!(matches!(
+        completed(queued_v2).await,
+        RequestState::Finished(RequestOutcome::Success(_))
+    ));
+    assert!(calls.try_recv().is_err());
+
+    let kind_root = folder.join("kind-documents");
+    std::fs::create_dir(&kind_root).unwrap();
+    std::fs::write(kind_root.join("notes.txt"), "Kind has a violet sky.").unwrap();
+    let kind_revision =
+        DocumentRevisionApi::prepare(&kind_root, CharacterId::Kind, &revisions).unwrap();
+    let selected = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let with_kind = DocumentRevisionApi::activate(&kind_revision, selected.revision).unwrap();
+    assert_eq!(with_kind.value.sources[&CharacterId::Crazy].index, v2.index);
+    assert_eq!(
+        with_kind.value.sources[&CharacterId::Kind].index,
+        kind_revision.index
+    );
+
+    let current = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let off = DocumentRevisionApi::deactivate(CharacterId::Crazy, current.revision).unwrap();
+    assert!(matches!(
+        DocumentRevisionApi::status(CharacterId::Crazy).unwrap(),
+        DocumentRevisionStatus::Disabled { .. }
+    ));
+    assert!(
+        matches!(DocumentRevisionApi::status(CharacterId::Kind).unwrap(),
+        DocumentRevisionStatus::Ready { revision, .. } if revision == kind_revision)
+    );
+    assert!(matches!(
+        DocumentRevisionApi::deactivate(CharacterId::Crazy, current.revision),
+        Err(
+            neuromita::document_revision::DocumentRevisionError::Settings(
+                neuromita::settings::SettingsError::Conflict { .. }
+            )
+        )
+    ));
+    assert!(!off.value.sources.contains_key(&CharacterId::Crazy));
+    assert_eq!(
+        off.value.sources[&CharacterId::Kind].index,
+        kind_revision.index
+    );
+    SettingsApi::flush().await.unwrap();
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(folder).unwrap();
+}

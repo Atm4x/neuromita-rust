@@ -322,6 +322,29 @@ pub fn build_new(
     Ok(index)
 }
 
+/// Create one immutable, uniquely named derived index revision without selecting it.
+/// The caller must explicitly activate the returned path through the settings owner.
+pub fn build_new_revision(
+    root: &Path,
+    character: CharacterId,
+    revisions_directory: &Path,
+) -> Result<(std::path::PathBuf, DocumentIndex), DocumentError> {
+    validate_root(revisions_directory)?;
+    if revisions_directory.starts_with(root) || revisions_directory == root {
+        return Err(DocumentError::UnsafePath(
+            revisions_directory.display().to_string(),
+        ));
+    }
+    let destination = revisions_directory.join(format!(
+        "{}-{}.json",
+        character.as_str(),
+        uuid::Uuid::new_v4()
+    ));
+    let index = build_new(root, character, &destination)?;
+    load_verified(root, character, &destination)?;
+    Ok((destination, index))
+}
+
 pub fn search_verified(
     root: &Path,
     character: CharacterId,

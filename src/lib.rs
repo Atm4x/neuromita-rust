@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod audio;
 pub mod character;
+pub mod document_revision;
 pub mod finetune;
 pub mod game_context;
 pub mod game_link;

@@ -2,11 +2,17 @@ use std::{ffi::OsString, io, path::PathBuf};
 
 use neuromita::{
     character::CharacterId,
+    document_revision::DocumentRevisionApi,
     knowledge::document_index::{self, SearchStatus},
 };
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
+    Reindex {
+        root: PathBuf,
+        character: CharacterId,
+        revisions_directory: PathBuf,
+    },
     Build {
         root: PathBuf,
         character: CharacterId,
@@ -29,7 +35,9 @@ enum Action {
 
 fn parse(args: Vec<OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
-    let mode = args.next().ok_or("expected build, verify or query")?;
+    let mode = args
+        .next()
+        .ok_or("expected build, reindex, verify or query")?;
     if mode == "--help" {
         return if args.next().is_none() {
             Ok(Action::Help)
@@ -37,12 +45,13 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
             Err("unknown help arguments".into())
         };
     }
-    if mode != "build" && mode != "verify" && mode != "query" {
-        return Err("expected build, verify or query".into());
+    if mode != "build" && mode != "reindex" && mode != "verify" && mode != "query" {
+        return Err("expected build, reindex, verify or query".into());
     }
     let mut root = None;
     let mut character = None;
     let mut index = None;
+    let mut revisions_directory = None;
     let mut text = None;
     let mut limit = None;
     while let Some(flag) = args.next() {
@@ -50,6 +59,9 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
         match flag.to_str() {
             Some("--root") if root.is_none() => root = Some(PathBuf::from(value)),
             Some("--index") if index.is_none() => index = Some(PathBuf::from(value)),
+            Some("--revisions-dir") if mode == "reindex" && revisions_directory.is_none() => {
+                revisions_directory = Some(PathBuf::from(value));
+            }
             Some("--character") if character.is_none() => {
                 let name = value.into_string().map_err(|_| "invalid character")?;
                 character = Some(CharacterId::parse(&name).ok_or("unknown character")?);
@@ -65,10 +77,27 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
         }
     }
     let root = root.ok_or("--root is required")?;
-    let index = index.ok_or("--index is required")?;
     let character = character.ok_or("--character is required")?;
-    if !root.is_absolute() || !index.is_absolute() {
-        return Err("source and index paths must be absolute".into());
+    if !root.is_absolute() {
+        return Err("source path must be absolute".into());
+    }
+    if mode == "reindex" {
+        if index.is_some() || text.is_some() || limit.is_some() {
+            return Err("reindex accepts only a revisions directory, not an index path".into());
+        }
+        let revisions_directory = revisions_directory.ok_or("--revisions-dir is required")?;
+        if !revisions_directory.is_absolute() {
+            return Err("revisions directory must be absolute".into());
+        }
+        return Ok(Action::Reindex {
+            root,
+            character,
+            revisions_directory,
+        });
+    }
+    let index = index.ok_or("--index is required")?;
+    if !index.is_absolute() {
+        return Err("index path must be absolute".into());
     }
     match mode.to_str() {
         Some("build") => Ok(Action::Build {
@@ -96,8 +125,16 @@ pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     let action = parse(args).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     match action {
         Action::Help => println!(
-            "neuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index, no provider or generation activation."
+            "neuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
         ),
+        Action::Reindex {
+            root,
+            character,
+            revisions_directory,
+        } => {
+            let receipt = DocumentRevisionApi::prepare(&root, character, &revisions_directory)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+        }
         Action::Build {
             root,
             character,

@@ -315,3 +315,98 @@ fn competing_builds_never_overwrite_a_published_index() {
     assert_ne!(a.status.success(), b.status.success());
     assert!(f.run("verify", &[]).status.success());
 }
+
+#[test]
+fn reindex_prepares_immutable_distinct_revisions_without_activation() {
+    let f = Fixture::new();
+    let revisions = f.root.join("revisions");
+    fs::create_dir(&revisions).unwrap();
+    let prepare = || {
+        let result = f.call(&[
+            "reindex",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--revisions-dir",
+            revisions.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    let first = prepare();
+    let original = PathBuf::from(first["index"].as_str().unwrap());
+    let previous_bytes = fs::read(&original).unwrap();
+    let second = prepare();
+    let subsequent = PathBuf::from(second["index"].as_str().unwrap());
+    assert_ne!(original, subsequent);
+    assert_ne!(first["index"], f.index.to_string_lossy().as_ref());
+    assert_eq!(first["fingerprint"], second["fingerprint"]);
+    assert_eq!(fs::read(&original).unwrap(), previous_bytes);
+    assert_eq!(fs::read_dir(&revisions).unwrap().count(), 2);
+
+    fs::write(
+        f.documents.join("notes.md"),
+        "Brand new violet orchard revision.",
+    )
+    .unwrap();
+    let third = prepare();
+    assert_ne!(third["fingerprint"], first["fingerprint"]);
+    assert_eq!(fs::read(&original).unwrap(), previous_bytes);
+    let old = f.call(&[
+        "verify",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        original.to_str().unwrap(),
+    ]);
+    assert!(!old.status.success());
+    let new = f.call(&[
+        "verify",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        third["index"].as_str().unwrap(),
+    ]);
+    assert!(
+        new.status.success(),
+        "{}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+}
+
+#[test]
+fn reindex_rejects_revision_directory_inside_documents_and_invalid_character() {
+    let f = Fixture::new();
+    let inside = f.documents.join("index-revisions");
+    fs::create_dir(&inside).unwrap();
+    let invalid = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--revisions-dir",
+        inside.to_str().unwrap(),
+    ]);
+    assert!(!invalid.status.success());
+    assert_eq!(fs::read_dir(&inside).unwrap().count(), 0);
+    let wrong = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Unknown",
+        "--revisions-dir",
+        f.root.to_str().unwrap(),
+    ]);
+    assert!(!wrong.status.success());
+}
