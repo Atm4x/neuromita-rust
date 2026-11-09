@@ -1,0 +1,35 @@
+name: D50 exact Windows registry visibility fix importer
+on:
+  push:
+    branches:
+      - bridge/agent-d50-visibility-fix-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify exact original fix and fast-forward published D50 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7e301907c259f0634d16a72f6dd1b93ed3c2d834
+          EXPECTED=a7f0228deeb70a1da166b858fb7830febe17ec3f
+          TREE=20abfd00791df0a49d261f6bea091c6ebb4e6e52
+          tr -d '\n' < .agent-bridge/d50-fix.patch.br.b64 | base64 -d >/tmp/fix.br
+          echo 'd91294d9097b4a8660f165cd7c39ecb369fcc3fcd8b4058294a5579dbf45136e  /tmp/fix.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/fix.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/fix.br')))"
+          echo 'a5db1d8fc4c197715883f2eb362179e79c9a0af734b29a1b8b823da745e94518  /tmp/fix.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/fix.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d50-windows-reboot-guard-20261109
