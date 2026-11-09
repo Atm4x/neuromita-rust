@@ -1,0 +1,34 @@
+name: Agent D57 pinned D56 source delta export
+on:
+  push:
+    branches:
+      - bridge/agent-d57-export-d56-20261109
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d56-isolated-windows-handoff-20261109
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check pinned D56 parent and export one-commit bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 6b22584ff5162331e1b5ab837feae2be31a284ea
+          test "$(git rev-parse HEAD^{tree})" = 3f0f8f4f60bb07c1b800a19da3fe39300f7e80a7
+          test "$(git rev-parse HEAD^)" = 2791700dbbedda574a8fb587e128701980565b85
+          git bundle create agent-d57-d56-only.bundle HEAD^..HEAD
+          git bundle verify agent-d57-d56-only.bundle
+          sha256sum agent-d57-d56-only.bundle > agent-d57-d56-only.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d57-d56-only
+          path: |
+            agent-d57-d56-only.bundle
+            agent-d57-d56-only.sha256
+          retention-days: 2
