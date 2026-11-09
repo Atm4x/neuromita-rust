@@ -25,6 +25,57 @@ pub trait TimelineRepository {
         session: SessionId,
         character: CharacterId,
     ) -> Result<Vec<BranchId>, TimelineError>;
+    /// Ordered keyset enumeration. SQLite overrides this to bound source reads;
+    /// transient storage has no independent writers and filters its own branches.
+    fn regenerate_admission_branches_page(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+        after: Option<BranchId>,
+        limit: usize,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        Ok(self
+            .regenerate_admission_branches(session, character)?
+            .into_iter()
+            .filter(|branch| after.is_none_or(|previous| branch.0 > previous.0))
+            .take(limit)
+            .collect())
+    }
+    /// A duplicate in a later page must invalidate the earlier page too.
+    /// The persistent repository implements this via an indexed request lookup.
+    fn regenerate_admission_request_duplicate(
+        &self,
+        session: SessionId,
+        child: BranchId,
+        request: Uuid,
+    ) -> Result<bool, TimelineError> {
+        for character in CharacterId::ALL {
+            for candidate in self.regenerate_admission_branches(session, character)? {
+                if candidate == child {
+                    continue;
+                }
+                let info = self.branch(candidate)?;
+                let marker = self
+                    .read(
+                        candidate,
+                        info.fork_sequence,
+                        Some(info.fork_sequence + 1),
+                        1,
+                        None,
+                    )?
+                    .into_iter()
+                    .next()
+                    .ok_or(TimelineError::NotFound)?;
+                if let Some(receipt) =
+                    crate::timeline::RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    && receipt.request.0 == request
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
     /// Read only local facts for the admitted request on its child branch.
     /// A Regenerate RequestId is minted before the child fork and can never
     /// occur in the inherited parent prefix. This is evidence, not a replay permit.

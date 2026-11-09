@@ -65,6 +65,25 @@ use domain::{
     CharacterWorkingState, EventDraft, EventKind, SessionId, TimelineRepository, TimelineStore,
 };
 
+/// Opaque, process-local read-only cursor. Its private fields bind the ordered
+/// range to one session, character and persisted fact/selection snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct RegenerateAdmissionCursor {
+    session: SessionId,
+    character: CharacterId,
+    after: BranchId,
+    revision: Option<u64>,
+    selection: TimelineSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct RegenerateAdmissionPage {
+    pub entries: Vec<RegenerateRecoverySnapshot>,
+    pub next: Option<RegenerateAdmissionCursor>,
+}
+
 /// Canonical proof supplied by the read-only Regenerate preview. The owner must
 /// revalidate every field against its selected Timeline before forking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,6 +665,116 @@ impl SessionTimeline {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         Ok(result)
+    }
+
+    /// Bounded, read-only keyset enumeration. The next cursor is valid only
+    /// while both fact revision and persisted active-selection generation match.
+    /// A page cannot authorize replay of an unknown provider invocation.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn enumerate_regenerate_admissions_page(
+        &self,
+        character: CharacterId,
+        limit: usize,
+        cursor: Option<RegenerateAdmissionCursor>,
+    ) -> Result<RegenerateAdmissionPage, domain::TimelineError> {
+        if !(1..=128).contains(&limit) {
+            return Err(domain::TimelineError::Invalid(
+                "invalid regenerate page size",
+            ));
+        }
+        let session = self.store.branch(self.branch)?.session_id;
+        let revision = self.store.enumeration_revision()?;
+        #[cfg(feature = "sqlite-system")]
+        let selection = if let Some(repository) = &self.selection_repository {
+            repository
+                .selection()?
+                .ok_or(domain::TimelineError::NotFound)?
+        } else {
+            self.selection()
+        };
+        #[cfg(not(feature = "sqlite-system"))]
+        let selection = self.selection();
+        if let Some(cursor) = cursor
+            && (cursor.session != session || cursor.character != character)
+        {
+            return Err(domain::TimelineError::Conflict);
+        }
+        if let Some(cursor) = cursor
+            && (cursor.revision != revision || cursor.selection != selection)
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let after = cursor.map(|cursor| cursor.after);
+        let candidates =
+            self.store
+                .regenerate_admission_branches_page(session, character, after, limit + 1)?;
+        if candidates.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || candidates
+                .first()
+                .is_some_and(|first| after.is_some_and(|after| first.0 <= after.0))
+            || candidates.len() > limit + 1
+        {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let has_more = candidates.len() > limit;
+        let mut entries = Vec::with_capacity(candidates.len().min(limit));
+        for child in candidates.into_iter().take(limit) {
+            let info = self.store.branch(child)?;
+            let receipt =
+                self.regenerate_admission_receipt(child)?
+                    .ok_or(domain::TimelineError::Invalid(
+                        "missing regenerate admission marker",
+                    ))?;
+            if info.session_id != session
+                || info.parent != Some(receipt.parent_branch)
+                || receipt.character != character
+                || receipt.child_branch != child
+            {
+                return Err(domain::TimelineError::Conflict);
+            }
+            if self.store.regenerate_admission_request_duplicate(
+                session,
+                child,
+                receipt.request.0,
+            )? {
+                return Err(domain::TimelineError::Conflict);
+            }
+            receipt.validate(
+                self.store.as_ref(),
+                receipt.parent_branch,
+                child,
+                receipt.original_input,
+                character,
+            )?;
+            entries.push(self.reconcile_regenerate(child, receipt.request)?);
+        }
+        if self.store.enumeration_revision()? != revision {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        #[cfg(feature = "sqlite-system")]
+        if let Some(repository) = &self.selection_repository {
+            if repository.selection()? != Some(selection) {
+                return Err(domain::TimelineError::ConcurrentWrite);
+            }
+        } else if self.selection() != selection {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        #[cfg(not(feature = "sqlite-system"))]
+        if self.selection() != selection {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let next = if has_more {
+            entries.last().map(|entry| RegenerateAdmissionCursor {
+                session,
+                character,
+                after: entry.admission.child_branch,
+                revision,
+                selection,
+            })
+        } else {
+            None
+        };
+        Ok(RegenerateAdmissionPage { entries, next })
     }
 
     /// Inspect one admitted historical fork after an uncertain shutdown.

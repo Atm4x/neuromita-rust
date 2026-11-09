@@ -505,3 +505,364 @@ fn sqlite_indexed_accepted_source_obeys_parent_cutoff_and_character_scope() {
         let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
     }
 }
+
+fn b72_many_admissions(
+    timeline: &mut SessionTimeline,
+    count: usize,
+) -> (SessionId, BranchId, CharacterId) {
+    let root = timeline.selection().branch_id;
+    let session = timeline.store.branch(root).unwrap().session_id;
+    let (source, _, _) = super::regenerate_owner_tests::admitted_recovery_source(timeline);
+    for _ in 1..count {
+        let back = timeline.select_branch(root, timeline.selection()).unwrap();
+        let child = BranchId::new();
+        let receipt = RegenerateAdmissionReceipt {
+            request: RequestId::new(),
+            accepted_request: source.accepted_request,
+            accepted_message: source.accepted_message,
+            original_input: source.original_input,
+            character: source.character,
+            parent_branch: root,
+            parent_head: 2,
+            parent_generation: back.generation,
+            child_branch: child,
+            configuration: RegenerateConfigurationReference {
+                settings_revision: 7,
+                preset_id: 2,
+                provider_model: "recovery-model".into(),
+                prompt_set: None,
+            },
+        };
+        timeline
+            .fork_and_admit_regenerate_source(source, child, back, 2, &receipt)
+            .unwrap();
+    }
+    (session, root, source.character)
+}
+
+fn b72_collect_pages(
+    timeline: &SessionTimeline,
+    character: CharacterId,
+    limit: usize,
+) -> Vec<RegenerateRecoverySnapshot> {
+    let mut output = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = timeline
+            .enumerate_regenerate_admissions_page(character, limit, cursor)
+            .unwrap();
+        assert!(page.entries.len() <= limit);
+        output.extend(page.entries);
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    output
+}
+
+#[test]
+fn keyset_pages_sizes_one_two_empty_and_character_scope() {
+    let mut timeline = SessionTimeline::new();
+    let (_session, _root, character) = b72_many_admissions(&mut timeline, 9);
+    let original = timeline.enumerate_regenerate_admissions(character).unwrap();
+    assert_eq!(original.len(), 9);
+    for limit in [1, 2, 3, 8, 128] {
+        let pages = b72_collect_pages(&timeline, character, limit);
+        assert_eq!(pages, original);
+        assert_eq!(pages.len(), 9);
+    }
+    let empty = timeline
+        .enumerate_regenerate_admissions_page(CharacterId::Kind, 1, None)
+        .unwrap();
+    assert!(empty.entries.is_empty());
+    assert!(empty.next.is_none());
+    assert!(matches!(
+        timeline.enumerate_regenerate_admissions_page(character, 0, None),
+        Err(domain::TimelineError::Invalid(_))
+    ));
+    assert!(matches!(
+        timeline.enumerate_regenerate_admissions_page(character, 129, None),
+        Err(domain::TimelineError::Invalid(_))
+    ));
+    let first = timeline
+        .enumerate_regenerate_admissions_page(character, 1, None)
+        .unwrap();
+    assert_eq!(
+        timeline.enumerate_regenerate_admissions_page(CharacterId::Kind, 1, first.next),
+        Err(domain::TimelineError::Conflict)
+    );
+}
+
+#[test]
+fn transient_keyset_cursor_rejects_selection_aba() {
+    let mut timeline = SessionTimeline::new();
+    let (_session, root, character) = b72_many_admissions(&mut timeline, 3);
+    let first = timeline
+        .enumerate_regenerate_admissions_page(character, 1, None)
+        .unwrap();
+    let original = timeline.selection();
+    let back = timeline.select_branch(root, original).unwrap();
+    let returned = timeline.select_branch(original.branch_id, back).unwrap();
+    assert!(returned.generation > original.generation);
+    assert_eq!(
+        timeline.enumerate_regenerate_admissions_page(character, 1, first.next),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_keyset_reopen_other_writer_append_and_aba_invalidate_cursor() {
+    let path = std::env::temp_dir().join(format!("b72-pages-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let (_, _, character) = b72_many_admissions(&mut timeline, 7);
+    let expected = b72_collect_pages(&timeline, character, 2);
+    assert_eq!(
+        expected,
+        timeline.enumerate_regenerate_admissions(character).unwrap()
+    );
+    let first = timeline
+        .enumerate_regenerate_admissions_page(character, 2, None)
+        .unwrap();
+    drop(timeline);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(b72_collect_pages(&reopened, character, 1), expected);
+    let second = reopened
+        .enumerate_regenerate_admissions_page(character, 2, first.next)
+        .unwrap();
+    assert_eq!(second.entries, expected[2..4]);
+    let mut writer = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    writer
+        .publish_player_message(
+            character,
+            EventId::new(),
+            std::sync::Arc::from("concurrent player"),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened.enumerate_regenerate_admissions_page(character, 2, first.next),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    let after_append = reopened
+        .enumerate_regenerate_admissions_page(character, 1, None)
+        .unwrap();
+    let previous = writer.selection();
+    let back = writer.select_branch(root, previous).unwrap();
+    writer.select_branch(previous.branch_id, back).unwrap();
+    assert_eq!(
+        reopened.enumerate_regenerate_admissions_page(character, 1, after_append.next),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    drop((reopened, writer));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_keyset_rejects_same_request_on_another_page() {
+    let path = std::env::temp_dir().join(format!("b72-duplicate-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    b72_many_admissions(&mut timeline, 3);
+    let pages = timeline
+        .enumerate_regenerate_admissions(CharacterId::Crazy)
+        .unwrap();
+    let first = &pages[0].admission;
+    let other = &pages[2].admission;
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute(
+        "UPDATE timeline_events SET fact_json=json_set(fact_json,'$.draft.payload.regenerate_admission.request',?) WHERE branch_id=? AND sequence=(SELECT fork_sequence+1 FROM timeline_branches WHERE branch_id=?)",
+        rusqlite::params![first.request.0.to_string(), other.child_branch.0.to_string(), other.child_branch.0.to_string()],
+    ).unwrap();
+    assert_eq!(
+        timeline.enumerate_regenerate_admissions_page(CharacterId::Crazy, 1, None),
+        Err(domain::TimelineError::Conflict)
+    );
+    drop((timeline, connection));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_keyset_uses_recipient_index_and_bounded_source_rows() {
+    let path = std::env::temp_dir().join(format!("b72-index-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    b72_many_admissions(&mut timeline, 22);
+    let result = timeline
+        .enumerate_regenerate_admissions_page(CharacterId::Crazy, 2, None)
+        .unwrap();
+    assert_eq!(result.entries.len(), 2);
+    assert!(result.next.is_some());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut statement = connection.prepare("EXPLAIN QUERY PLAN SELECT e.branch_id,e.fact_json FROM timeline_events e INDEXED BY timeline_regenerate_markers_by_character JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character')=? AND json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL AND e.branch_id>? AND b.session_id=? AND b.parent_id IS NOT NULL AND e.sequence=b.fork_sequence+1 ORDER BY e.branch_id LIMIT ?").unwrap();
+    let plans: Vec<String> = statement
+        .query_map(
+            rusqlite::params!["Crazy", "", session.0.to_string(), "3"],
+            |row| row.get(3),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan.contains("timeline_regenerate_markers_by_character")),
+        "{plans:?}"
+    );
+    drop(statement);
+    assert_eq!(
+        b72_collect_pages(&timeline, CharacterId::Crazy, 2).len(),
+        22
+    );
+    drop((timeline, connection));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}
+
+#[test]
+fn keyset_cursor_is_bound_to_originating_session() {
+    let mut first = SessionTimeline::new();
+    b72_many_admissions(&mut first, 3);
+    let page = first
+        .enumerate_regenerate_admissions_page(CharacterId::Crazy, 1, None)
+        .unwrap();
+    assert!(page.next.is_some());
+    let mut another = SessionTimeline::new();
+    b72_many_admissions(&mut another, 3);
+    assert_eq!(
+        another.enumerate_regenerate_admissions_page(CharacterId::Crazy, 1, page.next),
+        Err(domain::TimelineError::Conflict)
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn archive_import_preserves_keyset_source_order_and_character_scope() {
+    use crate::timeline::storage::{SqliteTimelineRepository, archive, assets::TimelineAssetStore};
+    let path = std::env::temp_dir().join(format!("b72-archive-{}.db", uuid::Uuid::new_v4()));
+    let asset_path = std::env::temp_dir().join(format!("b72-assets-{}", uuid::Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&asset_path, 1024 * 1024).unwrap();
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    b72_many_admissions(&mut timeline, 4);
+    let expected = timeline
+        .enumerate_regenerate_admissions(CharacterId::Crazy)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.admission.child_branch)
+        .collect::<Vec<_>>();
+    drop(timeline);
+    let repository = SqliteTimelineRepository::open(&path).unwrap();
+    let archive_bytes = archive::export_sqlite(&repository, session, &assets).unwrap();
+    let mut restored = TimelineStore::new();
+    archive::import_memory(&mut restored, &archive_bytes, &assets).unwrap();
+    let mut after = None;
+    let mut seen = Vec::new();
+    loop {
+        let page = restored
+            .regenerate_admission_branches_page(session, CharacterId::Crazy, after, 2)
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().copied();
+        seen.extend(page);
+    }
+    assert_eq!(seen, expected);
+    assert!(
+        restored
+            .regenerate_admission_branches_page(session, CharacterId::Kind, None, 2)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        restored
+            .regenerate_admission_branches_page(SessionId::new(), CharacterId::Crazy, None, 2)
+            .unwrap()
+            .is_empty()
+    );
+    drop((repository, restored));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+    let _ = std::fs::remove_dir_all(asset_path);
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_keyset_scans_admission_markers_not_unrelated_player_history() {
+    let path = std::env::temp_dir().join(format!("b72-history-{}.db", uuid::Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: path.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    b72_many_admissions(&mut timeline, 10);
+    for _ in 0..120 {
+        timeline
+            .publish_player_message(
+                CharacterId::Crazy,
+                EventId::new(),
+                std::sync::Arc::from("unrelated input"),
+            )
+            .unwrap();
+    }
+    let original_selection = timeline.selection();
+    let original_revision = timeline.store.enumeration_revision().unwrap();
+    let pages = b72_collect_pages(&timeline, CharacterId::Crazy, 1);
+    assert_eq!(pages.len(), 10);
+    assert_eq!(timeline.selection(), original_selection);
+    assert_eq!(
+        timeline.store.enumeration_revision().unwrap(),
+        original_revision
+    );
+    drop(timeline);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+    }
+}

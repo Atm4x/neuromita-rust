@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS timeline_events(
 CREATE INDEX IF NOT EXISTS timeline_regenerate_events_by_request
     ON timeline_events(branch_id, json_extract(fact_json,'$.draft.payload.request_id'), sequence)
     WHERE json_extract(fact_json,'$.draft.payload.request_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_character
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.character'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS timeline_regenerate_markers_by_request
+    ON timeline_events(json_extract(fact_json,'$.draft.payload.regenerate_admission.request'),branch_id,sequence)
+    WHERE json_extract(fact_json,'$.draft.payload.regenerate_admission.request') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS timeline_observers(
     branch_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -945,6 +951,50 @@ impl TimelineRepository for SqliteTimelineRepository {
                 }
             }
             Ok(result)
+        })
+    }
+    fn regenerate_admission_branches_page(
+        &self,
+        session: SessionId,
+        character: CharacterId,
+        after: Option<BranchId>,
+        limit: usize,
+    ) -> Result<Vec<BranchId>, TimelineError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT e.branch_id,e.fact_json FROM timeline_events e INDEXED BY timeline_regenerate_markers_by_character JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character')=? AND json_extract(e.fact_json,'$.draft.payload.regenerate_admission.character') IS NOT NULL AND e.branch_id>? AND b.session_id=? AND b.parent_id IS NOT NULL AND e.sequence=b.fork_sequence+1 ORDER BY e.branch_id LIMIT ?",
+                &[character.as_str(), &after.map_or_else(String::new, |branch| branch.0.to_string()), &session.0.to_string(), &limit.to_string()],
+            )?;
+            rows.into_iter().map(|row| {
+                let branch = BranchId(parse_uuid(&row[0])?);
+                let marker: TimelineFact = decode(&row[1])?;
+                if marker.branch_id != branch || marker.draft.kind != EventKind::BranchCreated {
+                    return Err(TimelineError::Invalid("invalid indexed admission marker"));
+                }
+                let receipt = RegenerateAdmissionReceipt::from_marker(&marker.draft.payload)?
+                    .ok_or(TimelineError::Invalid("missing indexed regenerate receipt"))?;
+                if receipt.character != character || receipt.child_branch != branch {
+                    return Err(TimelineError::Invalid("indexed admission identity mismatch"));
+                }
+                Ok(branch)
+            }).collect()
+        })
+    }
+    fn regenerate_admission_request_duplicate(
+        &self,
+        session: SessionId,
+        child: BranchId,
+        request: Uuid,
+    ) -> Result<bool, TimelineError> {
+        self.read_snapshot(|connection| {
+            let rows = connection.query(
+                "SELECT e.branch_id FROM timeline_events e INDEXED BY timeline_regenerate_markers_by_request JOIN timeline_branches b ON b.branch_id=e.branch_id WHERE json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request')=? AND json_extract(e.fact_json,'$.draft.payload.regenerate_admission.request') IS NOT NULL AND b.session_id=? AND b.parent_id IS NOT NULL AND e.sequence=b.fork_sequence+1 AND e.branch_id<>? LIMIT 1",
+                &[&request.to_string(), &session.0.to_string(), &child.0.to_string()],
+            )?;
+            Ok(!rows.is_empty())
         })
     }
     fn accepted_reply_at(
