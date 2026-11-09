@@ -7,6 +7,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::{
+    native_approval::VerifiedNativeRelease,
     native_controller::{NativeControllerError, NativeModelController, NativeModelSelection},
     native_model::{NativeBackend, NativeModelSnapshot},
     native_registry::{NativeRegistryError, parse_sha256},
@@ -67,6 +68,21 @@ impl NativeModelWorkflow {
                 .as_ref()
                 .and_then(|session| session.controller.last_observed_snapshot()),
         })
+    }
+
+    /// Prefer this path for production-approved releases. The approval must
+    /// have been verified against a publisher key pinned outside model data.
+    pub fn select_verified(
+        &self,
+        approved: &VerifiedNativeRelease,
+        backend: NativeBackend,
+    ) -> Result<(), NativeWorkflowError> {
+        self.revisions.select(&NativeRevisionChoice {
+            model_id: approved.model_id().to_owned(),
+            manifest_sha256: approved.manifest_sha256(),
+            backend,
+        })?;
+        Ok(())
     }
 
     /// The digest must come from a separately approved, already published package.

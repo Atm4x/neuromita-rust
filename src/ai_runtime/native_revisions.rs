@@ -13,6 +13,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::{
+    native_approval::VerifiedNativeRelease,
     native_controller::{NativeModelController, NativeModelSelection},
     native_model::NativeBackend,
     native_package_install::{
@@ -113,6 +114,24 @@ pub struct NativeRevisionStore {
 impl NativeRevisionStore {
     pub fn new(root: PathBuf, runtime_root: PathBuf) -> Self {
         Self { root, runtime_root }
+    }
+
+    /// Signed admission uses a key independently pinned by the caller.
+    /// The underlying installer still rehashes every referenced artifact.
+    pub fn install_verified_local(
+        &self,
+        source_packages_root: &Path,
+        source_runtime_root: &Path,
+        approved: &VerifiedNativeRelease,
+        backend: NativeBackend,
+    ) -> Result<NativePackageInstallResult, NativeRevisionError> {
+        self.install_local(
+            source_packages_root,
+            source_runtime_root,
+            approved.model_id(),
+            approved.manifest_sha256(),
+            backend,
+        )
     }
 
     pub fn install_local(
