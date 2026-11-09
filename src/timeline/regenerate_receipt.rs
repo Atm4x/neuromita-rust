@@ -187,3 +187,11 @@ impl SameBranchRegenerateReceipt {
         Ok(draft)
     }
 }
+
+/// Read-only outcome of one same-branch admission. The caller must never
+/// interpret DispatchUnknown as permission to replay an external provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SameBranchRegenerateRecoverySnapshot {
+    pub admission: SameBranchRegenerateReceipt,
+    pub outcome: RegenerateRecoveryOutcome,
+}

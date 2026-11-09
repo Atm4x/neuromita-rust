@@ -1060,3 +1060,611 @@ fn history_reset_invalidates_old_same_branch_admission_without_changing_past() {
     );
     assert_eq!(timeline.store.world(timeline.branch).unwrap(), after_reset);
 }
+
+#[test]
+fn same_branch_dispatch_is_one_shot_and_abandon_fences_late_reply() {
+    let mut timeline = SessionTimeline::new();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "old");
+    let other = accepted(&mut timeline, CharacterId::Kind, "unrelated");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(timeline.branch, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
+    );
+    let dispatch = timeline
+        .permit_same_branch_regenerate_dispatch(
+            timeline.branch,
+            receipt.request,
+            timeline.selection(),
+        )
+        .unwrap();
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(timeline.branch, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::MayHaveDispatched(dispatch)
+    );
+    assert!(
+        timeline
+            .permit_same_branch_regenerate_dispatch(
+                timeline.branch,
+                receipt.request,
+                timeline.selection()
+            )
+            .is_err()
+    );
+    let abandoned = timeline
+        .abandon_same_branch_regenerate_request(timeline.branch, receipt.request)
+        .unwrap();
+    assert_eq!(
+        timeline.abandon_same_branch_regenerate_request(timeline.branch, receipt.request),
+        Ok(abandoned)
+    );
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(timeline.branch, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::Abandoned(abandoned)
+    );
+    let turn = timeline
+        .capture_turn(
+            CharacterId::Crazy,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    let expected_revision = domain::accepted_reply_count(
+        timeline.store.world(timeline.branch).unwrap().iter(),
+        CharacterId::Crazy,
+    )
+    .unwrap();
+    let late = timeline.append_reply(GeneratedReply {
+        request: receipt.request,
+        intent: TurnIntent::Reply(source.original_input),
+        turn,
+        expected_revision,
+        content: json!("late"),
+        audience: ConversationAudience::private_to(CharacterId::Crazy),
+        effects: Vec::new(),
+    });
+    assert_eq!(late, Err(domain::TimelineError::Conflict));
+    assert!(
+        message_ids(&timeline, CharacterId::Kind, timeline.anchor().through)
+            .contains(&other.accepted_message)
+    );
+}
+
+#[test]
+fn same_branch_accepted_reply_is_canonical_single_and_nonforking() {
+    let mut timeline = SessionTimeline::new();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "old");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    let original_branch = timeline.branch;
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let turn = timeline
+        .capture_turn(
+            CharacterId::Crazy,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    let revision = domain::accepted_reply_count(
+        timeline.store.world(original_branch).unwrap().iter(),
+        CharacterId::Crazy,
+    )
+    .unwrap();
+    let reply = || GeneratedReply {
+        request: receipt.request,
+        intent: TurnIntent::Reply(source.original_input),
+        turn,
+        expected_revision: revision,
+        content: json!("new"),
+        audience: ConversationAudience::private_to(CharacterId::Crazy),
+        effects: Vec::new(),
+    };
+    assert!(timeline.append_reply(reply()).is_err());
+    timeline
+        .permit_same_branch_regenerate_dispatch(
+            original_branch,
+            receipt.request,
+            timeline.selection(),
+        )
+        .unwrap();
+    let id = timeline.append_reply(reply()).unwrap();
+    assert_eq!(timeline.branch, original_branch);
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(original_branch, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::AcceptedReply(id)
+    );
+    assert!(timeline.append_reply(reply()).is_err());
+    assert_eq!(
+        timeline.abandon_same_branch_regenerate_request(original_branch, receipt.request),
+        Err(domain::TimelineError::Conflict)
+    );
+    let world = timeline.store.world(original_branch).unwrap();
+    assert_eq!(
+        world
+            .iter()
+            .filter(|fact| fact.draft.id == source.accepted_message)
+            .count(),
+        1
+    );
+    assert_eq!(
+        world
+            .iter()
+            .filter(|fact| fact.draft.id == source.original_input)
+            .count(),
+        1
+    );
+    assert!(message_ids(&timeline, CharacterId::Crazy, timeline.anchor().through).contains(&id));
+    assert!(
+        !message_ids(&timeline, CharacterId::Crazy, timeline.anchor().through)
+            .contains(&source.accepted_message)
+    );
+}
+
+#[test]
+fn history_reset_after_same_branch_admission_fences_provider_dispatch() {
+    let mut timeline = SessionTimeline::new();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "input");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let before = timeline.store.world(timeline.branch).unwrap();
+    timeline
+        .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
+        .unwrap();
+    assert_eq!(
+        timeline.permit_same_branch_regenerate_dispatch(
+            timeline.branch,
+            receipt.request,
+            timeline.selection()
+        ),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    assert_eq!(
+        timeline.store.world(timeline.branch).unwrap().len(),
+        before.len() + 1
+    );
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(timeline.branch, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_same_branch_dispatch_rollback_and_reopen() {
+    let db = std::env::temp_dir().join(format!("nm-b78-dispatch-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut first = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut first, CharacterId::Crazy, "input");
+    let plan = first
+        .plan_knowledge_regenerate(source, first.selection(), first.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    first
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let head = first.anchor().through;
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER b78_dispatch_abort BEFORE INSERT ON timeline_events WHEN json_extract(NEW.fact_json,'$.draft.kind')='RegenerateMayHaveDispatched' BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    assert!(
+        first
+            .permit_same_branch_regenerate_dispatch(root, receipt.request, first.selection())
+            .is_err()
+    );
+    drop(first);
+    let mut reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.anchor().through, head);
+    assert_eq!(
+        reopened
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
+    );
+    conn.execute_batch("DROP TRIGGER b78_dispatch_abort;")
+        .unwrap();
+    let dispatch = reopened
+        .permit_same_branch_regenerate_dispatch(root, receipt.request, reopened.selection())
+        .unwrap();
+    drop(reopened);
+    let mut again = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(
+        again
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::MayHaveDispatched(dispatch)
+    );
+    assert!(
+        again
+            .permit_same_branch_regenerate_dispatch(root, receipt.request, again.selection())
+            .is_err()
+    );
+    drop((conn, again));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_same_branch_cancel_vs_accept_with_effects_has_one_terminal() {
+    use std::sync::{Arc, Barrier};
+    let db = std::env::temp_dir().join(format!("nm-b78-race-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut initial = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut initial, CharacterId::Crazy, "old reply");
+    let private = accepted(&mut initial, CharacterId::Kind, "kind unaffected");
+    let plan = initial
+        .plan_knowledge_regenerate(source, initial.selection(), initial.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    initial
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    initial
+        .permit_same_branch_regenerate_dispatch(root, receipt.request, initial.selection())
+        .unwrap();
+    drop(initial);
+    let barrier = Arc::new(Barrier::new(3));
+    let (accepted_result, cancelled_result) = std::thread::scope(|scope| {
+        let a_db = db.clone();
+        let b_db = db.clone();
+        let a_barrier = Arc::clone(&barrier);
+        let b_barrier = Arc::clone(&barrier);
+        let accepted = scope.spawn(move || {
+            let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: a_db,
+                session,
+                root,
+            })
+            .unwrap();
+            let turn = owner
+                .capture_turn(
+                    CharacterId::Crazy,
+                    Some(source.original_input),
+                    owner.anchor(),
+                )
+                .unwrap();
+            let revision = domain::accepted_reply_count(
+                owner.store.world(root).unwrap().iter(),
+                CharacterId::Crazy,
+            )
+            .unwrap();
+            a_barrier.wait();
+            owner.append_reply(GeneratedReply {
+                request: receipt.request,
+                intent: TurnIntent::Reply(source.original_input),
+                turn,
+                expected_revision: revision,
+                content: json!("regenerated with durable state"),
+                audience: ConversationAudience::private_to(CharacterId::Crazy),
+                effects: vec![AppliedEffect::CharacterStateChanged(
+                    domain::CharacterBehavior {
+                        attitude: 82.0,
+                        boredom: 1.0,
+                        stress: 3.0,
+                    },
+                )],
+            })
+        });
+        let cancelled = scope.spawn(move || {
+            let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+                database: b_db,
+                session,
+                root,
+            })
+            .unwrap();
+            b_barrier.wait();
+            owner.abandon_same_branch_regenerate_request(root, receipt.request)
+        });
+        barrier.wait();
+        (accepted.join().unwrap(), cancelled.join().unwrap())
+    });
+    assert_eq!(
+        usize::from(accepted_result.is_ok()) + usize::from(cancelled_result.is_ok()),
+        1,
+        "accepted={accepted_result:?}, cancelled={cancelled_result:?}"
+    );
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let outcome = reopened
+        .reconcile_same_branch_regenerate(root, receipt.request)
+        .unwrap()
+        .outcome;
+    let world = reopened.store.world(root).unwrap();
+    let accepted_effects = world
+        .iter()
+        .filter(|f| {
+            f.draft.kind == EventKind::CharacterStateChanged
+                && f.draft.actor.as_deref() == Some(CharacterId::Crazy.as_str())
+        })
+        .count();
+    match outcome {
+        RegenerateRecoveryOutcome::AcceptedReply(id) => {
+            assert_eq!(accepted_result, Ok(id));
+            assert_eq!(accepted_effects, 1);
+            assert!(world.iter().any(|f| f.draft.id == id));
+        }
+        RegenerateRecoveryOutcome::Abandoned(id) => {
+            assert_eq!(cancelled_result, Ok(id));
+            assert_eq!(accepted_effects, 0);
+        }
+        other => panic!("invalid terminal state: {other:?}"),
+    }
+    assert!(
+        message_ids(&reopened, CharacterId::Kind, reopened.anchor().through)
+            .contains(&private.accepted_message)
+    );
+    assert_eq!(
+        world
+            .iter()
+            .filter(|f| f.draft.id == source.original_input)
+            .count(),
+        1
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_same_branch_accepted_reply_and_state_effect_roll_back_together() {
+    let db = std::env::temp_dir().join(format!("nm-b78-effects-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut owner, CharacterId::Crazy, "original");
+    let plan = owner
+        .plan_knowledge_regenerate(source, owner.selection(), owner.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    owner
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    owner
+        .permit_same_branch_regenerate_dispatch(root, receipt.request, owner.selection())
+        .unwrap();
+    let turn = owner
+        .capture_turn(
+            CharacterId::Crazy,
+            Some(source.original_input),
+            owner.anchor(),
+        )
+        .unwrap();
+    let revision =
+        domain::accepted_reply_count(owner.store.world(root).unwrap().iter(), CharacterId::Crazy)
+            .unwrap();
+    let reply = || GeneratedReply {
+        request: receipt.request,
+        intent: TurnIntent::Reply(source.original_input),
+        turn,
+        expected_revision: revision,
+        content: json!("new reply with effects"),
+        audience: ConversationAudience::private_to(CharacterId::Crazy),
+        effects: vec![AppliedEffect::CharacterStateChanged(
+            domain::CharacterBehavior {
+                attitude: 80.0,
+                boredom: 4.0,
+                stress: 1.0,
+            },
+        )],
+    };
+    let head = owner.anchor().through;
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER b78_effect_abort BEFORE INSERT ON timeline_events WHEN json_extract(NEW.fact_json,'$.draft.kind')='CharacterStateChanged' BEGIN SELECT RAISE(ABORT,'effect failed'); END;").unwrap();
+    assert!(owner.append_reply(reply()).is_err());
+    drop(owner);
+    let mut reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.anchor().through, head);
+    assert_eq!(
+        reopened
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::MayHaveDispatched(
+            reopened
+                .store
+                .world(root)
+                .unwrap()
+                .iter()
+                .find(|f| f.draft.kind == EventKind::RegenerateMayHaveDispatched)
+                .unwrap()
+                .draft
+                .id
+        )
+    );
+    assert!(
+        !reopened
+            .store
+            .world(root)
+            .unwrap()
+            .iter()
+            .any(|f| f.draft.kind == EventKind::CharacterStateChanged)
+    );
+    conn.execute_batch("DROP TRIGGER b78_effect_abort;")
+        .unwrap();
+    let updated_turn = reopened
+        .capture_turn(
+            CharacterId::Crazy,
+            Some(source.original_input),
+            reopened.anchor(),
+        )
+        .unwrap();
+    let accepted_id = reopened
+        .append_reply(GeneratedReply {
+            turn: updated_turn,
+            ..reply()
+        })
+        .unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::AcceptedReply(accepted_id)
+    );
+    assert_eq!(
+        reopened
+            .store
+            .world(root)
+            .unwrap()
+            .iter()
+            .filter(|f| f.draft.kind == EventKind::CharacterStateChanged)
+            .count(),
+        1
+    );
+    drop((conn, reopened));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn same_branch_lifecycle_archive_roundtrip_keeps_history_reset_and_terminal() {
+    use crate::timeline::storage::{archive, assets::TimelineAssetStore};
+    let db = std::env::temp_dir().join(format!("nm-b78-archive-{}.db", Uuid::new_v4()));
+    let assets_dir = std::env::temp_dir().join(format!("nm-b78-assets-{}", Uuid::new_v4()));
+    let assets = TimelineAssetStore::new(&assets_dir, 1024 * 1024).unwrap();
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "known before reset");
+    let kind = accepted(&mut timeline, CharacterId::Kind, "private other character");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let dispatch = timeline
+        .permit_same_branch_regenerate_dispatch(root, receipt.request, timeline.selection())
+        .unwrap();
+    let abandoned = timeline
+        .abandon_same_branch_regenerate_request(root, receipt.request)
+        .unwrap();
+    timeline
+        .reset_character_context(timeline.selection(), CharacterId::Crazy, EventId::new())
+        .unwrap();
+    drop(timeline);
+    let repository = storage::SqliteTimelineRepository::open(&db).unwrap();
+    let bytes = archive::export_sqlite(&repository, session, &assets).unwrap();
+    let mut imported = TimelineStore::new();
+    archive::import_memory(&mut imported, &bytes, &assets).unwrap();
+    let facts = imported.world(root).unwrap();
+    assert_eq!(
+        domain::dispatch_may_have_started(&facts, receipt.request.0)
+            .unwrap()
+            .unwrap()
+            .draft
+            .id,
+        dispatch
+    );
+    assert_eq!(
+        domain::abandoned_regenerate(&facts, receipt.request.0)
+            .unwrap()
+            .unwrap()
+            .draft
+            .id,
+        abandoned
+    );
+    assert!(
+        !imported
+            .knows(root, CharacterId::Crazy, source.accepted_message, None)
+            .unwrap()
+    );
+    assert!(
+        imported
+            .knows(
+                root,
+                CharacterId::Crazy,
+                source.accepted_message,
+                Some(plan.head)
+            )
+            .unwrap()
+    );
+    assert!(
+        imported
+            .knows(root, CharacterId::Kind, kind.accepted_message, None)
+            .unwrap()
+    );
+    drop(repository);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+    let _ = std::fs::remove_dir_all(assets_dir);
+}

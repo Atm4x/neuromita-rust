@@ -33,12 +33,12 @@ mod regenerate_enumeration_tests;
 #[cfg(test)]
 mod regenerate_owner_tests;
 mod regenerate_receipt;
-use regenerate_receipt::SameBranchRegenerateReceipt;
 #[doc(hidden)]
 pub use regenerate_receipt::{
     RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoveryOutcome,
     RegenerateRecoverySnapshot,
 };
+use regenerate_receipt::{SameBranchRegenerateReceipt, SameBranchRegenerateRecoverySnapshot};
 
 // Administrative purge is not reachable from generation or runtime until an authorized UI exists.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1012,6 +1012,155 @@ impl SessionTimeline {
         self.store.append(
             child,
             self.store.branch(child)?.head_sequence,
+            &format!("regenerate-abandon:{}", request.0),
+            json!({"request_id": request.0.to_string()}),
+            vec![draft],
+        )?;
+        Ok(id)
+    }
+
+    /// Locate a same-branch admission by canonical RequestId. A legacy child
+    /// BranchCreated receipt never substitutes for this explicit marker.
+    fn same_branch_regenerate_receipt(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<(SameBranchRegenerateReceipt, u64), domain::TimelineError> {
+        let mut found = None;
+        for fact in self.store.world(branch)? {
+            if fact.branch_id != branch || fact.draft.kind != EventKind::RegenerateAdmitted {
+                continue;
+            }
+            let receipt = SameBranchRegenerateReceipt::from_fact(&fact.draft)?;
+            if receipt.request == request {
+                if receipt.branch != branch || found.replace((receipt, fact.sequence)).is_some() {
+                    return Err(domain::TimelineError::Conflict);
+                }
+            }
+        }
+        found.ok_or(domain::TimelineError::NotFound)
+    }
+
+    /// Inspect only the durable facts; no registry re-creation or provider replay.
+    pub(crate) fn reconcile_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<SameBranchRegenerateRecoverySnapshot, domain::TimelineError> {
+        let (admission, admitted_at) = self.same_branch_regenerate_receipt(branch, request)?;
+        let facts = self.store.regenerate_request_facts(branch, request.0)?;
+        let abandoned = domain::abandoned_regenerate(&facts, request.0)?;
+        let dispatched = domain::dispatch_may_have_started(&facts, request.0)?;
+        let mut accepted = None;
+        for fact in &facts {
+            if domain::accepted_reply_request(fact, admission.character) == Some(request.0) {
+                if fact.branch_id != branch
+                    || fact.sequence <= admitted_at
+                    || fact
+                        .draft
+                        .links
+                        .iter()
+                        .filter(|link| link.relation == CausalRelation::ReplyTo)
+                        .map(|link| link.event_id)
+                        .collect::<Vec<_>>()
+                        != vec![admission.original_input]
+                    || fact.draft.payload.get("reply_to").and_then(|v| v.as_str())
+                        != Some(admission.original_input.0.to_string().as_str())
+                    || accepted.replace(fact).is_some()
+                {
+                    return Err(domain::TimelineError::Conflict);
+                }
+            }
+        }
+        if accepted.is_some() && abandoned.is_some() {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let outcome = match (accepted, abandoned, dispatched) {
+            (Some(fact), _, _) => RegenerateRecoveryOutcome::AcceptedReply(fact.draft.id),
+            (None, Some(fact), _) => RegenerateRecoveryOutcome::Abandoned(fact.draft.id),
+            (None, None, Some(fact)) => RegenerateRecoveryOutcome::MayHaveDispatched(fact.draft.id),
+            (None, None, None) => RegenerateRecoveryOutcome::DispatchUnknown,
+        };
+        Ok(SameBranchRegenerateRecoverySnapshot { admission, outcome })
+    }
+
+    /// Durable one-shot pre-provider fence for a same-branch admission.
+    /// A crash after this commit is an uncertain dispatch, not a replay permit.
+    pub(crate) fn permit_same_branch_regenerate_dispatch(
+        &mut self,
+        branch: BranchId,
+        request: RequestId,
+        expected: TimelineSelection,
+    ) -> Result<EventId, domain::TimelineError> {
+        self.assert_selection(expected)?;
+        if self.branch != branch || expected.branch_id != branch {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        let snapshot = self.reconcile_same_branch_regenerate(branch, request)?;
+        let expected_epoch = if snapshot.admission.forget_operation.is_some() {
+            snapshot.admission.source_head + 2
+        } else {
+            self.store.context_epoch_at(
+                branch,
+                snapshot.admission.character,
+                Some(snapshot.admission.source_head),
+            )?
+        };
+        if self
+            .store
+            .context_epoch(branch, snapshot.admission.character)?
+            != expected_epoch
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        if snapshot.outcome != RegenerateRecoveryOutcome::DispatchUnknown {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let mut draft = EventDraft::new(EventKind::RegenerateMayHaveDispatched);
+        let id = draft.id;
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.0.to_string()));
+        self.store.append_guarded(
+            branch,
+            self.store.branch(branch)?.head_sequence,
+            &format!("regenerate-dispatch:{}", request.0),
+            json!({"request_id": request.0.to_string()}),
+            vec![draft],
+            AppendGuard {
+                selection_generation: expected.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        Ok(id)
+    }
+
+    /// The terminal append is bound to the original request's branch, even
+    /// when the user has changed the active Timeline selection since admission.
+    pub(crate) fn abandon_same_branch_regenerate_request(
+        &mut self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<EventId, domain::TimelineError> {
+        let snapshot = self.reconcile_same_branch_regenerate(branch, request)?;
+        if let RegenerateRecoveryOutcome::Abandoned(id) = snapshot.outcome {
+            return Ok(id);
+        }
+        if matches!(
+            snapshot.outcome,
+            RegenerateRecoveryOutcome::AcceptedReply(_)
+        ) {
+            return Err(domain::TimelineError::Conflict);
+        }
+        let mut draft = EventDraft::new(EventKind::RegenerateAbandoned);
+        let id = draft.id;
+        draft
+            .payload
+            .insert("request_id".into(), json!(request.0.to_string()));
+        self.store.append(
+            branch,
+            self.store.branch(branch)?.head_sequence,
             &format!("regenerate-abandon:{}", request.0),
             json!({"request_id": request.0.to_string()}),
             vec![draft],

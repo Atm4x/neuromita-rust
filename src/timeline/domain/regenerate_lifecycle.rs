@@ -302,19 +302,50 @@ pub(crate) fn validate_regenerate_transition(
     }
 
     for request in candidate_requests {
-        let mut admission = None;
-        for fact in facts
-            .iter()
-            .filter(|fact| fact.draft.kind == EventKind::BranchCreated)
-        {
-            if let Some(receipt) = RegenerateAdmissionReceipt::from_marker(&fact.draft.payload)?
-                && receipt.request.0 == request
-            {
-                if admission.replace(receipt).is_some() {
-                    return Err(TimelineError::Conflict);
+        // Legacy fork receipts and same-branch admissions are distinct, explicit
+        // durable protocols. Never infer one from the absence of the other.
+        let mut legacy = None;
+        let mut same_branch = None;
+        for fact in facts {
+            match fact.draft.kind {
+                EventKind::BranchCreated => {
+                    if let Some(receipt) =
+                        RegenerateAdmissionReceipt::from_marker(&fact.draft.payload)?
+                        && receipt.request.0 == request
+                    {
+                        if legacy.replace(receipt).is_some() {
+                            return Err(TimelineError::Conflict);
+                        }
+                    }
                 }
+                EventKind::RegenerateAdmitted => {
+                    let receipt = SameBranchRegenerateReceipt::from_fact(&fact.draft)?;
+                    if receipt.request.0 == request {
+                        if same_branch.replace(receipt).is_some() {
+                            return Err(TimelineError::Conflict);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+        if legacy.is_some() && same_branch.is_some() {
+            return Err(TimelineError::Conflict);
+        }
+        let identity = legacy
+            .as_ref()
+            .map(|receipt| {
+                (
+                    receipt.child_branch,
+                    receipt.character,
+                    receipt.original_input,
+                )
+            })
+            .or_else(|| {
+                same_branch
+                    .as_ref()
+                    .map(|receipt| (receipt.branch, receipt.character, receipt.original_input))
+            });
         let existing_dispatch = dispatch_may_have_started(facts, request)?.is_some();
         let mut dispatch_count = usize::from(existing_dispatch);
         let existing_abandoned = abandoned_regenerate(facts, request)?.is_some();
@@ -335,21 +366,21 @@ pub(crate) fn validate_regenerate_transition(
         for draft in drafts {
             match draft.kind {
                 EventKind::RegenerateMayHaveDispatched if parse_dispatch(draft)? == request => {
-                    let receipt = admission.as_ref().ok_or(TimelineError::Invalid(
+                    let (admitted_branch, _, _) = identity.ok_or(TimelineError::Invalid(
                         "dispatch requires a durable regenerate admission",
                     ))?;
-                    if receipt.child_branch != branch || abandoned_count > 0 || accepted_count > 0 {
+                    if admitted_branch != branch || abandoned_count > 0 || accepted_count > 0 {
                         return Err(TimelineError::Conflict);
                     }
                     dispatch_count += 1;
                 }
                 EventKind::RegenerateAbandoned if parse_abandoned(draft)? == request => {
-                    let receipt = admission.as_ref().ok_or(TimelineError::Invalid(
+                    let (admitted_branch, _, _) = identity.ok_or(TimelineError::Invalid(
                         "abandonment requires a durable regenerate admission",
                     ))?;
-                    if receipt.child_branch != branch {
+                    if admitted_branch != branch {
                         return Err(TimelineError::Invalid(
-                            "abandonment requires admitted child",
+                            "abandonment requires admitted branch",
                         ));
                     }
                     abandoned_count += 1;
@@ -362,19 +393,51 @@ pub(crate) fn validate_regenerate_transition(
                         .and_then(|id| Uuid::parse_str(id).ok())
                         == Some(request) =>
                 {
-                    if let Some(receipt) = admission.as_ref() {
+                    if let Some((admitted_branch, character, input)) = identity {
                         let links = draft
                             .links
                             .iter()
                             .filter(|link| link.relation == CausalRelation::ReplyTo)
                             .collect::<Vec<_>>();
-                        if branch != receipt.child_branch
-                            || draft.actor.as_deref() != Some(receipt.character.as_str())
-                            || !draft.observers.contains(&receipt.character)
+                        if let Some(receipt) = same_branch.as_ref() {
+                            let marker_sequence = facts
+                                .iter()
+                                .find(|fact| {
+                                    fact.branch_id == branch
+                                        && fact.draft.kind == EventKind::RegenerateAdmitted
+                                        && fact.draft.id != draft.id
+                                        && SameBranchRegenerateReceipt::from_fact(&fact.draft)
+                                            .is_ok_and(|existing| {
+                                                existing.request == receipt.request
+                                            })
+                                })
+                                .map(|fact| fact.sequence)
+                                .ok_or(TimelineError::NotFound)?;
+                            if dispatch_count == 0 {
+                                return Err(TimelineError::Invalid(
+                                    "same-branch acceptance requires pre-provider dispatch",
+                                ));
+                            }
+                            if facts.iter().any(|fact| {
+                                fact.sequence > marker_sequence
+                                    && fact.draft.observers.contains(&character)
+                                    && matches!(
+                                        fact.draft.kind,
+                                        EventKind::CharacterContextReset
+                                            | EventKind::CharacterKnowledgeForgotten
+                                            | EventKind::CharacterKnowledgeRevealed
+                                    )
+                            }) {
+                                return Err(TimelineError::ConcurrentWrite);
+                            }
+                        }
+                        if branch != admitted_branch
+                            || draft.actor.as_deref() != Some(character.as_str())
+                            || !draft.observers.contains(&character)
                             || links.len() != 1
-                            || links[0].event_id != receipt.original_input
+                            || links[0].event_id != input
                             || draft.payload.get("reply_to").and_then(Value::as_str)
-                                != Some(receipt.original_input.0.to_string().as_str())
+                                != Some(input.0.to_string().as_str())
                         {
                             return Err(TimelineError::Invalid(
                                 "regenerate acceptance violates durable admission",
@@ -386,7 +449,7 @@ pub(crate) fn validate_regenerate_transition(
                 _ => {}
             }
         }
-        if admission.is_some()
+        if identity.is_some()
             && (dispatch_count > 1
                 || abandoned_count > 1
                 || accepted_count > 1
