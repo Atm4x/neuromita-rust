@@ -1,0 +1,45 @@
+name: Agent B74 exact-head backend
+on:
+  push:
+    branches:
+      - bridge/agent-b74-verify-20261109
+jobs:
+  exact-b74:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 64788b2ec04efff5ec1614631a043458e466c0d8
+          fetch-depth: 3
+          persist-credentials: false
+      - name: Verify exact B74 commit tree and parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "64788b2ec04efff5ec1614631a043458e466c0d8"
+          test "$(git rev-parse HEAD^{tree})" = "125bf4b7fd713e30e495776401bac0ecbc3a7e52"
+          test "$(git rev-parse HEAD^)" = "2387d38e7f9b37806129e2dca99a6cc438205aa4"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: Focused indexed recovery and native smoke benchmark
+        run: |
+          cargo test --locked --offline --lib regenerate_enumeration_tests -- --test-threads=2
+          B74_ADMISSIONS=129 B74_EVENTS=32 B74_ITERATIONS=3 cargo test --locked --offline --lib b74_native_recovery_benchmark -- --ignored --nocapture --test-threads=1
+      - name: Full filtered library suite
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: Static verification
+        shell: bash
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
