@@ -4,7 +4,7 @@
 //! identity. It never accepts an arbitrary target path, package path or URL.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::Path,
@@ -36,6 +36,49 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 const HELPER_NAME: &str = "neuromita-updater.exe";
 #[cfg(not(windows))]
 const HELPER_NAME: &str = "neuromita-updater";
+
+trait HandoffRuntime {
+    fn arm(&self, helper: &Path) -> io::Result<bool>;
+    fn disarm(&self, helper: &Path) -> io::Result<()>;
+    fn is_armed(&self, helper: &Path) -> io::Result<bool>;
+    fn helper_command(&self, helper: &Path, pid: u32, identity: u64, nonce: Uuid) -> Command;
+    fn new_gui_command(&self, executable: &Path) -> Command;
+    fn restored_gui_command(&self, executable: &Path) -> Command;
+}
+
+struct ProductionHandoffRuntime;
+
+impl HandoffRuntime for ProductionHandoffRuntime {
+    fn arm(&self, helper: &Path) -> io::Result<bool> {
+        reboot_guard::arm(helper)
+    }
+
+    fn disarm(&self, helper: &Path) -> io::Result<()> {
+        reboot_guard::disarm(helper)
+    }
+
+    fn is_armed(&self, helper: &Path) -> io::Result<bool> {
+        reboot_guard::is_armed(helper)
+    }
+
+    fn helper_command(&self, helper: &Path, pid: u32, identity: u64, nonce: Uuid) -> Command {
+        let mut command = Command::new(helper);
+        command
+            .arg(HELPER_COMMAND)
+            .arg(pid.to_string())
+            .arg(identity.to_string())
+            .arg(nonce.to_string());
+        command
+    }
+
+    fn new_gui_command(&self, executable: &Path) -> Command {
+        Command::new(executable)
+    }
+
+    fn restored_gui_command(&self, executable: &Path) -> Command {
+        Command::new(executable)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum HandoffError {
@@ -129,6 +172,13 @@ pub fn validate_handoff_environment(activator: &SingleFileActivator) -> Result<(
 /// helper independently waits for *this exact process identity* to exit.
 /// The transaction must have been prepared by `SingleFileActivator::prepare`.
 pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, HandoffError> {
+    schedule_after_shutdown_with(activator, &ProductionHandoffRuntime)
+}
+
+fn schedule_after_shutdown_with(
+    activator: &SingleFileActivator,
+    runtime: &impl HandoffRuntime,
+) -> Result<u32, HandoffError> {
     validate_handoff_environment(activator)?;
     let expected = if cfg!(windows) {
         "neuromita-gui.exe"
@@ -175,9 +225,10 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
             &intent_path,
             false,
             error,
+            runtime,
         ));
     }
-    let registered = match reboot_guard::arm(&helper) {
+    let registered = match runtime.arm(&helper) {
         Ok(registered) => registered,
         Err(error) => {
             return Err(abort_failed_schedule(
@@ -186,6 +237,7 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
                 &intent_path,
                 false,
                 error.into(),
+                runtime,
             ));
         }
     };
@@ -196,13 +248,11 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
             &intent_path,
             registered,
             error.into(),
+            runtime,
         ));
     }
-    let child = Command::new(&helper)
-        .arg(HELPER_COMMAND)
-        .arg(process::id().to_string())
-        .arg(identity.to_string())
-        .arg(intent.nonce.to_string())
+    let child = runtime
+        .helper_command(&helper, process::id(), identity, intent.nonce)
         .current_dir(activator.install_root())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -216,6 +266,7 @@ pub fn schedule_after_shutdown(activator: &SingleFileActivator) -> Result<u32, H
             &intent_path,
             registered,
             error.into(),
+            runtime,
         )),
     }
 }
@@ -226,6 +277,7 @@ fn abort_failed_schedule(
     intent_path: &Path,
     guard_armed: bool,
     handoff: HandoffError,
+    runtime: &impl HandoffRuntime,
 ) -> HandoffError {
     let cleanup = (|| -> Result<(), HandoffError> {
         match fs::symlink_metadata(intent_path) {
@@ -238,7 +290,7 @@ fn abort_failed_schedule(
         }
         activator.discard_prepared()?;
         if guard_armed {
-            reboot_guard::disarm(helper)?;
+            runtime.disarm(helper)?;
         }
         Ok(())
     })();
@@ -264,7 +316,16 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
     if arguments.as_slice() == [OsStr::new(AUTO_RECOVER_COMMAND)] {
         return auto_recover_on_login();
     }
-    let [command, pid, identity, nonce] = arguments.as_slice() else {
+    let executable = std::env::current_exe()?;
+    run_apply_helper(&arguments, &executable, &ProductionHandoffRuntime)
+}
+
+fn run_apply_helper(
+    arguments: &[OsString],
+    executable: &Path,
+    runtime: &impl HandoffRuntime,
+) -> Result<(), HandoffError> {
+    let [command, pid, identity, nonce] = arguments else {
         return Err(HandoffError::InvalidInvocation);
     };
     if command != HELPER_COMMAND {
@@ -284,12 +345,11 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         .to_str()
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or(HandoffError::InvalidInvocation)?;
-    let executable = std::env::current_exe()?;
     if executable.file_name() != Some(OsStr::new(HELPER_NAME)) {
         return Err(HandoffError::UnsafeHelper);
     }
     require_regular_file(&executable)?;
-    if !reboot_guard::is_armed(&executable)? {
+    if !runtime.is_armed(executable)? {
         return Err(HandoffError::MissingRecoveryGuard);
     }
     let install_root = executable.parent().ok_or(HandoffError::UnsafeHelper)?;
@@ -326,13 +386,14 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         if resolved != RecoveryOutcome::AwaitingHealth {
             return Err(HandoffError::NotPrepared);
         }
-        match restart_and_verify(install_root, &activator, nonce) {
+        match restart_and_verify(install_root, &activator, nonce, runtime) {
             Ok(()) => Ok("updated-and-restarted"),
             Err(error) => {
                 activator
                     .rollback_health_check(nonce)
                     .map_err(HandoffError::RollbackFailed)?;
-                Command::new(activator.target_path())
+                runtime
+                    .restored_gui_command(&activator.target_path())
                     .current_dir(install_root)
                     .env_remove(READY_NONCE_ENV)
                     .env_remove("NEUROMITA_DATA_DIR")
@@ -358,7 +419,7 @@ pub fn run_helper(args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<(
         details.as_deref().unwrap_or(""),
     )?;
     if matches!(activator.recover(), Ok(RecoveryOutcome::NoTransaction)) {
-        reboot_guard::disarm(&executable)?;
+        runtime.disarm(executable)?;
     }
     result.map(|_| ())
 }
@@ -628,8 +689,10 @@ fn restart_and_verify(
     install_root: &Path,
     activator: &SingleFileActivator,
     nonce: Uuid,
+    runtime: &impl HandoffRuntime,
 ) -> Result<(), HandoffError> {
-    let mut child = Command::new(activator.target_path())
+    let mut child = runtime
+        .new_gui_command(&activator.target_path())
         .current_dir(install_root)
         .env_remove("NEUROMITA_DATA_DIR")
         .env(READY_NONCE_ENV, nonce.to_string())
@@ -1043,3 +1106,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_acceptance;

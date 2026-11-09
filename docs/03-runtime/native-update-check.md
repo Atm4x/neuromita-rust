@@ -279,3 +279,32 @@ uses a typed recovery-lease boundary: production always targets its fixed
 subkey. No runtime argument or environment variable can substitute a test key
 for the production recovery guard. The Windows test does not emulate an actual
 interactive reboot or prove complete production helper-handoff registration.
+
+## Windows installed handoff with an isolated recovery lease (D56)
+
+The Windows unit-test build now exercises the entire process boundary in a
+**disposable installation**. Its parent GUI probe, installed updater probe and
+restarted GUI probe are separate Windows PE processes. The parent writes the
+actual nonce-bound handoff and exits; the installed helper waits for its exact
+PID and OS creation identity, replaces the verified candidate, starts a fresh
+GUI probe, validates the real readiness receipt and retires the backup. A
+second case fails before readiness, verifies rollback and observes the old
+GUI relaunch. Both cases check retained portable UserData and the absence of
+an outstanding transaction.
+
+A private `HandoffRuntime` boundary chooses the recovery lease and the
+executable command construction. The only public entrypoints instantiate the
+**production** implementation: fixed `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+installed-helper executable and exact production CLI arguments. The isolated
+runtime exists only under `cfg(all(test, windows))` in the library's unit-test
+binary. Its unique `HKCU\Software\NeuroMita\UpdaterLeaseTests\...` subkey
+is removed after acceptance. Test-only command and environment handling are
+not linked into the installed updater or GUI and cannot be selected by their
+runtime arguments or environment. The process, activation, nonce, lock,
+identity and filesystem checks under test are the same production functions.
+
+This acceptance does not assert that a live Slint window, AI/Core initialization,
+a real downloaded publisher asset or Windows sign-in startup ordering is healthy.
+Windows CI is the source of truth for this test; Linux's no-op recovery guard
+cannot prove Windows registry semantics. Production release acceptance and
+actual interactive reboot remain separate requirements under #44.

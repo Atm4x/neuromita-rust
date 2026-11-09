@@ -34,7 +34,7 @@ mod windows {
     const RECOVER_ARG: &str = "--auto-recover-interrupted-update";
     const MAX_REGISTRY_BYTES: u32 = 8192;
 
-    struct RecoveryLease<'a> {
+    pub(crate) struct RecoveryLease<'a> {
         subkey: &'a str,
     }
 
@@ -44,21 +44,21 @@ mod windows {
         }
 
         #[cfg(test)]
-        fn isolated(subkey: &'a str) -> Self {
+        pub(crate) fn isolated(subkey: &'a str) -> Self {
             Self { subkey }
         }
 
-        fn arm(&self, helper: &Path) -> io::Result<bool> {
+        pub(crate) fn arm(&self, helper: &Path) -> io::Result<bool> {
             let (name, command) = identity(helper)?;
             register_in_key(self.subkey, &name, &command)
         }
 
-        fn disarm(&self, helper: &Path) -> io::Result<()> {
+        pub(crate) fn disarm(&self, helper: &Path) -> io::Result<()> {
             let (name, command) = identity(helper)?;
             remove_from_key(self.subkey, &name, &command)
         }
 
-        fn is_armed(&self, helper: &Path) -> io::Result<bool> {
+        pub(crate) fn is_armed(&self, helper: &Path) -> io::Result<bool> {
             let (name, command) = identity(helper)?;
             is_registered_in_key(self.subkey, &name, &command)
         }
@@ -288,6 +288,21 @@ mod windows {
     }
 
     #[cfg(test)]
+    pub(crate) fn remove_isolated_key(subkey: &str) -> io::Result<()> {
+        let status = unsafe {
+            windows_sys::Win32::System::Registry::RegDeleteKeyW(
+                HKEY_CURRENT_USER,
+                wide(OsStr::new(subkey)).as_ptr(),
+            )
+        };
+        if status == 0 || status == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    }
+
+    #[cfg(test)]
     mod tests {
         use super::*;
         use uuid::Uuid;
@@ -323,3 +338,9 @@ mod windows {
 
 #[cfg(windows)]
 pub(crate) use windows::{arm, disarm, is_armed};
+
+#[cfg(all(windows, test))]
+pub(crate) use windows::RecoveryLease;
+
+#[cfg(all(windows, test))]
+pub(crate) use windows::remove_isolated_key;
