@@ -1,4 +1,4 @@
-name: Agent D50 Windows GUI compile using established job
+name: Agent D50 Windows registry validation after visibility fix
 on:
   push:
     branches:
