@@ -70,7 +70,7 @@ impl Options {
             }
             if argument == "--help" {
                 println!(
-                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH] [--installed-speech]\n\n--installed-speech: opt in to previously installed TTS/ASR selections from persistent settings; no model installs or downloads.\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /ai worker status, /ai worker restart Embedding|Reranker|Tts|Asr EXPECTED_GENERATION_UUID, /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
+                    "neuromita --model MODEL --character Crazy|Kind --listen HOST:PORT [--message TEXT] [--data-dir PATH] [--finetune-config PATH] [--installed-speech]\n\n--installed-speech: opt in to previously installed TTS/ASR selections from persistent settings; no model installs or downloads.\nRequired environment: GEMINI_API_KEY\nNetwork command: test followed by newline\nInteractive commands: /ai worker status, /ai worker restart Embedding|Reranker|Tts|Asr EXPECTED_GENERATION_UUID, /cancel REQUEST_UUID, /character Crazy|Kind, /recall forgotten id UUID | QUERY, /recall forgotten search | QUERY, /rag history QUERY, /rag history-fts QUERY, /rag history-vector QUERY, /rag history-fusion QUERY, /rag generation [off|keyword|fts|vector|fusion|window N], /documents status CHARACTER|inspect CHARACTER|activate CHARACTER EXPECTED_REV ABSOLUTE_RECEIPT_JSON|deactivate CHARACTER EXPECTED_REV|retry-save EXPECTED_REV, /knowledge cache preview|clear TOKEN, /knowledge graph inspect MEMORY_UUID..., /knowledge graph preview clear|reindex MEMORY_UUID..., /knowledge graph apply TOKEN, /knowledge memory export PATH|preview PATH|apply TOKEN, /knowledge variables export PATH|preview PATH|apply TOKEN, /knowledge portable export PATH|preview PATH|apply TOKEN, /diagnostics ..., /dataset status, /game start|place|random|fire|turn|auto|close|view, /reminders, /reminder add|timer|update|delete|enable|disable|retry|zone|now ..., /quit\n\n{}",
                     crate::settings_cli::HELP
                 );
                 return Ok(None);
@@ -468,6 +468,11 @@ pub async fn run(
                                     }
                                 }
                                 Err(error) => eprintln!("{error}"),
+                            }
+                        } else if slash_command(&line, "/documents") {
+                            match crate::documents_operator::run(&line).await {
+                                Ok(output) => println!("{output}"),
+                                Err(error) => eprintln!("Documents: {error}"),
                             }
                         } else if slash_command(&line, "/rag generation") {
                             match history_generation_command(&line) {

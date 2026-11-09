@@ -1,4 +1,5 @@
 mod documents_cli;
+mod documents_operator;
 mod logging;
 #[cfg(feature = "sqlite-system")]
 mod recovery_inventory_cli;
