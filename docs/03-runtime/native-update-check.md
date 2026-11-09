@@ -244,3 +244,38 @@ readiness-based completion, early-startup rollback, helper launch refusal,
 missing-helper refusal and a conflicting handoff record. Windows validation
 uses native CI; it does not imply a real published release or a completed
 interactive click-through with a running Slint GUI.
+
+## Verified orphan handoff reconciliation (D55)
+
+A helper can terminate after the installed GUI has written
+`.neuromita-update/handoff.json` but before the helper consumes the record.
+Previously this legitimate file blocked otherwise safe offline recovery because
+ordinary activation cleanup deliberately rejects unknown transaction entries.
+The explicit offline recovery command (and the existing per-user Windows login
+recovery command) now recognizes this particular stranded handoff only when all
+installed GUI and other updater processes are stopped. It validates the record's
+bounded JSON, exact installed target name, nonzero original process-creation
+identity, already-exited parent PID/identity pair, and nonce bound to the durable
+health-armed journal.
+
+After taking the exclusive installation lock, the activator rereads the original
+handoff bytes and refuses a replaced or symlinked record. Before removing the
+record it checks every workspace entry, both old/new content digests, and the
+rollback marker. Unrecognized target bytes, a damaged backup, unknown workspace
+files, a still-running original parent, mismatched nonce or an unarmed journal
+block recovery without discarding the original handoff or the verified backup.
+Only a validated residual handoff is removed; **ordinary cleanup still refuses
+any handoff.json**, so active helper transactions do not become generally
+discardable. If rollback later encounters an operating-system file lock, the
+health-armed journal is still available for a subsequent offline repair.
+
+`tests/updater_offline_recovery.rs` exercises the real installed updater helper
+for both orphaned **prepared** and orphaned **already-applied** transactions,
+including wrong-nonce refusal, unexpected workspace evidence, a replaced
+installed executable, successful old-version restoration, byte-exact persistent
+settings and replay refusal. The native Windows registry implementation also
+uses a typed recovery-lease boundary: production always targets its fixed
+`HKCU\...\Run` key while its unit tests can use a separate isolated HKCU
+subkey. No runtime argument or environment variable can substitute a test key
+for the production recovery guard. The Windows test does not emulate an actual
+interactive reboot or prove complete production helper-handoff registration.

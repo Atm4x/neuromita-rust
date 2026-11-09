@@ -34,6 +34,36 @@ mod windows {
     const RECOVER_ARG: &str = "--auto-recover-interrupted-update";
     const MAX_REGISTRY_BYTES: u32 = 8192;
 
+    struct RecoveryLease<'a> {
+        subkey: &'a str,
+    }
+
+    impl<'a> RecoveryLease<'a> {
+        fn production() -> Self {
+            Self { subkey: RUN_KEY }
+        }
+
+        #[cfg(test)]
+        fn isolated(subkey: &'a str) -> Self {
+            Self { subkey }
+        }
+
+        fn arm(&self, helper: &Path) -> io::Result<bool> {
+            let (name, command) = identity(helper)?;
+            register_in_key(self.subkey, &name, &command)
+        }
+
+        fn disarm(&self, helper: &Path) -> io::Result<()> {
+            let (name, command) = identity(helper)?;
+            remove_from_key(self.subkey, &name, &command)
+        }
+
+        fn is_armed(&self, helper: &Path) -> io::Result<bool> {
+            let (name, command) = identity(helper)?;
+            is_registered_in_key(self.subkey, &name, &command)
+        }
+    }
+
     struct RegistryKey(HKEY);
 
     impl Drop for RegistryKey {
@@ -246,18 +276,15 @@ mod windows {
     }
 
     pub(crate) fn arm(helper: &Path) -> io::Result<bool> {
-        let (name, command) = identity(helper)?;
-        register_in_key(RUN_KEY, &name, &command)
+        RecoveryLease::production().arm(helper)
     }
 
     pub(crate) fn disarm(helper: &Path) -> io::Result<()> {
-        let (name, command) = identity(helper)?;
-        remove_from_key(RUN_KEY, &name, &command)
+        RecoveryLease::production().disarm(helper)
     }
 
     pub(crate) fn is_armed(helper: &Path) -> io::Result<bool> {
-        let (name, command) = identity(helper)?;
-        is_registered_in_key(RUN_KEY, &name, &command)
+        RecoveryLease::production().is_armed(helper)
     }
 
     #[cfg(test)]
@@ -268,17 +295,22 @@ mod windows {
         #[test]
         fn registry_recovery_lease_is_exact_and_cannot_delete_modified_commands() {
             let subkey = format!("Software\\NeuroMita\\UpdaterLeaseTests\\{}", Uuid::new_v4());
-            let name = "test-recovery";
-            let command = r#""C:\\App\\neuromita-updater.exe" --auto-recover-interrupted-update"#;
-            assert!(!is_registered_in_key(&subkey, name, command).unwrap());
-            assert!(register_in_key(&subkey, name, command).unwrap());
-            assert!(!register_in_key(&subkey, name, command).unwrap());
-            assert!(is_registered_in_key(&subkey, name, command).unwrap());
-            assert!(register_in_key(&subkey, name, "other command").is_err());
-            assert!(remove_from_key(&subkey, name, "other command").is_err());
-            assert!(is_registered_in_key(&subkey, name, command).unwrap());
-            remove_from_key(&subkey, name, command).unwrap();
-            assert!(!is_registered_in_key(&subkey, name, command).unwrap());
+            let helper = std::env::current_exe().unwrap();
+            let lease = RecoveryLease::isolated(&subkey);
+            let (name, command) = identity(&helper).unwrap();
+            assert!(!lease.is_armed(&helper).unwrap());
+            assert!(lease.arm(&helper).unwrap());
+            assert!(!lease.arm(&helper).unwrap());
+            assert!(lease.is_armed(&helper).unwrap());
+            assert!(register_in_key(&subkey, &name, "another command").is_err());
+            assert!(remove_from_key(&subkey, &name, "another command").is_err());
+            assert!(lease.is_armed(&helper).unwrap());
+            assert_eq!(
+                read_entry(&open_existing(&subkey).unwrap().unwrap(), &name).unwrap(),
+                Some(command)
+            );
+            lease.disarm(&helper).unwrap();
+            assert!(!lease.is_armed(&helper).unwrap());
             unsafe {
                 windows_sys::Win32::System::Registry::RegDeleteKeyW(
                     HKEY_CURRENT_USER,

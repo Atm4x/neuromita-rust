@@ -421,7 +421,34 @@ fn recover_stopped_installation() -> Result<(), HandoffError> {
     let data_root = PortableDataRoot::from_executable(&executable, Some(&data_path), None)?;
     let activator = SingleFileActivator::new(install, &data_root, required_name)?;
     ensure_no_active_installation_processes(&activator, &executable)?;
-    let recovered = activator.recover_interrupted_health_check()?;
+    let residual_path = install.join(".neuromita-update").join(HANDOFF_NAME);
+    let residual = match fs::symlink_metadata(&residual_path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(HandoffError::InvalidInvocation);
+            }
+            let bytes = fs::read(&residual_path)?;
+            if bytes.is_empty() || bytes.len() > 1024 {
+                return Err(HandoffError::InvalidInvocation);
+            }
+            let intent: HandoffIntent =
+                serde_json::from_slice(&bytes).map_err(|_| HandoffError::InvalidInvocation)?;
+            if intent.target != required_name
+                || intent.parent_pid < 2
+                || intent.parent_identity == 0
+                || original_parent_still_alive(intent.parent_pid, intent.parent_identity)?
+            {
+                return Err(HandoffError::InvalidInvocation);
+            }
+            Some((intent.nonce, bytes))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let recovered = match residual {
+        Some((nonce, bytes)) => activator.recover_interrupted_with_handoff(nonce, &bytes)?,
+        None => activator.recover_interrupted_health_check()?,
+    };
     if recovered != RecoveryOutcome::PreviousRestored {
         return Err(HandoffError::NotPrepared);
     }
@@ -734,6 +761,50 @@ fn current_process_identity() -> Result<u64, HandoffError> {
 }
 
 #[cfg(target_os = "linux")]
+fn original_parent_still_alive(pid: u32, expected: u64) -> Result<bool, HandoffError> {
+    Ok(
+        matches!(process_identity(pid)?, Some((observed, state)) if observed == expected && state != 'Z' && state != 'X'),
+    )
+}
+
+#[cfg(windows)]
+fn original_parent_still_alive(pid: u32, expected: u64) -> Result<bool, HandoffError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        Storage::FileSystem::SYNCHRONIZE,
+        System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+        },
+    };
+    let handle = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            Ok(false)
+        } else {
+            Err(error.into())
+        };
+    }
+    let result = (|| {
+        if process_creation_time(handle, GetProcessTimes)? != expected {
+            return Ok(false);
+        }
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_OBJECT_0 => Ok(false),
+            WAIT_TIMEOUT => Ok(true),
+            _ => Err(io::Error::last_os_error().into()),
+        }
+    })();
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn original_parent_still_alive(_pid: u32, _expected: u64) -> Result<bool, HandoffError> {
+    Err(HandoffError::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "linux")]
 fn wait_until_parent_exits(pid: u32, expected: u64) -> Result<(), HandoffError> {
     loop {
         match process_identity(pid)? {
@@ -840,6 +911,14 @@ mod tests {
                 Err(HandoffError::InvalidInvocation)
             ));
         }
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn residual_handoff_rejects_the_exact_live_parent_identity() {
+        let identity = current_process_identity().unwrap();
+        assert!(original_parent_still_alive(process::id(), identity).unwrap());
+        assert!(!original_parent_still_alive(process::id(), identity.wrapping_add(1)).unwrap());
     }
 
     #[cfg(target_os = "linux")]

@@ -335,6 +335,113 @@ impl SingleFileActivator {
     /// Unarmed/legacy transactions are intentionally ineligible.
     pub fn recover_interrupted_health_check(&self) -> Result<RecoveryOutcome, ActivationError> {
         let _lock = lock_installation(&self.install_root)?;
+        self.recover_interrupted_health_unlocked()
+    }
+
+    /// Accepts a stopped installation's orphaned helper handoff only when its exact
+    /// validated bytes match the health nonce and a recoverable transaction state.
+    /// Ordinary activation cleanup must continue to reject handoff records.
+    pub(crate) fn recover_interrupted_with_handoff(
+        &self,
+        nonce: Uuid,
+        handoff_bytes: &[u8],
+    ) -> Result<RecoveryOutcome, ActivationError> {
+        let _lock = lock_installation(&self.install_root)?;
+        if handoff_bytes.is_empty() || handoff_bytes.len() > 1024 {
+            return Err(ActivationError::Conflict("invalid residual handoff length"));
+        }
+        let workspace = self.workspace();
+        let handoff_path = workspace.join("handoff.json");
+        regular_file(&handoff_path)?;
+        if fs::read(&handoff_path)? != handoff_bytes {
+            return Err(ActivationError::Conflict("residual handoff was modified"));
+        }
+        let journal = self.load_journal()?;
+        if journal.health_nonce != Some(nonce) {
+            return Err(ActivationError::Conflict(
+                "residual handoff nonce does not match journal",
+            ));
+        }
+        for entry in fs::read_dir(&workspace)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if ![
+                BACKUP,
+                CANDIDATE,
+                READY,
+                JOURNAL_PENDING,
+                ROLLBACK_MARKER,
+                JOURNAL,
+                "handoff.json",
+            ]
+            .iter()
+            .any(|allowed| name == *allowed)
+            {
+                return Err(ActivationError::Conflict("unexpected workspace entry"));
+            }
+            regular_file(&entry.path())?;
+        }
+        let target = self.target();
+        let backup = workspace.join(BACKUP);
+        let candidate = workspace.join(CANDIDATE);
+        let live = match fs::symlink_metadata(&target) {
+            Ok(_) => Some(hash_file(&target)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let old = live.as_ref().is_some_and(|(size, digest)| {
+            *size == journal.previous_size && *digest == journal.previous_sha256
+        });
+        let new = live.as_ref().is_some_and(|(size, digest)| {
+            *size == journal.next_size && *digest == journal.next_sha256
+        });
+        if !old && !new && live.is_some() {
+            return Err(ActivationError::Conflict(
+                "unrecognized installed executable",
+            ));
+        }
+        if old && backup.exists() {
+            return Err(ActivationError::Conflict(
+                "old executable and backup coexist in an unknown state",
+            ));
+        }
+        let rollback_marker = workspace.join(ROLLBACK_MARKER);
+        if rollback_marker.exists() && fs::read(&rollback_marker)? != b"rollback" {
+            return Err(ActivationError::Conflict("invalid rollback marker"));
+        }
+        if backup.exists() {
+            verify(
+                &backup,
+                journal.previous_size,
+                &journal.previous_sha256,
+                "backup",
+            )?;
+        } else if !old {
+            return Err(ActivationError::Conflict(
+                "missing previous executable backup",
+            ));
+        }
+        if candidate.exists() {
+            verify(
+                &candidate,
+                journal.next_size,
+                &journal.next_sha256,
+                "candidate",
+            )?;
+        } else if old && !workspace.join(ROLLBACK_MARKER).exists() {
+            return Err(ActivationError::Conflict(
+                "missing prepared update candidate",
+            ));
+        }
+        if new && !backup.exists() {
+            return Err(ActivationError::Conflict("new executable without backup"));
+        }
+        fs::remove_file(&handoff_path)?;
+        sync_directory(&workspace)?;
+        self.recover_interrupted_health_unlocked()
+    }
+
+    fn recover_interrupted_health_unlocked(&self) -> Result<RecoveryOutcome, ActivationError> {
         if !self.workspace().exists() {
             return Ok(RecoveryOutcome::NoTransaction);
         }
