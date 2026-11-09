@@ -2265,3 +2265,211 @@ async fn same_branch_history_reset_rejects_provider_dispatch_but_not_cancellatio
         crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
     ));
 }
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_external_acceptance_before_queue_start_retires_request_truthfully() {
+    let db = std::env::temp_dir().join(format!("b80-external-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let mut fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    }
+    .before_provider(
+        handle.id(),
+        record.admission(),
+        record.regenerate_protocol(),
+    )
+    .unwrap();
+    let mut other = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let turn = other
+        .capture_turn(
+            fixture.source.character,
+            Some(fixture.source.original_input),
+            other.anchor(),
+        )
+        .unwrap();
+    let revision = other
+        .accepted_replies_at(fixture.source.character, other.anchor())
+        .unwrap();
+    let accepted = other
+        .append_reply(crate::timeline::GeneratedReply {
+            request: handle.id(),
+            intent: TurnIntent::Reply(fixture.source.original_input),
+            turn,
+            expected_revision: revision,
+            content: json!("accepted externally"),
+            audience: crate::timeline::conversation::ConversationAudience::private_to(
+                fixture.source.character,
+            ),
+            effects: vec![
+                crate::timeline::domain::AppliedEffect::CharacterStateChanged(
+                    crate::timeline::domain::CharacterBehavior {
+                        attitude: 76.0,
+                        boredom: 3.0,
+                        stress: 2.0,
+                    },
+                ),
+            ],
+        })
+        .unwrap();
+    assert_eq!(handle.cancel(), crate::request::CancelResult::TooLate);
+    assert_eq!(record.externally_accepted(), Some(accepted));
+    assert!(record.try_start().is_none());
+    assert!(
+        matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(event)) if event == accepted)
+    );
+    assert!(matches!(
+        other.reconcile_same_branch_regenerate(root, handle.id()).unwrap().outcome,
+        crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(event) if event == accepted
+    ));
+    drop((other, record, handle, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_request_handle_cancel_races_foreign_acceptance_with_effects() {
+    use std::sync::Barrier;
+
+    let db = std::env::temp_dir().join(format!("b80-cancel-race-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let mut fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    }
+    .before_provider(
+        handle.id(),
+        record.admission(),
+        record.regenerate_protocol(),
+    )
+    .unwrap();
+    let mut other = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let turn = other
+        .capture_turn(
+            fixture.source.character,
+            Some(fixture.source.original_input),
+            other.anchor(),
+        )
+        .unwrap();
+    let revision = other
+        .accepted_replies_at(fixture.source.character, other.anchor())
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(3));
+    let cancel_handle = handle.clone();
+    let cancel_barrier = Arc::clone(&barrier);
+    let acceptance_barrier = Arc::clone(&barrier);
+    let source = fixture.source;
+    let request_id = handle.id();
+    let (cancel_result, accepted_result) = std::thread::scope(|scope| {
+        let cancellation = scope.spawn(move || {
+            cancel_barrier.wait();
+            cancel_handle.cancel()
+        });
+        let acceptance = scope.spawn(move || {
+            acceptance_barrier.wait();
+            other.append_reply(crate::timeline::GeneratedReply {
+                request: request_id,
+                intent: TurnIntent::Reply(source.original_input),
+                turn,
+                expected_revision: revision,
+                content: json!("racing acceptance"),
+                audience: crate::timeline::conversation::ConversationAudience::private_to(
+                    source.character,
+                ),
+                effects: vec![
+                    crate::timeline::domain::AppliedEffect::CharacterStateChanged(
+                        crate::timeline::domain::CharacterBehavior {
+                            attitude: 88.0,
+                            boredom: 2.0,
+                            stress: 1.0,
+                        },
+                    ),
+                ],
+            })
+        });
+        barrier.wait();
+        (cancellation.join().unwrap(), acceptance.join().unwrap())
+    });
+    let owner = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let outcome = owner
+        .reconcile_same_branch_regenerate(root, handle.id())
+        .unwrap()
+        .outcome;
+    let behavior = owner
+        .character_behavior_at(fixture.source.character, owner.anchor())
+        .unwrap();
+    match (accepted_result, outcome) {
+        (Ok(event), crate::timeline::RegenerateRecoveryOutcome::AcceptedReply(accepted)) => {
+            assert_eq!(event, accepted);
+            assert_eq!(behavior.attitude, 88.0);
+            assert_eq!(cancel_result, crate::request::CancelResult::TooLate);
+            assert_eq!(record.externally_accepted(), Some(event));
+            assert!(
+                matches!(handle.wait().await, Err(crate::request::ObserveError::DurablyAcceptedElsewhere(id)) if id == event)
+            );
+        }
+        (Err(_), crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)) => {
+            assert_ne!(behavior.attitude, 88.0);
+            assert!(matches!(
+                cancel_result,
+                crate::request::CancelResult::Cancelled | crate::request::CancelResult::Requested
+            ));
+            assert_eq!(record.externally_accepted(), None);
+        }
+        (accept, terminal) => panic!("inconsistent same-branch terminal: {accept:?} {terminal:?}"),
+    }
+    drop((owner, record, handle, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
