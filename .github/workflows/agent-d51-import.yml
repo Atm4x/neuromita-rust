@@ -1,0 +1,35 @@
+name: Agent D51 exact Windows sync fix import
+on:
+  push:
+    branches:
+      - bridge/agent-d51-sync-open-handle-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check original patch, commit and tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=a7f0228deeb70a1da166b858fb7830febe17ec3f
+          EXPECTED=36bbabfbafe51a9a8cd39054d2a2174120fb2911
+          TREE=f10d91beb90de690c9589235664a07b50663ffc8
+          tr -d '\n' < .agent-bridge/d51.patch.br.b64 | base64 -d > /tmp/d51.patch.br
+          echo 'd4e82c98823d721d1eb43a6641a429d210dcc8e1cc9ab48bca01a798a3f09c13  /tmp/d51.patch.br' | sha256sum --check
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d51.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d51.patch.br')))"
+          echo 'f6b5f9f2cba6e0263ed52fce452c27853ba0ffcc12d874c47d06ef70f48e3c0b  /tmp/d51.patch' | sha256sum --check
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d51.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d51-windows-sync-permission-20261109
