@@ -1,0 +1,39 @@
+name: Agent D55 native Windows orphan recovery acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d55-windows-ci-20261109
+permissions:
+  contents: read
+jobs:
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d55-orphan-handoff-recovery-20261109
+      - name: Verify exact D55 HEAD and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "2791700dbbedda574a8fb587e128701980565b85"
+          test "$(git rev-parse HEAD^{tree})" = "a3610234d623aad11dc455de5d455eb3fb5bf5ce"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Native Windows updater and isolated HKCU lease unit tests
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Windows installed-helper orphan handoff and file-lock E2E
+        run: |
+          cargo test --locked --offline --test updater_offline_recovery -- --test-threads=1
+      - name: Windows raw PE stage apply readiness rollback
+        run: |
+          cargo test --locked --offline --test updater_native_apply_e2e
+      - name: All Windows Rust targets
+        run: |
+          cargo check --locked --offline --all-targets
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
