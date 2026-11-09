@@ -1147,6 +1147,103 @@ impl SessionTimeline {
         })
     }
 
+    /// Atomically apply only the character-scoped knowledge/presentation changes
+    /// of a prevalidated Regenerate plan. This is NOT request admission: no caller
+    /// may expose it until a durable same-branch receipt and queue permit join
+    /// this exact transaction. In particular it never selects or forks a branch.
+    #[allow(dead_code)]
+    pub(crate) fn commit_regenerate_knowledge_controls(
+        &mut self,
+        proposed: &RegenerateKnowledgePlan,
+        hide_operation: EventId,
+        forget_operation: EventId,
+    ) -> Result<ContextAnchor, domain::TimelineError> {
+        if hide_operation == forget_operation || proposed.hide_messages.is_empty() {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate controls need distinct operations and visible replies",
+            ));
+        }
+        let checked =
+            self.plan_knowledge_regenerate(proposed.source, proposed.selection, proposed.head)?;
+        if checked != *proposed || !checked.related_effects.is_empty() {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate plan is stale or needs effect reconciliation",
+            ));
+        }
+        let accepted_sequence = self
+            .store
+            .event(self.branch, proposed.source.accepted_message)?
+            .sequence;
+        let unsafe_effect = self.store.world(self.branch)?.iter().any(|fact| {
+            fact.sequence >= accepted_sequence
+                && fact.draft.actor.as_deref() == Some(proposed.source.character.as_str())
+                && matches!(
+                    fact.draft.kind,
+                    EventKind::CharacterStateChanged
+                        | EventKind::CharacterWorkingStateReplaced
+                        | EventKind::CharacterVariablesChanged
+                        | EventKind::CharacterMemoryChanged
+                        | EventKind::GameAction
+                        | EventKind::GameStateCaptured
+                )
+        });
+        if unsafe_effect {
+            return Err(domain::TimelineError::Invalid(
+                "regenerate needs explicit reconciliation of stateful effects",
+            ));
+        }
+        let mut drafts = vec![
+            MessageAction::Hide {
+                targets: checked.hide_messages.clone(),
+            }
+            .into_draft(hide_operation, checked.source.character),
+        ];
+        if !checked.forget_events.is_empty() {
+            let mut forget = EventDraft::new(EventKind::CharacterKnowledgeForgotten);
+            forget.id = forget_operation;
+            forget.observers.insert(checked.source.character);
+            forget.payload.insert(
+                "event_ids".into(),
+                json!(
+                    checked
+                        .forget_events
+                        .iter()
+                        .map(|id| id.0.to_string())
+                        .collect::<Vec<_>>()
+                ),
+            );
+            drafts.push(forget);
+        }
+        let committed = self.store.append_guarded(
+            self.branch,
+            checked.head,
+            &format!("regenerate-controls:{hide_operation:?}:{forget_operation:?}"),
+            json!({
+                "character": checked.source.character.to_string(),
+                "accepted_message": checked.source.accepted_message.0.to_string(),
+                "original_input": checked.source.original_input.0.to_string(),
+            }),
+            drafts,
+            AppendGuard {
+                selection_generation: checked.selection.generation,
+                context: None,
+                accepted_reply_revision: None,
+            },
+        )?;
+        let epoch = self
+            .store
+            .context_epoch(self.branch, checked.source.character)?;
+        self.context_updates[&checked.source.character].send_replace(epoch);
+        self.notify_memory_changed(checked.source.character);
+        Ok(ContextAnchor {
+            branch_id: self.branch.0,
+            through: committed
+                .last()
+                .expect("at least one regenerate control")
+                .sequence,
+        })
+    }
+
     fn validate_regenerate_source(
         &self,
         source: RegenerateSource,

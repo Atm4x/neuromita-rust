@@ -477,3 +477,197 @@ fn revised_message_remains_revised_after_forget_and_reveal() {
     .unwrap();
     assert_eq!(current.messages()[0].content, "revised");
 }
+
+#[test]
+fn same_branch_controls_are_atomic_and_preserve_other_mitas() {
+    let mut timeline = SessionTimeline::new();
+    let initial = accepted(&mut timeline, CharacterId::Crazy, "original");
+    let other = accepted(&mut timeline, CharacterId::Kind, "other character");
+    let later = accepted(&mut timeline, CharacterId::Crazy, "later");
+    let before = timeline.selection();
+    let head = timeline.anchor().through;
+    let proposal = timeline
+        .plan_knowledge_regenerate(initial, before, head)
+        .unwrap();
+    let old = timeline.store.world(timeline.branch).unwrap();
+    let mut tampered = proposal.clone();
+    tampered.forget_events.clear();
+    assert!(
+        timeline
+            .commit_regenerate_knowledge_controls(&tampered, EventId::new(), EventId::new())
+            .is_err()
+    );
+    assert_eq!(timeline.store.world(timeline.branch).unwrap(), old);
+
+    let after = timeline
+        .commit_regenerate_knowledge_controls(&proposal, EventId::new(), EventId::new())
+        .unwrap();
+    assert_eq!(timeline.selection(), before);
+    assert_eq!(after.through, head + 2);
+    assert_eq!(timeline.branch.0, after.branch_id);
+    let crazy = message_ids(&timeline, CharacterId::Crazy, after.through);
+    assert!(!crazy.contains(&initial.accepted_message));
+    assert!(!crazy.contains(&later.accepted_message));
+    assert!(crazy.contains(&initial.original_input));
+    let kind = message_ids(&timeline, CharacterId::Kind, after.through);
+    assert!(kind.contains(&other.accepted_message));
+    assert!(kind.contains(&other.original_input));
+    assert!(
+        !timeline
+            .store
+            .knows(
+                timeline.branch,
+                CharacterId::Crazy,
+                initial.accepted_message,
+                None
+            )
+            .unwrap()
+    );
+    assert!(
+        timeline
+            .store
+            .knows(
+                timeline.branch,
+                CharacterId::Kind,
+                other.accepted_message,
+                None
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        message_ids(&timeline, CharacterId::Crazy, head).contains(&initial.accepted_message),
+        true
+    );
+    assert_eq!(
+        timeline.store.world(timeline.branch).unwrap().len(),
+        old.len() + 2
+    );
+    assert!(
+        timeline
+            .commit_regenerate_knowledge_controls(&proposal, EventId::new(), EventId::new())
+            .is_err()
+    );
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_same_branch_controls_survive_reopen_and_reject_stale_writer() {
+    let db = std::env::temp_dir().join(format!("nm-regenerate-controls-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut first = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut first, CharacterId::Crazy, "input");
+    let other = accepted(&mut first, CharacterId::Kind, "untouched");
+    let mut second = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let plan = first
+        .plan_knowledge_regenerate(source, first.selection(), first.anchor().through)
+        .unwrap();
+    let stale = second
+        .plan_knowledge_regenerate(source, second.selection(), second.anchor().through)
+        .unwrap();
+    let committed = first
+        .commit_regenerate_knowledge_controls(&plan, EventId::new(), EventId::new())
+        .unwrap();
+    assert_eq!(
+        second.commit_regenerate_knowledge_controls(&stale, EventId::new(), EventId::new()),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    drop((first, second));
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.selection().branch_id, root);
+    assert_eq!(reopened.anchor().through, committed.through);
+    assert!(
+        !reopened
+            .store
+            .knows(root, CharacterId::Crazy, source.accepted_message, None)
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .store
+            .knows(root, CharacterId::Kind, other.accepted_message, None)
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .store
+            .knows(
+                root,
+                CharacterId::Crazy,
+                source.accepted_message,
+                Some(plan.head)
+            )
+            .unwrap()
+    );
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[test]
+fn sqlite_control_batch_rollback_does_not_hide_reply_when_forget_insert_fails() {
+    let db = std::env::temp_dir().join(format!("nm-regenerate-rollback-{}.db", Uuid::new_v4()));
+    let session = SessionId::new();
+    let root = BranchId::new();
+    let mut timeline = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "original");
+    let selection = timeline.selection();
+    let plan = timeline
+        .plan_knowledge_regenerate(source, selection, timeline.anchor().through)
+        .unwrap();
+    let head = plan.head;
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_regenerate_forget BEFORE INSERT ON timeline_events WHEN json_extract(NEW.fact_json,'$.draft.kind')='CharacterKnowledgeForgotten' BEGIN SELECT RAISE(ABORT, 'injected forget failure'); END;").unwrap();
+    assert!(
+        timeline
+            .commit_regenerate_knowledge_controls(&plan, EventId::new(), EventId::new())
+            .is_err()
+    );
+    drop(timeline);
+    let mut reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.anchor().through, head);
+    assert!(message_ids(&reopened, CharacterId::Crazy, head).contains(&source.accepted_message));
+    assert!(
+        reopened
+            .store
+            .knows(root, CharacterId::Crazy, source.accepted_message, None)
+            .unwrap()
+    );
+    conn.execute_batch("DROP TRIGGER reject_regenerate_forget;")
+        .unwrap();
+    let committed = reopened
+        .commit_regenerate_knowledge_controls(&plan, EventId::new(), EventId::new())
+        .unwrap();
+    assert_eq!(committed.through, head + 2);
+    drop((conn, reopened));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
