@@ -1,0 +1,34 @@
+name: Agent A Cycle62 incremental source export
+on:
+  push:
+    branches: [bridge/agent-a-cycle62-source-export-20261109]
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a10d573e3b8d720d509f867066d81971f419a3bf
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export verified incremental objects since already-mounted baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "a10d573e3b8d720d509f867066d81971f419a3bf"
+          git cat-file -e "7af68061150e663fb079fa0b152786a2bfd9675e^{commit}"
+          git merge-base --is-ancestor 7af68061150e663fb079fa0b152786a2bfd9675e HEAD
+          git update-ref refs/heads/cycle62-source HEAD
+          git bundle create cycle62-increment.bundle refs/heads/cycle62-source ^7af68061150e663fb079fa0b152786a2bfd9675e
+          git bundle verify cycle62-increment.bundle
+          sha256sum cycle62-increment.bundle > cycle62-increment.bundle.sha256
+          git bundle list-heads cycle62-increment.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle62-source-increment
+          path: |
+            cycle62-increment.bundle
+            cycle62-increment.bundle.sha256
+          retention-days: 1
