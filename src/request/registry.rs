@@ -223,7 +223,32 @@ impl RequestRegistry {
         prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
         cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
     ) -> RequestHandle {
-        let record = RequestRecord::new(
+        self.register_with_regenerate_protocol(
+            message,
+            id,
+            admission,
+            settings,
+            preset,
+            prompt,
+            cancel_ingress
+                .as_ref()
+                .map(|_| RegenerateProtocol::LegacyFork),
+            cancel_ingress,
+        )
+    }
+
+    pub(crate) fn register_with_regenerate_protocol(
+        &self,
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings: Option<Arc<crate::settings::SettingsSnapshot>>,
+        preset: Option<crate::generation::GenerationPreset>,
+        prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        protocol: Option<RegenerateProtocol>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    ) -> RequestHandle {
+        let record = RequestRecord::new_with_protocol(
             message,
             id,
             admission,
@@ -232,6 +257,7 @@ impl RequestRegistry {
             prompt,
             Arc::downgrade(&self.inner),
             cancel_ingress,
+            protocol,
         );
         let handle = record.handle();
         let mut records = self.inner.records.lock().expect("registry mutex poisoned");

@@ -33,12 +33,13 @@ mod regenerate_enumeration_tests;
 #[cfg(test)]
 mod regenerate_owner_tests;
 mod regenerate_receipt;
+pub(crate) use regenerate_receipt::SameBranchRegenerateReceipt;
+use regenerate_receipt::SameBranchRegenerateRecoverySnapshot;
 #[doc(hidden)]
 pub use regenerate_receipt::{
     RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoveryOutcome,
     RegenerateRecoverySnapshot,
 };
-use regenerate_receipt::{SameBranchRegenerateReceipt, SameBranchRegenerateRecoverySnapshot};
 
 // Administrative purge is not reachable from generation or runtime until an authorized UI exists.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2173,6 +2174,16 @@ impl SessionTimeline {
     }
 
     #[cfg(test)]
+    pub(crate) fn knows_event_at(
+        &self,
+        character: CharacterId,
+        event: EventId,
+        through: Option<u64>,
+    ) -> Result<bool, domain::TimelineError> {
+        self.store.knows(self.branch, character, event, through)
+    }
+
+    #[cfg(test)]
     pub(crate) fn history(&self, character: CharacterId) -> HistoryView {
         self.history_at(character, self.anchor())
             .expect("current branch anchor is valid")
@@ -2372,6 +2383,18 @@ impl SessionTimeline {
         } = reply;
         let character = turn.character;
         self.assert_turn(turn)?;
+        match self.same_branch_regenerate_receipt(turn.selection.branch_id, request) {
+            Ok((receipt, _)) => {
+                if receipt.character != character
+                    || !matches!(intent, TurnIntent::Reply(id) if id == receipt.original_input)
+                    || receipt.selection_generation != turn.selection.generation
+                {
+                    return Err(domain::TimelineError::ConcurrentWrite);
+                }
+            }
+            Err(domain::TimelineError::NotFound) => {}
+            Err(error) => return Err(error),
+        }
         // The durable fork receipt is authoritative for the new RequestId.
         // Validate before constructing any reply/effect drafts and before the
         // guarded append, so an unrelated callback cannot use that identity.

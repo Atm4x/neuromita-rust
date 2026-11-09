@@ -1708,3 +1708,65 @@ fn same_branch_dispatch_rejects_a_to_b_to_a_selection_replay() {
         RegenerateRecoveryOutcome::DispatchUnknown
     );
 }
+
+#[test]
+fn same_branch_acceptance_rejects_forged_fresh_turn_after_a_to_b_to_a() {
+    let mut timeline = SessionTimeline::new();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "first version");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let root = timeline.branch;
+    timeline
+        .permit_same_branch_regenerate_dispatch(root, receipt.request, timeline.selection())
+        .unwrap();
+    let selection = timeline.selection();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    timeline
+        .append_test_fact("b79:checkpoint", checkpoint)
+        .unwrap();
+    let child = BranchId::new();
+    let selected = timeline
+        .fork_and_select_checkpoint(checkpoint_id, child, selection, timeline.anchor().through)
+        .unwrap();
+    let returned = timeline.select_branch(root, selected).unwrap();
+    assert!(returned.generation > receipt.selection_generation);
+    let forged_turn = timeline
+        .capture_turn(
+            CharacterId::Crazy,
+            Some(source.original_input),
+            timeline.anchor(),
+        )
+        .unwrap();
+    assert_eq!(forged_turn.selection, returned);
+    let accepted_revision = domain::accepted_reply_count(
+        timeline.store.world(root).unwrap().iter(),
+        CharacterId::Crazy,
+    )
+    .unwrap();
+    let before = timeline.store.world(root).unwrap();
+    let error = timeline.append_reply(GeneratedReply {
+        request: receipt.request,
+        intent: TurnIntent::Reply(source.original_input),
+        turn: forged_turn,
+        expected_revision: accepted_revision,
+        content: json!("forged after return"),
+        audience: ConversationAudience::private_to(CharacterId::Crazy),
+        effects: vec![],
+    });
+    assert!(matches!(error, Err(domain::TimelineError::ConcurrentWrite)));
+    assert_eq!(timeline.store.world(root).unwrap(), before);
+    assert!(matches!(
+        timeline
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::MayHaveDispatched(_)
+    ));
+}

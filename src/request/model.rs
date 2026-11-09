@@ -27,6 +27,12 @@ pub enum RequestSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegenerateProtocol {
+    LegacyFork,
+    SameBranch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
     User,
     Shutdown,

@@ -623,14 +623,20 @@ async fn provider_dispatch_fence_persists_before_external_call_and_denies_duplic
     let fence = TimelineRequestIngress {
         timeline: Arc::clone(&case.timeline),
     };
-    fence.before_provider(id, admission).unwrap();
+    fence
+        .before_provider(id, admission, Some(RegenerateProtocol::LegacyFork))
+        .unwrap();
     let owner = case.timeline.lock().unwrap();
     assert!(matches!(
         owner.reconcile_regenerate(child, id).unwrap().outcome,
         crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(_)
     ));
     drop(owner);
-    assert!(fence.before_provider(id, admission).is_err());
+    assert!(
+        fence
+            .before_provider(id, admission, Some(RegenerateProtocol::LegacyFork))
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -645,7 +651,9 @@ async fn normal_root_request_never_requires_a_regenerate_dispatch_marker() {
     let fence = TimelineRequestIngress {
         timeline: Arc::clone(&fixture.timeline),
     };
-    fence.before_provider(RequestId::new(), admission).unwrap();
+    fence
+        .before_provider(RequestId::new(), admission, None)
+        .unwrap();
     let owner = fixture.timeline.lock().unwrap();
     assert_eq!(owner.anchor(), initial);
 }
@@ -666,7 +674,9 @@ async fn unrelated_request_on_regenerate_child_does_not_consume_dispatch_permit(
     let fence = TimelineRequestIngress {
         timeline: Arc::clone(&fixture.timeline),
     };
-    fence.before_provider(RequestId::new(), admission).unwrap();
+    fence
+        .before_provider(RequestId::new(), admission, None)
+        .unwrap();
     assert!(matches!(
         fixture
             .timeline
@@ -1205,8 +1215,12 @@ async fn terminal_provider_failure_sql_abort_remains_repairable_without_replay()
     let gate = TimelineRequestIngress {
         timeline: Arc::clone(&fixture.timeline),
     };
-    gate.before_provider(handle.id(), record.admission())
-        .unwrap();
+    gate.before_provider(
+        handle.id(),
+        record.admission(),
+        record.regenerate_protocol(),
+    )
+    .unwrap();
     let connection = rusqlite::Connection::open(&db).unwrap();
     connection.execute_batch("CREATE TRIGGER b67_abort BEFORE INSERT ON timeline_events WHEN NEW.fact_json LIKE '%RegenerateAbandoned%' BEGIN SELECT RAISE(ABORT, 'injected b67 terminal failure'); END;").unwrap();
     let revision: i64 = connection
@@ -1262,8 +1276,12 @@ async fn terminal_provider_failure_sql_abort_remains_repairable_without_replay()
     assert_eq!(fixture.api.registry.active_count(), 0);
     assert!(fixture.api.reconcile_pending_terminals().is_empty());
     assert!(
-        gate.before_provider(handle.id(), record.admission())
-            .is_err()
+        gate.before_provider(
+            handle.id(),
+            record.admission(),
+            record.regenerate_protocol()
+        )
+        .is_err()
     );
     drop((fixture, connection, gate, record));
     let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
@@ -1932,5 +1950,318 @@ async fn b69_foreign_acceptance_before_start_cannot_run_queued_generation() {
     assert!(matches!(
         handle.cancel(),
         crate::request::CancelResult::AlreadyFinished
+    ));
+}
+
+#[tokio::test]
+async fn same_branch_queue_refusal_does_not_hide_or_forget_history() {
+    let mut test = fixture(TimelineConfig::Transient, 1, true).await;
+    test.sender.try_send(RequestId::new()).unwrap();
+    assert!(matches!(
+        test.api.regenerate_same_branch(test.source, test.fence),
+        Err(SubmitError::QueueFull)
+    ));
+    let owner = test.timeline.lock().unwrap();
+    assert_eq!(owner.anchor(), test.fence.at);
+    assert_eq!(owner.selection(), test.fence.selection);
+    assert!(
+        owner
+            .knows_event_at(CharacterId::Crazy, test.source.accepted_message, None)
+            .unwrap()
+    );
+    drop(owner);
+    let _ = test.queue.recv().await;
+    let no_preset = fixture(TimelineConfig::Transient, 2, false).await;
+    assert!(matches!(
+        no_preset
+            .api
+            .regenerate_same_branch(no_preset.source, no_preset.fence),
+        Err(SubmitError::PresetUnavailable)
+    ));
+    assert_eq!(
+        no_preset.timeline.lock().unwrap().anchor(),
+        no_preset.fence.at
+    );
+}
+
+#[tokio::test]
+async fn same_branch_queue_admission_is_one_durable_receipt_and_one_dispatch() {
+    let mut fixture = fixture(TimelineConfig::Transient, 3, true).await;
+    let original_branch = fixture.fence.selection.branch_id;
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    assert_eq!(
+        record.regenerate_protocol(),
+        Some(RegenerateProtocol::SameBranch)
+    );
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    assert!(fixture.queue.try_recv().is_err());
+    assert!(record.admitted_settings().is_some());
+    assert!(record.admitted_preset().is_some());
+    let owner = fixture.timeline.lock().unwrap();
+    assert_eq!(owner.selection().branch_id, original_branch);
+    assert!(owner.anchor().through > fixture.fence.at.through);
+    assert_eq!(record.admission().selection, fixture.fence.selection);
+    assert!(matches!(
+        owner
+            .reconcile_same_branch_regenerate(original_branch, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    ));
+    assert!(
+        !owner
+            .knows_event_at(CharacterId::Crazy, fixture.source.accepted_message, None)
+            .unwrap()
+    );
+    assert!(
+        owner
+            .knows_event_at(
+                CharacterId::Crazy,
+                fixture.source.accepted_message,
+                Some(fixture.fence.at.through)
+            )
+            .unwrap()
+    );
+    drop(owner);
+    let gate = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    gate.before_provider(
+        handle.id(),
+        record.admission(),
+        record.regenerate_protocol(),
+    )
+    .unwrap();
+    assert!(
+        gate.before_provider(
+            handle.id(),
+            record.admission(),
+            record.regenerate_protocol()
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_same_branch_regenerate(original_branch, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::MayHaveDispatched(_)
+    ));
+    assert!(matches!(
+        handle.cancel(),
+        crate::request::CancelResult::Cancelled | crate::request::CancelResult::Requested
+    ));
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_same_branch_regenerate(original_branch, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+    ));
+}
+
+#[tokio::test]
+async fn same_branch_stale_and_competing_regenerates_leave_one_admission() {
+    let mut fixture = fixture(TimelineConfig::Transient, 3, true).await;
+    let api = Arc::clone(&fixture.api);
+    let src = fixture.source;
+    let fence = fixture.fence;
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(|| api.regenerate_same_branch(src, fence));
+        let second = scope.spawn(|| fixture.api.regenerate_same_branch(src, fence));
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|value| value.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|value| matches!(value, Err(SubmitError::StaleTimeline)))
+            .count(),
+        1
+    );
+    let won = results.into_iter().find_map(Result::ok).unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), won.id());
+    assert!(fixture.queue.try_recv().is_err());
+    let owner = fixture.timeline.lock().unwrap();
+    assert_eq!(owner.selection(), fence.selection);
+    assert!(matches!(
+        owner
+            .reconcile_same_branch_regenerate(fence.selection.branch_id, won.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    ));
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_sqlite_reopen_retains_receipt_and_unmodified_other_mita() {
+    let db = std::env::temp_dir().join(format!("b79-same-branch-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let config = TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    };
+    let mut fixture = fixture(config, 2, true).await;
+    let other = {
+        let mut owner = fixture.timeline.lock().unwrap();
+        let other = EventId::new();
+        owner
+            .publish_player_message(
+                CharacterId::Kind,
+                other,
+                Arc::from("other mita is independent"),
+            )
+            .unwrap();
+        other
+    };
+    let fence = {
+        let owner = fixture.timeline.lock().unwrap();
+        TimelineFence {
+            selection: owner.selection(),
+            at: owner.anchor(),
+        }
+    };
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fence)
+        .unwrap();
+    let request = handle.id();
+    assert_eq!(fixture.queue.try_recv().unwrap(), request);
+    drop(fixture);
+    let reopened = SessionTimeline::from_config(TimelineConfig::Sqlite {
+        database: db.clone(),
+        session,
+        root,
+    })
+    .unwrap();
+    assert_eq!(reopened.selection().branch_id, root);
+    assert!(
+        reopened
+            .knows_event_at(CharacterId::Kind, other, None)
+            .unwrap()
+    );
+    assert!(matches!(
+        reopened
+            .reconcile_same_branch_regenerate(root, request)
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
+            | crate::timeline::RegenerateRecoveryOutcome::DispatchUnknown
+    ));
+    drop(reopened);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[cfg(feature = "sqlite-system")]
+#[tokio::test]
+async fn same_branch_sqlite_marker_failure_rolls_back_queue_admission_and_knowledge() {
+    let db = std::env::temp_dir().join(format!("b79-marker-{}.db", uuid::Uuid::new_v4()));
+    let session = crate::timeline::domain::SessionId::new();
+    let root = BranchId::new();
+    let mut fixture = fixture(
+        TimelineConfig::Sqlite {
+            database: db.clone(),
+            session,
+            root,
+        },
+        2,
+        true,
+    )
+    .await;
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TRIGGER b79_reject_admission BEFORE INSERT ON timeline_events WHEN json_extract(NEW.fact_json,'$.draft.kind')='RegenerateAdmitted' BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END;").unwrap();
+    assert!(matches!(
+        fixture
+            .api
+            .regenerate_same_branch(fixture.source, fixture.fence),
+        Err(SubmitError::TimelineUnavailable)
+    ));
+    assert!(fixture.queue.try_recv().is_err());
+    {
+        let owner = fixture.timeline.lock().unwrap();
+        assert_eq!(owner.selection(), fixture.fence.selection);
+        assert_eq!(owner.anchor(), fixture.fence.at);
+        assert!(
+            owner
+                .knows_event_at(CharacterId::Crazy, fixture.source.accepted_message, None)
+                .unwrap()
+        );
+    }
+    conn.execute_batch("DROP TRIGGER b79_reject_admission;")
+        .unwrap();
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    assert!(fixture.queue.try_recv().is_err());
+    assert!(
+        !fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .knows_event_at(CharacterId::Crazy, fixture.source.accepted_message, None)
+            .unwrap()
+    );
+    drop((conn, fixture));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{}", db.display(), suffix));
+    }
+}
+
+#[tokio::test]
+async fn same_branch_history_reset_rejects_provider_dispatch_but_not_cancellation() {
+    let mut fixture = fixture(TimelineConfig::Transient, 2, true).await;
+    let handle = fixture
+        .api
+        .regenerate_same_branch(fixture.source, fixture.fence)
+        .unwrap();
+    assert_eq!(fixture.queue.try_recv().unwrap(), handle.id());
+    let record = fixture.api.registry.get(handle.id()).unwrap();
+    fixture
+        .timeline
+        .lock()
+        .unwrap()
+        .reset_character_context(fixture.fence.selection, CharacterId::Crazy, EventId::new())
+        .unwrap();
+    let gate = TimelineRequestIngress {
+        timeline: Arc::clone(&fixture.timeline),
+    };
+    assert!(
+        gate.before_provider(
+            handle.id(),
+            record.admission(),
+            record.regenerate_protocol()
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        handle.cancel(),
+        crate::request::CancelResult::Cancelled | crate::request::CancelResult::Requested
+    ));
+    assert!(matches!(
+        fixture
+            .timeline
+            .lock()
+            .unwrap()
+            .reconcile_same_branch_regenerate(fixture.fence.selection.branch_id, handle.id())
+            .unwrap()
+            .outcome,
+        crate::timeline::RegenerateRecoveryOutcome::Abandoned(_)
     ));
 }

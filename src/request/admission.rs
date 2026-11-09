@@ -6,8 +6,8 @@ use std::{
 use tokio::sync::mpsc;
 
 use super::{
-    DiagnosticScope, DiagnosticsAccess, GenerationCommand, RequestDiscovery, RequestHandle,
-    RequestRegistry, SubmitError,
+    DiagnosticScope, DiagnosticsAccess, GenerationCommand, RegenerateProtocol, RequestDiscovery,
+    RequestHandle, RequestRegistry, SubmitError,
 };
 use crate::{
     generation::PresetCatalog,
@@ -17,13 +17,19 @@ use crate::{
     request::TimelineFence,
     settings::SettingsOwner,
     timeline::{
-        RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoverySnapshot,
-        RegenerateSource,
+        RegenerateAdmissionReceipt, RegenerateConfigurationReference, RegenerateRecoveryOutcome,
+        RegenerateRecoverySnapshot, RegenerateSource,
         conversation::ConversationMessage,
         domain::{BranchId, TimelineError},
         selection::TimelineAdmission,
     },
 };
+
+#[derive(Debug, Clone, Copy)]
+enum Regeneration {
+    LegacyFork(RegenerateSource, TimelineFence, BranchId),
+    SameBranch(RegenerateSource, TimelineFence),
+}
 
 pub(crate) trait RegenerateCancellation: Send + Sync {
     fn abandon_regenerate(
@@ -37,6 +43,18 @@ pub(crate) trait RegenerateCancellation: Send + Sync {
         child: BranchId,
         request: RequestId,
     ) -> Result<RegenerateRecoverySnapshot, TimelineError>;
+
+    fn abandon_same_branch_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), TimelineError>;
+
+    fn inspect_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError>;
 }
 
 pub(crate) trait RequestIngress: RegenerateCancellation {
@@ -63,6 +81,14 @@ pub(crate) trait RequestIngress: RegenerateCancellation {
         fence: TimelineFence,
         child: BranchId,
         receipt: &RegenerateAdmissionReceipt,
+    ) -> Result<TimelineAdmission, SubmitError>;
+
+    fn admit_same_branch_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: TimelineFence,
+        request: RequestId,
+        configuration: RegenerateConfigurationReference,
     ) -> Result<TimelineAdmission, SubmitError>;
 }
 
@@ -121,6 +147,16 @@ impl ChatApiState {
         self.ingress.inspect_regenerate(child, request)
     }
 
+    /// Read-only same-branch orphan inspection. Unknown is never permission to replay.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn inspect_orphaned_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        self.ingress.inspect_same_branch_regenerate(branch, request)
+    }
+
     /// Operations-level retry, never re-enqueues or invokes a provider.
     pub(crate) fn reconcile_pending_terminals(
         &self,
@@ -152,13 +188,31 @@ impl ChatApiState {
             source.original_input,
             super::RequestSource::Presenter,
         );
-        self.send_with_regeneration(request, Some((source, fence, child)))
+        self.send_with_regeneration(
+            request,
+            Some(Regeneration::LegacyFork(source, fence, child)),
+        )
+    }
+
+    /// Backend-only same-branch admission. No public/UI entry point yet.
+    #[allow(dead_code)]
+    pub(crate) fn regenerate_same_branch(
+        &self,
+        source: RegenerateSource,
+        fence: TimelineFence,
+    ) -> Result<RequestHandle, SubmitError> {
+        let request = super::ReplyRequest::new(
+            source.character,
+            source.original_input,
+            super::RequestSource::Presenter,
+        );
+        self.send_with_regeneration(request, Some(Regeneration::SameBranch(source, fence)))
     }
 
     fn send_with_regeneration(
         &self,
         request: impl GenerationCommand + 'static,
-        regeneration: Option<(RegenerateSource, TimelineFence, BranchId)>,
+        regeneration: Option<Regeneration>,
     ) -> Result<RequestHandle, SubmitError> {
         if !*self.accepting.lock().expect("admission mutex poisoned") {
             return Err(SubmitError::Stopped);
@@ -211,31 +265,44 @@ impl ChatApiState {
             return Err(SubmitError::Stopped);
         }
         let id = RequestId::new();
-        let admission = if let Some((source, fence, child)) = regeneration {
+        let configuration = RegenerateConfigurationReference {
+            settings_revision: settings.revision,
+            preset_id: preset_id.0,
+            provider_model: preset.template().model().to_owned(),
+            prompt_set: prompt.as_ref().map(|snapshot| snapshot.name().to_owned()),
+        };
+        let admission = if let Some(regeneration) = regeneration {
+            let source = match regeneration {
+                Regeneration::LegacyFork(source, _, _) | Regeneration::SameBranch(source, _) => {
+                    source
+                }
+            };
             if request.character_id() != source.character
                 || request.intent() != TurnIntent::Reply(source.original_input)
             {
                 return Err(SubmitError::InvalidTargetEvent);
             }
-            let receipt = RegenerateAdmissionReceipt {
-                request: id,
-                accepted_request: source.accepted_request,
-                accepted_message: source.accepted_message,
-                original_input: source.original_input,
-                character: source.character,
-                parent_branch: fence.selection.branch_id,
-                parent_head: fence.at.through,
-                parent_generation: fence.selection.generation,
-                child_branch: child,
-                configuration: RegenerateConfigurationReference {
-                    settings_revision: settings.revision,
-                    preset_id: preset_id.0,
-                    provider_model: preset.template().model().to_owned(),
-                    prompt_set: prompt.as_ref().map(|snapshot| snapshot.name().to_owned()),
-                },
-            };
-            self.ingress
-                .admit_regenerate(source, fence, child, &receipt)?
+            match regeneration {
+                Regeneration::SameBranch(source, fence) => self
+                    .ingress
+                    .admit_same_branch_regenerate(source, fence, id, configuration)?,
+                Regeneration::LegacyFork(source, fence, child) => {
+                    let receipt = RegenerateAdmissionReceipt {
+                        request: id,
+                        accepted_request: source.accepted_request,
+                        accepted_message: source.accepted_message,
+                        original_input: source.original_input,
+                        character: source.character,
+                        parent_branch: fence.selection.branch_id,
+                        parent_head: fence.at.through,
+                        parent_generation: fence.selection.generation,
+                        child_branch: child,
+                        configuration,
+                    };
+                    self.ingress
+                        .admit_regenerate(source, fence, child, &receipt)?
+                }
+            }
         } else {
             self.ingress.admit(
                 request.character_id(),
@@ -243,14 +310,19 @@ impl ChatApiState {
                 request.timeline_fence(),
             )?
         };
-        let handle = self.registry.register_with_regenerate_cancellation(
+        let protocol = regeneration.map(|kind| match kind {
+            Regeneration::LegacyFork(..) => RegenerateProtocol::LegacyFork,
+            Regeneration::SameBranch(..) => RegenerateProtocol::SameBranch,
+        });
+        let handle = self.registry.register_with_regenerate_protocol(
             Box::new(request),
             id,
             admission,
             Some(settings),
             Some(preset),
             prompt,
-            regeneration.map(|_| Arc::clone(&self.ingress) as Arc<dyn RegenerateCancellation>),
+            protocol,
+            protocol.map(|_| Arc::clone(&self.ingress) as Arc<dyn RegenerateCancellation>),
         );
         permit.send(id);
         Ok(handle)

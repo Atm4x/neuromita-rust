@@ -19,6 +19,7 @@ pub(crate) struct RequestRecord {
     admitted_preset: Option<crate::generation::GenerationPreset>,
     admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
     cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+    regenerate_protocol: Option<RegenerateProtocol>,
 }
 
 struct Execution {
@@ -128,6 +129,30 @@ impl RequestRecord {
         registry: Weak<RegistryInner>,
         cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
     ) -> Arc<Self> {
+        Self::new_with_protocol(
+            message,
+            id,
+            admission,
+            settings_snapshot,
+            admitted_preset,
+            admitted_prompt,
+            registry,
+            cancel_ingress,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_protocol(
+        message: Box<dyn GenerationCommand>,
+        id: RequestId,
+        admission: TimelineAdmission,
+        settings_snapshot: Option<Arc<crate::settings::SettingsSnapshot>>,
+        admitted_preset: Option<crate::generation::GenerationPreset>,
+        admitted_prompt: Option<Arc<crate::prompts::PromptSetSnapshot>>,
+        registry: Weak<RegistryInner>,
+        cancel_ingress: Option<Arc<dyn super::RegenerateCancellation>>,
+        regenerate_protocol: Option<RegenerateProtocol>,
+    ) -> Arc<Self> {
         let snapshot = Arc::new(RequestSnapshot {
             metadata: RequestMetadata {
                 id,
@@ -174,6 +199,7 @@ impl RequestRecord {
             admitted_preset,
             admitted_prompt,
             cancel_ingress,
+            regenerate_protocol,
         })
     }
 
@@ -239,6 +265,44 @@ impl RequestRecord {
         self.admission
     }
 
+    pub(crate) fn regenerate_protocol(&self) -> Option<RegenerateProtocol> {
+        self.regenerate_protocol
+    }
+
+    fn abandon_durable(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Result<(), crate::timeline::domain::TimelineError> {
+        match self
+            .regenerate_protocol
+            .unwrap_or(RegenerateProtocol::LegacyFork)
+        {
+            RegenerateProtocol::LegacyFork => ingress.abandon_regenerate(request, self.admission),
+            RegenerateProtocol::SameBranch => {
+                ingress.abandon_same_branch_regenerate(request, self.admission)
+            }
+        }
+    }
+
+    fn inspect_durable(
+        &self,
+        ingress: &dyn super::RegenerateCancellation,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, crate::timeline::domain::TimelineError> {
+        match self
+            .regenerate_protocol
+            .unwrap_or(RegenerateProtocol::LegacyFork)
+        {
+            RegenerateProtocol::LegacyFork => ingress
+                .inspect_regenerate(self.admission.selection.branch_id, request)
+                .map(|v| v.outcome),
+            RegenerateProtocol::SameBranch => {
+                ingress.inspect_same_branch_regenerate(self.admission.selection.branch_id, request)
+            }
+        }
+    }
+
     pub(crate) fn try_start(&self) -> Option<Box<dyn GenerationCommand>> {
         let mut inner = self.inner.lock().expect("request mutex poisoned");
         if inner.snapshot.is_resolved() || !matches!(inner.snapshot.state, RequestState::Pending) {
@@ -271,7 +335,7 @@ impl RequestRecord {
                 }
             }
             let request = self.snapshot().metadata.id;
-            if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+            if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
                 if matches!(
                     error,
                     crate::timeline::domain::TimelineError::Storage(_)
@@ -354,10 +418,8 @@ impl RequestRecord {
         ingress: &dyn super::RegenerateCancellation,
         request: RequestId,
     ) -> Option<EventId> {
-        let RegenerateRecoveryOutcome::AcceptedReply(event) = ingress
-            .inspect_regenerate(self.admission.selection.branch_id, request)
-            .ok()?
-            .outcome
+        let RegenerateRecoveryOutcome::AcceptedReply(event) =
+            self.inspect_durable(ingress, request).ok()?
         else {
             return None;
         };
@@ -418,7 +480,7 @@ impl RequestRecord {
             return Ok(None);
         };
         let request = self.snapshot().metadata.id;
-        match ingress.abandon_regenerate(request, self.admission) {
+        match self.abandon_durable(ingress.as_ref(), request) {
             Ok(()) => {
                 match pending {
                     PendingTerminal::Failure(outcome) => self.finish_volatile(outcome),
@@ -470,7 +532,7 @@ impl RequestRecord {
                 {
                     return;
                 }
-            } else if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+            } else if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
                 if self
                     .observe_external_acceptance(ingress.as_ref(), request)
                     .is_some()
@@ -535,7 +597,7 @@ impl RequestRecord {
         }
         if let Some(ingress) = &self.cancel_ingress {
             let request = self.snapshot().metadata.id;
-            if let Err(error) = ingress.abandon_regenerate(request, self.admission) {
+            if let Err(error) = self.abandon_durable(ingress.as_ref(), request) {
                 if self
                     .observe_external_acceptance(ingress.as_ref(), request)
                     .is_some()

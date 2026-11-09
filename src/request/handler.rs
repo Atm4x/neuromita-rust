@@ -26,6 +26,7 @@ pub(crate) trait ProviderDispatchFence: Send + Sync {
         &self,
         request: RequestId,
         admission: crate::timeline::selection::TimelineAdmission,
+        protocol: Option<RegenerateProtocol>,
     ) -> Result<(), String>;
 }
 
@@ -248,7 +249,7 @@ impl MessageHandler {
                     .with_tools(settings.values.tools.clone())
                     .with_assets(self.assets.clone());
                 self.dispatch_fence
-                    .before_provider(id, record.admission())
+                    .before_provider(id, record.admission(), record.regenerate_protocol())
                     .map_err(GenerationError::Response)?;
                 let mut combined = RecordObserver {
                     record: &record,

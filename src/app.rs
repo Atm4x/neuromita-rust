@@ -49,8 +49,8 @@ use crate::{
     prompts::PromptCatalog,
     reminders::{ReminderConfig, ReminderService},
     request::{
-        ChatApiState, MessageHandler, ProviderDispatchFence, RegenerateCancellation, RequestId,
-        RequestIngress, RequestRegistry, SubmitError,
+        ChatApiState, MessageHandler, ProviderDispatchFence, RegenerateCancellation,
+        RegenerateProtocol, RequestId, RequestIngress, RequestRegistry, SubmitError,
     },
     runtime::{self, ApiBindings, RuntimeLease},
     server::{ServerConfig, ServerHandle, ServerLifecycle},
@@ -59,7 +59,8 @@ use crate::{
         SettingsError, SettingsLifecycle, SettingsSource, SettingsStartupMigration,
     },
     timeline::{
-        RegenerateSource, SessionTimeline, TimelineConfig, TimelineEvent,
+        RegenerateConfigurationReference, RegenerateRecoveryOutcome, RegenerateSource,
+        SameBranchRegenerateReceipt, SessionTimeline, TimelineConfig, TimelineEvent,
         conversation::ConversationMessage,
         domain::{BranchId, TimelineError, TimelineFact},
         ingress::SemanticBatch,
@@ -325,12 +326,22 @@ impl ProviderDispatchFence for TimelineRequestIngress {
         &self,
         request: RequestId,
         admission: TimelineAdmission,
+        protocol: Option<RegenerateProtocol>,
     ) -> Result<(), String> {
+        if protocol.is_none() {
+            return Ok(());
+        }
         let mut timeline = self
             .timeline
             .lock()
             .map_err(|_| "timeline mutex poisoned".to_owned())?;
         let child = admission.selection.branch_id;
+        if protocol == Some(RegenerateProtocol::SameBranch) {
+            return timeline
+                .permit_same_branch_regenerate_dispatch(child, request, admission.selection)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
         let Some(receipt) = timeline
             .regenerate_admission_receipt(child)
             .map_err(|error| error.to_string())?
@@ -371,12 +382,32 @@ impl RegenerateCancellation for TimelineRequestIngress {
     {
         self.timeline
             .lock()
-            .map_err(|_| {
-                crate::timeline::domain::TimelineError::Storage(
-                    "timeline mutex poisoned".to_owned(),
-                )
-            })?
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
             .reconcile_regenerate(child, request)
+    }
+
+    fn abandon_same_branch_regenerate(
+        &self,
+        request: RequestId,
+        admission: TimelineAdmission,
+    ) -> Result<(), TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
+            .abandon_same_branch_regenerate_request(admission.selection.branch_id, request)
+            .map(|_| ())
+    }
+
+    fn inspect_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        self.timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?
+            .reconcile_same_branch_regenerate(branch, request)
+            .map(|snapshot| snapshot.outcome)
     }
 }
 
@@ -466,6 +497,55 @@ impl RequestIngress for TimelineRequestIngress {
                 fence.at.through,
                 receipt,
             )
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })
+    }
+
+    fn admit_same_branch_regenerate(
+        &self,
+        source: RegenerateSource,
+        fence: crate::request::TimelineFence,
+        request: RequestId,
+        configuration: RegenerateConfigurationReference,
+    ) -> Result<TimelineAdmission, SubmitError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| SubmitError::TimelineUnavailable)?;
+        if fence.selection.branch_id.0 != fence.at.branch_id {
+            return Err(SubmitError::StaleTimeline);
+        }
+        let plan = timeline
+            .plan_knowledge_regenerate(source, fence.selection, fence.at.through)
+            .map_err(|error| match error {
+                TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
+                TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
+                    SubmitError::InvalidTargetEvent
+                }
+                _ => SubmitError::TimelineUnavailable,
+            })?;
+        let receipt = SameBranchRegenerateReceipt {
+            request,
+            accepted_request: source.accepted_request,
+            accepted_message: source.accepted_message,
+            original_input: source.original_input,
+            character: source.character,
+            branch: fence.selection.branch_id,
+            source_head: plan.head,
+            selection_generation: fence.selection.generation,
+            hide_operation: EventId::new(),
+            forget_operation: (!plan.forget_events.is_empty()).then(EventId::new),
+            hidden_messages: plan.hide_messages.clone(),
+            forgotten_events: plan.forget_events.clone(),
+            configuration,
+        };
+        timeline
+            .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
             .map_err(|error| match error {
                 TimelineError::ConcurrentWrite => SubmitError::StaleTimeline,
                 TimelineError::Invalid(_) | TimelineError::NotFound | TimelineError::Conflict => {
