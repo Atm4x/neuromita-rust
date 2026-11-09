@@ -26,6 +26,8 @@ struct Fixture {
     timeline: Arc<Mutex<SessionTimeline>>,
     source: RegenerateSource,
     fence: TimelineFence,
+    settings_owner: Arc<crate::settings::SettingsOwner>,
+    presets: Arc<PresetCatalog>,
 }
 
 async fn fixture(config: TimelineConfig, queue_capacity: usize, with_preset: bool) -> Fixture {
@@ -87,14 +89,16 @@ async fn fixture(config: TimelineConfig, queue_capacity: usize, with_preset: boo
         PresetCatalog::new(Default::default())
     };
     let (sender, queue) = mpsc::channel(queue_capacity);
+    let settings_owner = settings.owner();
+    let presets = Arc::new(presets);
     let api = Arc::new(ChatApiState::new(
         Arc::new(RequestRegistry::new(8)),
         HashMap::from([(CharacterId::Crazy, sender.clone())]),
         Arc::new(TimelineRequestIngress {
             timeline: Arc::clone(&timeline),
         }),
-        settings.owner(),
-        Arc::new(presets),
+        Arc::clone(&settings_owner),
+        Arc::clone(&presets),
         None,
     ));
     Fixture {
@@ -104,6 +108,8 @@ async fn fixture(config: TimelineConfig, queue_capacity: usize, with_preset: boo
         timeline,
         source,
         fence,
+        settings_owner,
+        presets,
     }
 }
 
@@ -134,6 +140,7 @@ async fn queue_full_and_closed_leave_original_world_unchanged() {
         timeline,
         source,
         fence,
+        ..
     } = closed;
     drop(queue);
     assert!(matches!(
@@ -2732,3 +2739,6 @@ async fn same_branch_foreign_reveal_denies_provider_dispatch_without_replaying_o
 async fn same_branch_foreign_history_reset_denies_provider_dispatch_without_replaying_orphan() {
     b82_foreign_knowledge_change_rejects_dispatch(B82ForeignKnowledgeChange::HistoryReset).await;
 }
+#[cfg(feature = "sqlite-system")]
+#[path = "regenerate_b83_tests.rs"]
+mod b83;
