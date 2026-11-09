@@ -10,6 +10,10 @@ name = "neuromita-gui"
 path = "src/bin/neuromita-gui/main.rs"
 required-features = ["gui"]
 
+[[test]]
+name = "updater_native_apply_e2e"
+harness = false
+
 [[example]]
 name = "gui_snapshot"
 required-features = ["gui"]

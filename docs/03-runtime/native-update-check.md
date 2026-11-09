@@ -185,3 +185,33 @@ This acceptance therefore validates **offline native Windows process and file
 sharing semantics**, not the full interactive GUI → latest-release → helper
 handoff → authenticated readiness path, Windows sign-in startup ordering, or
 publisher release availability. Those remain open acceptance criteria for #44.
+
+## Verified native activation and restart probes (D53)
+
+`tests/updater_native_apply_e2e.rs` has a standalone test entrypoint so a copy
+of its compiled executable can run as a disposable installed GUI rather than
+recursively invoking a test harness. The executable deliberately appends distinct
+ELF/PE overlays to represent the previous and candidate versions; they are
+independently SHA-256 hashed. The test creates no published release and never
+fetches a remote URL. An exact cache entry is checked through `UpdateStager`
+against a publisher-formatted digest, then `SingleFileActivator` prepares the
+platform-native asset-name mapping.
+
+On **Linux**, the test runs the actual `schedule_after_shutdown` path from a
+separate installed GUI process, launches a real installed `neuromita-updater`,
+and waits for its PID-bound helper handoff to replace the executable. Two cases
+must pass: a restarted probe acknowledging the real nonce through
+`acknowledge_gui_ready`, and a probe exiting before readiness so the helper
+rolls back, relaunches the old executable and records the failure. In both
+cases persistent UserData is unchanged and the transaction workspace is gone.
+The helper's native recovery guard is a no-op on Linux, as in production.
+
+On **Windows**, the same test exercises disposable native PE files, exact
+SHA-256 reuse, `arm_health_check` and `apply_or_resume`, the real
+`acknowledge_gui_ready` receipt, `complete_health_check`, and
+`rollback_health_check` after a failed probe. **It does not start the
+production helper or register a startup Run entry**, because a test must not
+change the normal user's HKCU recovery guard. It therefore does not prove
+Windows helper-parent handoff, interactive Slint readiness, a real Windows
+reboot/sign-in, or application AI/Core health. The Windows PE probes emit a
+real nonce/PID receipt but do not start the Slint GUI event loop.
