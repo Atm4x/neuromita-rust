@@ -1,0 +1,45 @@
+name: Agent B73 exact-head backend
+on:
+  push:
+    branches:
+      - bridge/agent-b73-verify-20261109
+jobs:
+  exact-b73:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cd95a0793741bd42d5cdf44a7bd5d784bb26894e
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact B73 SHA tree and parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "cd95a0793741bd42d5cdf44a7bd5d784bb26894e"
+          test "$(git rev-parse HEAD^{tree})" = "98a3eac19f9b83349162019bb3d7dd5288279665"
+          test "$(git rev-parse HEAD^)" = "52c8960b47cf5194abecb2116f85de31306ec296"
+      - name: Install Rust 1.98.1 and ALSA headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt
+          rustup default 1.98.1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev pkg-config
+          rustc --version
+      - name: B73 indexed enumeration and admission tests
+        run: |
+          cargo test --locked --offline --lib regenerate_enumeration_tests -- --test-threads=2
+          cargo test --locked --offline --lib app::regenerate_admission_tests -- --test-threads=2
+      - name: Full filtered library suite
+        run: cargo test --locked --offline --lib -- --test-threads=2 --skip ai_runtime::assets::generation::tests::approved_installer_stages_verifies_and_publishes_only_declared_assets
+      - name: Static verification
+        shell: bash
+        run: |
+          cargo check --locked --offline --all-targets
+          cargo fmt --all -- --check
+          git diff --check
