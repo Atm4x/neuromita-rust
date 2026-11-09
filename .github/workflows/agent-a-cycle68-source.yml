@@ -1,0 +1,33 @@
+name: Agent A Cycle68 exact source increment
+on:
+  push:
+    branches:
+      - bridge/agent-a-cycle68-source-export-20261109
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3dc872613361de5b305ceedc5feeaab5c4b71643
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and export single original SSE commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 3dc872613361de5b305ceedc5feeaab5c4b71643
+          test "$(git show -s --format=%P HEAD)" = 6fb888fd2dd2224872bb8675d94ae3b67aed53f3
+          git update-ref refs/heads/agent-a-cycle68-source HEAD
+          git bundle create cycle68-source.bundle refs/heads/agent-a-cycle68-source ^6fb888fd2dd2224872bb8675d94ae3b67aed53f3
+          git bundle verify cycle68-source.bundle
+          sha256sum cycle68-source.bundle > cycle68-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle68-sse-source
+          path: |
+            cycle68-source.bundle
+            cycle68-source.bundle.sha256
+          retention-days: 1
