@@ -269,6 +269,101 @@ pub fn load_verified(
     Ok(index)
 }
 
+/// The authoritative corpus is owned by the caller's existing character directory.
+/// Import is explicit and never rebuilds or activates any derived index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ImportedDocument {
+    pub character: CharacterId,
+    pub name: String,
+    pub source_sha256: String,
+    pub bytes: usize,
+    pub requires_reindex: bool,
+}
+
+pub fn import_new_document(
+    root: &Path,
+    character: CharacterId,
+    source: &Path,
+    name: &str,
+) -> Result<ImportedDocument, DocumentError> {
+    validate_root(root)?;
+    if !source.is_absolute() || fs::canonicalize(source)? != source || source.starts_with(root) {
+        return Err(DocumentError::UnsafePath(source.display().to_string()));
+    }
+    if name.starts_with('.')
+        || name.chars().count() > 128
+        || name.is_empty()
+        || name.trim() != name
+        || name.chars().any(char::is_control)
+        || name.contains(['/', '\\'])
+        || !(name.ends_with(".md") || name.ends_with(".txt"))
+    {
+        return Err(DocumentError::UnsafePath(name.to_owned()));
+    }
+    let destination = root.join(name);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Err(DocumentError::UnsafePath(destination.display().to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(DocumentError::Io(error)),
+    }
+    let before = inspect_source(root, character)?;
+    if before.documents.len() >= MAX_FILES {
+        return Err(DocumentError::Limit);
+    }
+    let bytes = read_regular(source, MAX_SINGLE_BYTES)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| DocumentError::InvalidText)?;
+    let added_chunks = chunks(text)?;
+    if added_chunks.is_empty()
+        || before
+            .documents
+            .iter()
+            .map(|d| d.chunks.len())
+            .sum::<usize>()
+            + added_chunks.len()
+            > MAX_CHUNKS
+        || before.documents.iter().map(|d| d.bytes).sum::<u64>() + bytes.len() as u64
+            > MAX_TOTAL_BYTES
+    {
+        return Err(DocumentError::Limit);
+    }
+    let stage = root.join(format!(
+        ".neuromita-document-import-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let publication = (|| -> Result<(), DocumentError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&stage)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        if inspect_source(root, character)? != before
+            || read_regular(source, MAX_SINGLE_BYTES)? != bytes
+        {
+            return Err(DocumentError::StaleIndex);
+        }
+        fs::hard_link(&stage, &destination)?;
+        #[cfg(unix)]
+        File::open(root)
+            .and_then(|handle| handle.sync_all())
+            .map_err(|error| DocumentError::PublicationUncertain(error.to_string()))?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&stage);
+    publication?;
+    Ok(ImportedDocument {
+        character,
+        name: name.to_owned(),
+        source_sha256: sha256(&bytes),
+        bytes: bytes.len(),
+        requires_reindex: true,
+    })
+}
+
 pub fn build_new(
     root: &Path,
     character: CharacterId,

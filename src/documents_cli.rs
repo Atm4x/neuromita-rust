@@ -8,6 +8,12 @@ use neuromita::{
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
+    Import {
+        root: PathBuf,
+        character: CharacterId,
+        source: PathBuf,
+        name: String,
+    },
     Reindex {
         root: PathBuf,
         character: CharacterId,
@@ -37,7 +43,7 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
     let mode = args
         .next()
-        .ok_or("expected build, reindex, verify or query")?;
+        .ok_or("expected import, build, reindex, verify or query")?;
     if mode == "--help" {
         return if args.next().is_none() {
             Ok(Action::Help)
@@ -45,9 +51,16 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
             Err("unknown help arguments".into())
         };
     }
-    if mode != "build" && mode != "reindex" && mode != "verify" && mode != "query" {
-        return Err("expected build, reindex, verify or query".into());
+    if mode != "import"
+        && mode != "build"
+        && mode != "reindex"
+        && mode != "verify"
+        && mode != "query"
+    {
+        return Err("expected import, build, reindex, verify or query".into());
     }
+    let mut source = None;
+    let mut name = None;
     let mut root = None;
     let mut character = None;
     let mut index = None;
@@ -58,6 +71,12 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
         let value = args.next().ok_or("missing option value")?;
         match flag.to_str() {
             Some("--root") if root.is_none() => root = Some(PathBuf::from(value)),
+            Some("--source") if mode == "import" && source.is_none() => {
+                source = Some(PathBuf::from(value));
+            }
+            Some("--name") if mode == "import" && name.is_none() => {
+                name = Some(value.into_string().map_err(|_| "invalid document name")?);
+            }
             Some("--index") if index.is_none() => index = Some(PathBuf::from(value)),
             Some("--revisions-dir") if mode == "reindex" && revisions_directory.is_none() => {
                 revisions_directory = Some(PathBuf::from(value));
@@ -80,6 +99,21 @@ fn parse(args: Vec<OsString>) -> Result<Action, String> {
     let character = character.ok_or("--character is required")?;
     if !root.is_absolute() {
         return Err("source path must be absolute".into());
+    }
+    if mode == "import" {
+        if index.is_some() || revisions_directory.is_some() || text.is_some() || limit.is_some() {
+            return Err("import accepts only --source and --name".into());
+        }
+        let source = source.ok_or("--source is required")?;
+        if !source.is_absolute() {
+            return Err("document input path must be absolute".into());
+        }
+        return Ok(Action::Import {
+            root,
+            character,
+            source,
+            name: name.ok_or("--name is required")?,
+        });
     }
     if mode == "reindex" {
         if index.is_some() || text.is_some() || limit.is_some() {
@@ -125,8 +159,17 @@ pub fn run(args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     let action = parse(args).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     match action {
         Action::Help => println!(
-            "neuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
+            "neuromita documents import --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --source ABSOLUTE_INPUT_TEXT_PATH --name NEW_FILENAME.md\nneuromita documents reindex --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --revisions-dir EXISTING_ABSOLUTE_DIRECTORY\nneuromita documents build --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index NEW_ABSOLUTE_PATH\nneuromita documents verify --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH\nneuromita documents query --root ABSOLUTE_CHARACTER_DOCUMENT_DIRECTORY --character Kind --index ABSOLUTE_PATH --text QUERY [--limit 5]\n\nExplicit lexical-only Documents source. .txt/.md only, single directory, source-verified derived index; reindex never activates. Activate a receipt through DocumentRevisionApi and SettingsApi in a trusted running application."
         ),
+        Action::Import {
+            root,
+            character,
+            source,
+            name,
+        } => {
+            let imported = document_index::import_new_document(&root, character, &source, &name)?;
+            println!("{}", serde_json::to_string_pretty(&imported)?);
+        }
         Action::Reindex {
             root,
             character,

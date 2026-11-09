@@ -410,3 +410,224 @@ fn reindex_rejects_revision_directory_inside_documents_and_invalid_character() {
     ]);
     assert!(!wrong.status.success());
 }
+
+#[test]
+fn explicit_import_updates_canonical_corpus_but_never_activates_stale_index() {
+    let f = Fixture::new();
+    f.build();
+    let source = f.root.join("external.txt");
+    fs::write(&source, "The migrating cranes return in autumn.").unwrap();
+    let output = f.call(&[
+        "import",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--source",
+        source.to_str().unwrap(),
+        "--name",
+        "season.md",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["character"], "Kind");
+    assert_eq!(receipt["name"], "season.md");
+    assert_eq!(receipt["requires_reindex"], true);
+    assert_eq!(receipt["source_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        fs::read(f.documents.join("season.md")).unwrap(),
+        fs::read(&source).unwrap()
+    );
+    assert!(!f.run("verify", &[]).status.success());
+    assert!(!f.query("cranes").status.success());
+    let revisions = f.root.join("revisions");
+    fs::create_dir(&revisions).unwrap();
+    let next = f.call(&[
+        "reindex",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--revisions-dir",
+        revisions.to_str().unwrap(),
+    ]);
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    let next_receipt: Value = serde_json::from_slice(&next.stdout).unwrap();
+    let new_index = next_receipt["index"].as_str().unwrap();
+    let query = f.call(&[
+        "query",
+        "--root",
+        f.documents.to_str().unwrap(),
+        "--character",
+        "Kind",
+        "--index",
+        new_index,
+        "--text",
+        "migrating cranes",
+    ]);
+    assert!(
+        query.status.success(),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&query.stdout).unwrap()["status"],
+        "selected"
+    );
+}
+
+#[test]
+fn import_rejects_unsafe_and_oversized_source_without_mutating_corpus() {
+    let f = Fixture::new();
+    let original = fs::read(f.documents.join("notes.md")).unwrap();
+    let source = f.root.join("incoming.md");
+    fs::write(&source, "valid text content").unwrap();
+    for name in [
+        "../escape.md",
+        ".private.md",
+        "bad.txt/another",
+        "bad.pdf",
+        " notes.md",
+        "notes.md",
+    ] {
+        let output = f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            name,
+        ]);
+        assert!(!output.status.success(), "{name:?}");
+    }
+    assert_eq!(fs::read(f.documents.join("notes.md")).unwrap(), original);
+    assert!(!f.documents.join("escape.md").exists());
+    fs::write(&source, vec![b'a'; 128 * 1024 + 1]).unwrap();
+    assert!(
+        !f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            "large.txt"
+        ])
+        .status
+        .success()
+    );
+    fs::write(&source, [0xff, 0xfe, 0x00]).unwrap();
+    assert!(
+        !f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            source.to_str().unwrap(),
+            "--name",
+            "invalid.txt"
+        ])
+        .status
+        .success()
+    );
+    assert!(fs::read_dir(&f.documents).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-import-")
+    }));
+    assert!(!f.documents.join("large.txt").exists());
+    assert!(!f.documents.join("invalid.txt").exists());
+}
+
+#[test]
+fn racing_importers_never_replace_canonical_document() {
+    let f = Fixture::new();
+    let a = f.root.join("a.txt");
+    let b = f.root.join("b.txt");
+    fs::write(&a, "first canonical choice").unwrap();
+    fs::write(&b, "second canonical choice").unwrap();
+    let exe = env!("CARGO_BIN_EXE_neuromita").to_string();
+    let root = f.documents.to_string_lossy().into_owned();
+    let a = a.to_string_lossy().into_owned();
+    let b = b.to_string_lossy().into_owned();
+    let handles = [a, b].map(|source| {
+        let root = root.clone();
+        let exe = exe.clone();
+        std::thread::spawn(move || {
+            Command::new(exe)
+                .args([
+                    "documents",
+                    "import",
+                    "--root",
+                    &root,
+                    "--character",
+                    "Kind",
+                    "--source",
+                    &source,
+                    "--name",
+                    "race.md",
+                ])
+                .output()
+                .unwrap()
+        })
+    });
+    let output = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(output.iter().filter(|o| o.status.success()).count(), 1);
+    let actual = fs::read_to_string(f.documents.join("race.md")).unwrap();
+    assert!(actual == "first canonical choice" || actual == "second canonical choice");
+    assert!(fs::read_dir(&f.documents).unwrap().all(|e| {
+        !e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".neuromita-document-import-")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn import_rejects_symlink_inputs_and_existing_symlink_targets() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let source = f.root.join("original.md");
+    let link = f.root.join("linked.md");
+    fs::write(&source, "source owner test").unwrap();
+    symlink(&source, &link).unwrap();
+    let call = |input: &str, name: &str| {
+        f.call(&[
+            "import",
+            "--root",
+            f.documents.to_str().unwrap(),
+            "--character",
+            "Kind",
+            "--source",
+            input,
+            "--name",
+            name,
+        ])
+    };
+    assert!(!call(link.to_str().unwrap(), "linked.md").status.success());
+    let target = f.documents.join("already.md");
+    symlink(&source, &target).unwrap();
+    assert!(
+        !call(source.to_str().unwrap(), "already.md")
+            .status
+            .success()
+    );
+    assert_eq!(fs::read_to_string(&source).unwrap(), "source owner test");
+}
