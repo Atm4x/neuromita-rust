@@ -17,6 +17,9 @@ jobs:
         with:
           toolchain: '1.98.1'
           components: rustfmt
+      - name: Test Windows registry lease and updater
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
       - name: Test real Windows recovery helper
         run: cargo test --locked --offline --test updater_offline_recovery
       - name: Check native GUI
