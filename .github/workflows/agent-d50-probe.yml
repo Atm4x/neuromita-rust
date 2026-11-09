@@ -1,4 +1,4 @@
-name: Agent D50 Windows admission probe
+name: Agent D50 Windows registry and GUI test
 on:
   push:
     branches:
@@ -9,4 +9,16 @@ jobs:
   win:
     runs-on: windows-latest
     steps:
-      - run: echo windows-d50-admitted
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d50-windows-reboot-guard-20261109
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Verify native registry recovery tests
+        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Verify native GUI typecheck
+        run: cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Rust format
+        run: cargo fmt --all -- --check
