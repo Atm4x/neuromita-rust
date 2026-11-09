@@ -1,0 +1,37 @@
+name: Agent D52 pinned source delta export
+on:
+  push:
+    branches:
+      - bridge/agent-d52-export-d51-20261109
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d51-windows-sync-permission-20261109
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert exact D43 to D51 delta and bundle it
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=7e339281cec2e3987c2571e44e493d1b14aaa210
+          EXPECTED=36bbabfbafe51a9a8cd39054d2a2174120fb2911
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          git cat-file -e "$BASE^{commit}"
+          git bundle create /tmp/agent-d52-delta.bundle "$BASE"..HEAD
+          git bundle verify /tmp/agent-d52-delta.bundle
+          sha256sum /tmp/agent-d52-delta.bundle > /tmp/agent-d52-delta.sha256
+          cp /tmp/agent-d52-delta.bundle .
+          cp /tmp/agent-d52-delta.sha256 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-d52-d51-pinned-delta
+          path: |
+            agent-d52-delta.bundle
+            agent-d52-delta.sha256
+          retention-days: 2
