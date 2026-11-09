@@ -1,0 +1,35 @@
+name: Import exact Agent C native local installer
+on:
+  push:
+    branches: [bridge/agent-c-native-installer-20261109]
+    paths: [.github/workflows/bridge-agent-c-native-installer-20261109.yml]
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bridge/agent-c-native-installer-20261109
+          fetch-depth: 0
+      - name: Verify exact bundle and non-force publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/bridge/agent-c-native-install.part0{0,1,2,3,4,5} | base64 -d >/tmp/agent-c-native-install.bundle.xz
+          test "$(sha256sum /tmp/agent-c-native-install.bundle.xz | cut -d' ' -f1)" = "0c83de950fb4ccc796f3f54bb76c9f4d97796fb022a9f61fdcb252066e70f9dd"
+          xz -d -c /tmp/agent-c-native-install.bundle.xz >/tmp/agent-c-native-install.bundle
+          test "$(sha256sum /tmp/agent-c-native-install.bundle | cut -d' ' -f1)" = "1b4f319809a9a507a5faaad599c7cc2c4adc8ffda7603937aef1d03cc020362a"
+          git fetch origin refs/heads/codex/ai-native-model-controller-20261109
+          test "$(git rev-parse FETCH_HEAD)" = "5b172efe5c4c771a92b24260c261d9c0d1c4c56d"
+          git fetch origin refs/heads/codex/ai-native-local-package-installer-20261109:refs/remotes/origin/candidate
+          test "$(git rev-parse refs/remotes/origin/candidate)" = "5b172efe5c4c771a92b24260c261d9c0d1c4c56d"
+          git bundle verify /tmp/agent-c-native-install.bundle
+          git fetch /tmp/agent-c-native-install.bundle HEAD
+          test "$(git rev-parse FETCH_HEAD)" = "17427333b69d73fecbc62a4053055246775274ba"
+          git checkout --detach "17427333b69d73fecbc62a4053055246775274ba"
+          test "$(git rev-parse HEAD^{tree})" = "18e1e8b7e57bb606b0550c189563e9c5f6863dfd"
+          test "$(git rev-list --parents -n1 HEAD)" = "17427333b69d73fecbc62a4053055246775274ba 5b172efe5c4c771a92b24260c261d9c0d1c4c56d"
+          git diff --check "5b172efe5c4c771a92b24260c261d9c0d1c4c56d" HEAD
+          git push origin HEAD:refs/heads/codex/ai-native-local-package-installer-20261109
