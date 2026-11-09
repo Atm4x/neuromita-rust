@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: 6ac6d056eb83cf461447576130e35bfa8edd2869
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
       - name: Verify pinned tree
         shell: bash
