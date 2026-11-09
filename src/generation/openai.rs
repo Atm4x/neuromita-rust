@@ -227,6 +227,9 @@ impl OpenAiTemplate {
     pub fn model(&self) -> &str {
         &self.definition.model
     }
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.definition.timeout_ms)
+    }
     pub(crate) fn diagnostic_redaction_values(&self) -> Vec<String> {
         self.key.iter().map(ToString::to_string).collect()
     }
@@ -371,7 +374,7 @@ impl OpenAiProvider {
         {
             Ok(result) => result,
             Err(_) => {
-                let error = GenerationError::Transport("LLM request deadline exceeded".into());
+                let error = GenerationError::DeadlineExceeded;
                 observer.failed(&error);
                 Err(error)
             }

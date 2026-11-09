@@ -354,7 +354,9 @@ async fn reindex_activation_is_explicit_revision_scoped_and_queued_requests_rema
     pending_provider.reply.send("first".into()).unwrap();
     assert!(matches!(
         completed(blocked).await,
-        RequestState::Finished(RequestOutcome::Success(_))
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(
+            GenerationError::Response(message)
+        )) if message.contains("selected document evidence changed before acceptance")
     ));
     assert!(matches!(
         completed(queued_v1).await,

@@ -13,7 +13,10 @@ use neuromita::{
         ProviderKind, ProviderTemplate, ResponseGenerator, StructuredResponse,
         gemini::{GeminiTemplate, GenerationSettings},
     },
-    request::{InitiateRequest, RequestOutcome, RequestSource, RequestState},
+    request::{
+        DiagnosticOutcome, DiagnosticScope, FailureStage, InitiateRequest, RequestOutcome,
+        RequestSource, RequestState,
+    },
     settings::{
         AppSettings, DocumentGenerationSettings, JsonSettingsRepository, SettingsApi,
         SettingsConfig, SettingsError, SettingsRepository, SettingsSource,
@@ -55,11 +58,20 @@ fn config<R: SettingsRepository>(
     repository: Arc<R>,
     source: SettingsSource,
 ) -> ApplicationConfig {
+    config_with_timeout(sender, repository, source, Duration::from_secs(5))
+}
+
+fn config_with_timeout<R: SettingsRepository>(
+    sender: mpsc::UnboundedSender<ProviderCall>,
+    repository: Arc<R>,
+    source: SettingsSource,
+    provider_timeout: Duration,
+) -> ApplicationConfig {
     let preset = GenerationPreset::new(ProviderTemplate::Gemini(
         GeminiTemplate::google(
             "test",
             "unused",
-            GenerationSettings::new(0.0, 128, Duration::from_secs(5)).unwrap(),
+            GenerationSettings::new(0.0, 128, provider_timeout).unwrap(),
         )
         .unwrap(),
     ));
@@ -492,6 +504,158 @@ async fn failed_settings_save_needs_explicit_retry_before_restart_keeps_document
         DocumentRevisionStatus::Ready { settings_revision, revision } if settings_revision == activated.revision && revision == receipt
     ));
     generated(&mut calls, CharacterId::Crazy, "sapphire blue").await;
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[tokio::test]
+async fn documents_generation_automatic_deadline_rejects_late_provider_result() {
+    let folder = std::env::temp_dir().join(format!("nm-r7-deadline-{}", uuid::Uuid::new_v4()));
+    let root = folder.join("crazy");
+    let revisions = folder.join("revisions");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir(&revisions).unwrap();
+    std::fs::write(root.join("doc.md"), "Nebula orchid: sapphire blue.").unwrap();
+    let receipt = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    let repository = Arc::new(JsonSettingsRepository::new(folder.join("settings.json")));
+    let (sender, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config_with_timeout(
+        sender,
+        Arc::clone(&repository),
+        SettingsSource::initial(AppSettings::initial_profile()),
+        Duration::from_millis(140),
+    ))
+    .await
+    .unwrap();
+    let baseline = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let activated = DocumentRevisionApi::activate(&receipt, baseline.revision).unwrap();
+    SettingsApi::flush().await.unwrap();
+
+    let waiting = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "nebula orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let delayed = timeout(Duration::from_secs(8), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        delayed
+            .input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains("sapphire blue")
+    );
+    assert!(matches!(
+        timeout(Duration::from_secs(8), waiting.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(
+            GenerationError::DeadlineExceeded
+        ))
+    ));
+    assert!(delayed.reply.send("arrived too late".into()).is_err());
+    let diagnostic = ChatApi::diagnostics_for(DiagnosticScope::owner(
+        CharacterId::Crazy,
+        RequestSource::Presenter,
+    ))
+    .unwrap()
+    .request(waiting.id())
+    .unwrap()
+    .trace
+    .view();
+    assert!(matches!(
+        diagnostic.outcome,
+        Some(DiagnosticOutcome::Failed {
+            stage: FailureStage::ProviderTimeout,
+            ..
+        })
+    ));
+    assert!(matches!(
+        DocumentRevisionApi::inspect(CharacterId::Crazy).unwrap(),
+        DocumentRevisionInspection::Ready { settings_revision, .. }
+            if settings_revision == activated.revision
+    ));
+    assert_eq!(repository.load().unwrap().revision, activated.revision);
+
+    generated(&mut calls, CharacterId::Crazy, "sapphire blue").await;
+    app.shutdown().await.unwrap();
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[tokio::test]
+async fn documents_changed_during_provider_reply_are_rejected_before_acceptance() {
+    let folder = std::env::temp_dir().join(format!("nm-r7-postcheck-{}", uuid::Uuid::new_v4()));
+    let root = folder.join("crazy");
+    let revisions = folder.join("revisions");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir(&revisions).unwrap();
+    let source = root.join("doc.md");
+    std::fs::write(&source, "Nebula orchid: sapphire blue.").unwrap();
+    let first = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    let repository = Arc::new(JsonSettingsRepository::new(folder.join("settings.json")));
+    let (sender, mut calls) = mpsc::unbounded_channel();
+    let app = ApplicationLifecycle::start(config(
+        sender,
+        Arc::clone(&repository),
+        SettingsSource::initial(AppSettings::initial_profile()),
+    ))
+    .await
+    .unwrap();
+    let baseline = SettingsApi::snapshot::<DocumentGenerationSettings>().unwrap();
+    let active = DocumentRevisionApi::activate(&first, baseline.revision).unwrap();
+    SettingsApi::flush().await.unwrap();
+
+    let pending = ChatApi::initiate(InitiateRequest::new(
+        CharacterId::Crazy,
+        "nebula orchid",
+        RequestSource::Presenter,
+    ))
+    .unwrap();
+    let call = timeout(Duration::from_secs(8), calls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        call.input
+            .prepared_knowledge
+            .as_deref()
+            .unwrap_or("")
+            .contains("sapphire blue")
+    );
+    std::fs::write(&source, "Nebula orchid: emerald green.").unwrap();
+    call.reply
+        .send("reply based on stale sapphire".into())
+        .unwrap();
+    let status = timeout(Duration::from_secs(8), pending.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        status.state,
+        RequestState::Finished(RequestOutcome::TextGenerationFailed(
+            GenerationError::Response(ref details)
+        )) if details.contains("selected document evidence changed before acceptance")
+    ));
+    assert!(matches!(
+        DocumentRevisionApi::inspect(CharacterId::Crazy).unwrap(),
+        DocumentRevisionInspection::Unavailable {
+            settings_revision,
+            issue: DocumentRevisionIssue::StaleSource
+        } if settings_revision == active.revision
+    ));
+    assert_eq!(repository.load().unwrap().revision, active.revision);
+
+    let next = DocumentRevisionApi::prepare(&root, CharacterId::Crazy, &revisions).unwrap();
+    let applied = DocumentRevisionApi::activate(&next, active.revision).unwrap();
+    SettingsApi::flush().await.unwrap();
+    generated(&mut calls, CharacterId::Crazy, "emerald green").await;
+    assert_eq!(repository.load().unwrap().revision, applied.revision);
     app.shutdown().await.unwrap();
     std::fs::remove_dir_all(folder).unwrap();
 }

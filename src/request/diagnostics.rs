@@ -427,6 +427,7 @@ pub enum FailureStage {
     PromptPreparation,
     ProviderConfiguration,
     ProviderTransport,
+    ProviderTimeout,
     ProviderHttp,
     ProviderResponse,
     ProviderResponseMalformed,
@@ -442,6 +443,7 @@ impl FailureStage {
                 Self::ProviderConfiguration
             }
             GenerationError::Transport(_) => Self::ProviderTransport,
+            GenerationError::DeadlineExceeded => Self::ProviderTimeout,
             GenerationError::Http(_) => Self::ProviderHttp,
             GenerationError::Response(_) if malformed => Self::ProviderResponseMalformed,
             GenerationError::Response(_) => Self::ProviderResponse,

@@ -116,7 +116,7 @@ impl GeminiProvider {
         {
             Ok(result) => result,
             Err(_) => {
-                let error = GenerationError::Transport("LLM request deadline exceeded".into());
+                let error = GenerationError::DeadlineExceeded;
                 observer.failed(&error);
                 Err(error)
             }

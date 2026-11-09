@@ -223,6 +223,13 @@ impl MessageHandler {
                     source: message.source(),
                 })
             });
+        let admitted_documents = settings
+            .values
+            .document_generation
+            .sources
+            .get(&message.character_id())
+            .cloned()
+            .map(|source| (message.character_id(), source));
         let generated = tokio::select! {
             biased;
             _ = record.cancellation.cancelled() => GenerationRun::Cancelled,
@@ -386,7 +393,24 @@ impl MessageHandler {
                     record: &record,
                     capture: observer.as_mut(),
                 };
-                self.generator.generate_observed(request, &mut combined).await
+                let response = self.generator.generate_observed(request, &mut combined).await?;
+                if let Some((character, source)) = admitted_documents {
+                    tokio::task::spawn_blocking(move || {
+                        crate::knowledge::document_index::load_verified(
+                            &source.root,
+                            character,
+                            &source.index,
+                        )
+                    })
+                    .await
+                    .map_err(|error| GenerationError::Response(format!(
+                        "post-generation document verification task failed: {error}"
+                    )))?
+                    .map_err(|error| GenerationError::Response(format!(
+                        "selected document evidence changed before acceptance: {error}"
+                    )))?;
+                }
+                Ok(response)
             } => GenerationRun::Response(response),
         };
         let capture = self.persist_observation(observer.as_ref());

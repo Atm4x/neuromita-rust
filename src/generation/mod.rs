@@ -59,6 +59,12 @@ impl ProviderTemplate {
             Self::OpenAi(_) => ProviderKind::OpenAi,
         }
     }
+    pub fn timeout(&self) -> std::time::Duration {
+        match self {
+            Self::Gemini(template) => template.settings().timeout(),
+            Self::OpenAi(template) => template.timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -23,6 +23,8 @@ pub enum GenerationError {
     Duplicate(ProviderKind),
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("LLM request deadline exceeded")]
+    DeadlineExceeded,
     #[error("provider returned HTTP {0}")]
     Http(u16),
     #[error("invalid provider response: {0}")]
@@ -297,6 +299,11 @@ impl ResponseGenerator {
             ));
         }
         let template = request.preset.template().clone();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(template.timeout())
+            .ok_or_else(|| {
+                GenerationError::Response("provider timeout exceeds clock range".into())
+            })?;
         let post_dsl = request.post_dsl;
         let model_memory_policy = request.model_memory_policy;
         let context_variables = request.context.variables.clone();
@@ -318,9 +325,19 @@ impl ResponseGenerator {
         };
         let mut depth = 0;
         let structured = loop {
-            let mut output = provider
-                .generate_observed(input.clone(), template.clone(), observer)
-                .await?;
+            let mut output = match tokio::time::timeout_at(
+                deadline,
+                provider.generate_observed(input.clone(), template.clone(), observer),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    let error = GenerationError::DeadlineExceeded;
+                    observer.failed(&error);
+                    return Err(error);
+                }
+            };
             let Some(tool_call) = output.tool_call.clone() else {
                 break output;
             };
@@ -365,11 +382,20 @@ impl ResponseGenerator {
                 output.full_text().to_string()
             };
             observer.tool_started(&tool_call.name, &tool_call.args, &spoken);
-            let result =
-                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context)
-                    .await;
+            let result = tokio::time::timeout_at(
+                deadline,
+                super::tools::execute(&tools, &tool_call.name, &tool_call.args, &input.context),
+            )
+            .await;
             observer.tool_finished();
-            let result = result?;
+            let result = match result {
+                Ok(result) => result?,
+                Err(_) => {
+                    let error = GenerationError::DeadlineExceeded;
+                    observer.failed(&error);
+                    return Err(error);
+                }
+            };
             if let Some(origin) = tool_call.native_origin {
                 if !input.tool_history.is_empty() {
                     return Err(GenerationError::Response(
