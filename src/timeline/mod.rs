@@ -1097,6 +1097,9 @@ impl SessionTimeline {
             return Err(domain::TimelineError::ConcurrentWrite);
         }
         let snapshot = self.reconcile_same_branch_regenerate(branch, request)?;
+        if expected.generation != snapshot.admission.selection_generation {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
         let expected_epoch = if snapshot.admission.forget_operation.is_some() {
             snapshot.admission.source_head + 2
         } else {

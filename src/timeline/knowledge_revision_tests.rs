@@ -1668,3 +1668,43 @@ fn same_branch_lifecycle_archive_roundtrip_keeps_history_reset_and_terminal() {
     }
     let _ = std::fs::remove_dir_all(assets_dir);
 }
+
+#[test]
+fn same_branch_dispatch_rejects_a_to_b_to_a_selection_replay() {
+    let mut timeline = SessionTimeline::new();
+    let source = accepted(&mut timeline, CharacterId::Crazy, "input");
+    let plan = timeline
+        .plan_knowledge_regenerate(source, timeline.selection(), timeline.anchor().through)
+        .unwrap();
+    let receipt = same_branch_receipt(&plan);
+    timeline
+        .admit_same_branch_regenerate(&plan, &receipt, EventId::new())
+        .unwrap();
+    let root = timeline.branch;
+    let selection = timeline.selection();
+    let mut checkpoint = EventDraft::new(EventKind::Checkpoint);
+    checkpoint.payload.insert("snapshot".into(), json!({}));
+    let checkpoint_id = checkpoint.id;
+    timeline
+        .append_test_fact("b78:checkpoint", checkpoint)
+        .unwrap();
+    let child = BranchId::new();
+    let switched = timeline
+        .fork_and_select_checkpoint(checkpoint_id, child, selection, timeline.anchor().through)
+        .unwrap();
+    let returned = timeline.select_branch(root, switched).unwrap();
+    assert!(returned.generation > selection.generation);
+    let before = timeline.store.world(root).unwrap();
+    assert_eq!(
+        timeline.permit_same_branch_regenerate_dispatch(root, receipt.request, returned),
+        Err(domain::TimelineError::ConcurrentWrite)
+    );
+    assert_eq!(timeline.store.world(root).unwrap(), before);
+    assert_eq!(
+        timeline
+            .reconcile_same_branch_regenerate(root, receipt.request)
+            .unwrap()
+            .outcome,
+        RegenerateRecoveryOutcome::DispatchUnknown
+    );
+}
