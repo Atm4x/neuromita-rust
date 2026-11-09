@@ -47,6 +47,36 @@ pub enum DocumentRevisionStatus {
     },
 }
 
+/// A bounded diagnostic classification; never includes document contents or OS paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentRevisionIssue {
+    MissingRoot,
+    MissingIndex,
+    InvalidIndex,
+    StaleSource,
+    WrongScope,
+    UnsafeSource,
+    InvalidSource,
+    Io,
+}
+
+/// Read-only state of an admitted Documents source, including broken selections.
+/// A broken selection remains selected until the settings owner changes it explicitly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentRevisionInspection {
+    Disabled {
+        settings_revision: u64,
+    },
+    Ready {
+        settings_revision: u64,
+        revision: DocumentRevisionReceipt,
+    },
+    Unavailable {
+        settings_revision: u64,
+        issue: DocumentRevisionIssue,
+    },
+}
+
 pub struct DocumentRevisionApi;
 
 impl DocumentRevisionApi {
@@ -115,6 +145,29 @@ impl DocumentRevisionApi {
         Ok(SettingsApi::replace(expected_settings_revision, next)?)
     }
 
+    /// Never changes the active selection, even when its index is missing or invalid.
+    /// Unlike `status`, exposes a bounded failure category for trusted operator UI/services.
+    pub fn inspect(
+        character: CharacterId,
+    ) -> Result<DocumentRevisionInspection, DocumentRevisionError> {
+        let snapshot = SettingsApi::snapshot::<DocumentGenerationSettings>()?;
+        let Some(source) = snapshot.value.sources.get(&character) else {
+            return Ok(DocumentRevisionInspection::Disabled {
+                settings_revision: snapshot.revision,
+            });
+        };
+        match document_index::load_verified(&source.root, character, &source.index) {
+            Ok(index) => Ok(DocumentRevisionInspection::Ready {
+                settings_revision: snapshot.revision,
+                revision: receipt_for(&source.index, &index)?,
+            }),
+            Err(error) => Ok(DocumentRevisionInspection::Unavailable {
+                settings_revision: snapshot.revision,
+                issue: issue_for(&error, &source.root, &source.index),
+            }),
+        }
+    }
+
     pub fn status(character: CharacterId) -> Result<DocumentRevisionStatus, DocumentRevisionError> {
         let snapshot = SettingsApi::snapshot::<DocumentGenerationSettings>()?;
         let Some(source) = snapshot.value.sources.get(&character) else {
@@ -147,4 +200,28 @@ fn receipt_for(
         fingerprint,
         documents: index.documents.len(),
     })
+}
+
+fn issue_for(error: &DocumentError, root: &Path, index: &Path) -> DocumentRevisionIssue {
+    match error {
+        DocumentError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(root)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                DocumentRevisionIssue::MissingRoot
+            } else if std::fs::symlink_metadata(index)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                DocumentRevisionIssue::MissingIndex
+            } else {
+                DocumentRevisionIssue::Io
+            }
+        }
+        DocumentError::InvalidIndex => DocumentRevisionIssue::InvalidIndex,
+        DocumentError::StaleIndex => DocumentRevisionIssue::StaleSource,
+        DocumentError::WrongScope => DocumentRevisionIssue::WrongScope,
+        DocumentError::UnsafePath(_) => DocumentRevisionIssue::UnsafeSource,
+        DocumentError::Limit | DocumentError::InvalidText => DocumentRevisionIssue::InvalidSource,
+        _ => DocumentRevisionIssue::Io,
+    }
 }
