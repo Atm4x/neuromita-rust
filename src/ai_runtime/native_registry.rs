@@ -180,7 +180,7 @@ impl NativeModelRegistry {
     }
 }
 
-fn check_path(path: &Path, directory: bool) -> Result<(), NativeRegistryError> {
+pub(super) fn check_path(path: &Path, directory: bool) -> Result<(), NativeRegistryError> {
     if !path.is_absolute() {
         return Err(NativeRegistryError::Invalid(
             "managed paths must be absolute",
@@ -214,7 +214,7 @@ fn safe_relative(path: &str) -> bool {
         })
 }
 
-fn parse_sha256(value: &str) -> Result<[u8; 32], NativeRegistryError> {
+pub(super) fn parse_sha256(value: &str) -> Result<[u8; 32], NativeRegistryError> {
     let bytes = value.as_bytes();
     if bytes.len() != 64 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return Err(NativeRegistryError::Invalid("invalid sha256 encoding"));
@@ -318,7 +318,7 @@ fn validate_manifest(manifest: &NativeModelManifest) -> Result<(), NativeRegistr
     Ok(())
 }
 
-fn read_manifest(path: &Path) -> Result<Vec<u8>, NativeRegistryError> {
+pub(super) fn read_manifest(path: &Path) -> Result<Vec<u8>, NativeRegistryError> {
     let file = File::open(path)?;
     let len = file.metadata()?.len();
     if len == 0 || len > MAX_MANIFEST_BYTES {
@@ -341,7 +341,7 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     output
 }
 
-fn verify_file(root: &Path, file: &NativeFileRef) -> Result<(), NativeRegistryError> {
+pub(super) fn verify_file(root: &Path, file: &NativeFileRef) -> Result<(), NativeRegistryError> {
     let path = root.join(&file.path);
     check_path(&path, false)?;
     let input = File::open(&path)?;
