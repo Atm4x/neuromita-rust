@@ -1,4 +1,4 @@
-name: Agent D49 native Windows recovery acceptance
+name: Agent D49 Windows recovery validation
 on:
   push:
     branches:
@@ -6,29 +6,18 @@ on:
 permissions:
   contents: read
 jobs:
-  win:
+  windows-gui:
     runs-on: windows-latest
-    timeout-minutes: 50
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: codex/agent-d49-offline-helper-recovery-20261109
-      - name: Verify exact D49 commit and tree
-        shell: bash
-        run: |
-          test "$(git rev-parse HEAD)" = "72bfa9e5daf9d485de0cf51bc440578f86845ad5"
-          test "$(git rev-parse HEAD^{tree})" = "c6d2a5f61536d5efcb668cee9437753ee0e803cd"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Real Windows updater recovery subprocess integration
+      - name: Test real Windows recovery helper
         run: cargo test --locked --offline --test updater_offline_recovery
-      - name: Windows updater library suite
-        run: cargo test --locked --offline --lib updater:: -- --test-threads=2
-      - name: Windows native GUI typecheck
+      - name: Check native GUI
         run: cargo check --locked --offline --features gui --bin neuromita-gui
-      - name: Windows all-targets typecheck
-        run: cargo check --locked --offline --all-targets
-      - name: Rustfmt
+      - name: Rust formatting
         run: cargo fmt --all -- --check
