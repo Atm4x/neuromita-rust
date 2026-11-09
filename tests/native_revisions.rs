@@ -8,7 +8,10 @@ use std::{
 use neuromita::ai_runtime::{
     native_model::{NativeBackend, NativePhase},
     native_registry::{NativeFileRef, NativeModelManifest, NativeRuntimeFile},
-    native_revisions::{NativeRevisionChoice, NativeRevisionStore},
+    native_revisions::{NativeRevisionChoice, NativeRevisionStore, NativeSelectionManifestState},
+};
+use neuromita::presentation::native_revisions::{
+    NativeArtifactVerification, NativeRevisionPresenter, NativeWorkerObservation,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -340,6 +343,159 @@ fn missing_published_weights_reject_selected_but_keep_pointer() {
     assert!(fixture.store().selected("native-test").is_err());
     let pointer = fixture.revisions.join("selections/native-test.json");
     assert!(pointer.is_file());
+}
+
+#[test]
+fn ui_inventory_is_metadata_only_and_never_claims_verified_or_ready() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    fs::write(
+        fixture
+            .object_root(digest)
+            .join("native-test/models/weight.bin"),
+        b"deliberately-corrupted-weights",
+    )
+    .unwrap();
+
+    let overview = fixture.store().overview().unwrap();
+    assert_eq!(overview.revisions.len(), 1);
+    assert_eq!(overview.selections.len(), 1);
+    assert_eq!(
+        overview.selections[0].manifest_state,
+        NativeSelectionManifestState::Present
+    );
+    let view = NativeRevisionPresenter::project(overview);
+    assert_eq!(view.models[0].model_id, "native-test");
+    assert_eq!(view.models[0].package_version, "1.0.0");
+    assert_eq!(view.models[0].display_name, "Synthetic worker only");
+    assert_eq!(
+        view.models[0].artifact_verification,
+        NativeArtifactVerification::NotChecked
+    );
+    assert_eq!(
+        view.selections[0].worker_observation,
+        NativeWorkerObservation::NotObserved
+    );
+    assert!(fixture.store().selected("native-test").is_err());
+    assert!(
+        fixture
+            .store()
+            .controller_for_selected("native-test", Duration::from_secs(3))
+            .is_err()
+    );
+}
+
+#[test]
+fn ui_inventory_tracks_explicit_switch_but_not_a_running_session() {
+    let mut fixture = Fixture::new();
+    let first = fixture.digest();
+    fixture.install(first);
+    let second = fixture.version("2.0.0");
+    fixture.install(second);
+    let without_selection = NativeRevisionPresenter::read(&fixture.store()).unwrap();
+    assert_eq!(without_selection.models.len(), 2);
+    assert!(without_selection.selections.is_empty());
+
+    fixture.store().select(&fixture.choice(second)).unwrap();
+    let selected = NativeRevisionPresenter::read(&fixture.store()).unwrap();
+    assert_eq!(selected.selections.len(), 1);
+    assert_eq!(selected.selections[0].backend, NativeBackend::Cpu);
+    assert_eq!(
+        selected.selections[0].manifest_sha256,
+        second
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        selected.selections[0].manifest_state,
+        NativeSelectionManifestState::Present
+    );
+    assert!(
+        selected
+            .models
+            .iter()
+            .all(|model| { model.worker_observation == NativeWorkerObservation::NotObserved })
+    );
+}
+
+#[test]
+fn missing_published_revision_is_reported_without_implicit_fallback() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    fs::remove_dir_all(fixture.object_root(digest).join("native-test")).unwrap();
+
+    let overview = fixture.store().overview().unwrap();
+    assert!(overview.revisions.is_empty());
+    assert_eq!(overview.selections.len(), 1);
+    assert_eq!(
+        overview.selections[0].manifest_state,
+        NativeSelectionManifestState::Missing
+    );
+    assert!(fixture.store().selected("native-test").is_err());
+}
+
+#[test]
+fn unsupported_selected_backend_is_not_silently_changed_by_presenter() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let pointer = fixture.revisions.join("selections/native-test.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&pointer).unwrap()).unwrap();
+    record["backend"] = json!("cuda");
+    fs::write(&pointer, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let overview = fixture.store().overview().unwrap();
+    assert_eq!(overview.selections[0].choice.backend, NativeBackend::Cuda);
+    assert_eq!(
+        overview.selections[0].manifest_state,
+        NativeSelectionManifestState::BackendUndeclared
+    );
+    assert!(fixture.store().selected("native-test").is_err());
+}
+
+#[test]
+fn malformed_selection_and_foreign_selection_entries_fail_closed() {
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let directory = fixture.revisions.join("selections");
+    let pointer = directory.join("native-test.json");
+    fs::write(&pointer, b"{broken").unwrap();
+    assert!(NativeRevisionPresenter::read(&fixture.store()).is_err());
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    fs::write(directory.join("foreign-file"), b"untouched").unwrap();
+    assert!(fixture.store().overview().is_err());
+    assert_eq!(
+        fs::read(directory.join("foreign-file")).unwrap(),
+        b"untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_selection_does_not_leak_victim_contents_into_ui() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let digest = fixture.digest();
+    fixture.install(digest);
+    fixture.store().select(&fixture.choice(digest)).unwrap();
+    let pointer = fixture.revisions.join("selections/native-test.json");
+    let victim = fixture.root.join("victim.json");
+    fs::write(&victim, fs::read(&pointer).unwrap()).unwrap();
+    fs::remove_file(&pointer).unwrap();
+    symlink(&victim, &pointer).unwrap();
+    assert!(fixture.store().overview().is_err());
+    assert!(fixture.store().selected("native-test").is_err());
+    assert!(victim.is_file());
 }
 
 #[test]

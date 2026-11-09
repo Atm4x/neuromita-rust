@@ -61,6 +61,36 @@ pub struct NativeRevisionChoice {
     pub backend: NativeBackend,
 }
 
+/// Metadata-only read model. None of these witnesses establish package-file integrity
+/// or readiness of a resident model process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRevisionOverview {
+    pub revisions: Vec<NativeRevisionMetadata>,
+    pub selections: Vec<NativeSelectionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRevisionMetadata {
+    pub model_id: String,
+    pub display_name: String,
+    pub package_version: String,
+    pub manifest_sha256: [u8; 32],
+    pub backends: Vec<NativeBackend>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSelectionManifestState {
+    Present,
+    Missing,
+    BackendUndeclared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSelectionMetadata {
+    pub choice: NativeRevisionChoice,
+    pub manifest_state: NativeSelectionManifestState,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectionRecord {
@@ -202,6 +232,24 @@ impl NativeRevisionStore {
         &self,
         model_id: &str,
     ) -> Result<Option<NativeRevisionChoice>, NativeRevisionError> {
+        let Some(choice) = self.selection_hint(model_id)? else {
+            return Ok(None);
+        };
+        self.registration_for(&choice)?.prepare_launch(
+            choice.manifest_sha256,
+            choice.backend,
+            &self.runtime_root,
+            Duration::from_secs(1),
+        )?;
+        Ok(Some(choice))
+    }
+
+    /// Cheap, strictly parsed on-disk pointer. This does not check model weights,
+    /// executable bytes or runtime libraries and MUST NOT authorize execution.
+    pub fn selection_hint(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<NativeRevisionChoice>, NativeRevisionError> {
         self.verify_roots()?;
         if !valid_identifier(model_id) {
             return Err(NativeRevisionError::Invalid("invalid model id"));
@@ -239,13 +287,86 @@ impl NativeRevisionStore {
             manifest_sha256: digest,
             backend: record.backend,
         };
-        self.registration_for(&choice)?.prepare_launch(
-            choice.manifest_sha256,
-            choice.backend,
-            &self.runtime_root,
-            Duration::from_secs(1),
-        )?;
         Ok(Some(choice))
+    }
+
+    /// Bounded UI inventory. Reads *only* small manifest and selection JSON files;
+    /// no EXE/weights/runtime SHA scan occurs. A selection is a user preference,
+    /// not a proof that its package is usable, loaded or ready for inference.
+    pub fn overview(&self) -> Result<NativeRevisionOverview, NativeRevisionError> {
+        self.verify_roots()?;
+        let mut revisions = Vec::new();
+        for (digest, registration) in self.all_registrations()? {
+            let manifest = registration.manifest();
+            revisions.push(NativeRevisionMetadata {
+                model_id: manifest.model_id.clone(),
+                display_name: manifest.display_name.clone(),
+                package_version: manifest.package_version.clone(),
+                manifest_sha256: digest,
+                backends: manifest.backends.clone(),
+            });
+        }
+        revisions.sort_by(|left, right| {
+            left.model_id
+                .cmp(&right.model_id)
+                .then(left.manifest_sha256.cmp(&right.manifest_sha256))
+        });
+
+        let mut selections = Vec::new();
+        let directory = self.root.join(SELECTIONS_DIR);
+        if exists(&directory)? {
+            check_path(&directory, true)?;
+            for entry in fs::read_dir(&directory)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name
+                    .to_str()
+                    .ok_or(NativeRevisionError::Invalid("non-utf8 selection entry"))?;
+                if name == ".install-owner.lock" {
+                    check_path(&entry.path(), false)?;
+                    continue;
+                }
+                if let Some(uuid) = name
+                    .strip_prefix(".select-")
+                    .and_then(|value| value.strip_suffix(".tmp"))
+                {
+                    if Uuid::parse_str(uuid).is_err() {
+                        return Err(NativeRevisionError::Invalid("invalid selection temp"));
+                    }
+                    check_path(&entry.path(), false)?;
+                    continue;
+                }
+                let model_id = name
+                    .strip_suffix(".json")
+                    .filter(|id| valid_identifier(id))
+                    .ok_or(NativeRevisionError::Invalid("unexpected selection entry"))?;
+                if selections.len() == MAX_OBJECTS {
+                    return Err(NativeRevisionError::Invalid("too many selections"));
+                }
+                let choice = self
+                    .selection_hint(model_id)?
+                    .ok_or(NativeRevisionError::Invalid("selection disappeared"))?;
+                let manifest_state = match revisions.iter().find(|revision| {
+                    revision.model_id == choice.model_id
+                        && revision.manifest_sha256 == choice.manifest_sha256
+                }) {
+                    None => NativeSelectionManifestState::Missing,
+                    Some(revision) if !revision.backends.contains(&choice.backend) => {
+                        NativeSelectionManifestState::BackendUndeclared
+                    }
+                    Some(_) => NativeSelectionManifestState::Present,
+                };
+                selections.push(NativeSelectionMetadata {
+                    choice,
+                    manifest_state,
+                });
+            }
+        }
+        selections.sort_by(|a, b| a.choice.model_id.cmp(&b.choice.model_id));
+        Ok(NativeRevisionOverview {
+            revisions,
+            selections,
+        })
     }
 
     /// Caller owns the returned controller for its entire worker session. A later
