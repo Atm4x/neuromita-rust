@@ -1,0 +1,36 @@
+name: Agent D53 exact native apply E2E source import
+on:
+  push:
+    branches:
+      - bridge/agent-d53-native-apply-e2e-20261109
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate source and publish exact D53 commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=629b8f4a78e8595a71913e8414bbaf1faf017609
+          EXPECTED=601f3f7c011dda450f2e2292b934a3dbdcd9a970
+          TREE=b983928cd27b05eb9f5383a92d1b604eee0c78df
+          cat .agent-bridge/d53-part-0{1,2,3,4}.b64 | tr -d '\n' | base64 -d >/tmp/d53.patch.br
+          echo '108e3a85789bdc0925ef9821f3a0d96cf6ec52d4c05e842c468ccdc6493a36ab  /tmp/d53.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d53.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d53.patch.br')))"
+          echo '9e9235a071a48749bee182b584d2625017de65c3dc8108f28acf7385689e2885  /tmp/d53.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d53.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d53-native-apply-e2e-20261109
