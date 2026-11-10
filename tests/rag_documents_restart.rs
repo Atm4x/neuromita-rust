@@ -148,8 +148,11 @@ async fn rejected_before_provider(
     );
 }
 
+static CORE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn persistent_document_revisions_survive_restart_and_fail_closed_until_explicit_recovery() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-r6-restart-{}", uuid::Uuid::new_v4()));
     let crazy_root = folder.join("crazy");
     let kind_root = folder.join("kind");
@@ -335,6 +338,7 @@ impl SettingsRepository for FailableJsonRepository {
 
 #[tokio::test]
 async fn document_provider_failure_and_explicit_cancellation_do_not_change_selection() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     use neuromita::request::CancelResult;
 
     let folder = std::env::temp_dir().join(format!("nm-r7-provider-{}", uuid::Uuid::new_v4()));
@@ -440,6 +444,7 @@ async fn document_provider_failure_and_explicit_cancellation_do_not_change_selec
 
 #[tokio::test]
 async fn failed_settings_save_needs_explicit_retry_before_restart_keeps_document_selection() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-r7-save-{}", uuid::Uuid::new_v4()));
     let root = folder.join("crazy");
     let revisions = folder.join("revisions");
@@ -510,6 +515,7 @@ async fn failed_settings_save_needs_explicit_retry_before_restart_keeps_document
 
 #[tokio::test]
 async fn documents_generation_automatic_deadline_rejects_late_provider_result() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-r7-deadline-{}", uuid::Uuid::new_v4()));
     let root = folder.join("crazy");
     let revisions = folder.join("revisions");
@@ -590,6 +596,7 @@ async fn documents_generation_automatic_deadline_rejects_late_provider_result() 
 
 #[tokio::test]
 async fn documents_changed_during_provider_reply_are_rejected_before_acceptance() {
+    let _serial = CORE_TEST_MUTEX.lock().await;
     let folder = std::env::temp_dir().join(format!("nm-r7-postcheck-{}", uuid::Uuid::new_v4()));
     let root = folder.join("crazy");
     let revisions = folder.join("revisions");

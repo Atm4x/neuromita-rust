@@ -521,7 +521,7 @@ impl GenerationProvider for CheckedProvider {
 async fn finished(handle: &RequestHandle) -> Arc<neuromita::request::RequestSnapshot> {
     timeout(Duration::from_secs(10), handle.wait())
         .await
-        .unwrap()
+        .unwrap_or_else(|_| panic!("request did not finish: {:?}", handle.snapshot()))
         .unwrap()
 }
 
@@ -998,7 +998,7 @@ async fn presenter_to_provider_observation_cancellation_and_commit() {
         .next()
         .await
         .respond
-        .send(Reply::Status(503))
+        .send(Reply::Status(400))
         .unwrap();
     assert!(matches!(
         finished(&failed).await.state,
