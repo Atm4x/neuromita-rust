@@ -6,10 +6,11 @@ use crate::{
     character::CharacterId,
     generation::ToolSettings,
     settings::{
-        AppSettings, AsrPreferences, CharactersSettings, InterfaceSettings, MemorySettings,
-        OperationPresets, PresetId, PresetSelection, PresetSettings, SettingsArea, SettingsError,
-        SettingsOwner, SettingsSnapshot, SettingsTransfer, SpeechSettings, StructuredDisplayMode,
-        TtsPreferences, VoiceSettings, Volume,
+        AppSettings, AsrPreferences, CharactersSettings, GuideLevel, InterfaceSettings, Language,
+        MemorySettings, OnboardingSettings, OperationPresets, PresetId, PresetSelection,
+        PresetSettings, SettingsArea, SettingsError, SettingsOwner, SettingsSnapshot,
+        SettingsTransfer, SpeechSettings, StructuredDisplayMode, TtsPreferences, VoiceSettings,
+        Volume,
     },
 };
 
@@ -226,8 +227,15 @@ impl CharactersSettingsPresenter {
     }
 }
 
+pub struct OnboardingSettingsPresenter {
+    pub guide_level: BoundProperty<GuideLevel>,
+    pub guide_page: BoundProperty<u8>,
+    pub guide_completed: BoundProperty<bool>,
+}
+
 pub struct InterfaceSettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub language: BoundProperty<Language>,
     pub hide_private: BoundProperty<bool>,
     pub structured_display: BoundProperty<StructuredDisplayMode>,
 }
@@ -242,6 +250,7 @@ impl InterfaceSettingsPresenter {
 
 pub struct SettingsPresenter {
     owner: Arc<SettingsOwner>,
+    pub onboarding: OnboardingSettingsPresenter,
     pub interface: InterfaceSettingsPresenter,
     pub voice: VoiceSettingsPresenter,
     pub tts: TtsSettingsPresenter,
@@ -255,8 +264,56 @@ impl SettingsPresenter {
     pub(crate) fn new(owner: Arc<SettingsOwner>) -> Self {
         Self {
             owner: Arc::clone(&owner),
+            onboarding: OnboardingSettingsPresenter {
+                guide_level: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_level,
+                    |owner, level| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| {
+                                let page = crate::onboarding::guide::remap_index(
+                                    settings.guide_level,
+                                    usize::from(settings.guide_page),
+                                    level,
+                                );
+                                settings.guide_level = level;
+                                settings.guide_page = page as u8;
+                            })
+                            .map(|_| ())
+                    },
+                ),
+                guide_page: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_page,
+                    |owner, page| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| settings.guide_page = page)
+                            .map(|_| ())
+                    },
+                ),
+                guide_completed: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.onboarding.guide_completed,
+                    |owner, completed| {
+                        owner
+                            .edit::<OnboardingSettings>(|settings| {
+                                settings.guide_completed = completed
+                            })
+                            .map(|_| ())
+                    },
+                ),
+            },
             interface: InterfaceSettingsPresenter {
                 owner: Arc::clone(&owner),
+                language: BoundProperty::new(
+                    Arc::clone(&owner),
+                    |settings| settings.interface.language.clone(),
+                    |owner, language| {
+                        owner
+                            .edit::<InterfaceSettings>(|settings| settings.language = language)
+                            .map(|_| ())
+                    },
+                ),
                 hide_private: BoundProperty::new(
                     Arc::clone(&owner),
                     |settings| settings.interface.hide_private,
@@ -414,6 +471,218 @@ mod tests {
     use crate::settings::{
         MemorySettingsRepository, SettingsConfig, SettingsLifecycle, SettingsSource,
     };
+
+    #[tokio::test]
+    async fn guide_level_changes_through_onboarding_owner_without_extra_settings_store() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut observed = presenter.onboarding.guide_level.observe();
+        assert_eq!(observed.next().await.unwrap(), GuideLevel::Basic);
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        assert_eq!(observed.next().await.unwrap(), GuideLevel::Full);
+        assert_eq!(owner.snapshot_all().unwrap().revision, 1);
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, 1);
+        assert!(
+            !owner
+                .snapshot_all()
+                .unwrap()
+                .values
+                .onboarding
+                .eula_accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn guide_page_and_completion_share_the_settings_owner() {
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(AppSettings::initial_profile()),
+            repository: Arc::new(MemorySettingsRepository::new()),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        assert!(!presenter.onboarding.guide_completed.get());
+        assert_eq!(presenter.onboarding.guide_page.get(), 0);
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(7).unwrap();
+        let snapshot = owner.snapshot_all().unwrap();
+        assert_eq!(snapshot.values.onboarding.guide_page, 7);
+        assert!(!snapshot.values.onboarding.guide_completed);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        assert!(presenter.onboarding.guide_completed.get());
+        assert_eq!(owner.snapshot_all().unwrap().revision, 3);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, 3);
+    }
+
+    #[tokio::test]
+    async fn persisted_guide_completion_survives_real_settings_lifecycle_restart() {
+        use crate::{lifecycle::Lifecycle, onboarding, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-guide-progress-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(8).unwrap();
+        owner.flush().await.unwrap();
+        let resumed = onboarding::startup_state(&directory).unwrap();
+        assert!(resumed.requires_guide);
+        assert_eq!(resumed.guide_page, 8);
+        assert_eq!(resumed.guide_level, GuideLevel::Full);
+        presenter.onboarding.guide_completed.set(true).unwrap();
+        owner.flush().await.unwrap();
+        let completed = onboarding::startup_state(&directory).unwrap();
+        assert!(!completed.requires_guide);
+        assert!(!completed.requires_consent);
+        assert_eq!(completed.guide_page, 8);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(onboarding::startup_state(&directory).unwrap(), completed);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guide_level_switch_remaps_page_in_one_revision_and_survives_restart() {
+        use crate::{lifecycle::Lifecycle, onboarding, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory = std::env::temp_dir().join(format!(
+            "neuromita-guide-level-switch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Full)
+            .unwrap();
+        presenter.onboarding.guide_page.set(12).unwrap();
+        owner.flush().await.unwrap();
+        let before = owner.snapshot_all().unwrap().revision;
+
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Basic)
+            .unwrap();
+        let snapshot = owner.snapshot_all().unwrap();
+        assert_eq!(snapshot.revision, before + 1);
+        assert_eq!(snapshot.values.onboarding.guide_level, GuideLevel::Basic);
+        assert_eq!(snapshot.values.onboarding.guide_page, 2);
+        owner.flush().await.unwrap();
+        let resumed = onboarding::startup_state(&directory).unwrap();
+        assert!(resumed.requires_guide);
+        assert_eq!(resumed.guide_level, GuideLevel::Basic);
+        assert_eq!(resumed.guide_page, 2);
+
+        let before = snapshot.revision;
+        presenter
+            .onboarding
+            .guide_level
+            .set(GuideLevel::Basic)
+            .unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, before);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn guide_language_persists_through_settings_owner_and_restart() {
+        use crate::{lifecycle::Lifecycle, settings::JsonSettingsRepository};
+        use tokio_util::sync::CancellationToken;
+
+        let directory =
+            std::env::temp_dir().join(format!("neuromita-guide-language-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = AppSettings::initial_profile();
+        initial.onboarding.eula_accepted = true;
+        initial.onboarding.guide_completed = false;
+        let lifecycle = SettingsLifecycle::prepare(SettingsConfig {
+            source: SettingsSource::initial(initial),
+            repository: Arc::new(JsonSettingsRepository::new(directory.join("settings.json"))),
+        })
+        .await
+        .unwrap();
+        let owner = lifecycle.owner();
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let task = tokio::spawn(async move { lifecycle.run(cancelled).await });
+        let presenter = SettingsPresenter::new(Arc::clone(&owner));
+        let mut observed = presenter.interface.language.observe();
+        assert_eq!(observed.next().await.unwrap(), Language::Russian);
+        let revision = owner.snapshot_all().unwrap().revision;
+        presenter.interface.language.set(Language::English).unwrap();
+        assert_eq!(observed.next().await.unwrap(), Language::English);
+        assert_eq!(owner.snapshot_all().unwrap().revision, revision + 1);
+        owner.flush().await.unwrap();
+        let stored = JsonSettingsRepository::new(directory.join("settings.json"));
+        use crate::settings::SettingsRepository;
+        assert_eq!(
+            stored.load().unwrap().settings.interface.language,
+            Language::English
+        );
+        presenter.interface.language.set(Language::English).unwrap();
+        assert_eq!(owner.snapshot_all().unwrap().revision, revision + 1);
+        stop.cancel();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            stored.load().unwrap().settings.interface.language,
+            Language::English
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn tts_asr_preferences_round_trip_through_settings_owner() {

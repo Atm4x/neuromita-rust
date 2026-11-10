@@ -112,6 +112,7 @@ async fn b83_foreign_knowledge_change_rejects_post_dispatch_acceptance(
         turn: context.turn,
         game: context.game_key,
         game_guard: context.game_guard,
+        require_exact_timeline_prefix: false,
     };
     let mut structured = crate::generation::StructuredResponse::spoken("post-dispatch response");
     structured.attitude_change = 4.0;

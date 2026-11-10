@@ -2057,3 +2057,54 @@ fn chat_retry_callback_preserves_original_request_identity_and_selection() {
         if *origin == ChatOrigin { character: CharacterId::Crazy, selection_revision: 2 } && id.0 == new_attempt));
     window.hide().unwrap();
 }
+
+#[test]
+fn successful_gui_shutdown_never_cancels_a_scheduled_native_update() {
+    let cancelled = std::cell::Cell::new(false);
+    let result = request_scheduled_shutdown(
+        || Ok::<(), &str>(()),
+        || {
+            cancelled.set(true);
+            Err::<(), &str>("must not cancel")
+        },
+    );
+    assert_eq!(result, Ok(()));
+    assert!(!cancelled.get());
+}
+
+#[test]
+fn failed_gui_shutdown_cancels_the_scheduled_native_update() {
+    let calls = RefCell::new(Vec::new());
+    let result = request_scheduled_shutdown(
+        || {
+            calls.borrow_mut().push("quit");
+            Err::<(), &str>("event loop refused shutdown")
+        },
+        || {
+            calls.borrow_mut().push("cancel");
+            Ok::<(), &str>(())
+        },
+    );
+    assert_eq!(*calls.borrow(), ["quit", "cancel"]);
+    assert_eq!(
+        result,
+        Err(ScheduledShutdownError::Cancelled {
+            shutdown: "event loop refused shutdown".into(),
+        })
+    );
+}
+
+#[test]
+fn failed_gui_shutdown_and_cancellation_report_both_errors_as_pending() {
+    let result = request_scheduled_shutdown(
+        || Err::<(), &str>("Slint event-loop failure"),
+        || Err::<(), &str>("workspace inventory changed"),
+    );
+    assert_eq!(
+        result,
+        Err(ScheduledShutdownError::PendingTransaction {
+            shutdown: "Slint event-loop failure".into(),
+            cancellation: "workspace inventory changed".into(),
+        })
+    );
+}

@@ -47,9 +47,61 @@
     "source": "Остановить",
     "translation": "Stop"
   },
+  "launcher.actions.starting": {
+    "source": "Запускается…",
+    "translation": "Starting…"
+  },
+  "launcher.actions.stopping": {
+    "source": "Останавливается…",
+    "translation": "Stopping…"
+  },
+  "launcher.game.external-running": {
+    "source": "Игра запущена отдельно",
+    "translation": "Game running separately"
+  },
   "launcher.game.operation-error": {
     "source": "Не удалось запустить или остановить игру: {error}",
     "translation": "Failed to start or stop the game: {error}"
+  },
+  "launcher.native-update.checking": {
+    "source": "Проверяется релиз Rust-приложения…",
+    "translation": "Checking the Rust application release…"
+  },
+  "launcher.native-update.busy": {
+    "source": "Операция с обновлением Rust-приложения уже выполняется.",
+    "translation": "A Rust application update operation is already in progress."
+  },
+  "launcher.native-update.failed": {
+    "source": "Не удалось проверить релиз Rust-приложения: {error}",
+    "translation": "Could not check the Rust application release: {error}"
+  },
+  "launcher.native-update.not-published": {
+    "source": "Нативный релиз Rust-приложения пока не опубликован. Установить обновление нельзя.",
+    "translation": "No native Rust application release has been published yet. There is no update to install."
+  },
+  "launcher.native-update.unsupported-platform": {
+    "source": "Для этой платформы проверяемые нативные обновления пока не поддерживаются.",
+    "translation": "Verified native releases are not supported for this platform yet."
+  },
+  "launcher.native-update.missing-asset": {
+    "source": "Релиз Rust-приложения {tag} найден, но в нём нет файла с SHA-256 издателя для этой платформы. Установка недоступна.",
+    "translation": "Rust application release {tag} exists, but has no executable with a publisher SHA-256 for this platform. Installation is unavailable."
+  },
+  "launcher.native-update.unknown-version": {
+    "source": "Релиз Rust-приложения {tag} найден, но его версию нельзя безопасно сравнить с установленной.",
+    "translation": "Rust application release {tag} exists, but its version cannot be compared safely with the installed version."
+  },
+  "launcher.native-update.current": {
+    "source": "Установленная версия Rust-приложения актуальна относительно релиза {tag}.",
+    "translation": "The installed Rust application version matches release {tag}."
+  },
+  "launcher.native-update.older-release": {
+    "source": "Опубликованный релиз Rust-приложения {tag} старее установленной версии.",
+    "translation": "Published Rust application release {tag} is older than the installed version."
+  },
+  "launcher.native-update.available": {
+    "source": "Релиз {tag} содержит файл {asset} с SHA-256 издателя. Файл не скачан и не проверен; автоматическая установка пока не подключена.",
+    "translation": "Release {tag} lists executable {asset} with a publisher SHA-256. The file has not been downloaded or verified; automatic installation is not connected yet."
   },
   "launcher.releases.title": {
     "source": "ПОСЛЕДНИЕ РЕЛИЗЫ",
@@ -1930,5 +1982,53 @@
   "sandbox.message.edit": {
     "source": "Редактировать",
     "translation": "Edit"
+  },
+  "launcher.actions.download-native-update": {
+    "source": "Скачать и проверить обновление",
+    "translation": "Download and verify update"
+  },
+  "launcher.native-update.downloading": {
+    "source": "Получение метаданных и проверенное скачивание Rust-приложения… Установка не выполняется.",
+    "translation": "Fetching metadata and verifying downloaded Rust application… No installation will be performed."
+  },
+  "launcher.native-update.verified-reused": {
+    "source": "Релиз {tag}: файл {asset} повторно проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+    "translation": "Release {tag}: cached file {asset} verified again (SHA-256: {hash}, {bytes} bytes). Not installed."
+  },
+  "launcher.native-update.verified-new": {
+    "source": "Релиз {tag}: файл {asset} скачан и проверен (SHA-256: {hash}, {bytes} байт). Установка не выполнена.",
+    "translation": "Release {tag}: file {asset} downloaded and verified (SHA-256: {hash}, {bytes} bytes). Not installed."
+  },
+  "launcher.native-update.download-failed": {
+    "source": "Не удалось скачать и проверить обновление: {error}. Установка не выполнялась.",
+    "translation": "Failed to download and verify update: {error}. Nothing was installed."
+  },
+  "launcher.actions.install-native-update": {
+    "source": "Установить Rust-обновление и перезапустить",
+    "translation": "Install Rust update and restart"
+  },
+  "launcher.native-update.preparing": {
+    "source": "Проверяется пакет и готовится установка нативного обновления с перезапуском…",
+    "translation": "Verifying the package and preparing a native update for restart…"
+  },
+  "launcher.native-update.prepared": {
+    "source": "Обновление подготовлено к применению после закрытия приложения.",
+    "translation": "The update is prepared for activation once the application closes."
+  },
+  "launcher.native-update.install-failed": {
+    "source": "Применение обновления не начато: {error}",
+    "translation": "Update activation has not started: {error}"
+  },
+  "launcher.native-update.handoff": {
+    "source": "Обновление проверено. Приложение закрывается; отдельный updater применит его после завершения процесса и попробует перезапустить GUI.",
+    "translation": "Update verified. The application is closing; the separate updater will apply it after this process exits and attempt to restart the GUI."
+  },
+  "launcher.native-update.shutdown-cancelled": {
+    "source": "Не удалось закрыть приложение ({shutdown}). Обновление безопасно отменено; текущая версия продолжает работу.",
+    "translation": "The application could not close ({shutdown}). The scheduled update was safely cancelled; the current version remains running."
+  },
+  "launcher.native-update.shutdown-pending": {
+    "source": "Не удалось закрыть приложение ({shutdown}) и завершить отмену обновления ({cancellation}). Состояние установки требует проверки; не запускайте повторную установку до восстановления.",
+    "translation": "The application could not close ({shutdown}) and update cancellation could not finish ({cancellation}). The installation state must be checked; do not start another installation until recovery."
   }
 }

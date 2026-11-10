@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod audio;
 pub mod character;
+pub mod diagnostics;
 pub mod document_revision;
 pub mod finetune;
 pub mod game_context;
@@ -21,6 +22,8 @@ pub mod prompts;
 #[cfg_attr(not(test), allow(dead_code))]
 mod maintenance;
 pub mod migration;
+pub mod onboarding;
+pub mod portable;
 pub mod presentation;
 #[cfg(feature = "sqlite-system")]
 pub mod recovery_inventory;
@@ -37,5 +40,6 @@ pub mod voice;
 pub use character::memory;
 pub use interaction::UserInput;
 pub mod turn;
+pub mod updater;
 
 pub mod releases;

@@ -73,6 +73,23 @@ use crate::{
     voice::{UnavailableVoiceProvider, VoiceProvider},
 };
 
+// Infrastructure lease ownership follows the persistent repository lifetime;
+// the generation domain never needs to know about lock files.
+struct LeasedPresetRepository {
+    inner: JsonPresetRepository,
+    _lease: crate::settings::PresetStorageLease,
+}
+
+impl PresetRepository for LeasedPresetRepository {
+    fn load(&self) -> Result<Option<crate::generation::StoredPresets>, PresetCatalogError> {
+        self.inner.load()
+    }
+
+    fn save(&self, value: &crate::generation::StoredPresets) -> Result<(), PresetCatalogError> {
+        self.inner.save(value)
+    }
+}
+
 pub struct RuntimeLimits {
     pub request_queue: NonZeroUsize,
     pub discovery_buffer: NonZeroUsize,
@@ -245,6 +262,7 @@ impl ApplicationConfig {
             SettingsInstanceLease::acquire(data_directory)
                 .map_err(|error| SettingsError::Storage(error.to_string()))?,
         );
+        let preset_lease = crate::settings::PresetActivation::runtime_lease(data_directory)?;
         let settings_path = data_directory.join("settings.json");
         let source = match std::fs::metadata(&settings_path) {
             Ok(_) => SettingsSource::Stored,
@@ -264,9 +282,10 @@ impl ApplicationConfig {
                 8 * 1024 * 1024,
             )?,
         ));
-        let repository: Arc<dyn PresetRepository> = Arc::new(JsonPresetRepository::new(
-            data_directory.join("presets.json"),
-        ));
+        let repository: Arc<dyn PresetRepository> = Arc::new(LeasedPresetRepository {
+            inner: JsonPresetRepository::new(data_directory.join("presets.json")),
+            _lease: preset_lease,
+        });
         config.presets = PresetCatalog::open(
             runtime,
             repository,
@@ -306,6 +325,8 @@ pub enum ApplicationError {
     Settings(#[from] SettingsError),
     #[error(transparent)]
     Presets(#[from] PresetCatalogError),
+    #[error(transparent)]
+    PresetActivation(#[from] crate::settings::PresetActivationError),
     #[error(transparent)]
     FineTune(#[from] FineTuneError),
     #[error(transparent)]
@@ -407,6 +428,18 @@ struct TimelineRequestIngress {
 }
 
 impl ProviderDispatchFence for TimelineRequestIngress {
+    fn validate_knowledge(
+        &self,
+        turn: crate::timeline::selection::TimelineTurn,
+        latest: bool,
+    ) -> Result<(), String> {
+        self.timeline
+            .lock()
+            .map_err(|_| String::from("timeline mutex poisoned"))?
+            .assert_knowledge_turn(turn, latest)
+            .map_err(|error| error.to_string())
+    }
+
     fn before_provider(
         &self,
         request: RequestId,

@@ -982,10 +982,14 @@ mod tests {
             &None,
             Some(&window),
             None,
-            &[],
-            &[],
-            &crate::generation::ToolSettings::default(),
-        );
+            WireTools {
+                history: &[],
+                native_history: &[],
+                settings: &crate::generation::ToolSettings::default(),
+            },
+            None,
+        )
+        .unwrap();
         let scoped_json = serde_json::to_value(scoped.body).unwrap();
         let contents = scoped_json["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 2);

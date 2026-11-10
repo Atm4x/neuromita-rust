@@ -177,3 +177,232 @@ fn help_documents_offline_commands_without_api_key() {
     assert!(text.contains("neuromita settings import --source"));
     assert!(text.contains("no GEMINI_API_KEY"));
 }
+
+#[test]
+fn python_cli_preview_is_read_only_then_import_is_reversible_and_repeated_import_is_noop() {
+    let directory = TempDir::new();
+    let source = directory.path("python-source.json");
+    let target = directory.path("rust-settings.json");
+    let starting = stored(22, 90);
+    JsonSettingsRepository::new(target.clone())
+        .save(&starting)
+        .unwrap();
+    let original = fs::read(&target).unwrap();
+    let python_source = br#"{"LANGUAGE":"EN","HIDE_PRIVATE":false,"VOICEOVER_LOCAL_VOLUME":45,"LAST_API_PRESET_ID":87,"API_KEY":"test-secret-value"}"#;
+    fs::write(&source, python_source).unwrap();
+
+    let execute = |extra: &[&str]| {
+        Command::new(BINARY)
+            .args(["settings", "import", "--format", "python", "--source"])
+            .arg(&source)
+            .arg("--destination")
+            .arg(&target)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let dry_run = execute(&["--dry-run"]);
+    assert!(dry_run.status.success(), "{}", stderr(&dry_run));
+    assert!(stdout(&dry_run).contains("no destination or backup files were written"));
+    assert!(stdout(&dry_run).contains("LAST_API_PRESET_ID"));
+    assert!(!stdout(&dry_run).contains("test-secret-value"));
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let rejected = execute(&[]);
+    assert!(!rejected.status.success());
+    assert!(stderr(&rejected).contains("--accept-skipped-key"));
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let preview_report = stdout(&dry_run);
+    let source_sha = preview_report
+        .lines()
+        .find_map(|line| line.strip_prefix("Source SHA-256: "))
+        .unwrap();
+    let target_sha = preview_report
+        .lines()
+        .find_map(|line| line.strip_prefix("Target SHA-256: "))
+        .unwrap();
+    let approval = [
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        target_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+    ];
+    let boolean_denied = execute(&["--allow-unmapped"]);
+    assert!(!boolean_denied.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+    let wrong_key = execute(&[
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        target_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "NOT_THE_ORIGINAL",
+    ]);
+    assert!(!wrong_key.status.success());
+    assert_eq!(fs::read(&target).unwrap(), original);
+    let applied = execute(&approval);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert!(stdout(&applied).contains("Previous Rust settings backup:"));
+    assert_eq!(fs::read(&source).unwrap(), python_source);
+    let imported = JsonSettingsRepository::new(target.clone()).load().unwrap();
+    assert_eq!(imported.revision, starting.revision + 1);
+    assert_eq!(imported.settings.voice.volume, Volume::new(45).unwrap());
+    assert_eq!(imported.settings.presets, starting.settings.presets);
+    assert_eq!(
+        fs::read_dir(&directory.path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-python-import"))
+            .count(),
+        2
+    );
+    let stale = execute(&approval);
+    assert!(!stale.status.success());
+    let second_report = execute(&["--preview"]);
+    assert!(second_report.status.success());
+    let report = stdout(&second_report);
+    let current_sha = report
+        .lines()
+        .find_map(|line| line.strip_prefix("Target SHA-256: "))
+        .unwrap();
+    let second = execute(&[
+        "--expect-source-sha256",
+        source_sha,
+        "--expect-target-sha256",
+        current_sha,
+        "--accept-skipped-key",
+        "API_KEY",
+        "--accept-skipped-key",
+        "LAST_API_PRESET_ID",
+    ]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(stdout(&second).contains("changed=false"));
+    assert_eq!(
+        JsonSettingsRepository::new(target).load().unwrap(),
+        imported
+    );
+}
+
+#[test]
+fn python_cli_never_overwrites_the_python_source_even_via_alias() {
+    let directory = TempDir::new();
+    let source = directory.path("python.json");
+    let original = br#"{"LANGUAGE":"EN"}"#;
+    fs::write(&source, original).unwrap();
+    let output = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        source.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("must be different files"));
+    assert_eq!(fs::read(&source).unwrap(), original);
+}
+
+#[test]
+fn python_preview_alias_and_source_backup_stay_with_portable_rust_target() {
+    let directory = TempDir::new();
+    let python_dir = directory.path("python");
+    let rust_dir = directory.path("rust");
+    fs::create_dir_all(&python_dir).unwrap();
+    fs::create_dir_all(&rust_dir).unwrap();
+    let source = python_dir.join("settings.json");
+    let target = rust_dir.join("settings.json");
+    let input = br#"{"LANGUAGE":"EN","REMINDERS_ENABLED":false}"#;
+    fs::write(&source, input).unwrap();
+    let preview = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+        "--preview",
+    ]);
+    assert!(preview.status.success(), "{}", stderr(&preview));
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(&python_dir).unwrap().count(), 1);
+    let applied = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+    ]);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert_eq!(fs::read_dir(&python_dir).unwrap().count(), 1);
+    let source_backup = fs::read_dir(&rust_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("python-source-settings.json.pre-python-import")
+        })
+        .unwrap()
+        .path();
+    assert_eq!(fs::read(&source_backup).unwrap(), input);
+    assert!(
+        !JsonSettingsRepository::new(target.clone())
+            .load()
+            .unwrap()
+            .settings
+            .reminders
+            .enabled
+    );
+    let again = run(&[
+        "settings",
+        "import",
+        "--format",
+        "python",
+        "--source",
+        source.to_str().unwrap(),
+        "--destination",
+        target.to_str().unwrap(),
+    ]);
+    assert!(again.status.success(), "{}", stderr(&again));
+    assert_eq!(
+        fs::read_dir(&rust_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains("pre-python-import"))
+            .count(),
+        1
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&source_backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}

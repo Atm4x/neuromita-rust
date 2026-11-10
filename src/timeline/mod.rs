@@ -362,6 +362,19 @@ impl SessionTimeline {
         Ok(())
     }
 
+    pub(crate) fn assert_knowledge_turn(
+        &self,
+        turn: TimelineTurn,
+        latest: bool,
+    ) -> Result<(), domain::TimelineError> {
+        self.assert_turn(turn)?;
+        if latest && self.store.branch(turn.selection.branch_id)?.head_sequence != turn.context_head
+        {
+            return Err(domain::TimelineError::ConcurrentWrite);
+        }
+        Ok(())
+    }
+
     pub(crate) fn assert_turn(&self, turn: TimelineTurn) -> Result<(), domain::TimelineError> {
         self.workspace.assert_current(self.store.as_ref(), turn)?;
         #[cfg(feature = "sqlite-system")]

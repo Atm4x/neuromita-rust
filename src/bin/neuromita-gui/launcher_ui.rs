@@ -18,7 +18,9 @@ impl LauncherUi {
                 window.set_launcher_inspected(true);
                 window.set_unity_installed(update.installed);
                 window.set_game_running(matches!(update.state, OwnedProcessState::Running { .. }));
-                window.set_notice(update.error.unwrap_or_default().into());
+                window.set_game_running_external(update.external_running);
+                window.set_launcher_busy(update.busy);
+                window.set_launcher_error(update.error.unwrap_or_default().into());
             });
         })?;
         Ok(Self { controller })

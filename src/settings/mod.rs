@@ -1,6 +1,9 @@
 mod instance_lease;
 mod migration;
 mod model;
+mod preset_activation;
+mod python_presets;
+mod python_schemas;
 mod speech;
 mod storage;
 mod transfer;
@@ -8,8 +11,20 @@ mod transfer;
 pub use crate::generation::PresetId;
 pub(crate) use instance_lease::SettingsInstanceLease;
 pub(crate) use migration::SettingsStartupMigration;
-pub use migration::{PythonSettingsMigration, RustSettingsMigration};
+pub use migration::{PythonSettingsMigration, PythonSettingsPreview, RustSettingsMigration};
 pub use model::*;
+pub use preset_activation::{
+    PresetActivation, PresetActivationError, PresetRecovery, PresetStorageLease,
+    PythonSettingsImportReview,
+};
+pub use python_presets::{
+    PythonPresetPreferencesReview, PythonPresetStage, PythonPresetStageError,
+    PythonPresetStagePreview,
+};
+pub use python_schemas::{
+    PythonSchemaAuditError, PythonSchemaDirectoryReview, PythonSchemaFileKind,
+    PythonSchemaFileReview,
+};
 pub use speech::*;
 pub(crate) use storage::LeasedJsonSettingsRepository;
 pub use storage::*;

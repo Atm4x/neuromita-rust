@@ -1099,11 +1099,17 @@ impl AiSupervisor {
         if let Some(expected) = expected_failed_generation {
             let status = self.status_snapshot();
             let previous = self.workers.lock().await.get(&key).cloned();
-            if !services.iter().all(|service| {
-                let state = status.service(*service);
-                state.generation == Some(expected) && state.phase == RuntimePhase::Failed
-            }) {
-                return Err(AiRuntimeError::ActivationSuperseded);
+            if services
+                .iter()
+                .any(|service| status.service(*service).generation != Some(expected))
+            {
+                return Err(AiRuntimeError::StaleGeneration);
+            }
+            if services
+                .iter()
+                .any(|service| status.service(*service).phase != RuntimePhase::Failed)
+            {
+                return Err(AiRuntimeError::WorkerNotFailed);
             }
             let previous = previous.ok_or(AiRuntimeError::ActivationSuperseded)?;
             let process = previous.lock().await;

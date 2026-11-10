@@ -34,6 +34,11 @@ use crate::{
 };
 
 pub(crate) trait ProviderDispatchFence: Send + Sync {
+    fn validate_knowledge(
+        &self,
+        turn: crate::timeline::selection::TimelineTurn,
+        latest: bool,
+    ) -> Result<(), String>;
     fn before_provider(
         &self,
         request: RequestId,
@@ -259,6 +264,11 @@ impl MessageHandler {
             response = async {
                 let query = LlmConversation::memory_query(&context);
                 let history_policy = settings.values.history_generation;
+                let checks_knowledge = !self.knowledge.is_lexical() || history_policy.mode != HistoryGenerationMode::Off;
+                let latest = matches!(message.at(), crate::timeline::ContextPosition::Latest);
+                if checks_knowledge {
+                    self.dispatch_fence.validate_knowledge(context.turn, latest).map_err(GenerationError::Response)?;
+                }
                 let joint_semantic = !self.knowledge.is_lexical()
                     && matches!(history_policy.mode, HistoryGenerationMode::Vector | HistoryGenerationMode::Fusion);
                 let joint_lexical = self.knowledge.is_lexical()
@@ -394,6 +404,9 @@ impl MessageHandler {
                             None => selected = Some(documents),
                         }
                     }
+                }
+                if checks_knowledge {
+                    self.dispatch_fence.validate_knowledge(context.turn, latest).map_err(GenerationError::Response)?;
                 }
                 let request = GenerationRequest::new(context, preset, selected)
                     .with_history_window(history_window)

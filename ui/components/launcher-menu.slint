@@ -4,6 +4,8 @@ import { I18n } from "../i18n.slint";
 
 export enum LauncherMenuAction {
     check-updates,
+    download-native-update,
+    install-native-update,
     install-unity,
     verify-unity,
     open-unity-folder,
@@ -13,7 +15,7 @@ export enum LauncherMenuAction {
 export component LauncherMenu inherits PopupWindow {
     callback chosen(LauncherMenuAction);
     width: 300px;
-    height: 167px;
+    height: 227px;
     close-policy: close-on-click-outside;
     Rectangle {
         width: 100%; height: 100%;
@@ -23,13 +25,15 @@ export component LauncherMenu inherits PopupWindow {
             padding: 4px; spacing: 0px;
             for item[index] in [
                 { action: LauncherMenuAction.check-updates, label: I18n.i18n("launcher.actions.check-updates", "Проверить обновления") },
+                { action: LauncherMenuAction.download-native-update, label: I18n.i18n("launcher.actions.download-native-update", "Скачать и проверить обновление") },
+                { action: LauncherMenuAction.install-native-update, label: I18n.i18n("launcher.actions.install-native-update", "Установить Rust-обновление и перезапустить") },
                 { action: LauncherMenuAction.install-unity, label: I18n.i18n("launcher.actions.install", "Установить / обновить Unity") },
                 { action: LauncherMenuAction.verify-unity, label: I18n.i18n("launcher.actions.verify", "Проверить файлы Unity") },
                 { action: LauncherMenuAction.open-unity-folder, label: I18n.i18n("launcher.actions.open-folder", "Открыть папку Unity") },
                 { action: LauncherMenuAction.update-settings, label: I18n.i18n("launcher.actions.update-settings", "Настройки обновлений") }
             ]: VerticalLayout {
                 padding: 0px; spacing: 0px;
-                if index == 3: Rectangle {
+                if index == 4: Rectangle {
                     height: 9px;
                     HorizontalLayout {
                         padding-left: 8px; padding-right: 8px;

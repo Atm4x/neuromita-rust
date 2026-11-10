@@ -20,8 +20,12 @@ pub enum SettingsTransferError {
     InvalidEnvelope(String),
     #[error("invalid settings values: {0}")]
     InvalidValue(String),
-    #[error("{format:?} settings migration is not implemented")]
-    NotImplemented { format: SettingsImportFormat },
+    #[error(
+        "Python settings need a target Rust settings profile; use PythonSettingsMigration::preview"
+    )]
+    PythonNeedsTarget,
+    #[error("Python settings have unmapped fields (explicit approval required): {0:?}")]
+    UnmappedPythonFields(Vec<String>),
 }
 
 impl From<SettingsTransferError> for SettingsError {

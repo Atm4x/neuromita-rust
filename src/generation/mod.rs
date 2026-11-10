@@ -9,6 +9,7 @@ pub mod multimodal;
 pub mod openai;
 mod presets;
 pub use credentials::{ApplicationPresetCredentials, CredentialReference, SecretKey};
+pub(crate) use presets::StoredPresets;
 mod provider;
 pub mod python_import;
 mod structured;

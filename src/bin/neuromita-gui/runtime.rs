@@ -39,7 +39,7 @@ use neuromita::{
         PresetSlot, native_download::NativeDownloadPresenter,
     },
     request::{CancelResult, RequestId},
-    settings::{AsrPreferences, PresetId, PresetSelection, TtsPreferences, Volume},
+    settings::{AsrPreferences, GuideLevel, PresetId, PresetSelection, TtsPreferences, Volume},
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -86,6 +86,7 @@ pub enum Command {
     NewPreset,
     UpdatePreset(PresetId, neuromita::generation::PresetConnectionEdit),
     DeletePreset(PresetId),
+    MovePreset(PresetId, i32),
     ActivePreset(PresetId),
     AssignPreset(CharacterId, PresetSlot, PresetSelection),
     AssignAllPresets(CharacterId, PresetSelection),
@@ -131,6 +132,10 @@ pub enum Command {
     SectionVisibility(neuromita::settings::SettingsArea, bool),
     HidePrivate(bool),
     StructuredDisplay(neuromita::settings::StructuredDisplayMode),
+    SetGuideLevel(GuideLevel),
+    SetGuidePage(u8),
+    SetGuideLanguage(neuromita::settings::Language),
+    CompleteGuide,
     SetToolOption(ToolOption, bool),
     SetToolDepth(u8),
     SetMemoryDedupEnabled(bool),
@@ -231,6 +236,8 @@ pub enum Update {
     },
     PresetCreated(PresetId, PresetRecord),
     AdminSaved,
+    GuideError(String),
+    GuideCompleted,
     PresetSaved(PresetId),
     AdminError(String),
     Stopped,
@@ -847,7 +854,33 @@ async fn observe(
                         Err(error) => publish(Update::AdminError(error)),
                     }
                 },
-                Some(command @ (Command::DeletePreset(_) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
+                Some(Command::CompleteGuide) => {
+                    let result = administration.settings.onboarding.guide_completed
+                        .set(true)
+                        .map_err(|error| error.to_string());
+                    let result = match result {
+                        Ok(()) => neuromita::settings::SettingsApi::flush().await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(()) => publish(Update::GuideCompleted),
+                        Err(error) => publish(Update::AdminError(error)),
+                    }
+                },
+                Some(command @ (Command::SetGuideLevel(_) | Command::SetGuidePage(_) | Command::SetGuideLanguage(_))) => {
+                    let result = super::settings::execute(administration, command);
+                    let result = match result {
+                        Ok(()) => neuromita::settings::SettingsApi::flush().await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(()) => publish(Update::AdminSaved),
+                        Err(error) => publish(Update::GuideError(error)),
+                    }
+                },
+                Some(command @ (Command::DeletePreset(_) | Command::MovePreset(..) | Command::ActivePreset(_) | Command::AssignPreset(..) | Command::AssignAllPresets(..) | Command::SelectPromptSet(..) | Command::VoiceInLauncher(_) | Command::VoiceInGame(_) | Command::VoiceName(_) | Command::SectionVisibility(..) | Command::HidePrivate(_) | Command::StructuredDisplay(_) | Command::SetToolOption(..) | Command::SetToolDepth(_) | Command::SetMemoryDedupEnabled(_) | Command::SetMemoryDedupThreshold(_) | Command::SaveTts(_) | Command::SaveAsr(..) | Command::SaveCharacterVoice(..) | Command::SelectAsrRecognizer(_))) => {
                     match super::settings::execute(administration, command) {
                         Ok(()) => publish(Update::AdminSaved),
                         Err(error) => publish(Update::AdminError(error)),
@@ -1631,28 +1664,6 @@ async fn character_debug_snapshot(api: &GuiPresenter, character: CharacterId) ->
             error: Some(error),
         },
     }
-}
-
-pub fn data_directory() -> Result<PathBuf, String> {
-    if let Some(directory) = std::env::var_os("NEUROMITA_DATA_DIR") {
-        if directory.is_empty() {
-            return Err("NEUROMITA_DATA_DIR must not be empty".into());
-        }
-        return Ok(directory.into());
-    }
-    #[cfg(windows)]
-    if let Some(directory) = std::env::var_os("APPDATA") {
-        return Ok(PathBuf::from(directory).join("NeuroMita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(directory) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(directory).join("neuromita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(directory) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(directory).join(".config/neuromita"));
-    }
-    Err("Specify --data-dir or NEUROMITA_DATA_DIR".into())
 }
 
 struct MemoryWatch {

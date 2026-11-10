@@ -10,12 +10,68 @@ use super::{
     presenter::{
         ComponentPreview, HomePreview, LauncherAction, Page, ShellCommand, ShellPresenter,
     },
-    view::{AppWindow, ComponentCard, I18n, LauncherMenuAction, LocaleOption, PageId, ReleaseItem},
+    update_check::{NativeUpdateChecker, NativeUpdateCompletion},
+    view::{
+        AppWindow, ComponentCard, GuideContentsEntry, GuideFocusTarget, GuideSectionEntry, I18n,
+        LauncherMenuAction, LocaleOption, PageId, ReleaseItem, SettingsUi,
+    },
     voice::VoicePreviewMode,
 };
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    let result = run_inner();
+    neuromita::diagnostics::boundary(
+        neuromita::diagnostics::Boundary::GuiFinish,
+        if result.is_ok() {
+            neuromita::diagnostics::Outcome::Completed
+        } else {
+            neuromita::diagnostics::Outcome::Failed
+        },
+    );
+    result
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScheduledShutdownError {
+    Cancelled {
+        shutdown: String,
+    },
+    PendingTransaction {
+        shutdown: String,
+        cancellation: String,
+    },
+}
+
+fn request_scheduled_shutdown<Q, C>(
+    quit: impl FnOnce() -> Result<(), Q>,
+    cancel: impl FnOnce() -> Result<(), C>,
+) -> Result<(), ScheduledShutdownError>
+where
+    Q: std::fmt::Display,
+    C: std::fmt::Display,
+{
+    let Err(shutdown) = quit() else {
+        return Ok(());
+    };
+    let shutdown = shutdown.to_string();
+    match cancel() {
+        Ok(()) => Err(ScheduledShutdownError::Cancelled { shutdown }),
+        Err(cancellation) => Err(ScheduledShutdownError::PendingTransaction {
+            shutdown,
+            cancellation: cancellation.to_string(),
+        }),
+    }
+}
+
+fn run_inner() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
+    let diagnostics = neuromita::diagnostics::init().map_err(std::io::Error::other)?;
+    let root = neuromita::portable::PortableDataRoot::resolve(Some(&options.data_directory))?;
+    diagnostics.attach(&root)?;
+    neuromita::diagnostics::boundary(
+        neuromita::diagnostics::Boundary::GuiStart,
+        neuromita::diagnostics::Outcome::Started,
+    );
     let mut catalog = Localizer::bundled(FallbackPolicy::EnglishThenSource)?;
     if let Some(directory) = &options.directory {
         catalog.reload_directory(directory)?;
@@ -28,11 +84,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .renderer_name("femtovg".into())
         .select()?;
     let window = AppWindow::new()?;
-    let _desktop = super::sandbox::attach(
-        &window,
-        options.data_directory.clone(),
-        options.model.clone(),
-    )?;
+    let onboarding = neuromita::onboarding::startup_state(&options.data_directory)?;
+    let requires_consent = onboarding.requires_consent;
+    window.set_onboarding_required(requires_consent);
+    window.set_onboarding_guide_visible(onboarding.requires_guide);
+    let initial_code = options.locale.as_str();
+    window.set_onboarding_language(initial_code.into());
+    window.set_onboarding_eula_text(neuromita::onboarding::eula_text(initial_code).into());
+    window.set_onboarding_guide_level(onboarding.guide_level.index());
+    window.set_onboarding_guide_page(i32::from(onboarding.guide_page));
+    update_guide(&window, i32::from(onboarding.guide_page));
+    let wiki_history = Rc::new(RefCell::new(super::wiki::WikiHistory::new(initial_code)));
+    super::wiki::render(&window, &wiki_history.borrow());
+    let desktop = Rc::new(RefCell::new(None));
+    if !requires_consent {
+        *desktop.borrow_mut() = Some(super::sandbox::attach(
+            &window,
+            options.data_directory.clone(),
+            options.model.clone(),
+        )?);
+    }
     let catalog = Rc::new(RefCell::new(catalog));
     window
         .global::<I18n>()
@@ -67,6 +138,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         super::asr::preview(&window);
     }
 
+    let reopen_guide_directory = options.data_directory.clone();
     let weak = window.as_weak();
     let dispatch = Rc::new(move |command| {
         let Some(window) = weak.upgrade() else {
@@ -108,6 +180,264 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         presenter.dispatch(command);
         render(&window, &presenter, &catalog.borrow());
     });
+    let reopen_window = window.as_weak();
+    window.on_onboarding_guide_reopen(move || {
+        let Some(window) = reopen_window.upgrade() else {
+            return;
+        };
+        match neuromita::onboarding::guide_reopen_position(&reopen_guide_directory) {
+            Ok((level, page)) => {
+                reset_guide_image_view(&window);
+                sync_guide_position(&window, level, page);
+                window.set_onboarding_guide_visible(true);
+            }
+            Err(error) => window.set_notice(format!("Cannot open Guide: {error}").into()),
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_open_article(move |id| {
+        let Some(window) = wiki_window.upgrade() else {
+            return;
+        };
+        let mut history = wiki_controller.borrow_mut();
+        if history.open(&id) {
+            super::wiki::render(&window, &history);
+        } else {
+            window.set_notice(format!("Unknown Wiki article: {id}").into());
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_back(move || {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            history.back();
+            super::wiki::render(&window, &history);
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_forward(move || {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            history.forward();
+            super::wiki::render(&window, &history);
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_change_language(move |code| {
+        if let Some(window) = wiki_window.upgrade() {
+            let mut history = wiki_controller.borrow_mut();
+            if history.set_language(&code) {
+                super::wiki::render(&window, &history);
+            }
+        }
+    });
+    let wiki_window = window.as_weak();
+    let wiki_controller = wiki_history.clone();
+    window.on_wiki_open_link(move |url| {
+        use neuromita::onboarding::wiki::{self, WikiLink};
+        let Some(window) = wiki_window.upgrade() else {
+            return;
+        };
+        match wiki::resolve_link(&url) {
+            Ok(WikiLink::Article { id, anchor }) => {
+                let mut history = wiki_controller.borrow_mut();
+                history.open(id);
+                super::wiki::render(&window, &history);
+                if anchor.is_some() {
+                    window.set_notice("Wiki anchors are not yet supported".into());
+                }
+            }
+            Ok(WikiLink::AppHome) => window.invoke_navigate(PageId::Home),
+            Ok(WikiLink::AppSandbox) => window.invoke_navigate(PageId::Sandbox),
+            Ok(WikiLink::AppSettings) => window.invoke_navigate(PageId::Settings),
+            Ok(WikiLink::AppSettingsSection(target)) => {
+                let (section, open_rag) = wiki_settings_section(target);
+                let settings = window.global::<SettingsUi>();
+                settings.set_section(section);
+                if open_rag {
+                    settings.set_models_rag_open(true);
+                }
+                window.invoke_navigate(PageId::Settings);
+            }
+            Ok(WikiLink::External(link)) => window.invoke_external_link(link.into()),
+            Err(error) => {
+                window.set_notice(format!("Wiki link unsupported: {error:?}").into());
+            }
+        }
+    });
+    let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
+    window.on_onboarding_guide_navigate(move |index| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide position cannot be saved until Core starts".into());
+            return;
+        };
+        let level = neuromita::onboarding::guide::GuideLevel::from_index(
+            window.get_onboarding_guide_level(),
+        );
+        let page = index.clamp(0, (neuromita::onboarding::guide::count(level) - 1) as i32) as u8;
+        match runtime
+            .commands
+            .try_send(super::runtime::Command::SetGuidePage(page))
+        {
+            Ok(()) => update_guide(&window, i32::from(page)),
+            Err(error) => {
+                window.set_notice(format!("Failed to queue Guide position: {error}").into())
+            }
+        }
+    });
+    let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
+    window.on_onboarding_guide_finish(move || {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide completion requires a running Core".into());
+            return;
+        };
+        if let Err(error) = runtime
+            .commands
+            .try_send(super::runtime::Command::CompleteGuide)
+        {
+            window.set_notice(format!("Failed to save Guide completion: {error}").into());
+        }
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_select_step(move |number| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        set_guide_focus(&window, number);
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_select_image_mode(move |mode| {
+        if let Some(window) = guide_window.upgrade() {
+            if (0..=2).contains(&mode) {
+                window.set_onboarding_guide_sizing_mode(mode);
+                window.set_onboarding_guide_zoom(1.0);
+                window.set_onboarding_guide_pan_x(0.0);
+                window.set_onboarding_guide_pan_y(0.0);
+            }
+        }
+    });
+    let guide_window = window.as_weak();
+    window.on_onboarding_guide_link_activated(move |link| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        use neuromita::onboarding::guide::{self, GuideLevel};
+        let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+        let Some(page) = guide::page(level, window.get_onboarding_guide_page() as usize) else {
+            return;
+        };
+        if let Some(number) = page.step_from_link(&link) {
+            set_guide_focus(&window, i32::from(number));
+        }
+    });
+    let guide_window = window.as_weak();
+    let guide_runtime = desktop.clone();
+    window.on_onboarding_guide_select_level(move |index| {
+        let Some(window) = guide_window.upgrade() else {
+            return;
+        };
+        let level = neuromita::onboarding::guide::GuideLevel::from_index(index);
+        if level.index() == window.get_onboarding_guide_level() {
+            return;
+        }
+        let runtime = guide_runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            window.set_notice("Guide settings are unavailable until the runtime starts".into());
+            return;
+        };
+        if let Err(error) = runtime
+            .commands
+            .try_send(super::runtime::Command::SetGuideLevel(level))
+        {
+            window.set_notice(format!("Failed to queue Guide level change: {error}").into());
+        }
+    });
+    let language_window = window.as_weak();
+    let language_runtime = desktop.clone();
+    let language_dispatch = dispatch.clone();
+    window.on_onboarding_language_selected(move |code| {
+        let Some(window) = language_window.upgrade() else {
+            return;
+        };
+        let language = match code.as_str() {
+            "ru" => neuromita::settings::Language::Russian,
+            "en" => neuromita::settings::Language::English,
+            _ => {
+                window.set_notice("Unsupported Guide language".into());
+                return;
+            }
+        };
+        if !window.get_onboarding_required() {
+            let runtime = language_runtime.borrow();
+            let Some(runtime) = runtime.as_ref() else {
+                window.set_notice("Guide language cannot be saved until Core starts".into());
+                return;
+            };
+            if let Err(error) = runtime
+                .commands
+                .try_send(super::runtime::Command::SetGuideLanguage(language))
+            {
+                window.set_notice(format!("Failed to queue Guide language: {error}").into());
+                return;
+            }
+            if let Ok(locale) = LocaleId::new(&code) {
+                language_dispatch(ShellCommand::SelectLanguage(locale));
+            }
+        }
+        if window.get_onboarding_language() != code {
+            reset_guide_image_view(&window);
+        }
+        window.set_onboarding_language(code.clone());
+        window.set_onboarding_eula_text(neuromita::onboarding::eula_text(&code).into());
+        update_guide(&window, window.get_onboarding_guide_page());
+    });
+    let accept_window = window.as_weak();
+    let accept_directory = options.data_directory.clone();
+    let accept_model = options.model.clone();
+    let accept_desktop = desktop.clone();
+    let accept_dispatch = dispatch.clone();
+    window.on_onboarding_accept(move || {
+        let Some(window) = accept_window.upgrade() else {
+            return;
+        };
+        let code = window.get_onboarding_language();
+        if let Err(error) = neuromita::onboarding::accept(&accept_directory, &code) {
+            window.set_notice(format!("Не удалось сохранить согласие: {error}").into());
+            return;
+        }
+        window.set_onboarding_required(false);
+        update_guide(&window, 0);
+        window.set_onboarding_guide_visible(true);
+        match super::sandbox::attach(&window, accept_directory.clone(), accept_model.clone()) {
+            Ok(runtime) => {
+                *accept_desktop.borrow_mut() = Some(runtime);
+            }
+            Err(error) => window.set_notice(error.to_string().into()),
+        }
+        if let Ok(locale) = LocaleId::new(&code) {
+            accept_dispatch(ShellCommand::SelectLanguage(locale));
+        }
+    });
+    let reject_window = window.as_weak();
+    window.on_onboarding_reject(move || {
+        if let Some(window) = reject_window.upgrade() {
+            let _ = window.hide();
+        }
+    });
     let handler = dispatch.clone();
     let nav_window = window.as_weak();
     window.on_navigate(move |page| {
@@ -141,11 +471,80 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let notice = launcher_for_play.borrow_mut().toggle_play();
         handler(ShellCommand::LauncherFeedback(notice));
     });
+    let update_checker = Rc::new(NativeUpdateChecker::new(&window));
+    let finished_checker = update_checker.clone();
+    let update_handler = dispatch.clone();
+    let install_directory = root.path().to_path_buf();
+    window.on_native_update_finished(move || {
+        let Some(completion) = finished_checker.take_result() else {
+            return;
+        };
+        if let NativeUpdateCompletion::InstallPrepared(Ok(
+            neuromita::updater::install::NativeInstallOutcome::Prepared { .. },
+        )) = &completion
+        {
+            let handoff = neuromita::portable::PortableDataRoot::resolve(Some(&install_directory))
+                .map_err(|error| error.to_string())
+                .and_then(|data_root| {
+                    neuromita::updater::install::schedule_prepared_native_update(&data_root)
+                        .map_err(|error| error.to_string())?;
+                    update_handler(ShellCommand::LauncherFeedback(
+                        super::update_check::handoff_notice(),
+                    ));
+                    Ok(request_scheduled_shutdown(slint::quit_event_loop, || {
+                        neuromita::updater::install::cancel_scheduled_native_update(&data_root)
+                    }))
+                });
+            let notice = match handoff {
+                Ok(Ok(())) => None,
+                Ok(Err(ScheduledShutdownError::Cancelled { shutdown })) => {
+                    Some(super::update_check::handoff_cancelled_notice(shutdown))
+                }
+                Ok(Err(ScheduledShutdownError::PendingTransaction {
+                    shutdown,
+                    cancellation,
+                })) => Some(super::update_check::handoff_pending_notice(
+                    shutdown,
+                    cancellation,
+                )),
+                Err(error) => Some(super::update_check::install_error_notice(error)),
+            };
+            if let Some(notice) = notice {
+                update_handler(ShellCommand::LauncherFeedback(notice));
+            }
+        } else {
+            update_handler(ShellCommand::LauncherFeedback(
+                super::update_check::completion_notice(completion),
+            ));
+        }
+    });
     let handler = dispatch.clone();
     let launcher_for_action = launcher.clone();
+    let download_directory = root.path().to_path_buf();
     window.on_launcher_action(move |action| {
         let action = launcher_action(action);
         match action {
+            LauncherAction::CheckUpdates => {
+                let notice = match update_checker.check() {
+                    Ok(()) => super::update_check::started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            LauncherAction::DownloadNativeUpdate => {
+                let notice = match update_checker.download(download_directory.clone()) {
+                    Ok(()) => super::update_check::download_started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
+            LauncherAction::InstallNativeUpdate => {
+                let notice = match update_checker.install(download_directory.clone()) {
+                    Ok(()) => super::update_check::install_started_notice(),
+                    Err(error) => super::update_check::start_error_notice(error),
+                };
+                handler(ShellCommand::LauncherFeedback(notice));
+            }
             LauncherAction::OpenUnityFolder => {
                 let notice = launcher_for_action.borrow().open_location();
                 handler(ShellCommand::LauncherFeedback(notice));
@@ -164,6 +563,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             window.set_notice(error.into());
         }
     });
+    let readiness_window = window.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
+        if let Some(window) = readiness_window.upgrade()
+            && window.window().is_visible()
+            && let Err(error) = neuromita::updater::handoff::acknowledge_gui_ready()
+        {
+            window.set_notice(format!("Update startup confirmation failed: {error}").into());
+        }
+    });
     let result = window.run();
     let shutdown = launcher.borrow_mut().shutdown();
     result?;
@@ -171,11 +579,136 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub(super) fn sync_guide_position(
+    window: &AppWindow,
+    level: neuromita::onboarding::guide::GuideLevel,
+    page: u8,
+) {
+    use neuromita::onboarding::guide;
+
+    let level_changed = window.get_onboarding_guide_level() != level.index();
+    if level_changed {
+        window.set_onboarding_guide_level(level.index());
+        reset_guide_image_view(window);
+    }
+    let page = i32::from(page).min((guide::count(level) - 1) as i32);
+    if level_changed || window.get_onboarding_guide_page() != page {
+        update_guide(window, page);
+    }
+}
+
+fn reset_guide_image_view(window: &AppWindow) {
+    window.set_onboarding_guide_sizing_mode(0);
+    window.set_onboarding_guide_zoom(1.0);
+    window.set_onboarding_guide_pan_x(0.0);
+    window.set_onboarding_guide_pan_y(0.0);
+    window.set_onboarding_guide_focus_step(0);
+    window.set_onboarding_guide_focus_x(0.5);
+    window.set_onboarding_guide_focus_y(0.5);
+}
+
+fn set_guide_focus(window: &AppWindow, number: i32) {
+    use neuromita::onboarding::guide::{self, GuideLevel};
+
+    let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+    let Some(page) = guide::page(level, window.get_onboarding_guide_page() as usize) else {
+        return;
+    };
+    let chosen = u8::try_from(number).ok().and_then(|number| {
+        page.focus_steps()
+            .iter()
+            .find(|target| target.number == number)
+    });
+    match chosen {
+        Some(step) => {
+            window.set_onboarding_guide_pan_x(0.0);
+            window.set_onboarding_guide_pan_y(0.0);
+            window.set_onboarding_guide_focus_step(i32::from(step.number));
+            window.set_onboarding_guide_focus_x(step.rect.left + step.rect.width / 2.0);
+            window.set_onboarding_guide_focus_y(step.rect.top + step.rect.height / 2.0);
+            window.set_onboarding_guide_zoom(window.get_onboarding_guide_zoom().max(1.35));
+        }
+        None => {
+            window.set_onboarding_guide_focus_step(0);
+            window.set_onboarding_guide_focus_x(0.5);
+            window.set_onboarding_guide_focus_y(0.5);
+        }
+    }
+}
+
+fn update_guide(window: &AppWindow, requested_index: i32) {
+    use neuromita::onboarding::guide::{self, GuideLevel};
+
+    let level = GuideLevel::from_index(window.get_onboarding_guide_level());
+    let count = guide::count(level);
+    let index = requested_index.clamp(0, (count - 1) as i32);
+    let page = guide::page(level, index as usize).expect("guide has a visible page");
+    let language = window.get_onboarding_language();
+    if window.get_onboarding_guide_page() != index {
+        reset_guide_image_view(window);
+    }
+    window.set_onboarding_guide_count(count as i32);
+    window.set_onboarding_guide_page(index);
+    window.set_onboarding_guide_title(page.title(&language).into());
+    window.set_onboarding_guide_description(page.description(&language).into());
+    window.set_onboarding_guide_description_rich(
+        slint::StyledText::from_markdown(&page.description_markdown(&language))
+            .expect("static Guide description Markdown must be valid"),
+    );
+    window.set_onboarding_guide_image(page.image_key.into());
+    window.set_onboarding_guide_wiki_target(page.wiki_target.unwrap_or_default().into());
+    let crop = page.image_crop();
+    window.set_onboarding_guide_crop_left(crop.left);
+    window.set_onboarding_guide_crop_top(crop.top);
+    window.set_onboarding_guide_crop_right(crop.right);
+    window.set_onboarding_guide_crop_bottom(crop.bottom);
+    let targets = page
+        .focus_steps()
+        .iter()
+        .map(|step| GuideFocusTarget {
+            number: i32::from(step.number),
+            left: step.rect.left,
+            top: step.rect.top,
+            width: step.rect.width,
+            height: step.rect.height,
+        })
+        .collect::<Vec<_>>();
+    window.set_onboarding_guide_targets(ModelRc::new(VecModel::from(targets)));
+    let sections = guide::sections(level)
+        .into_iter()
+        .map(|section| GuideSectionEntry {
+            first: section.first_index as i32,
+            last: section.last_index as i32,
+            title: section.kind.title(&language).into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_onboarding_guide_sections(ModelRc::new(VecModel::from(sections)));
+    let contents = guide::pages(level)
+        .enumerate()
+        .map(|(index, page)| GuideContentsEntry {
+            index: index as i32,
+            title: page.title(&language).into(),
+            section: page.section().title(&language).into(),
+        })
+        .collect::<Vec<_>>();
+    window.set_onboarding_guide_contents(ModelRc::new(VecModel::from(contents)));
+}
+
 fn render(window: &AppWindow, presenter: &ShellPresenter, catalog: &Localizer) {
     let localize =
         |text: &LocalizedText| display_translation(catalog.resolve(presenter.locale(), text));
     let translations = window.global::<I18n>();
     translations.set_locale(presenter.locale().as_str().into());
+    if !window.get_onboarding_required() {
+        if !window.get_onboarding_guide_visible() {
+            let locale = presenter.locale().as_str();
+            if window.get_onboarding_language().to_string() != locale {
+                window.set_onboarding_language(locale.into());
+                reset_guide_image_view(window);
+            }
+        }
+        update_guide(window, window.get_onboarding_guide_page());
+    }
     translations.set_revision((catalog.revision() % i32::MAX as u64) as i32);
     let languages = catalog
         .languages()
@@ -246,7 +779,7 @@ impl Options {
         let mut options = Self {
             directory: None,
             locale: LocaleId::russian(),
-            data_directory: super::runtime::data_directory()?,
+            data_directory: PathBuf::new(),
             model: None,
             sandbox: false,
             voice_preview: None,
@@ -254,6 +787,8 @@ impl Options {
             unity_directory: None,
             launcher_config: None,
         };
+        let mut explicit_data_directory: Option<PathBuf> = None;
+        let mut explicit_language = false;
         let mut arguments = std::env::args_os().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
@@ -295,7 +830,7 @@ impl Options {
                     if directory.is_empty() {
                         return Err("--data-dir must not be empty".into());
                     }
-                    options.data_directory = directory.into();
+                    explicit_data_directory = Some(directory.into());
                 }
                 Some("--translations-dir") => {
                     options.directory = Some(
@@ -306,6 +841,7 @@ impl Options {
                     )
                 }
                 Some("--language") => {
+                    explicit_language = true;
                     options.locale = LocaleId::new(
                         arguments
                             .next()
@@ -321,6 +857,21 @@ impl Options {
                 }
             }
         }
+        let root =
+            neuromita::portable::PortableDataRoot::resolve(explicit_data_directory.as_deref())?;
+        root.ensure_writable()?;
+        options.data_directory = root.path().to_path_buf();
+        if !explicit_language {
+            let path = options.data_directory.join("settings.json");
+            if path.exists() {
+                use neuromita::settings::{JsonSettingsRepository, Language, SettingsRepository};
+                let stored = JsonSettingsRepository::new(path).load()?;
+                options.locale = match stored.settings.interface.language {
+                    Language::Russian => LocaleId::russian(),
+                    Language::English => LocaleId::english(),
+                };
+            }
+        }
         Ok(options)
     }
 }
@@ -328,12 +879,28 @@ impl Options {
 fn launcher_action(action: LauncherMenuAction) -> LauncherAction {
     match action {
         LauncherMenuAction::CheckUpdates => LauncherAction::CheckUpdates,
+        LauncherMenuAction::DownloadNativeUpdate => LauncherAction::DownloadNativeUpdate,
+        LauncherMenuAction::InstallNativeUpdate => LauncherAction::InstallNativeUpdate,
         LauncherMenuAction::InstallUnity => LauncherAction::InstallUnity,
         LauncherMenuAction::VerifyUnity => LauncherAction::VerifyUnity,
         LauncherMenuAction::OpenUnityFolder => LauncherAction::OpenUnityFolder,
         LauncherMenuAction::UpdateSettings => LauncherAction::UpdateSettings,
     }
 }
+fn wiki_settings_section(target: neuromita::onboarding::wiki::WikiSettingsSection) -> (i32, bool) {
+    use neuromita::onboarding::wiki::WikiSettingsSection;
+    match target {
+        WikiSettingsSection::Api => (1, false),
+        WikiSettingsSection::Characters => (2, false),
+        WikiSettingsSection::Voice => (3, false),
+        WikiSettingsSection::Language => (4, false),
+        WikiSettingsSection::Microphone => (5, false),
+        WikiSettingsSection::Models => (8, false),
+        WikiSettingsSection::ModelsRag => (8, true),
+        WikiSettingsSection::Screen => (9, false),
+    }
+}
+
 fn from_view(page: PageId) -> Page {
     match page {
         PageId::Home => Page::Home,

@@ -168,22 +168,37 @@ impl LauncherSession {
             return Err(LauncherError::NotRunning);
         };
         let executable = owned.executable.clone();
-        if let Err(error) = owned.child.kill() {
-            if let Ok(Some(status)) = owned.child.try_wait() {
-                self.owned = None;
-                self.identity = None;
-                self.state = OwnedProcessState::Finished {
-                    exit_code: status.code(),
-                    requested_stop: true,
-                };
-                return Ok(self.state.clone());
+        #[cfg(windows)]
+        let graceful_status = if super::process::request_owned_window_close(owned.pid) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match owned.child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    _ => break None,
+                }
             }
-            return Err(classify_io("stopping owned game", &executable, error));
-        }
-        let status = owned
-            .child
-            .wait()
-            .map_err(|error| classify_io("waiting for owned game", &executable, error))?;
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let graceful_status: Option<std::process::ExitStatus> = None;
+
+        let status = if let Some(status) = graceful_status {
+            status
+        } else if let Err(error) = owned.child.kill() {
+            match owned.child.try_wait() {
+                Ok(Some(status)) => status,
+                _ => return Err(classify_io("stopping owned game", &executable, error)),
+            }
+        } else {
+            owned
+                .child
+                .wait()
+                .map_err(|error| classify_io("waiting for owned game", &executable, error))?
+        };
         self.owned = None;
         self.identity = None;
         self.state = OwnedProcessState::Finished {

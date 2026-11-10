@@ -491,7 +491,7 @@ export component SettingsPage inherits Rectangle {
                     language-selected(code) => { root.language-selected(code); }
                 }
                 if SettingsUi.section == 7: GameSettingsPage {}
-                if SettingsUi.section == 8: ModelsSettingsPage {}
+                if SettingsUi.section == 8: ModelsSettingsPage { rag-open <=> SettingsUi.models-rag-open; }
                 if SettingsUi.section == 9: ImagesSettingsPage {}
                 if SettingsUi.section > 9: VerticalLayout { padding: 2px; spacing: 12px; alignment: start;
                     SettingsLabel { text: I18n.i18n("settings.section-unavailable", "Этот раздел пока недоступен."); color: SettingsTheme.muted; }

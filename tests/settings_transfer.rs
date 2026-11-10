@@ -98,6 +98,7 @@ fn export_is_a_complete_canonical_envelope() {
             "characters",
             "interface",
             "memory",
+            "onboarding",
             "presets",
             "reminders",
             "speech",

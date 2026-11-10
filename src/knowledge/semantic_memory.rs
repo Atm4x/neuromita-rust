@@ -544,6 +544,7 @@ impl SemanticMemoryRetriever {
             .collect::<Vec<_>>();
         self.score_canonical_documents(character, &sources, query, None)
             .await
+            .map(|(space, scores, cost, _)| (space, scores, cost))
     }
 
     /// Score one caller-admitted Memory+History corpus using one query embedding.
@@ -566,9 +567,10 @@ impl SemanticMemoryRetriever {
                 )
             }))
             .collect::<Vec<_>>();
-        let (space, similarities, cost) = self
+        let (space, similarities, cost, barrier) = self
             .score_canonical_documents(character, &sources, query, Some(turn))
             .await?;
+        self.check_barrier(character, barrier)?;
         let (memory, history) = similarities.split_at(memories.len());
         Ok((space, memory.to_vec(), history.to_vec(), cost))
     }
@@ -582,7 +584,7 @@ impl SemanticMemoryRetriever {
         sources: &[(CachedSourceId, &str)],
         query: &str,
         turn: Option<TimelineTurn>,
-    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost), EmbeddingError> {
+    ) -> Result<(EmbeddingSpace, Vec<f64>, RetrievalCost, RetrievalBarrier), EmbeddingError> {
         let space = self.provider.space().clone();
         let mut cost = RetrievalCost {
             embedding_requests: 0,
@@ -617,7 +619,7 @@ impl SemanticMemoryRetriever {
             .unwrap_or_else(|poison| poison.into_inner())
             .track(character, turn, &keys)?;
         if sources.is_empty() {
-            return Ok((space, Vec::new(), cost));
+            return Ok((space, Vec::new(), cost, barrier));
         }
         let mut vectors: Vec<Option<Embedding>> = vec![None; sources.len()];
         let mut missing = Vec::new();
@@ -722,7 +724,25 @@ impl SemanticMemoryRetriever {
                 })
                 .collect(),
             cost,
+            barrier,
         ))
+    }
+
+    fn check_barrier(
+        &self,
+        character: CharacterId,
+        barrier: RetrievalBarrier,
+    ) -> Result<(), EmbeddingError> {
+        if self
+            .cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unchanged(character, barrier)
+        {
+            Ok(())
+        } else {
+            Err(EmbeddingError::StaleKnowledge)
+        }
     }
 
     async fn retrieve_admitted_with_fusion(
@@ -767,7 +787,7 @@ impl SemanticMemoryRetriever {
             .iter()
             .map(|record| (CachedSourceId::Memory(record.id), record.content.as_str()))
             .collect::<Vec<_>>();
-        let (space, similarities, cost) = self
+        let (space, similarities, cost, barrier) = self
             .score_canonical_documents(character, &sources, &query, turn)
             .await?;
         let mut ranked = memories.iter().zip(similarities).collect::<Vec<_>>();

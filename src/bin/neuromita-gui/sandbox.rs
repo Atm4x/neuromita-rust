@@ -720,6 +720,11 @@ pub(super) fn apply_with_pager(
             super::settings::render_character_debug(window, character, &fields, error.as_deref());
         }
         Update::Administration(snapshot) => {
+            super::binding::sync_guide_position(
+                window,
+                snapshot.settings.values.onboarding.guide_level,
+                snapshot.settings.values.onboarding.guide_page,
+            );
             super::settings::render(window, &snapshot);
             super::voice::render(window, &snapshot.settings.values.speech.tts);
             super::asr::render(window, &snapshot.settings.values.speech.asr);
@@ -732,6 +737,8 @@ pub(super) fn apply_with_pager(
                 .set_settings_error(error.into());
         }
         Update::AdminSaved => super::settings::saved(window, None),
+        Update::GuideError(error) => window.set_notice(format!("Guide not saved: {error}").into()),
+        Update::GuideCompleted => window.set_onboarding_guide_visible(false),
         Update::PresetSaved(id) => super::settings::saved(window, Some(id)),
         Update::Stopped => {
             super::ai_hub::stopped(window);

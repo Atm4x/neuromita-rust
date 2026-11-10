@@ -1,8 +1,11 @@
+import { ScrollView } from "std-widgets.slint";
 import { CharacterCatalog } from "characters/catalog.slint";
 import { MemoryUi, MemoryItem } from "sandbox/memory.slint";
 import { ConversationUi } from "sandbox/admin.slint";
 import { Theme, Icons } from "theme.slint";
 import { Label, ActionSurface } from "components/controls.slint";
+import { GuideMedia, GuideFocusTarget } from "components/guide-media.slint";
+import { GuideNavigator, GuideContentsEntry } from "components/guide-navigator.slint";
 import { Sidebar, PageId } from "components/sidebar.slint";
 import { HomePage, ComponentCard, ReleaseItem } from "pages/home.slint";
 import { AiHubPage } from "pages/ai-hub.slint";
@@ -12,13 +15,16 @@ import { SettingsPage, SettingsUi, PresetItem, PresetTemplateItem, CharacterPres
 import { VoiceUi } from "pages/voice.slint";
 import { AsrUi } from "pages/asr.slint";
 import { PlaceholderPage } from "pages/placeholder.slint";
+import { WikiReader, WikiArticleEntry } from "pages/wiki.slint";
 import { LauncherMenuAction } from "components/launcher-menu.slint";
 import { I18n, LocaleOption } from "i18n.slint";
 import { SandboxPage, ChatRow, ChatStatus } from "pages/sandbox.slint";
 import { ReleasesPage, ReleaseEntry } from "pages/releases.slint";
 import { AboutPage } from "pages/about.slint";
 
-export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus }
+export { NativeRevisionRow, NativeReleaseRow, HubModel, AiEngineUi, AiHardwareDevice, VoiceUi, AsrUi, CharacterCatalog, MemoryUi, MemoryItem, ConversationUi, SettingsUi, PresetItem, PresetTemplateItem, CharacterPresets, CharacterDebugItem, PageId, ComponentCard, ReleaseItem, ReleaseEntry, LauncherMenuAction, I18n, LocaleOption, ChatRow, ChatStatus, GuideFocusTarget, GuideContentsEntry, WikiArticleEntry }
+
+export struct GuideSectionEntry { first: int, last: int, title: string }
 
 export component AppWindow inherits Window {
     title: I18n.i18n("app.window.title", "Чат с NeuroMita");
@@ -32,6 +38,51 @@ export component AppWindow inherits Window {
     private property <bool> ai-hub-open: false;
     in property <string> version;
     in property <string> page-title;
+    in-out property <bool> onboarding-required: false;
+    in-out property <string> onboarding-language: "ru";
+    in property <string> onboarding-eula-text;
+    in-out property <bool> onboarding-guide-visible: false;
+    in-out property <int> onboarding-guide-page: 0;
+    in-out property <int> onboarding-guide-level: 0;
+    in property <int> onboarding-guide-count: 3;
+    in property <string> onboarding-guide-title;
+    in property <string> onboarding-guide-description;
+    in property <styled-text> onboarding-guide-description-rich;
+    callback onboarding-guide-link-activated(string);
+    in property <string> onboarding-guide-image;
+    in property <string> onboarding-guide-wiki-target;
+    in property <[WikiArticleEntry]> wiki-articles;
+    in property <string> wiki-current-article;
+    in property <string> wiki-current-title;
+    in property <styled-text> wiki-article-text;
+    in property <string> wiki-language: "ru";
+    in property <bool> wiki-can-back: false;
+    in property <bool> wiki-can-forward: false;
+    callback wiki-open-article(string);
+    callback wiki-open-link(string);
+    callback wiki-back();
+    callback wiki-forward();
+    callback wiki-change-language(string);
+    in-out property <float> onboarding-guide-zoom: 1.0;
+    in-out property <int> onboarding-guide-sizing-mode: 0;
+    in-out property <length> onboarding-guide-pan-x: 0px;
+    in-out property <length> onboarding-guide-pan-y: 0px;
+    callback onboarding-guide-select-image-mode(int);
+    in-out property <int> onboarding-guide-focus-step: 0;
+    in property <float> onboarding-guide-focus-x: 0.5;
+    in property <float> onboarding-guide-focus-y: 0.5;
+    in property <float> onboarding-guide-crop-left: 0.0;
+    in property <float> onboarding-guide-crop-top: 0.0;
+    in property <float> onboarding-guide-crop-right: 1.0;
+    in property <float> onboarding-guide-crop-bottom: 1.0;
+    in property <[GuideFocusTarget]> onboarding-guide-targets;
+    in property <[GuideSectionEntry]> onboarding-guide-sections;
+    in property <[GuideContentsEntry]> onboarding-guide-contents;
+    callback onboarding-guide-select-step(int);
+    callback onboarding-guide-navigate(int);
+    callback onboarding-guide-reopen();
+    callback onboarding-guide-finish();
+    callback onboarding-guide-select-level(int);
     in property <ComponentCard> backend;
     in property <ComponentCard> client;
     in property <[ReleaseItem]> releases;
@@ -44,9 +95,12 @@ export component AppWindow inherits Window {
     in property <bool> backend-selected;
     in property <bool> client-selected;
     in property <bool> game-running;
+    in property <bool> game-running-external;
+    in property <bool> launcher-busy;
     in property <bool> launcher-inspected;
     in property <bool> unity-installed;
     in property <string> notice;
+    in property <string> launcher-error;
     in property <[ChatRow]> chat-messages;
     in property <bool> chat-has-older;
     in property <bool> chat-older-loading;
@@ -105,6 +159,9 @@ export component AppWindow inherits Window {
     in-out property <string> chat-attachment-path;
     in-out property <string> chat-model-input;
     in-out property <bool> chat-follow-tail: true;
+    callback onboarding-language-selected(string);
+    callback onboarding-accept();
+    callback onboarding-reject();
     callback chat-send(string);
     callback chat-attach(string, string);
     callback chat-cancel(string);
@@ -125,6 +182,7 @@ export component AppWindow inherits Window {
     callback toggle-client();
     callback play();
     callback launcher-action(LauncherMenuAction);
+    callback native-update-finished();
     callback dismiss-notice();
     callback releases-refresh();
     callback external-link(string);
@@ -178,7 +236,7 @@ export component AppWindow inherits Window {
                 backend: { title: I18n.i18n("launcher.core.title", "Ядро Rust"), value: root.core-connected ? I18n.i18n("launcher.core.running", "Работает") : root.core-connecting ? I18n.i18n("launcher.core.starting", "Запускается…") : I18n.i18n("launcher.core.stopped", "Не запущен"), update: "" };
                 client: { title: root.client.title, value: !root.launcher-inspected ? I18n.i18n("launcher.install.checking", "Проверяется…") : root.unity-installed ? I18n.i18n("launcher.install.detected", "Установка обнаружена") : I18n.i18n("launcher.install.missing", "Не установлен"), update: "" };
                 releases: root.releases;
-                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running;
+                backend-selected: root.backend-selected; client-selected: root.client-selected; game-running: root.game-running; game-running-external: root.game-running-external; launcher-busy: root.launcher-busy;
                 toggle-backend => { root.toggle-backend(); }
                 toggle-client => { root.toggle-client(); }
                 play => { root.play(); }
@@ -217,9 +275,24 @@ export component AppWindow inherits Window {
             if !root.ai-hub-open && root.page == PageId.settings: SettingsPage {
                 width: parent.width; height: parent.height; connected: root.core-connected; connecting: root.core-connecting;
                 home => { root.navigate(PageId.home); }
-                wiki => { root.navigate(PageId.wiki); }
-                guide => { root.external-link("https://github.com/Atm4x/NeuroMita/wiki"); }
+                wiki => { root.wiki-open-article("index.md"); root.navigate(PageId.wiki); }
+                guide => { root.onboarding-guide-reopen(); }
                 language-selected(code) => { root.language-selected(code); }
+            }
+            if !root.ai-hub-open && root.page == PageId.wiki: WikiReader {
+                width: parent.width; height: parent.height;
+                articles: root.wiki-articles;
+                current-article: root.wiki-current-article;
+                current-title: root.wiki-current-title;
+                article-text: root.wiki-article-text;
+                language: root.wiki-language;
+                can-back: root.wiki-can-back;
+                can-forward: root.wiki-can-forward;
+                open-article(id) => { root.wiki-open-article(id); }
+                open-link(url) => { root.wiki-open-link(url); }
+                back => { root.wiki-back(); }
+                forward => { root.wiki-forward(); }
+                change-language(code) => { root.wiki-change-language(code); }
             }
             if !root.ai-hub-open && root.page == PageId.releases: ReleasesPage {
                 width: parent.width; height: parent.height;
@@ -232,21 +305,21 @@ export component AppWindow inherits Window {
                 width: parent.width; height: parent.height; version: root.version;
                 open-url(url) => { root.external-link(url); }
             }
-            if !root.ai-hub-open && root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings: PlaceholderPage {
+            if !root.ai-hub-open && root.page != PageId.home && root.page != PageId.sandbox && root.page != PageId.releases && root.page != PageId.about && root.page != PageId.settings && root.page != PageId.wiki: PlaceholderPage {
                 width: parent.width; height: parent.height;
                 title: root.page-title;
                 icon: root.page == PageId.settings ? Icons.settings : root.page == PageId.sandbox ? Icons.sandbox : root.page == PageId.releases ? Icons.releases : root.page == PageId.gallery ? Icons.gallery : root.page == PageId.wiki ? Icons.wiki : Icons.logs;
                 home => { root.navigate(PageId.home); }
             }
-            if root.notice != "": VerticalLayout {
+            if root.notice != "" || root.launcher-error != "": VerticalLayout {
                 width: 100%; height: 100%; padding-top: 24px; padding-left: 28px; padding-right: 28px; alignment: start;
                 HorizontalLayout { alignment: center;
                     Rectangle {
                         width: min(650px, parent.width); height: 64px;
                         border-radius: 14px; background: #0e101ff5; border-width: 1px; border-color: Theme.accent;
                         HorizontalLayout { padding-left: 18px; padding-right: 12px; spacing: 8px;
-                            Label { horizontal-stretch: 1; text: root.notice; wrap: word-wrap; }
-                            VerticalLayout { padding: 0px; alignment: center; width: 32px;
+                            Label { horizontal-stretch: 1; text: root.launcher-error != "" ? root.launcher-error : root.notice; wrap: word-wrap; }
+                            if root.launcher-error == "": VerticalLayout { padding: 0px; alignment: center; width: 32px;
                                 ActionSurface {
                                     width: 32px; height: 32px; label: I18n.i18n("common.dismiss", "Закрыть");
                                     Label { text: "×"; font-size: 22px; horizontal-alignment: center; }
@@ -254,6 +327,268 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.onboarding-guide-visible && !root.onboarding-required: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #080d19e8;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: min(parent.width - 50px, 920px); height: min(parent.height - 50px, 650px);
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            background: Theme.panel; border-width: 1px; border-color: Theme.border; border-radius: 18px;
+            VerticalLayout {
+                padding: 22px; spacing: 12px;
+                Text {
+                    text: root.onboarding-guide-title;
+                    color: Theme.text; font-size: 23px; font-weight: 700;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ActionSurface { width: 180px; height: 32px; label: "Quick start";
+                        selected: root.onboarding-guide-level == 0;
+                        background: root.onboarding-guide-level == 0 ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Быстрый старт" : "Quick start"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-level(0); }
+                    }
+                    ActionSurface { width: 180px; height: 32px; label: "Voice and input";
+                        selected: root.onboarding-guide-level == 1;
+                        background: root.onboarding-guide-level == 1 ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Голос и ввод" : "Voice & input"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-level(1); }
+                    }
+                    ActionSurface { width: 180px; height: 32px; label: "All features";
+                        selected: root.onboarding-guide-level == 2;
+                        background: root.onboarding-guide-level == 2 ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Все возможности" : "Everything"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-level(2); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language Russian";
+                        selected: root.onboarding-language == "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "RU"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("ru"); }
+                    }
+                    ActionSurface {
+                        width: 50px; height: 32px; label: "Guide language English";
+                        selected: root.onboarding-language != "ru";
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "EN"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("en"); }
+                    }
+                }
+                if root.onboarding-guide-sections.length > 0: HorizontalLayout {
+                    height: 30px; spacing: 6px;
+                    for section in root.onboarding-guide-sections: ActionSurface {
+                        horizontal-stretch: 1; min-width: 0px; height: 30px;
+                        label: section.title;
+                        selected: root.onboarding-guide-page >= section.first && root.onboarding-guide-page <= section.last;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label {
+                            text: section.title; horizontal-alignment: center;
+                            font-size: 11px; overflow: elide;
+                        }
+                        activated => { root.onboarding-guide-navigate(section.first); }
+                    }
+                }
+                GuideNavigator {
+                    entries: root.onboarding-guide-contents;
+                    current-index: root.onboarding-guide-page;
+                    language: root.onboarding-language;
+                    navigate(index) => { root.onboarding-guide-navigate(index); }
+                }
+                GuideMedia {
+                    vertical-stretch: 1;
+                    image-key: root.onboarding-guide-image;
+                    language: root.onboarding-language;
+                    description: root.onboarding-guide-title;
+                    zoom: root.onboarding-guide-zoom;
+                    sizing-mode: root.onboarding-guide-sizing-mode;
+                    pan-x <=> root.onboarding-guide-pan-x;
+                    pan-y <=> root.onboarding-guide-pan-y;
+                    crop-left: root.onboarding-guide-crop-left;
+                    crop-top: root.onboarding-guide-crop-top;
+                    crop-right: root.onboarding-guide-crop-right;
+                    crop-bottom: root.onboarding-guide-crop-bottom;
+                    steps: root.onboarding-guide-targets;
+                    focus-step: root.onboarding-guide-focus-step;
+                    focus-center-x: root.onboarding-guide-focus-x;
+                    focus-center-y: root.onboarding-guide-focus-y;
+                }
+                if root.onboarding-guide-targets.length > 0: HorizontalLayout {
+                    height: 30px; spacing: 5px;
+                    Text {
+                        text: root.onboarding-language == "ru" ? "Шаг:" : "Step:";
+                        color: Theme.muted; vertical-alignment: center; font-size: 12px;
+                    }
+                    for step in root.onboarding-guide-targets: ActionSurface {
+                        width: 30px; height: 28px;
+                        label: (root.onboarding-language == "ru" ? "Шаг " : "Step ") + step.number;
+                        selected: root.onboarding-guide-focus-step == step.number;
+                        background: root.onboarding-guide-focus-step == step.number ? Theme.selected : Theme.hover;
+                        Label {
+                            text: "" + step.number;
+                            horizontal-alignment: center;
+                        }
+                        activated => { root.onboarding-guide-select-step(step.number); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    if root.onboarding-guide-focus-step != 0: ActionSurface {
+                        width: 105px; height: 28px;
+                        label: "Clear image highlight"; background: Theme.hover;
+                        Label {
+                            text: root.onboarding-language == "ru" ? "Сбросить" : "Clear";
+                            horizontal-alignment: center;
+                        }
+                        activated => { root.onboarding-guide-select-step(0); }
+                    }
+                }
+                Rectangle {
+                    height: 165px; background: transparent;
+                    ScrollView {
+                        width: parent.width; height: parent.height; content-width: self.visible-width;
+                        StyledText {
+                            x: 10px; y: 8px; width: parent.width - 20px;
+                            height: self.preferred-height;
+                            text: root.onboarding-guide-description-rich;
+                            default-color: Theme.muted; link-color: Theme.accent-hover;
+                            default-font-size: 13px;
+                            link-clicked(url) => { root.onboarding-guide-link-activated(url); }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 145px; height: 38px; label: "Documentation"; background: Theme.hover;
+                        visible: root.onboarding-guide-wiki-target != "";
+                        Label { text: "Wiki / Help"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-visible = false; root.wiki-open-article(root.onboarding-guide-wiki-target); root.navigate(PageId.wiki); }
+                    }
+                    ActionSurface {
+                        width: 38px; height: 38px; label: "Zoom out";
+                        enabled: root.onboarding-guide-zoom > 1.0; background: Theme.hover;
+                        Label { text: "−"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-zoom = max(1.0, root.onboarding-guide-zoom - 0.25); }
+                    }
+                    ActionSurface {
+                        width: 62px; height: 38px; label: "Fit image";
+                        selected: root.onboarding-guide-sizing-mode == 0;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Вписать" : "Fit"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-image-mode(0); }
+                    }
+                    ActionSurface {
+                        width: 53px; height: 38px; label: "Fit image width";
+                        selected: root.onboarding-guide-sizing-mode == 1;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Шир." : "Width"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-image-mode(1); }
+                    }
+                    ActionSurface {
+                        width: 40px; height: 38px; label: "Actual image pixels";
+                        selected: root.onboarding-guide-sizing-mode == 2;
+                        background: self.selected ? Theme.selected : Theme.hover;
+                        Label { text: "1:1"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-select-image-mode(2); }
+                    }
+                    ActionSurface {
+                        width: 38px; height: 38px; label: "Zoom in";
+                        enabled: root.onboarding-guide-zoom < 6.0; background: Theme.hover;
+                        Label { text: "+"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-zoom = min(6.0, root.onboarding-guide-zoom + 0.25); }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    Text { text: (root.onboarding-guide-page + 1) + " / " + root.onboarding-guide-count; color: Theme.muted; vertical-alignment: center; }
+                    ActionSurface {
+                        width: 110px; height: 38px; label: "Previous";
+                        enabled: root.onboarding-guide-page > 0; background: Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Назад" : "Back"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-navigate(root.onboarding-guide-page - 1); }
+                    }
+                    ActionSurface {
+                        width: 124px; height: 38px; label: "Next"; background: Theme.selected;
+                        Label {
+                            text: root.onboarding-guide-page + 1 >= root.onboarding-guide-count ?
+                                (root.onboarding-language == "ru" ? "Завершить" : "Finish") :
+                                (root.onboarding-language == "ru" ? "Далее" : "Next");
+                            horizontal-alignment: center;
+                        }
+                        activated => {
+                            if root.onboarding-guide-page + 1 >= root.onboarding-guide-count { root.onboarding-guide-finish(); }
+                            else { root.onboarding-guide-navigate(root.onboarding-guide-page + 1); }
+                        }
+                    }
+                    ActionSurface {
+                        width: 105px; height: 38px; label: "Close"; background: Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Закрыть" : "Close"; horizontal-alignment: center; }
+                        activated => { root.onboarding-guide-visible = false; }
+                    }
+                }
+            }
+        }
+    }
+    if root.onboarding-required: Rectangle {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        background: #080d19ef;
+        TouchArea { width: parent.width; height: parent.height; }
+        Rectangle {
+            width: 900px; height: 630px; x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.panel; border-width: 1px; border-color: Theme.border;
+            border-radius: 18px;
+            VerticalLayout {
+                padding: 26px; spacing: 18px;
+                Text {
+                    text: root.onboarding-language == "ru" ? "Лицензионное соглашение пользователя" : "End User License Agreement";
+                    color: Theme.text; font-size: 23px; font-weight: 700;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionSurface {
+                        width: 105px; height: 38px; label: "Русский";
+                        selected: root.onboarding-language == "ru"; background: root.onboarding-language == "ru" ? Theme.selected : Theme.hover;
+                        Label { text: "Русский"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("ru"); }
+                    }
+                    ActionSurface {
+                        width: 105px; height: 38px; label: "English";
+                        selected: root.onboarding-language == "en"; background: root.onboarding-language == "en" ? Theme.selected : Theme.hover;
+                        Label { text: "English"; horizontal-alignment: center; }
+                        activated => { root.onboarding-language-selected("en"); }
+                    }
+                }
+                Rectangle {
+                    background: Theme.background; border-radius: 12px;
+                    vertical-stretch: 1;
+                    ScrollView {
+                        content-width: self.visible-width;
+                        Text {
+                            x: 14px; y: 14px; width: parent.width - 28px;
+                            height: self.preferred-height;
+                            text: root.onboarding-eula-text;
+                            color: Theme.text; font-size: 13px; wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    ActionSurface {
+                        width: 160px; height: 42px; label: "Reject"; background: Theme.hover;
+                        Label { text: root.onboarding-language == "ru" ? "Отклонить" : "Reject"; horizontal-alignment: center; }
+                        activated => { root.onboarding-reject(); }
+                    }
+                    ActionSurface {
+                        width: 160px; height: 42px; label: "Accept"; background: Theme.selected;
+                        Label { text: root.onboarding-language == "ru" ? "Принять" : "Accept"; horizontal-alignment: center; }
+                        activated => { root.onboarding-accept(); }
                     }
                 }
             }

@@ -66,6 +66,10 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .update_connection(id, record)
             .map_err(|e| e.to_string())?,
         Command::DeletePreset(id) => api.presets.delete(id).map_err(|e| e.to_string())?,
+        Command::MovePreset(id, step) => api
+            .presets
+            .move_one(id, step)
+            .map_err(|error| error.to_string())?,
         Command::ActivePreset(id) => {
             api.presets
                 .require_configured(id)
@@ -183,6 +187,24 @@ pub fn execute(api: &GuiPresenter, command: Command) -> Result<(), String> {
             .interface
             .structured_display
             .set(mode)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuideLevel(level) => api
+            .settings
+            .onboarding
+            .guide_level
+            .set(level)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuidePage(page) => api
+            .settings
+            .onboarding
+            .guide_page
+            .set(page)
+            .map_err(|e| e.to_string())?,
+        Command::SetGuideLanguage(language) => api
+            .settings
+            .interface
+            .language
+            .set(language)
             .map_err(|e| e.to_string())?,
         Command::SetToolOption(option, enabled) => {
             let mut settings = api.settings.tools.state.get();
@@ -553,6 +575,17 @@ pub fn bind(window: &AppWindow, dispatch: Rc<dyn Fn(Command)>) {
             match id(&value) {
                 Ok(id) => send(Command::DeletePreset(id)),
                 Err(error) => window.set_settings_error(error.into()),
+            }
+        }
+    });
+    let send = dispatch.clone();
+    let weak = window.as_weak();
+    settings.on_preset_move(move |value, step| {
+        if let Some(component) = weak.upgrade() {
+            let ui = component.global::<SettingsUi>();
+            match id(&value) {
+                Ok(id) => send(Command::MovePreset(id, step)),
+                Err(error) => ui.set_settings_error(error.into()),
             }
         }
     });
@@ -1087,4 +1120,33 @@ pub(super) fn provider_templates(
             available: provider.supported,
         })
         .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod preset_move_gui_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn slint_move_callback_dispatches_selected_id_and_direction() {
+        let window = AppWindow::new().expect("Slint test window");
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let events = Rc::clone(&captured);
+        bind(
+            &window,
+            Rc::new(move |command| events.borrow_mut().push(command)),
+        );
+        let settings = window.global::<SettingsUi>();
+        settings.invoke_preset_move("42".into(), -1);
+        settings.invoke_preset_move("42".into(), 1);
+        let commands = captured.borrow();
+        assert!(matches!(
+            commands.first(),
+            Some(Command::MovePreset(PresetId(42), -1))
+        ));
+        assert!(matches!(
+            commands.get(1),
+            Some(Command::MovePreset(PresetId(42), 1))
+        ));
+    }
 }

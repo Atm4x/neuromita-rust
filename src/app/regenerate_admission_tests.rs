@@ -2536,6 +2536,7 @@ async fn same_branch_character_handle_acceptance_survives_post_commit_cancel() {
         turn: context.turn,
         game: context.game_key,
         game_guard: context.game_guard,
+        require_exact_timeline_prefix: false,
     };
     let mut structured = crate::generation::StructuredResponse::spoken("generated response");
     structured.attitude_change = 3.0;

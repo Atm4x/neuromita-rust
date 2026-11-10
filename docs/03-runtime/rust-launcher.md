@@ -122,3 +122,11 @@ cargo test --locked --offline
 cargo clippy --locked --offline --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
+
+## D43 — наблюдаемый внешний процесс на главной странице Slint
+
+`LauncherController` раз в секунду сверяет `LauncherSession::status()` с уже проверенным executable установки. Внешний запуск фиксируется только по **точному пути executable**, а не по имени или PID чужой программы. Собственный запущенный `Child` сохраняет приоритет: даже при появлении второго процесса пользователь может остановить принадлежащий текущей сессии экземпляр. Принудительная команда Toggle дополнительно обновляет наблюдение немедленно.
+
+`LauncherUpdate.external_running` передаёт это состояние исключительно в GUI presentation: Home показывает «Игра запущена отдельно» (EN: `Game running separately`), блокирует собственную кнопку Play/Stop, но не пытается захватить или завершить внешний процесс. После выхода внешней игры очередной scan сбрасывает флаг. Данные об ownership по-прежнему не сохраняются; после перезапуска launcher внешний процесс остаётся только наблюдаемым, а не управляемым.
+
+Интеграционные тесты `controller_observes_external_game_and_never_claims_or_stops_it` и `controller_does_not_confuse_same_name_foreign_executable_with_installed_game` запускают настоящие исполняемые копии тестового helper: проверяют определение exact-path процесса, запрет захвата, сохранение жизни чужого процесса после отказа Toggle, возвращение UI в Idle после выхода процесса и невмешательство в одноимённый executable другой установки. На Windows этот сценарий требует нативного runner; Linux unit/integration недостаточно для Windows сертификации. Не проверены реальная Unity game window, Windows GUI mouse/keyboard E2E или graceful stop: они остаются открытыми критериями #43.

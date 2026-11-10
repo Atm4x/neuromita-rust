@@ -10,8 +10,9 @@ use std::{
 };
 
 use neuromita::launcher::{
-    ConfigStore, IdentityProbe, LaunchRequest, LauncherApi, LauncherConfig, LauncherError,
-    LauncherService, LocationOpener, OwnedProcessState, identity_for_pid,
+    ConfigStore, IdentityProbe, LaunchRequest, LauncherApi, LauncherCommand, LauncherConfig,
+    LauncherController, LauncherError, LauncherService, LocationOpener, OwnedProcessState,
+    identity_for_pid,
 };
 
 const HELPER_ENVIRONMENT: &str = "NEUROMITA_LAUNCHER_HELPER_MS";
@@ -335,6 +336,32 @@ fn already_running_is_rejected_and_stop_completes_the_owned_child() {
     assert_eq!(session.status().expect("post-stop status").identity, None);
 }
 
+#[cfg(windows)]
+#[test]
+fn headless_owned_child_has_a_forced_stop_fallback() {
+    let directory = TestDirectory::new("headless-stop");
+    let root = directory.path().join("install");
+    install_candidate(&root);
+    let mut session = installed_service(&root).session();
+    let started = session
+        .start_with(helper_request(30_000))
+        .expect("launch headless helper");
+    let pid = started.pid().expect("owned child pid");
+    let stopped = session.stop().expect("stop headless child");
+    assert!(matches!(
+        stopped,
+        OwnedProcessState::Finished {
+            requested_stop: true,
+            ..
+        }
+    ));
+    assert!(
+        identity_for_pid(pid)
+            .expect("identity after stop")
+            .is_none()
+    );
+}
+
 #[test]
 fn exact_install_running_outside_the_session_blocks_start_and_is_not_owned() {
     let directory = TestDirectory::new("external");
@@ -351,6 +378,107 @@ fn exact_install_running_outside_the_session_blocks_start_and_is_not_owned() {
     assert_eq!(
         external.child_mut().try_wait().expect("external status"),
         None
+    );
+}
+
+#[test]
+fn controller_observes_external_game_and_never_claims_or_stops_it() {
+    let directory = TestDirectory::new("controller-external");
+    let root = directory.path().join("install");
+    let candidate = install_candidate(&root);
+    let mut external = spawn_helper(&candidate, 30_000);
+    wait_for_identity(external.pid());
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut controller = LauncherController::start(LauncherConfig::new(&root), move |update| {
+        let _ = sender.send(update);
+    })
+    .expect("create controller");
+
+    let mut observed = false;
+    wait_until(Duration::from_secs(7), || {
+        for update in receiver.try_iter() {
+            assert!(!matches!(update.state, OwnedProcessState::Running { .. }));
+            if update.external_running {
+                assert!(update.installed);
+                observed = true;
+            }
+        }
+        observed
+    });
+
+    controller
+        .submit(LauncherCommand::Toggle)
+        .expect("submit toggle");
+    let mut refused = false;
+    wait_until(Duration::from_secs(7), || {
+        for update in receiver.try_iter() {
+            if update
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("already running outside"))
+            {
+                assert!(update.external_running);
+                refused = true;
+            }
+        }
+        refused
+    });
+    assert!(
+        external
+            .child_mut()
+            .try_wait()
+            .expect("external process")
+            .is_none()
+    );
+    external
+        .child_mut()
+        .kill()
+        .expect("stop external test fixture");
+    external
+        .child_mut()
+        .wait()
+        .expect("reap external test fixture");
+    let mut returned_to_idle = false;
+    wait_until(Duration::from_secs(7), || {
+        for update in receiver.try_iter() {
+            if !update.external_running && update.installed {
+                returned_to_idle = true;
+            }
+        }
+        returned_to_idle
+    });
+    controller.shutdown().expect("shutdown owner");
+}
+
+#[test]
+fn controller_does_not_confuse_same_name_foreign_executable_with_installed_game() {
+    let directory = TestDirectory::new("controller-foreign");
+    let root = directory.path().join("install");
+    install_candidate(&root);
+    let different_root = directory.path().join("other-game");
+    let foreign = install_candidate(&different_root);
+    let mut process = spawn_helper(&foreign, 30_000);
+    wait_for_identity(process.pid());
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut controller = LauncherController::start(LauncherConfig::new(&root), move |update| {
+        let _ = sender.send(update);
+    })
+    .expect("create controller");
+    let update = receiver
+        .recv_timeout(Duration::from_secs(7))
+        .expect("initial update");
+    assert!(update.installed);
+    assert!(!update.external_running);
+    assert!(matches!(update.state, OwnedProcessState::Idle));
+    controller.shutdown().expect("shutdown controller");
+    assert!(
+        process
+            .child_mut()
+            .try_wait()
+            .expect("unrelated process")
+            .is_none()
     );
 }
 
@@ -522,3 +650,6 @@ fn interactive_cli_persists_selection_and_does_not_auto_start() {
         .unwrap();
     assert!(reopened.status.success(), "{reopened:?}");
 }
+
+#[cfg(windows)]
+mod launcher_windows_cases;

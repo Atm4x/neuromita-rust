@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, Write},
+    path::Path,
     path::PathBuf,
     sync::Arc,
 };
@@ -26,6 +27,7 @@ use neuromita::{
         variable_transfer::VariableImportPreview,
     },
     memory::MemoryId,
+    portable::PortableDataRoot,
     presentation::ChatPresenter,
     request::{
         DiagnosticScope, DiagnosticSection, RequestId, RequestOutcome, RequestSnapshot,
@@ -112,10 +114,11 @@ impl Options {
             character,
             message: values.remove("--message"),
             listen,
-            data_dir: match values.remove("--data-dir") {
-                Some(path) if path.is_empty() => return Err(invalid("empty data directory")),
-                Some(path) => PathBuf::from(path),
-                None => default_data_dir()?,
+            data_dir: {
+                let explicit = values.remove("--data-dir");
+                let root = PortableDataRoot::resolve(explicit.as_deref().map(Path::new))?;
+                root.ensure_writable()?;
+                root.path().to_path_buf()
             },
             finetune_config: match values.remove("--finetune-config") {
                 Some(path) if path.is_empty() => {
@@ -126,24 +129,6 @@ impl Options {
             },
         }))
     }
-}
-
-fn default_data_dir() -> io::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("NEUROMITA_DATA_DIR") {
-        return Ok(PathBuf::from(path));
-    }
-    #[cfg(windows)]
-    if let Some(path) = std::env::var_os("APPDATA") {
-        return Ok(PathBuf::from(path).join("NeuroMita"));
-    }
-    #[cfg(not(windows))]
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(path).join("neuromita"));
-    }
-    if let Some(path) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(path).join(".config").join("neuromita"));
-    }
-    Err(invalid("data directory unavailable; specify --data-dir"))
 }
 
 fn input() -> mpsc::Receiver<io::Result<String>> {
