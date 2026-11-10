@@ -10,14 +10,12 @@ use thiserror::Error;
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
-use crate::settings::SpeechModelReference;
-
-use super::AiService;
+use super::{AiService, model_identity::AiModelIdentity};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceModel {
     pub service: AiService,
-    pub model: SpeechModelReference,
+    pub model: AiModelIdentity,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -31,6 +29,20 @@ pub enum WorkerOwnershipError {
 pub struct ServiceWorkerRegistry {
     active: Arc<Mutex<HashMap<AiService, (Uuid, ServiceModel)>>>,
     gates: HashMap<AiService, RwLock<()>>,
+}
+
+/// Evidence that a specific service's transition fence is held. A transport
+/// may not dispatch native inference using another service's permit.
+pub(crate) struct ServiceInferencePermit<'a> {
+    owner: &'a ServiceWorkerRegistry,
+    service: AiService,
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+impl ServiceInferencePermit<'_> {
+    pub(crate) fn authorizes(&self, owner: &ServiceWorkerRegistry, service: AiService) -> bool {
+        self.service == service && std::ptr::eq(self.owner, owner)
+    }
 }
 
 impl Default for ServiceWorkerRegistry {
@@ -61,6 +73,14 @@ impl ServiceWorkerRegistry {
     /// its final validation. A service transition cannot pass it.
     pub async fn inference_gate(&self, service: AiService) -> RwLockReadGuard<'_, ()> {
         self.gates[&service].read().await
+    }
+
+    pub(crate) async fn inference_permit(&self, service: AiService) -> ServiceInferencePermit<'_> {
+        ServiceInferencePermit {
+            owner: self,
+            service,
+            _guard: self.inference_gate(service).await,
+        }
     }
 
     /// The owner holds an exclusive permit through shutdown, admission,
@@ -123,7 +143,10 @@ mod tests {
     use crate::settings::SpeechModelReference;
 
     fn model(service: AiService, model: SpeechModelReference) -> ServiceModel {
-        ServiceModel { service, model }
+        ServiceModel {
+            service,
+            model: model.into(),
+        }
     }
 
     #[test]
@@ -188,6 +211,61 @@ mod tests {
         );
         drop((tts, asr));
     }
+    #[test]
+    fn non_speech_services_share_model_identity_without_sharing_worker_slots() {
+        let registry = ServiceWorkerRegistry::new();
+        let embedding = registry
+            .claim(ServiceModel {
+                service: AiService::Embedding,
+                model: SpeechModelReference::python("encoder").into(),
+            })
+            .unwrap();
+        let reranker = registry
+            .claim(ServiceModel {
+                service: AiService::Reranker,
+                model: SpeechModelReference::rust("encoder", "a".repeat(64)).into(),
+            })
+            .unwrap();
+        assert_eq!(
+            registry
+                .active(AiService::Embedding)
+                .unwrap()
+                .unwrap()
+                .model
+                .model_id,
+            "encoder"
+        );
+        assert_eq!(
+            registry
+                .active(AiService::Reranker)
+                .unwrap()
+                .unwrap()
+                .model
+                .model_id,
+            "encoder"
+        );
+        assert!(
+            registry
+                .claim(ServiceModel {
+                    service: AiService::Embedding,
+                    model: SpeechModelReference::rust("encoder", "a".repeat(64)).into(),
+                })
+                .is_err()
+        );
+        drop((embedding, reranker));
+        assert!(registry.active(AiService::Embedding).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn inference_permit_is_bound_to_both_owner_and_service() {
+        let first = ServiceWorkerRegistry::new();
+        let other = ServiceWorkerRegistry::new();
+        let permit = first.inference_permit(AiService::Tts).await;
+        assert!(permit.authorizes(&first, AiService::Tts));
+        assert!(!permit.authorizes(&first, AiService::Asr));
+        assert!(!permit.authorizes(&other, AiService::Tts));
+    }
+
     #[tokio::test]
     async fn retiring_a_worker_cannot_overtake_an_inflight_request() {
         let registry = ServiceWorkerRegistry::new();

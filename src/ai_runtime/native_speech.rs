@@ -275,7 +275,7 @@ use std::collections::HashMap;
 
 use super::{
     native_service::AiHubNativeService,
-    service_workers::{ServiceModel, ServiceWorkerRegistry},
+    service_workers::{ServiceInferencePermit, ServiceModel, ServiceWorkerRegistry},
 };
 use crate::{
     audio::session::{SpeechFuture, SpeechSessionError, SpeechTranscriber},
@@ -293,6 +293,7 @@ trait TtsWorker: Send + Sync {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        permit: &'a ServiceInferencePermit<'_>,
         text: Arc<str>,
         options: VoiceOptions,
     ) -> VoiceFuture<'a>;
@@ -303,6 +304,7 @@ trait AsrWorker: Send + Sync {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        permit: &'a ServiceInferencePermit<'_>,
         wav: &'a [u8],
     ) -> SpeechFuture<'a, Transcript>;
 }
@@ -317,6 +319,7 @@ impl TtsWorker for PythonTtsWorker {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        _permit: &'a ServiceInferencePermit<'_>,
         text: Arc<str>,
         options: VoiceOptions,
     ) -> VoiceFuture<'a> {
@@ -336,6 +339,7 @@ impl TtsWorker for RustTtsWorker {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        permit: &'a ServiceInferencePermit<'_>,
         text: Arc<str>,
         options: VoiceOptions,
     ) -> VoiceFuture<'a> {
@@ -346,6 +350,7 @@ impl TtsWorker for RustTtsWorker {
             let revision = model.revision.as_deref().ok_or(VoiceError::Unavailable)?;
             self.0
                 .synthesize_speech(
+                    permit,
                     &model.model_id,
                     revision,
                     &text,
@@ -364,6 +369,7 @@ impl AsrWorker for PythonAsrWorker {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        _permit: &'a ServiceInferencePermit<'_>,
         wav: &'a [u8],
     ) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
@@ -382,6 +388,7 @@ impl AsrWorker for RustAsrWorker {
         &'a self,
         model: &'a SpeechModelReference,
         speech: &'a SpeechSettings,
+        permit: &'a ServiceInferencePermit<'_>,
         wav: &'a [u8],
     ) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
@@ -394,7 +401,7 @@ impl AsrWorker for RustAsrWorker {
                 .get(&model.model_id)
                 .map_or("auto", String::as_str);
             self.0
-                .transcribe_speech(&model.model_id, revision, wav, language)
+                .transcribe_speech(permit, &model.model_id, revision, wav, language)
                 .await
                 .map_err(SpeechSessionError::Asr)
         })
@@ -433,7 +440,7 @@ impl RoutedSpeechVoice {
 impl VoiceProvider for RoutedSpeechVoice {
     fn synthesize(&self, text: Arc<str>, options: VoiceOptions) -> VoiceFuture<'_> {
         Box::pin(async move {
-            let _call = self.registry.inference_gate(super::AiService::Tts).await;
+            let permit = self.registry.inference_permit(super::AiService::Tts).await;
             let saved = self
                 .settings
                 .snapshot_all()
@@ -449,7 +456,7 @@ impl VoiceProvider for RoutedSpeechVoice {
                     .map_err(|error| VoiceError::Generation(error.to_string()))?
                     != Some(ServiceModel {
                         service: super::AiService::Tts,
-                        model: selected.clone(),
+                        model: selected.clone().into(),
                     })
             {
                 return Err(VoiceError::Unavailable);
@@ -458,7 +465,9 @@ impl VoiceProvider for RoutedSpeechVoice {
                 .implementations
                 .get(&selected.implementation)
                 .ok_or(VoiceError::Unavailable)?;
-            let audio = worker.synthesize(&selected, speech, text, options).await?;
+            let audio = worker
+                .synthesize(&selected, speech, &permit, text, options)
+                .await?;
             let current = self
                 .settings
                 .snapshot_all()
@@ -474,7 +483,7 @@ impl VoiceProvider for RoutedSpeechVoice {
                         .map_err(|error| VoiceError::Generation(error.to_string()))?
                         != Some(ServiceModel {
                             service: super::AiService::Tts,
-                            model: selected,
+                            model: selected.into(),
                         }))
             {
                 return Err(VoiceError::Unavailable);
@@ -518,7 +527,7 @@ impl RoutedSpeechTranscriber {
 impl SpeechTranscriber for RoutedSpeechTranscriber {
     fn transcribe<'a>(&'a self, wav: &'a [u8]) -> SpeechFuture<'a, Transcript> {
         Box::pin(async move {
-            let _call = self.registry.inference_gate(super::AiService::Asr).await;
+            let permit = self.registry.inference_permit(super::AiService::Asr).await;
             let saved = self
                 .settings
                 .snapshot_all()
@@ -533,7 +542,7 @@ impl SpeechTranscriber for RoutedSpeechTranscriber {
                 .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
                 != Some(ServiceModel {
                     service: super::AiService::Asr,
-                    model: selected.clone(),
+                    model: selected.clone().into(),
                 })
             {
                 return Err(SpeechSessionError::Asr(
@@ -546,7 +555,7 @@ impl SpeechTranscriber for RoutedSpeechTranscriber {
                 .ok_or_else(|| {
                     SpeechSessionError::Asr("selected ASR model worker is not installed".into())
                 })?;
-            let transcript = worker.transcribe(&selected, speech, wav).await?;
+            let transcript = worker.transcribe(&selected, speech, &permit, wav).await?;
             let current = self
                 .settings
                 .snapshot_all()
@@ -561,7 +570,7 @@ impl SpeechTranscriber for RoutedSpeechTranscriber {
                     .map_err(|error| SpeechSessionError::Asr(error.to_string()))?
                     != Some(ServiceModel {
                         service: super::AiService::Asr,
-                        model: selected,
+                        model: selected.into(),
                     })
             {
                 return Err(SpeechSessionError::Asr(

@@ -99,14 +99,8 @@ impl Default for AsrPreferences {
     }
 }
 
-/// A model catalog entry's runtime implementation, not a user-facing engine mode.
-/// Two model entries may have the same model_id and different implementations.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerImplementation {
-    Python,
-    Rust,
-}
+use crate::ai_runtime::model_identity::AiModelIdentity;
+pub use crate::ai_runtime::model_identity::WorkerImplementation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +109,16 @@ pub struct SpeechModelReference {
     pub implementation: WorkerImplementation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+}
+
+impl From<SpeechModelReference> for AiModelIdentity {
+    fn from(model: SpeechModelReference) -> Self {
+        Self {
+            model_id: model.model_id,
+            implementation: model.implementation,
+            revision: model.revision,
+        }
+    }
 }
 
 impl SpeechModelReference {

@@ -1005,7 +1005,10 @@ impl ApplicationLifecycle {
                         })?;
                     prepared_claims.push(
                         service_workers
-                            .claim(ServiceModel { service, model })
+                            .claim(ServiceModel {
+                                service,
+                                model: model.into(),
+                            })
                             .map_err(|error| AiApplicationError::Invalid(error.to_string()))?,
                     );
                 }

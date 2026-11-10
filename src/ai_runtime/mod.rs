@@ -24,6 +24,7 @@ mod layer;
 mod linux_worker_lifetime;
 pub mod live_speech;
 pub mod managed;
+pub mod model_identity;
 pub mod native_approval;
 pub mod native_controller;
 pub mod native_download_operation;

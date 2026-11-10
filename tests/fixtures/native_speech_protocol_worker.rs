@@ -1,4 +1,6 @@
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn field(line: &str, name: &str) -> Option<String> {
     let prefix = format!("\"{name}\":\"");
@@ -6,7 +8,10 @@ fn field(line: &str, name: &str) -> Option<String> {
 }
 
 fn main() {
-    let disagree = std::env::args().any(|arg| arg == "--mismatched-speech");
+    let args = std::env::args().collect::<Vec<_>>();
+    let disagree = args.iter().any(|arg| arg == "--mismatched-speech");
+    let runtime_dir = args.windows(2).find(|pair| pair[0] == "--runtime-dir")
+        .map(|pair| PathBuf::from(&pair[1]));
     let mut loaded = false;
     let mut warmed = false;
     for line in io::stdin().lock().lines() {
@@ -24,7 +29,17 @@ fn main() {
             "infer" => {
                 assert!(loaded && warmed);
                 match field(&line, "kind").as_deref() {
-                    Some("tts") => r#"{"speech_version":1,"kind":"tts","audio_format":"wav","sample_rate_hz":16000,"audio_base64":"UklGRiYAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQIAAAAAAA=="}"#.to_owned(),
+                    Some("tts") => {
+                        if field(&line, "text").as_deref() == Some("hold-tts") {
+                            let dir = runtime_dir.as_ref().expect("runtime directory");
+                            std::fs::write(dir.join("tts-inflight"), b"started").unwrap();
+                            let started = Instant::now();
+                            while !dir.join("release-tts").exists() && started.elapsed() < Duration::from_secs(4) {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                        }
+                        r#"{"speech_version":1,"kind":"tts","audio_format":"wav","sample_rate_hz":16000,"audio_base64":"UklGRiYAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQIAAAAAAA=="}"#.to_owned()
+                    },
                     Some("asr") => r#"{"speech_version":1,"kind":"asr","text":"hello","language":"ru"}"#.to_owned(),
                     _ => panic!("unknown speech kind"),
                 }

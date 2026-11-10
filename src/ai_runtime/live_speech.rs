@@ -270,7 +270,10 @@ impl LiveSpeechRuntime {
                 if runtime.has_service(service)
                     && let Some(model) = settings.model_for(service)
                 {
-                    claims.push(registry.claim(ServiceModel { service, model })?);
+                    claims.push(registry.claim(ServiceModel {
+                        service,
+                        model: model.into(),
+                    })?);
                 }
             }
         }
@@ -424,7 +427,10 @@ impl LiveSpeechRuntime {
                     .any(|worker| worker.models.iter().any(|model| model.service == service))
                     && let Some(model) = desired.model_for(service)
                 {
-                    match self.registry.claim(ServiceModel { service, model }) {
+                    match self.registry.claim(ServiceModel {
+                        service,
+                        model: model.into(),
+                    }) {
                         Ok(claim) => new_claims.push(claim),
                         Err(error) => {
                             self.failed(&key, &error.to_string());

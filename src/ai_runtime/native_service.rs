@@ -22,7 +22,7 @@ use super::{
     native_speech::NativeSpeechKind,
     native_trust::{NativeAuthorizedRelease, NativePolicyPin, NativeReleaseTrust},
     native_workflow::{NativeModelWorkflow, NativeWorkflowSnapshot},
-    service_workers::{ServiceModel, ServiceWorkerRegistry, WorkerClaim},
+    service_workers::{ServiceInferencePermit, ServiceModel, ServiceWorkerRegistry, WorkerClaim},
 };
 
 struct NativeState {
@@ -200,8 +200,9 @@ impl AiHubNativeService {
                 .await
                 .map_err(|e| e.to_string()),
             [service] => {
-                self.activate_speech_locked(&mut state, *service, model_id)
-                    .await
+                let service = *service;
+                drop(state);
+                self.activate_speech(service, model_id).await
             }
             _ => Err(
                 "Для модели с несколькими сервисами необходима привязка к конкретному сервису"
@@ -210,19 +211,30 @@ impl AiHubNativeService {
         }
     }
 
-    async fn activate_speech_locked(
+    async fn activate_speech(
         &self,
-        state: &mut NativeState,
         service: NativeSpeechKind,
         model_id: &str,
     ) -> Result<NativeModelSnapshot, String> {
-        let workflow = state
-            .workflow
-            .as_mut()
-            .ok_or("Нативная ревизия недоступна")?;
-        let choice = workflow
-            .selected_choice(model_id)
-            .map_err(|e| e.to_string())?;
+        let service_id = match service {
+            NativeSpeechKind::Tts => super::AiService::Tts,
+            NativeSpeechKind::Asr => super::AiService::Asr,
+        };
+        let (prepared, choice) = {
+            let state = self.state.lock().await;
+            if self.stop.is_cancelled() {
+                return Err("Приложение завершает работу".into());
+            }
+            let workflow = state
+                .workflow
+                .as_ref()
+                .ok_or("Нативная ревизия недоступна")?;
+            let prepared = workflow
+                .prepare_for_service(service, model_id, Duration::from_secs(30))
+                .map_err(|e| e.to_string())?;
+            let choice = prepared.choice();
+            (prepared, choice)
+        };
         let model = crate::settings::SpeechModelReference::rust(
             model_id,
             choice
@@ -231,21 +243,28 @@ impl AiHubNativeService {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>(),
         );
-        let service_id = match service {
-            NativeSpeechKind::Tts => super::AiService::Tts,
-            NativeSpeechKind::Asr => super::AiService::Asr,
-        };
         let claim = self
             .registry
             .claim(ServiceModel {
                 service: service_id,
-                model,
+                model: model.into(),
             })
             .map_err(|e| e.to_string())?;
-        let snapshot = workflow
-            .activate_for_service(service, model_id, Duration::from_secs(30))
-            .await
-            .map_err(|e| e.to_string())?;
+        let (session, snapshot) = prepared.start().await.map_err(|e| e.to_string())?;
+        let mut state = self.state.lock().await;
+        if state.workflow.is_none() {
+            session.deactivate().await.map_err(|e| e.to_string())?;
+            return Err("Нативная ревизия недоступна".into());
+        }
+        if let Err(error) = state
+            .workflow
+            .as_mut()
+            .unwrap()
+            .install_active_speech(Arc::clone(&session))
+        {
+            session.deactivate().await.map_err(|e| e.to_string())?;
+            return Err(error.to_string());
+        }
         state.claims.insert(service, claim);
         Ok(snapshot)
     }
@@ -260,7 +279,7 @@ impl AiHubNativeService {
             NativeSpeechKind::Asr => super::AiService::Asr,
         };
         let _transition = self.registry.transition_gate(ai_service).await;
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         if self.stop.is_cancelled() {
             return Err("Приложение завершает работу".into());
         }
@@ -273,8 +292,8 @@ impl AiHubNativeService {
         if !capabilities.contains(&service) {
             return Err("Модель не поддерживает запрошенный сервис".into());
         }
-        self.activate_speech_locked(&mut state, service, model_id)
-            .await
+        drop(state);
+        self.activate_speech(service, model_id).await
     }
 
     pub async fn deactivate_for_service(&self, service: NativeSpeechKind) -> Result<(), String> {
@@ -283,23 +302,36 @@ impl AiHubNativeService {
             NativeSpeechKind::Asr => super::AiService::Asr,
         };
         let _transition = self.registry.transition_gate(ai_service).await;
+        let session = {
+            let state = self.state.lock().await;
+            if self.stop.is_cancelled() {
+                return Err("Приложение завершает работу".into());
+            }
+            state
+                .workflow
+                .as_ref()
+                .ok_or("Нативная сессия недоступна")?
+                .speech_session(service)
+                .map_err(|error| error.to_string())?
+        };
+        session
+            .deactivate()
+            .await
+            .map_err(|error| error.to_string())?;
         let mut state = self.state.lock().await;
-        if self.stop.is_cancelled() {
-            return Err("Приложение завершает работу".into());
-        }
         state
             .workflow
             .as_mut()
             .ok_or("Нативная сессия недоступна")?
-            .deactivate_for_service(service)
-            .await
+            .unpublish_stopped_speech(service, &session)
             .map_err(|error| error.to_string())?;
         state.claims.remove(&service);
         Ok(())
     }
 
-    pub async fn synthesize_speech(
+    pub(crate) async fn synthesize_speech(
         &self,
+        permit: &ServiceInferencePermit<'_>,
         model_id: &str,
         manifest_sha256: &str,
         text: &str,
@@ -307,16 +339,23 @@ impl AiHubNativeService {
         language: &str,
         volume_percent: u8,
     ) -> Result<crate::voice::AudioArtifact, String> {
-        let mut state = self.state.lock().await;
-        if self.stop.is_cancelled() {
-            return Err("Приложение завершает работу".into());
+        if !permit.authorizes(self.registry.as_ref(), super::AiService::Tts) {
+            return Err("Inference permit does not belong to the TTS owner".into());
         }
-        let workflow = state
-            .workflow
-            .as_mut()
-            .ok_or("Нативная сессия недоступна")?;
-        workflow
-            .synthesize_speech(
+        let session = {
+            let state = self.state.lock().await;
+            if self.stop.is_cancelled() {
+                return Err("Приложение завершает работу".into());
+            }
+            state
+                .workflow
+                .as_ref()
+                .ok_or("Нативная сессия недоступна")?
+                .speech_session(NativeSpeechKind::Tts)
+                .map_err(|error| error.to_string())?
+        };
+        session
+            .synthesize(
                 model_id,
                 manifest_sha256,
                 text,
@@ -325,28 +364,36 @@ impl AiHubNativeService {
                 volume_percent,
             )
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|error| error.to_string())
     }
 
-    pub async fn transcribe_speech(
+    pub(crate) async fn transcribe_speech(
         &self,
+        permit: &ServiceInferencePermit<'_>,
         model_id: &str,
         manifest_sha256: &str,
         wav: &[u8],
         language: &str,
     ) -> Result<crate::ai_runtime::speech::Transcript, String> {
-        let mut state = self.state.lock().await;
-        if self.stop.is_cancelled() {
-            return Err("Приложение завершает работу".into());
+        if !permit.authorizes(self.registry.as_ref(), super::AiService::Asr) {
+            return Err("Inference permit does not belong to the ASR owner".into());
         }
-        let workflow = state
-            .workflow
-            .as_mut()
-            .ok_or("Нативная сессия недоступна")?;
-        workflow
-            .transcribe_speech(model_id, manifest_sha256, wav, language)
+        let session = {
+            let state = self.state.lock().await;
+            if self.stop.is_cancelled() {
+                return Err("Приложение завершает работу".into());
+            }
+            state
+                .workflow
+                .as_ref()
+                .ok_or("Нативная сессия недоступна")?
+                .speech_session(NativeSpeechKind::Asr)
+                .map_err(|error| error.to_string())?
+        };
+        session
+            .transcribe(model_id, manifest_sha256, wav, language)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|error| error.to_string())
     }
 
     pub async fn deactivate(&self) -> Result<(), String> {
@@ -368,14 +415,35 @@ impl AiHubNativeService {
     }
 
     pub async fn refresh_worker(&self) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        if let Some(workflow) = state.workflow.as_mut() {
+        let (tts, asr) = {
+            let mut state = self.state.lock().await;
+            let Some(workflow) = state.workflow.as_mut() else {
+                return Ok(());
+            };
             workflow
-                .refresh_all_workers()
+                .refresh_generic_worker()
                 .await
                 .map_err(|error| error.to_string())?;
-        }
-        Ok(())
+            (
+                workflow.speech_session(NativeSpeechKind::Tts).ok(),
+                workflow.speech_session(NativeSpeechKind::Asr).ok(),
+            )
+        };
+        let tts_refresh = async {
+            if let Some(worker) = tts {
+                worker.refresh().await.map_err(|error| error.to_string())?;
+            }
+            Ok::<(), String>(())
+        };
+        let asr_refresh = async {
+            if let Some(worker) = asr {
+                worker.refresh().await.map_err(|error| error.to_string())?;
+            }
+            Ok::<(), String>(())
+        };
+        let (tts_result, asr_result) = tokio::join!(tts_refresh, asr_refresh);
+        tts_result?;
+        asr_result
     }
 
     pub async fn start_download(
