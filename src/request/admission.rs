@@ -55,6 +55,12 @@ pub(crate) trait RegenerateCancellation: Send + Sync {
         branch: BranchId,
         request: RequestId,
     ) -> Result<RegenerateRecoveryOutcome, TimelineError>;
+
+    fn abandon_orphaned_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError>;
 }
 
 pub(crate) trait RequestIngress: RegenerateCancellation {
@@ -155,6 +161,20 @@ impl ChatApiState {
         request: RequestId,
     ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
         self.ingress.inspect_same_branch_regenerate(branch, request)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn abandon_orphaned_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        let _admission = self.accepting.lock().expect("admission mutex poisoned");
+        if self.registry.get(request).is_some() {
+            return Err(TimelineError::Conflict);
+        }
+        self.ingress
+            .abandon_orphaned_same_branch_regenerate(branch, request)
     }
 
     /// Operations-level retry, never re-enqueues or invokes a provider.

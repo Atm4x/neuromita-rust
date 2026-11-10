@@ -2742,3 +2742,7 @@ async fn same_branch_foreign_history_reset_denies_provider_dispatch_without_repl
 #[cfg(feature = "sqlite-system")]
 #[path = "regenerate_b83_tests.rs"]
 mod b83;
+
+#[cfg(feature = "sqlite-system")]
+#[path = "regenerate_b84_tests.rs"]
+mod b84;

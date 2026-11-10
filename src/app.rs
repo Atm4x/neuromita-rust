@@ -409,6 +409,45 @@ impl RegenerateCancellation for TimelineRequestIngress {
             .reconcile_same_branch_regenerate(branch, request)
             .map(|snapshot| snapshot.outcome)
     }
+
+    fn abandon_orphaned_same_branch_regenerate(
+        &self,
+        branch: BranchId,
+        request: RequestId,
+    ) -> Result<RegenerateRecoveryOutcome, TimelineError> {
+        let mut timeline = self
+            .timeline
+            .lock()
+            .map_err(|_| TimelineError::Storage("timeline mutex poisoned".to_owned()))?;
+        let current = timeline
+            .reconcile_same_branch_regenerate(branch, request)?
+            .outcome;
+        if matches!(
+            current,
+            RegenerateRecoveryOutcome::AcceptedReply(_) | RegenerateRecoveryOutcome::Abandoned(_)
+        ) {
+            return Ok(current);
+        }
+        match timeline.abandon_same_branch_regenerate_request(branch, request) {
+            Ok(event) => Ok(RegenerateRecoveryOutcome::Abandoned(event)),
+            Err(error) => {
+                if matches!(
+                    error,
+                    TimelineError::Conflict | TimelineError::ConcurrentWrite
+                ) && let Ok(snapshot) =
+                    timeline.reconcile_same_branch_regenerate(branch, request)
+                    && matches!(
+                        snapshot.outcome,
+                        RegenerateRecoveryOutcome::AcceptedReply(_)
+                            | RegenerateRecoveryOutcome::Abandoned(_)
+                    )
+                {
+                    return Ok(snapshot.outcome);
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 impl RequestIngress for TimelineRequestIngress {

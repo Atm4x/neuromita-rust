@@ -5,6 +5,7 @@ on:
     branches:
       - codex/timeline-b82-foreign-knowledge-dispatch-fence-20261110
       - codex/timeline-b83-post-dispatch-acceptance-20261110
+      - codex/timeline-b84-orphan-terminal-reconciliation-20261110
 
 permissions:
   contents: read

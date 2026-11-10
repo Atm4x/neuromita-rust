@@ -409,3 +409,106 @@ impl SemanticMemoryRetriever {
         })
     }
 }
+
+#[cfg(test)]
+mod b84_tests {
+    use super::*;
+    use crate::timeline::domain::{MemoryId, MemoryPriority};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedEmbeddingProvider {
+        space: EmbeddingSpace,
+        calls: AtomicUsize,
+    }
+
+    impl EmbeddingProvider for CountedEmbeddingProvider {
+        fn space(&self) -> &EmbeddingSpace {
+            &self.space
+        }
+
+        fn embed(
+            &self,
+            _: EmbeddingPurpose,
+            _: String,
+        ) -> super::super::embedding::EmbeddingFuture<'_, Embedding> {
+            Box::pin(async {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Embedding::new(vec![1.0, 0.5], &self.space)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn b84_snapshot_membership_is_not_extended_by_resident_embeddings() {
+        let provider = Arc::new(CountedEmbeddingProvider {
+            space: EmbeddingSpace::new("test", "b84", "v1", 2).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let retriever = SemanticMemoryRetriever::new(provider.clone(), 8).unwrap();
+        let mut memory = MemoryRecord {
+            entities: vec![],
+            id: MemoryId(uuid::Uuid::new_v4()),
+            priority: MemoryPriority::Normal,
+            content: "private previous memory".into(),
+            kind: MemoryKind::Fact,
+            state: MemoryState::Active,
+            protected: false,
+            expires_at_unix_ms: None,
+        };
+        let previous = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "private")
+            .await
+            .unwrap();
+        assert_eq!(previous.selected_ids, vec![memory.id]);
+        assert!(
+            previous
+                .rendered
+                .unwrap()
+                .contains("private previous memory")
+        );
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 1);
+
+        let invisible = retriever
+            .retrieve(CharacterId::Crazy, &[], "private")
+            .await
+            .unwrap();
+        assert!(invisible.selected_ids.is_empty());
+        assert!(invisible.rendered.is_none());
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+
+        memory.state = MemoryState::Forgotten;
+        let forgotten = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "private")
+            .await
+            .unwrap();
+        assert!(forgotten.selected_ids.is_empty());
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 1);
+
+        memory.state = MemoryState::Active;
+        memory.content = "newly revealed replacement".into();
+        let replacement = retriever
+            .retrieve(CharacterId::Crazy, &[memory.clone()], "revealed")
+            .await
+            .unwrap();
+        assert_eq!(replacement.selected_ids, vec![memory.id]);
+        assert!(
+            replacement
+                .rendered
+                .unwrap()
+                .contains("newly revealed replacement")
+        );
+        assert_eq!(replacement.cost.cache_hits, 0);
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 4);
+        assert_eq!(retriever.cache.lock().unwrap().entries.len(), 2);
+
+        retriever.clear_cache();
+        assert!(retriever.cache.lock().unwrap().entries.is_empty());
+        let again = retriever
+            .retrieve(CharacterId::Crazy, &[memory], "revealed")
+            .await
+            .unwrap();
+        assert_eq!(again.cost.cache_hits, 0);
+    }
+}
