@@ -480,6 +480,36 @@ pub struct ForkedCorpusRemoval {
     pub requires_reindex: bool,
 }
 
+/// A new versioned corpus includes one additional verified document. The old
+/// corpus and its selected index remain untouched until explicit activation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForkedCorpusAddition {
+    pub character: CharacterId,
+    pub added_name: String,
+    pub source_sha256: String,
+    pub output_root: String,
+    pub total_documents: usize,
+    pub requires_reindex: bool,
+}
+
+pub fn fork_adding_document(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    source: &Path,
+    output_root: &Path,
+) -> Result<ForkedCorpusAddition, DocumentError> {
+    fork_adding_with_hooks(
+        root,
+        character,
+        name,
+        source,
+        output_root,
+        || Ok(()),
+        sync_corpus_parent,
+    )
+}
+
 pub fn fork_removing_document(
     root: &Path,
     character: CharacterId,
@@ -524,8 +554,10 @@ fn fork_replacing_with_hooks(
         root,
         character,
         name,
-        expected_sha256,
-        Some(replacement),
+        ForkChange::Replace {
+            expected_sha256,
+            source: replacement,
+        },
         output_root,
         after_staging,
         sync_parent,
@@ -555,8 +587,7 @@ fn fork_removing_with_hooks(
         root,
         character,
         name,
-        expected_sha256,
-        None,
+        ForkChange::Remove { expected_sha256 },
         output_root,
         after_staging,
         sync_parent,
@@ -571,18 +602,94 @@ fn fork_removing_with_hooks(
     })
 }
 
+fn fork_adding_with_hooks(
+    root: &Path,
+    character: CharacterId,
+    name: &str,
+    source: &Path,
+    output_root: &Path,
+    after_staging: impl FnOnce() -> Result<(), DocumentError>,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<ForkedCorpusAddition, DocumentError> {
+    let result = fork_changing_with_hooks(
+        root,
+        character,
+        name,
+        ForkChange::Add { source },
+        output_root,
+        after_staging,
+        sync_parent,
+    )?;
+    Ok(ForkedCorpusAddition {
+        character,
+        added_name: name.to_owned(),
+        source_sha256: result
+            .replacement_sha256
+            .ok_or(DocumentError::InvalidText)?,
+        output_root: result.output_root,
+        total_documents: result.document_count,
+        requires_reindex: true,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ForkChange<'a> {
+    Add {
+        source: &'a Path,
+    },
+    Replace {
+        expected_sha256: &'a str,
+        source: &'a Path,
+    },
+    Remove {
+        expected_sha256: &'a str,
+    },
+}
+
+impl<'a> ForkChange<'a> {
+    fn source(self) -> Option<&'a Path> {
+        match self {
+            Self::Add { source } | Self::Replace { source, .. } => Some(source),
+            Self::Remove { .. } => None,
+        }
+    }
+
+    fn expected_sha256(self) -> Option<&'a str> {
+        match self {
+            Self::Replace {
+                expected_sha256, ..
+            }
+            | Self::Remove { expected_sha256 } => Some(expected_sha256),
+            Self::Add { .. } => None,
+        }
+    }
+}
+
 struct ForkOutcome {
     output_root: String,
     replacement_sha256: Option<String>,
     document_count: usize,
 }
 
+fn inspect_owned_corpus(
+    root: &Path,
+    character: CharacterId,
+) -> Result<DocumentIndex, DocumentError> {
+    let corpus = inspect_source(root, character)?;
+    let entry_count = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?.len();
+    if entry_count != corpus.documents.len() {
+        return Err(DocumentError::UnsafePath(
+            "corpus contains entries outside the .md/.txt ownership contract".into(),
+        ));
+    }
+    Ok(corpus)
+}
+
 fn fork_changing_with_hooks(
     root: &Path,
     character: CharacterId,
     name: &str,
-    expected_sha256: &str,
-    replacement: Option<&Path>,
+    change: ForkChange<'_>,
     output_root: &Path,
     after_staging: impl FnOnce() -> Result<(), DocumentError>,
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
@@ -595,10 +702,12 @@ fn fork_changing_with_hooks(
         || name.chars().any(char::is_control)
         || name.contains(['/', '\\'])
         || !(name.ends_with(".md") || name.ends_with(".txt"))
-        || expected_sha256.len() != 64
-        || !expected_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || change.expected_sha256().is_some_and(|digest| {
+            digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
     {
         return Err(DocumentError::UnsafePath(
             "invalid document name or expected digest".into(),
@@ -620,27 +729,38 @@ fn fork_changing_with_hooks(
         .to_str()
         .ok_or_else(|| DocumentError::UnsafePath("output must be UTF-8".into()))?
         .to_owned();
-    let original = inspect_source(root, character)?;
-    let entries = fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
-    if entries.len() != original.documents.len() {
-        return Err(DocumentError::UnsafePath(
-            "source corpus contains files outside the .md/.txt ownership contract".into(),
-        ));
+    let original = inspect_owned_corpus(root, character)?;
+    match change.expected_sha256() {
+        Some(expected_sha256) => {
+            let entry = original
+                .documents
+                .iter()
+                .find(|item| item.path == name)
+                .ok_or_else(|| {
+                    DocumentError::UnsafePath("document not found in the canonical corpus".into())
+                })?;
+            if entry.source_sha256 != expected_sha256 {
+                return Err(DocumentError::StaleIndex);
+            }
+        }
+        None => {
+            if original.documents.len() >= MAX_FILES {
+                return Err(DocumentError::Limit);
+            }
+            if original.documents.iter().any(|item| item.path == name) {
+                return Err(DocumentError::UnsafePath(
+                    "document name already exists".into(),
+                ));
+            }
+        }
     }
-    let entry = original
-        .documents
-        .iter()
-        .find(|item| item.path == name)
-        .ok_or_else(|| {
-            DocumentError::UnsafePath("document not found in the canonical corpus".into())
-        })?;
-    if entry.source_sha256 != expected_sha256 {
-        return Err(DocumentError::StaleIndex);
-    }
-    let replacement_bytes = replacement
+    let replacement_bytes = change
+        .source()
         .map(|path| {
             if !path.is_absolute() || fs::canonicalize(path)? != path || path.starts_with(root) {
-                return Err(DocumentError::UnsafePath("invalid replacement path".into()));
+                return Err(DocumentError::UnsafePath(
+                    "invalid document input path".into(),
+                ));
             }
             let bytes = read_regular(path, MAX_SINGLE_BYTES)?;
             let text = std::str::from_utf8(&bytes).map_err(|_| DocumentError::InvalidText)?;
@@ -663,47 +783,70 @@ fn fork_changing_with_hooks(
     let publication = (|| -> Result<usize, DocumentError> {
         for document in &original.documents {
             let data = if document.path == name {
-                match &replacement_bytes {
-                    Some(bytes) => bytes.clone(),
-                    None => continue,
+                match change {
+                    ForkChange::Replace { .. } => replacement_bytes
+                        .as_ref()
+                        .ok_or(DocumentError::InvalidText)?
+                        .clone(),
+                    ForkChange::Remove { .. } => continue,
+                    ForkChange::Add { .. } => {
+                        read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?
+                    }
                 }
             } else {
-                let data = read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?;
-                if sha256(&data) != document.source_sha256 {
-                    return Err(DocumentError::StaleIndex);
-                }
-                data
+                read_regular(&root.join(&document.path), MAX_SINGLE_BYTES)?
             };
+            if !(matches!(change, ForkChange::Replace { .. }) && document.path == name)
+                && sha256(&data) != document.source_sha256
+            {
+                return Err(DocumentError::StaleIndex);
+            }
             write_private_document(&stage.join(&document.path), &data)?;
         }
+        if matches!(change, ForkChange::Add { .. }) {
+            write_private_document(
+                &stage.join(name),
+                replacement_bytes
+                    .as_ref()
+                    .ok_or(DocumentError::InvalidText)?,
+            )?;
+        }
         let next = inspect_source(&stage, character)?;
-        let expected_count = original.documents.len() - usize::from(replacement.is_none());
-        if next.documents.len() != expected_count
-            || next
-                .documents
-                .iter()
-                .zip(
-                    original
-                        .documents
-                        .iter()
-                        .filter(|doc| replacement.is_some() || doc.path != name),
-                )
-                .any(|(new, old)| {
-                    if new.path != old.path {
-                        return true;
-                    }
-                    if new.path == name {
-                        Some(new.source_sha256.as_str()) != replacement_sha256.as_deref()
-                    } else {
-                        new != old
-                    }
-                })
-        {
+        let mut expected = original.documents.clone();
+        match change {
+            ForkChange::Remove { .. } => expected.retain(|document| document.path != name),
+            ForkChange::Replace { .. } | ForkChange::Add { .. } => {
+                let bytes = replacement_bytes
+                    .as_ref()
+                    .ok_or(DocumentError::InvalidText)?;
+                let new_entry = DocumentEntry {
+                    path: name.to_owned(),
+                    source_sha256: replacement_sha256
+                        .clone()
+                        .ok_or(DocumentError::InvalidText)?,
+                    bytes: bytes.len() as u64,
+                    chunks: chunks(
+                        std::str::from_utf8(bytes).map_err(|_| DocumentError::InvalidText)?,
+                    )?,
+                };
+                if matches!(change, ForkChange::Add { .. }) {
+                    expected.push(new_entry);
+                    expected.sort_by(|a, b| a.path.cmp(&b.path));
+                } else {
+                    *expected
+                        .iter_mut()
+                        .find(|document| document.path == name)
+                        .ok_or(DocumentError::StaleIndex)? = new_entry;
+                }
+            }
+        }
+        if next.documents != expected {
             return Err(DocumentError::StaleIndex);
         }
         after_staging()?;
-        if inspect_source(root, character)? != original
-            || replacement
+        if inspect_owned_corpus(root, character)? != original
+            || change
+                .source()
                 .zip(replacement_bytes.as_ref())
                 .map(|(path, bytes)| {
                     read_regular(path, MAX_SINGLE_BYTES).map(|current| current != *bytes)
@@ -946,6 +1089,99 @@ mod fork_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.temp);
         }
+    }
+
+    #[test]
+    fn addition_refuses_changed_source_before_publication() {
+        let f = Fixture::new();
+        let result = fork_adding_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "added.md",
+            &f.replacement,
+            &f.target,
+            || {
+                fs::write(&f.replacement, "replaced while staging")?;
+                Ok(())
+            },
+            |parent| File::open(parent)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::StaleIndex)));
+        assert!(!f.target.exists());
+        assert!(!f.root.join("added.md").exists());
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn addition_does_not_overwrite_concurrent_destination() {
+        let f = Fixture::new();
+        let result = fork_adding_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "added.md",
+            &f.replacement,
+            &f.target,
+            || {
+                fs::create_dir(&f.target)?;
+                fs::write(f.target.join("foreign.md"), "foreign winner")?;
+                Ok(())
+            },
+            |parent| File::open(parent)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::Io(_))));
+        assert_eq!(
+            fs::read_to_string(f.target.join("foreign.md")).unwrap(),
+            "foreign winner"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn addition_rejects_foreign_file_introduced_while_staging() {
+        let f = Fixture::new();
+        let result = fork_adding_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "added.md",
+            &f.replacement,
+            &f.target,
+            || {
+                fs::write(f.root.join("late-foreign.bin"), "unowned")?;
+                Ok(())
+            },
+            |parent| File::open(parent)?.sync_all(),
+        );
+        assert!(matches!(result, Err(DocumentError::UnsafePath(_))));
+        assert!(!f.target.exists());
+        assert_eq!(
+            fs::read_to_string(f.root.join("late-foreign.bin")).unwrap(),
+            "unowned"
+        );
+        f.assert_no_staging();
+    }
+
+    #[test]
+    fn addition_postpublication_sync_failure_keeps_candidate() {
+        let f = Fixture::new();
+        let result = fork_adding_with_hooks(
+            &f.root,
+            CharacterId::Kind,
+            "added.md",
+            &f.replacement,
+            &f.target,
+            || Ok(()),
+            |_| Err(io::Error::other("injected parent sync error")),
+        );
+        assert!(matches!(
+            result,
+            Err(DocumentError::PublicationUncertain(_))
+        ));
+        assert_eq!(
+            fs::read(f.target.join("added.md")).unwrap(),
+            fs::read(&f.replacement).unwrap()
+        );
+        assert!(f.root.join("notes.md").exists());
+        f.assert_no_staging();
     }
 
     #[test]
