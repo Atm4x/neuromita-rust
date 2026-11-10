@@ -1,0 +1,39 @@
+name: Agent D59 Windows GUI shutdown cancellation acceptance
+on:
+  push:
+    branches:
+      - bridge/agent-d59-windows-gui-ci-20261110
+permissions:
+  contents: read
+jobs:
+  windows-gui:
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/agent-d59-gui-shutdown-cancellation-20261110
+      - name: Verify exact original D59 commit and tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "6e5255a9907c7c72c30b6eb59c94b35e4b787967"
+          test "$(git rev-parse HEAD^{tree})" = "f29ac688ccde4c91b0914f4747deeff261621d3f"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt
+      - name: Windows GUI Slint compile and type-check
+        run: |
+          cargo check --locked --offline --features gui --bin neuromita-gui
+      - name: Windows shutdown cancellation and dual-error GUI unit tests
+        run: |
+          cargo test --locked --offline --features gui --bin neuromita-gui gui_shutdown -- --test-threads=1
+      - name: Windows updater safety regression
+        run: |
+          cargo test --locked --offline --lib updater:: -- --test-threads=2
+      - name: Rustfmt
+        run: |
+          cargo fmt --all -- --check
