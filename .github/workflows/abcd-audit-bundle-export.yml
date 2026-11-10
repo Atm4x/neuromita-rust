@@ -1,0 +1,31 @@
+name: ABCD integration source bundle export
+on:
+  push:
+    branches:
+      - bridge/abcd-audit-bundle-20261110
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create exact target branch git bundle
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-target
+          test "$(git rev-parse refs/heads/abcd-target)" = "f9c432b179d0aea43a0e321a63a0ff05bb6c589c"
+          git bundle create "$RUNNER_TEMP/abcd-target.bundle" refs/heads/abcd-target
+          cd "$RUNNER_TEMP"
+          sha256sum abcd-target.bundle > abcd-target.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: abcd-source-bundle
+          path: |
+            ${{ runner.temp }}/abcd-target.bundle
+            ${{ runner.temp }}/abcd-target.bundle.sha256
+          retention-days: 1
+          compression-level: 0
