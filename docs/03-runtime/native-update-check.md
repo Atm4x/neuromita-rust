@@ -365,3 +365,27 @@ writing the real `HKCU\\...\\Run` key. It must pass on an actual Windows
 runner before claiming native Windows acceptance. The real Slint GUI still
 requires a presentation-layer cancellation action; this API alone does not
 claim an end-user button or published release.
+
+## Slint shutdown failure after scheduling (D59)
+
+After the native update is prepared, the installed GUI schedules the separate
+helper and requests an orderly Slint event-loop shutdown. If the shutdown
+request returns an error, the **still-running originating GUI** now invokes
+`install::cancel_scheduled_native_update` rather than asking the user to close
+the window and accidentally apply an update that it could not safely hand off.
+Verified cancellation removes only the unapplied transaction and its own
+recovery lease, leaves the old EXE and UserData untouched, and gives the GUI a
+specific cancellation notice. A successful shutdown request does **not**
+invoke cancellation and retains the regular handoff protocol.
+
+If both the Slint shutdown request and safe cancellation fail, the GUI reports
+**both error causes** and explicitly labels the state pending/uncertain. It
+does not assume the candidate, journal or recovery guard were all preserved:
+cancellation may have already completed workspace cleanup but failed to remove
+a stale lease. The state must be inspected and recovered using the existing
+installation process and health guards before a new installation is attempted.
+The tests cover shutdown success, verified cancellation, and dual-failure
+error preservation without needing a live Slint window. A successful
+`quit_event_loop` request means the shutdown was requested; it does not prove
+that every GUI process has already exited. The helper's bounded parent-exit
+wait and fail-closed recovery rules still apply.

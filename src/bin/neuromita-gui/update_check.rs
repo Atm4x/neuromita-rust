@@ -239,6 +239,26 @@ pub fn handoff_notice() -> LocalizedText {
     )
 }
 
+pub fn handoff_cancelled_notice(shutdown: impl std::fmt::Display) -> LocalizedText {
+    i18n(
+        "launcher.native-update.shutdown-cancelled",
+        "Не удалось закрыть приложение ({shutdown}). Обновление безопасно отменено; текущая версия продолжает работу.",
+    )
+    .arg("shutdown", shutdown.to_string())
+}
+
+pub fn handoff_pending_notice(
+    shutdown: impl std::fmt::Display,
+    cancellation: impl std::fmt::Display,
+) -> LocalizedText {
+    i18n(
+        "launcher.native-update.shutdown-pending",
+        "Не удалось закрыть приложение ({shutdown}) и завершить отмену обновления ({cancellation}). Состояние установки требует проверки; не запускайте повторную установку до восстановления.",
+    )
+    .arg("shutdown", shutdown.to_string())
+    .arg("cancellation", cancellation.to_string())
+}
+
 pub fn download_finished_notice(result: Result<NativeDownloadResult, String>) -> LocalizedText {
     match result {
         Ok(NativeDownloadResult::NotEligible(reason)) => finished_notice(Ok(reason)),

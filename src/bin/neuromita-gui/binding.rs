@@ -31,6 +31,38 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     result
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ScheduledShutdownError {
+    Cancelled {
+        shutdown: String,
+    },
+    PendingTransaction {
+        shutdown: String,
+        cancellation: String,
+    },
+}
+
+fn request_scheduled_shutdown<Q, C>(
+    quit: impl FnOnce() -> Result<(), Q>,
+    cancel: impl FnOnce() -> Result<(), C>,
+) -> Result<(), ScheduledShutdownError>
+where
+    Q: std::fmt::Display,
+    C: std::fmt::Display,
+{
+    let Err(shutdown) = quit() else {
+        return Ok(());
+    };
+    let shutdown = shutdown.to_string();
+    match cancel() {
+        Ok(()) => Err(ScheduledShutdownError::Cancelled { shutdown }),
+        Err(cancellation) => Err(ScheduledShutdownError::PendingTransaction {
+            shutdown,
+            cancellation: cancellation.to_string(),
+        }),
+    }
+}
+
 fn run_inner() -> Result<(), Box<dyn Error>> {
     let options = Options::parse()?;
     let diagnostics = neuromita::diagnostics::init().map_err(std::io::Error::other)?;
@@ -455,24 +487,30 @@ fn run_inner() -> Result<(), Box<dyn Error>> {
                 .map_err(|error| error.to_string())
                 .and_then(|data_root| {
                     neuromita::updater::install::schedule_prepared_native_update(&data_root)
-                        .map_err(|error| error.to_string())
-                });
-            match handoff {
-                Ok(_) => {
+                        .map_err(|error| error.to_string())?;
                     update_handler(ShellCommand::LauncherFeedback(
                         super::update_check::handoff_notice(),
                     ));
-                    if let Err(error) = slint::quit_event_loop() {
-                        update_handler(ShellCommand::LauncherFeedback(
-                            super::update_check::install_error_notice(format!(
-                                "Updater started but GUI shutdown failed: {error}. Close the application to continue."
-                            )),
-                        ));
-                    }
+                    Ok(request_scheduled_shutdown(slint::quit_event_loop, || {
+                        neuromita::updater::install::cancel_scheduled_native_update(&data_root)
+                    }))
+                });
+            let notice = match handoff {
+                Ok(Ok(())) => None,
+                Ok(Err(ScheduledShutdownError::Cancelled { shutdown })) => {
+                    Some(super::update_check::handoff_cancelled_notice(shutdown))
                 }
-                Err(error) => update_handler(ShellCommand::LauncherFeedback(
-                    super::update_check::install_error_notice(error),
+                Ok(Err(ScheduledShutdownError::PendingTransaction {
+                    shutdown,
+                    cancellation,
+                })) => Some(super::update_check::handoff_pending_notice(
+                    shutdown,
+                    cancellation,
                 )),
+                Err(error) => Some(super::update_check::install_error_notice(error)),
+            };
+            if let Some(notice) = notice {
+                update_handler(ShellCommand::LauncherFeedback(notice));
             }
         } else {
             update_handler(ShellCommand::LauncherFeedback(

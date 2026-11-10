@@ -1950,5 +1950,13 @@
   "launcher.native-update.handoff": {
     "source": "Обновление проверено. Приложение закрывается; отдельный updater применит его после завершения процесса и попробует перезапустить GUI.",
     "translation": "Update verified. The application is closing; the separate updater will apply it after this process exits and attempt to restart the GUI."
+  },
+  "launcher.native-update.shutdown-cancelled": {
+    "source": "Не удалось закрыть приложение ({shutdown}). Обновление безопасно отменено; текущая версия продолжает работу.",
+    "translation": "The application could not close ({shutdown}). The scheduled update was safely cancelled; the current version remains running."
+  },
+  "launcher.native-update.shutdown-pending": {
+    "source": "Не удалось закрыть приложение ({shutdown}) и завершить отмену обновления ({cancellation}). Состояние установки требует проверки; не запускайте повторную установку до восстановления.",
+    "translation": "The application could not close ({shutdown}) and update cancellation could not finish ({cancellation}). The installation state must be checked; do not start another installation until recovery."
   }
 }
