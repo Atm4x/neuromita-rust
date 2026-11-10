@@ -1,0 +1,30 @@
+name: ABCD exact native speech contract import
+on:
+  push:
+    branches:
+      - bridge/abcd-native-speech-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import exact verified native speech commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-native-speech.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "e8a3143a6d0ba87306234d034c0cb11682672ce3"
+          base64 -d transfer/abcd-native-speech.b64 > "$RUNNER_TEMP/native-speech.bundle"
+          echo "26253dbd82c89fa62609482747019839ca2b1e361924199a7e96b08ea88bdc6f  $RUNNER_TEMP/native-speech.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/native-speech.bundle"
+          git fetch "$RUNNER_TEMP/native-speech.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "2af69d4886c23a5c06d1619255ff4097f7c2f277"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
