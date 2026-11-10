@@ -1,0 +1,36 @@
+name: Agent D59 exact GUI shutdown cancellation import
+on:
+  push:
+    branches:
+      - bridge/agent-d59-gui-shutdown-20261110
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify D59 patch and publish exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=e1cfdc21f4a9b0a57e2828d6fc09a43d0456ddb0
+          EXPECTED=6e5255a9907c7c72c30b6eb59c94b35e4b787967
+          TREE=f29ac688ccde4c91b0914f4747deeff261621d3f
+          tr -d '\n' <.agent-bridge/d59.patch.br.b64 | base64 -d >/tmp/d59.patch.br
+          echo 'c925bd58d8df2e3db4a736781a111bbf8cda4b4637b43ff0cbc48fb639a8f6fb  /tmp/d59.patch.br' | sha256sum -c
+          node -e "const fs=require('node:fs');const z=require('node:zlib');fs.writeFileSync('/tmp/d59.patch',z.brotliDecompressSync(fs.readFileSync('/tmp/d59.patch.br')))"
+          echo '9c9bd4bb1f26dc15af17b24dd739f35c5091e8f7c0630b0d8bad8bff048519cb  /tmp/d59.patch' | sha256sum -c
+          git fetch origin "$BASE"
+          git checkout --detach "$BASE"
+          git -c user.name='Agent D' -c user.email='agent-d@local.invalid' am --committer-date-is-author-date /tmp/d59.patch
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse HEAD^)" = "$BASE"
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --check HEAD^ HEAD
+          git fsck --full
+          git push origin HEAD:refs/heads/codex/agent-d59-gui-shutdown-cancellation-20261110
