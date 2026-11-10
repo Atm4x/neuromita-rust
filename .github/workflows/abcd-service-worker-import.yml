@@ -1,0 +1,30 @@
+name: ABCD service worker exact import
+on:
+  push:
+    branches:
+      - bridge/abcd-service-worker-import-20261111
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import verified service worker commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-service-workers.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "2af69d4886c23a5c06d1619255ff4097f7c2f277"
+          base64 -d transfer/abcd-service-workers.b64 > "$RUNNER_TEMP/service-workers.bundle"
+          echo "50e01b125d45890ee18b3462e1aba067e25c473d2e7e755eda94ab9047aa4125  $RUNNER_TEMP/service-workers.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/service-workers.bundle"
+          git fetch "$RUNNER_TEMP/service-workers.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "ae2e7a1a24a6afc6e863cdf33ee617c6b8f1f5c5"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
