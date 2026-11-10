@@ -1,0 +1,32 @@
+name: Agent A Cycle72 one-commit source export
+on:
+  push:
+    branches: [bridge/agent-a-cycle72-source-20261110]
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3ca1e7e9bdb942a5ab6b96fb0a0b4ed30eeb2d1d
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export verified source one-commit increment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 3ca1e7e9bdb942a5ab6b96fb0a0b4ed30eeb2d1d
+          test "$(git rev-parse HEAD^)" = 25cd0a13a15d6cb37ebf526730282b2bfc4cd024
+          git update-ref refs/heads/agent-a-cycle72-source HEAD
+          git bundle create cycle72-source.bundle refs/heads/agent-a-cycle72-source ^25cd0a13a15d6cb37ebf526730282b2bfc4cd024
+          git bundle verify cycle72-source.bundle
+          sha256sum cycle72-source.bundle > cycle72-source.bundle.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-a-cycle72-source-increment
+          path: |
+            cycle72-source.bundle
+            cycle72-source.bundle.sha256
+          retention-days: 1
