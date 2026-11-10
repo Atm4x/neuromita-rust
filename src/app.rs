@@ -25,8 +25,10 @@ use crate::{
         live_speech::{
             LiveSpeechRuntime, LiveSpeechTranscriber, LiveSpeechVoice, watch_speech_settings,
         },
+        model_identity::{AiModelIdentity, WorkerImplementation},
         native_service::AiHubNativeService,
         native_speech::{RoutedSpeechTranscriber, RoutedSpeechVoice},
+        semantic_workers::{ServiceEmbeddingProvider, ServiceRerankProvider},
         service_workers::{ServiceModel, ServiceWorkerRegistry, WorkerClaim},
     },
     character::{CharacterHandle, CharacterId, CharacterRegistry, ReminderBridge},
@@ -371,6 +373,7 @@ pub struct ApplicationLifecycle {
     speech_controller: Arc<tokio::sync::Mutex<crate::audio::controller::SpeechSessionController>>,
     speech_startup_warning: Option<String>,
     ai_recovery: Option<crate::ai_runtime::application::AiRecoveryHandle>,
+    recovery_workers: Arc<ServiceWorkerRegistry>,
     ai_hub_install: Option<Arc<AiHubInstallCoordinator>>,
     ai_hub_native: Option<Arc<AiHubNativeService>>,
     id: Uuid,
@@ -897,12 +900,47 @@ impl ApplicationLifecycle {
             )
             .into()),
         };
+        if ai_runtime
+            .as_ref()
+            .is_some_and(|plan| plan.topology != crate::ai_runtime::ProcessTopology::Split)
+        {
+            return Err(AiApplicationError::Invalid(
+                "Core requires one independent worker process per AI service".into(),
+            )
+            .into());
+        }
         let (server_lifecycle, server) = ServerLifecycle::bind(server).await?;
         let game_link = match game_link {
             Some(config) => Some(GameLinkLifecycle::bind(config).await?),
             None => None,
         };
         let timeline = Arc::new(Mutex::new(SessionTimeline::from_config(timeline)?));
+        let mut prepared_claims = Vec::new();
+        if !(auto_speech && ai_hardware.is_some())
+            && let Some(configuration) = ai_runtime.as_ref()
+        {
+            for worker in &configuration.workers {
+                for selected in &worker.models {
+                    if matches!(
+                        selected.service,
+                        AiService::Embedding | AiService::Reranker | AiService::Beats
+                    ) {
+                        prepared_claims.push(
+                            service_workers
+                                .claim(ServiceModel {
+                                    service: selected.service,
+                                    model: AiModelIdentity {
+                                        model_id: selected.plugin_id.clone(),
+                                        implementation: WorkerImplementation::Python,
+                                        revision: selected.asset_revision.clone(),
+                                    },
+                                })
+                                .map_err(|error| AiApplicationError::Invalid(error.to_string()))?,
+                        );
+                    }
+                }
+            }
+        }
         let mut ai_runtime = match (ai_runtime, ai_hardware) {
             (Some(configuration), Some(path)) if auto_speech => {
                 speech_startup_warning = Some(format!(
@@ -937,6 +975,41 @@ impl ApplicationLifecycle {
             }
             (None, None) => None,
         };
+        if let Some(runtime) = ai_runtime.as_ref() {
+            for service in [AiService::Embedding, AiService::Reranker, AiService::Beats] {
+                if runtime.has_service(service) {
+                    let loaded = runtime
+                        .status_snapshot()
+                        .service(service)
+                        .active_model
+                        .ok_or_else(|| {
+                            AiApplicationError::Invalid(format!(
+                                "running {service:?} worker has no active model"
+                            ))
+                        })?;
+                    let actual = ServiceModel {
+                        service,
+                        model: AiModelIdentity {
+                            model_id: loaded.plugin_id,
+                            implementation: WorkerImplementation::Python,
+                            revision: loaded.asset_revision,
+                        },
+                    };
+                    if service_workers
+                        .active(service)
+                        .map_err(|error| AiApplicationError::Invalid(error.to_string()))?
+                        != Some(actual)
+                    {
+                        return Err(AiApplicationError::Invalid(format!(
+                            "{service:?} activation did not match its pre-spawn worker claim"
+                        ))
+                        .into());
+                    }
+                }
+            }
+        } else {
+            prepared_claims.clear();
+        }
         let knowledge = match ai_knowledge {
             None => knowledge,
             Some(selection) => {
@@ -946,7 +1019,14 @@ impl ApplicationLifecycle {
                 let adapter = runtime
                     .embedding_provider(selection.space)
                     .ok_or(ApplicationError::MissingEmbeddingWorker)?;
-                let provider: Arc<dyn EmbeddingProvider> = Arc::new(adapter);
+                let provider: Arc<dyn EmbeddingProvider> = Arc::new(ServiceEmbeddingProvider::new(
+                    Arc::clone(&service_workers),
+                    service_workers
+                        .active(AiService::Embedding)
+                        .map_err(|error| EmbeddingError::Transport(error.to_string()))?
+                        .ok_or(ApplicationError::MissingEmbeddingWorker)?,
+                    Arc::new(adapter),
+                )?);
                 let mut retriever =
                     SemanticMemoryRetriever::new(provider, selection.cache_entries)?;
                 if let Some(reranker) = selection.reranker {
@@ -954,7 +1034,14 @@ impl ApplicationLifecycle {
                         .reranker(reranker.model_id, reranker.protocol)
                         .ok_or(ApplicationError::MissingRerankerWorker)?
                         .map_err(|error| EmbeddingError::Configuration(error.to_string()))?;
-                    let scorer: Arc<dyn RerankProvider> = Arc::new(adapter);
+                    let scorer: Arc<dyn RerankProvider> = Arc::new(ServiceRerankProvider::new(
+                        Arc::clone(&service_workers),
+                        service_workers
+                            .active(AiService::Reranker)
+                            .map_err(|error| EmbeddingError::Transport(error.to_string()))?
+                            .ok_or(ApplicationError::MissingRerankerWorker)?,
+                        Arc::new(adapter),
+                    )?);
                     retriever = retriever.with_reranker(scorer, reranker.policy)?;
                 }
                 KnowledgeRetrieval::semantic_fusion(Arc::new(retriever), selection.fusion)?
@@ -985,7 +1072,6 @@ impl ApplicationLifecycle {
                 .expect("no native worker can be active before application startup finishes"),
             )
         });
-        let mut prepared_claims = Vec::new();
         if live_speech.is_none()
             && let Some(runtime) = ai_runtime.as_ref()
         {
@@ -1305,6 +1391,7 @@ impl ApplicationLifecycle {
             speech_controller,
             speech_startup_warning,
             ai_recovery,
+            recovery_workers: Arc::clone(&service_workers),
             ai_hub_install,
             ai_hub_native,
             id,
@@ -1328,6 +1415,7 @@ impl ApplicationLifecycle {
         let recovery = self.ai_recovery.as_ref().ok_or_else(|| {
             AiApplicationError::Invalid("no explicit AI worker recovery is available".into())
         })?;
+        let _transition = self.recovery_workers.transition_gate(service).await;
         recovery
             .restart_failed_worker(service, expected_generation)
             .await
