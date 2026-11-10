@@ -19,8 +19,8 @@ jobs:
       - name: Verify exact original D60 commit and tree
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "27cdbeb80b5b908805e70aa569714ebffead11cd"
-          test "$(git rev-parse HEAD^{tree})" = "28b5baf5f3f0556014ff3a4922905635677d5b59"
+          test "$(git rev-parse HEAD)" = "a6d7c0dcc112b92b8f475897822df3516e4e55f3"
+          test "$(git rev-parse HEAD^{tree})" = "a5495c9454db21c91ca746a6f3276003e1608471"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
