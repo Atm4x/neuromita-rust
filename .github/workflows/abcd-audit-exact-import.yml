@@ -1,0 +1,30 @@
+name: ABCD vetted exact bundle import
+on:
+  push:
+    branches:
+      - bridge/abcd-audit-import-20261110
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Import verified Git objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f transfer/abcd-outgoing.b64 || exit 0
+          git fetch origin +refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "f9c432b179d0aea43a0e321a63a0ff05bb6c589c"
+          base64 -d transfer/abcd-outgoing.b64 > "$RUNNER_TEMP/abcd-outgoing.bundle"
+          git bundle verify "$RUNNER_TEMP/abcd-outgoing.bundle"
+          git fetch "$RUNNER_TEMP/abcd-outgoing.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "e9fee6938fdfe0f3b999c8e0ff00658b0065c448"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
