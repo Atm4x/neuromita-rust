@@ -19,21 +19,21 @@ jobs:
       - name: Verify exact product commit and tree
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "b54a158a333007799da0f8cce79592237a09013d"
-          test "$(git rev-parse HEAD^{tree})" = "8923f819db6743c45bf7869c63c811af35cc03d6"
+          test "$(git rev-parse HEAD)" = "6f3171d2c0374d42974ad273bc11f47929aca7df"
+          test "$(git rev-parse HEAD^{tree})" = "0d7b0a16b514a2991fea6b3b3958dde028d7e4cc"
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98.1'
           components: rustfmt
-      - name: Native Windows Slint GUI compile
+      - name: Rustfmt
         run: |
-          cargo check --locked --offline --features gui --bin neuromita-gui
+          cargo fmt --all -- --check
       - name: Windows launcher integration with visible WM_CLOSE fixtures
         run: |
           cargo test --locked --offline --test launcher -- --test-threads=2
       - name: Windows launcher controller single-flight unit tests
         run: |
           cargo test --locked --offline --lib launcher::controller::tests:: -- --test-threads=1
-      - name: Rustfmt
+      - name: Native Windows Slint GUI compile
         run: |
-          cargo fmt --all -- --check
+          cargo check --locked --offline --features gui --bin neuromita-gui
