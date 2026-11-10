@@ -1,0 +1,55 @@
+name: ABCD unified model catalog exact source import and GUI acceptance
+on:
+  push:
+    branches:
+      - bridge/abcd-unified-catalog-import-20261111
+jobs:
+  import:
+    if: github.event.head_commit.message == 'bridge: verified ABCD unified catalog source'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import verified exact Git objects and publish fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin +refs/heads/codex/abcd-core-boundary-fixes-20261110:refs/heads/abcd-base
+          BASE=$(git rev-parse refs/heads/abcd-base)
+          test "$BASE" = "6f039276d483e294adf685670fe639d275d78c50"
+          base64 -d transfer/abcd-unified-catalog.b64 > "$RUNNER_TEMP/unified-catalog.bundle"
+          echo "5c5544c3fe59c4f75e681eee203ce73b6c47e52768d5b8931a750e829dc9ce6a  $RUNNER_TEMP/unified-catalog.bundle" | sha256sum -c -
+          git bundle verify "$RUNNER_TEMP/unified-catalog.bundle"
+          git fetch "$RUNNER_TEMP/unified-catalog.bundle" refs/heads/codex/abcd-integration-20261110:refs/heads/abcd-candidate
+          HEAD=$(git rev-parse refs/heads/abcd-candidate)
+          test "$HEAD" = "a6612788dcb4a087e0f98957fa66c98585ae22f8"
+          git merge-base --is-ancestor "$BASE" "$HEAD"
+          git push origin refs/heads/abcd-candidate:refs/heads/codex/abcd-core-boundary-fixes-20261110
+  gui-check:
+    needs: import
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a6612788dcb4a087e0f98957fa66c98585ae22f8
+          fetch-depth: 1
+      - name: Install native Linux GUI/audio build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev
+      - name: Verify Rust 1.98.1 GUI integration
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - name: Compile Slint GUI and Presenter
+        env:
+          CARGO_BUILD_JOBS: 1
+          CARGO_INCREMENTAL: 0
+          CARGO_PROFILE_DEV_DEBUG: 0
+        run: cargo check --features gui --bin neuromita-gui --offline -j1
